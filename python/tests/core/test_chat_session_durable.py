@@ -191,6 +191,70 @@ def after_restore(session):
     return session.log.forgotten_through
 
 
+async def stored_answer(provider, run_id):
+    from timbal.state import RunContext
+
+    trace = await provider.get(RunContext(parent_id=run_id, tracing_provider=provider))
+    return trace.get_path("agent")[0].output["content"][0]["text"]
+
+
+async def one_turn(session, text):
+    after = session.log.cursor_end
+    session.send(text)
+    await records(session, "turn_finished", 1, after=after)
+    return session.head
+
+
+class TestRootRunId:
+    async def test_a_generated_id_is_the_first_turns_run_id(self, db):
+        provider, _ = db
+        async with ChatSession(make_agent(provider, Gate(released=True))) as session:
+            assert session.root_run_id == session.id
+            assert await one_turn(session, "hi") == session.id
+            second = await one_turn(session, "again")
+        assert second != session.id and session.root_run_id == session.id
+
+    async def test_a_caller_session_id_built_twice_makes_two_threads(self, db):
+        provider, _ = db
+        async with ChatSession(make_agent(provider, Gate(released=True)), session_id="conv-42") as first:
+            run_1 = await one_turn(first, "one")
+            assert first.root_run_id == run_1 != "conv-42"
+        # The same conversation key again, without restore(): a new thread, never the old root's idempotency key.
+        async with ChatSession(make_agent(provider, Gate(released=True)), session_id="conv-42") as second:
+            run_2 = await one_turn(second, "two")
+        assert run_2 not in (run_1, "conv-42") and second.root_run_id == run_2
+        assert await stored_answer(provider, run_1) == "echo: one"  # the first thread's root is untouched
+
+    async def test_continuing_from_a_parent_alone_leaves_the_root_unknown(self, db):
+        provider, _ = db
+        async with ChatSession(make_agent(provider, Gate(released=True))) as first:
+            head = await one_turn(first, "one")
+        async with ChatSession(make_agent(provider, Gate(released=True)), parent_id=head) as session:
+            assert session.root_run_id is None
+            await one_turn(session, "two")
+            assert session.root_run_id is None and session._last_context._session_id is None
+
+    async def test_restore_keeps_the_root_and_an_older_snapshot_claims_none(self, db):
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_id="conv-7", session_store=store)
+        root = await one_turn(session, "one")
+        await session.close(keep=True)
+        restored = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, "conv-7")
+        assert restored.root_run_id == root
+        await one_turn(restored, "two")
+        assert restored._last_context._session_id == root
+        await restored.close(keep=True)
+
+        snapshot = await store.load("conv-7")
+        snapshot.root_run_id = None  # written before snapshots recorded the root
+        await store.save(snapshot, expect_version=snapshot.version)
+        older = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, "conv-7")
+        assert older.root_run_id is None
+        await one_turn(older, "three")
+        assert older._last_context._session_id is None
+        await older.close()
+
+
 class TestEdges:
     async def test_a_queued_message_waits_for_the_recovery_turn(self, db):
         provider, store = db

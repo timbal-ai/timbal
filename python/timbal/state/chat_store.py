@@ -69,6 +69,8 @@ class SessionSnapshot:
     """The agent's name: a session is only restored for the agent it belongs to."""
     config: dict[str, Any] = field(default_factory=dict)
     head: str | None = None
+    root_run_id: str | None = None
+    """The thread's root run, once known (:attr:`ChatSession.root_run_id`); absent from older snapshots."""
     turns: int = 0
     last_status: dict[str, Any] | None = None
     parked: bool = False
