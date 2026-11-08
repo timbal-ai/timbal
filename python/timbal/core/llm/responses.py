@@ -148,7 +148,10 @@ def prepare_responses_request(
     responses_kwargs["input"] = input_items
 
     if tools:
-        responses_tools = _with_tool_search(tools, set(deferred_tools or ()), provider, model_name)
+        if deferred_tools:
+            responses_tools = _with_tool_search(tools, set(deferred_tools), provider, model_name)
+        else:
+            responses_tools = [_responses_tool_schema(tool, provider, model_name) for tool in tools]
         if responses_tools:
             responses_kwargs["tools"] = responses_tools
             responses_kwargs["parallel_tool_calls"] = True
