@@ -373,6 +373,9 @@ class ChatSession:
                 "answer a parked turn with resume(), and continue a conversation with parent_id=."
             )
         self.id: str = session_id or uuid7(as_type="hex")  # type: ignore[assignment]
+        # The id is the thread's root run id (monolith#567): a new thread's first turn runs under it. Continuing a
+        # thread from parent_id without its session_id, the root is unknown here (the platform derives it).
+        self._id_is_root = session_id is not None or parent_id is None
         self.busy_mode: SendMode = busy_mode
         self.on_dead_turn: OnDeadTurn = on_dead_turn
         self.collect_window = collect_window
@@ -977,10 +980,14 @@ class ChatSession:
         turn: asyncio.Task | None = None
         try:
             kwargs, trigger, options = self._turn_inputs(followup, resume, wake)
-            context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
+            if scheduler.head is None:
+                # A new thread: its root run is the session, so the first turn runs under the session's id.
+                context = RunContext(id=self.id, tracing_provider=self._agent.tracing_provider)
+            else:
+                context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
             context._tracing_provider = self._turn_provider(context._tracing_provider)
             context._steering = options.steer
-            context._session_id = self.id
+            context._session_id = self.id if self._id_is_root else None
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
             context._cut = asyncio.Event()
