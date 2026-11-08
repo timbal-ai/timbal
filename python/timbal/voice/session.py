@@ -3795,6 +3795,10 @@ class VoiceSession:
         self.speculative_generations_started += 1
         self._active_turn_user_text = text
         self._cancel_turn.clear()
+        # Confirmation stamps this, sometimes before the turn task's first step.
+        # Until then the eou clocks stay unset so a discarded attempt does not
+        # inherit the previous turn's.
+        self._turn_eou_at = 0.0
         logger.info(
             "speculative_started",
             source=source,
@@ -4675,10 +4679,6 @@ class VoiceSession:
         speculative_token = None
         voice_token = None
         self._turn_speculative = speculative
-        if speculative:
-            # Confirmation stamps this. Until then the eou clocks stay unset
-            # so a discarded attempt does not inherit the previous turn's.
-            self._turn_eou_at = 0.0
         if self._scheduler.other_turn_active:
             # Another channel's turn on this conversation runs: the call's goes after it.
             await self._scheduler.until_no_other_turn(include_queued=False)

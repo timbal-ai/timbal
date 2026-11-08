@@ -367,6 +367,18 @@ class TestSpeculativeSession:
         assert metrics[-1].eou_to_first_audio_ms is not None
         assert metrics[-1].eou_to_first_audio_ms >= 0
 
+    async def test_confirmed_before_its_task_runs_still_reports_latency(self) -> None:
+        # Flux can send EagerEndOfTurn and EndOfTurn in the same millisecond, so
+        # the attempt is confirmed before the turn task has taken its first step.
+        session, _stt, _tts, model = _session(["The blue one."])
+        async with _Drive(session, _stt) as drive:
+            await session._maybe_start_speculative("book a table", source="eager_eot")
+            await session._confirm_speculative("book a table", vad_endpointed=False)
+            await _until(lambda: any(isinstance(e, TurnMetricsEvent) for e in drive.events))
+        assert model.call_count == 1
+        metrics = [e.metrics for e in drive.events if isinstance(e, TurnMetricsEvent)]
+        assert metrics[-1].eou_to_first_audio_ms is not None
+
     @pytest.mark.parametrize("detector", ["heuristic", "provider"])
     async def test_held_reply_is_not_echo_of_the_words_it_answers(self, detector: str) -> None:
         # The held reply opens with the caller's own word. Nothing of it has
