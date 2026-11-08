@@ -48,6 +48,7 @@ def _redacted_trace(trace: Trace, redact: Callable[[Any], Any]) -> Trace:
             error=redact(span.error),
             usage=span.usage,
             metadata=redact(span.metadata),
+            runnable=span.runnable,
             **(span._extra or {}),
         )
         for attr in _SPAN_DUMP_ATTRS:

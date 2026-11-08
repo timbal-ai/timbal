@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequ
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -282,6 +282,9 @@ class AgentParams(BaseModel):
 
 class Agent(Runnable):
     """Orchestrates LLM interactions with autonomous tool calling."""
+
+    _dumps_memory: ClassVar[bool] = True
+    """Its spans always serialize a ``memory`` key, ``null`` until it assembled one (see Span.model_dump)."""
 
     model: SkipValidation[Model | str]
     """LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5') or a TestModel for offline testing."""
