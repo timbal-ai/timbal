@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import os
 from collections.abc import AsyncIterator
@@ -54,6 +55,17 @@ _AUDIO_FLUSH_BYTES = int(16_000 * _AUDIO_FLUSH_INTERVAL * 2)  # 2560
 # Nova drops the socket with NET-0001 after ~10s without audio; send KeepAlive
 # well inside that window (Deepgram recommends every 3-5s).
 _NOVA_KEEPALIVE_INTERVAL = 5.0
+# Flux acks a Configure in a few hundred ms. Past this the ack is treated as
+# lost so later updates are not queued behind it forever.
+_CONFIGURE_ACK_TIMEOUT_SECS = 3.0
+
+
+@dataclasses.dataclass(frozen=True)
+class _PendingConfigure:
+    kind: str
+    body: dict[str, Any]
+    patient: bool = False
+    attempts: int = 0
 
 # Query params Flux accepts (used to filter stt_extra passthrough).
 _FLUX_QUERY_KEYS = frozenset(
@@ -155,10 +167,11 @@ class _DeepgramSTTBase(SpeechToText):
         # Flux processes one ``Configure`` at a time and rejects another sent
         # before the ack ("Too many pending `Configure` messages"), so a rejected
         # restore would leave patient thresholds on the socket.
-        # ``(kind, patient)`` of the message awaiting its ack, and the latest
-        # waiting message per kind (each kind replaces its own value).
-        self._configure_inflight: tuple[str, bool] | None = None
-        self._configure_waiting: dict[str, tuple[dict[str, Any], bool]] = {}
+        # The message awaiting its ack, and the latest waiting message per kind
+        # (each kind replaces its own value).
+        self._configure_inflight: _PendingConfigure | None = None
+        self._configure_waiting: dict[str, _PendingConfigure] = {}
+        self._configure_timeout: asyncio.Task[None] | None = None
 
     def _build_uri(self, config: AudioInputConfig) -> str:
         raise NotImplementedError
@@ -166,8 +179,7 @@ class _DeepgramSTTBase(SpeechToText):
     async def connect(self, config: AudioInputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
         self._input_config = config
-        self._configure_inflight = None
-        self._configure_waiting.clear()
+        self._reset_configure()
         uri = self._build_uri(config)
         logger.debug("dg_stt_connecting", uri=uri[:160])
         self._ws = await ws_connect(
@@ -276,24 +288,79 @@ class _DeepgramSTTBase(SpeechToText):
             with contextlib.suppress(Exception):
                 await self._ws.send(json.dumps(payload))
 
+    async def _try_send_json(self, payload: dict[str, Any]) -> bool:
+        async with self._wire_lock:
+            if self._ws is None:
+                return False
+            try:
+                await self._ws.send(json.dumps(payload))
+            except Exception as e:  # noqa: BLE001 — a dead socket is reported by the receive loop
+                logger.warning("dg_flux_configure_send_failed", error=str(e))
+                return False
+            return True
+
     async def _configure(self, kind: str, body: dict[str, Any], *, patient: bool = False) -> None:
         """Send one ``Configure``, or hold it until the one in flight is acked."""
+        message = _PendingConfigure(kind=kind, body=body, patient=patient)
         if self._configure_inflight is not None:
-            self._configure_waiting[kind] = (body, patient)
+            self._configure_waiting[kind] = message
             return
-        self._configure_inflight = (kind, patient)
-        await self._send_json({"type": "Configure", **body})
+        await self._send_configure(message)
+
+    async def _send_configure(self, message: _PendingConfigure) -> None:
+        self._configure_inflight = message
+        if not await self._try_send_json({"type": "Configure", **message.body}):
+            # Never reached Flux: nothing was applied and no ack will come.
+            self._configure_inflight = None
+            await self._send_next_configure()
+            return
+        self._cancel_configure_timeout()
+        self._configure_timeout = asyncio.create_task(self._configure_ack_timeout(message))
+
+    async def _configure_ack_timeout(self, message: _PendingConfigure) -> None:
+        await asyncio.sleep(_CONFIGURE_ACK_TIMEOUT_SECS)
+        if self._configure_inflight is not message:
+            return
+        # Whether Flux applied it is unknown, so the applied state stays as it was.
+        logger.warning("dg_flux_configure_ack_timeout", kind=message.kind)
+        self._configure_inflight = None
+        self._configure_timeout = None
+        await self._send_next_configure()
 
     async def _configure_acked(self, ok: bool) -> None:
-        inflight, self._configure_inflight = self._configure_inflight, None
-        if inflight is not None and inflight[0] == "thresholds":
-            self.patient_thresholds_live = ok and inflight[1]
-        if self._configure_waiting:
-            kind = next(iter(self._configure_waiting))
-            body, patient = self._configure_waiting.pop(kind)
-            await self._configure(kind, body, patient=patient)
+        self._cancel_configure_timeout()
+        message, self._configure_inflight = self._configure_inflight, None
+        if message is not None and message.kind == "thresholds":
+            if ok:
+                self.patient_thresholds_live = message.patient
+            elif (
+                not message.patient
+                and self.patient_thresholds_live
+                and message.attempts == 0
+                and "thresholds" not in self._configure_waiting
+            ):
+                # A rejected restore leaves the patient thresholds applied. Try once more.
+                self._configure_waiting["thresholds"] = dataclasses.replace(message, attempts=1)
+        await self._send_next_configure()
+
+    async def _send_next_configure(self) -> None:
+        if self._configure_inflight is not None or not self._configure_waiting:
+            return
+        kind = next(iter(self._configure_waiting))
+        await self._send_configure(self._configure_waiting.pop(kind))
+
+    def _cancel_configure_timeout(self) -> None:
+        task, self._configure_timeout = self._configure_timeout, None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    def _reset_configure(self) -> None:
+        self._cancel_configure_timeout()
+        self._configure_inflight = None
+        self._configure_waiting.clear()
 
     async def close(self) -> None:
+        self._reset_configure()
         self._stop.set()
         if self._flusher and not self._flusher.done():
             self._flusher.cancel()
@@ -446,9 +513,11 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
         clamped to the documented ranges (``eot_threshold`` 0.5–1.0,
         ``eager_eot_threshold`` 0.3–0.9 and ≤ ``eot_threshold`` when both are
         sent,         ``eot_timeout_ms`` 500–60000). ``patient`` is local: the matching
-        ``ConfigureSuccess`` sets :attr:`patient_thresholds_live`. Sent after
+        ``ConfigureSuccess`` sets :attr:`patient_thresholds_live`; a rejection
+        leaves it as it was, and a rejected restore is retried once. Sent after
         the ack of any ``Configure`` still in flight; a newer call replaces one
-        that is still waiting.
+        that is still waiting. A send that fails or an ack that does not come
+        within a few seconds releases the queue.
 
         https://developers.deepgram.com/docs/flux/configure
         """
