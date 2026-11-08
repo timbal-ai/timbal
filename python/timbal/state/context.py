@@ -180,6 +180,14 @@ class RunContext(BaseModel):
         description="Platform configuration for the run.",
     )
 
+    trigger: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "What started this run, stamped as the root span's metadata.trigger when it has none "
+            '(e.g. {"kind": "routine", "routine_id": ..., "fire_id": ..., "scheduled_at": ...}).'
+        ),
+    )
+
     tracing_provider: Any = Field(
         default=TRACING_UNSET,
         description=(
