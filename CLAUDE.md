@@ -358,6 +358,8 @@ provider = JsonlTracingProvider.configured(_path=Path("traces.jsonl"))
 agent = Agent(model="...", tracing_provider=provider)
 ```
 
+**`SqliteTracingProvider`** — one connection per file, WAL, `synchronous="NORMAL"` (survives a crash or kill, not a power cut; `"FULL"` opt-in); a `spans` table upserted per span — a save writes the spans new or still running, every span once the root ended — and `runs.spans` still holds the whole trace for ended runs (older rows read too).
+
 **Session chaining** — pass `parent_id` via `RunContext` to retrieve the parent run's trace in `get()`. Used for multi-turn memory across process restarts. `get()` should return `Trace(spans, parent_id=<the run that one continued>)`: a turn cut before its agent assembled memory stores none, and the next turn rebuilds it from the turn before plus the cut prompt (`Agent._previous_memory`, up to 8 such turns back). Live spans (in-memory) and serialized ones must agree, so `span.memory` stays unset until resolution completes.
 
 ### Exporters
