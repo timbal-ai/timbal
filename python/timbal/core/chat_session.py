@@ -645,9 +645,12 @@ class ChatSession:
                 "answer a parked turn with resume(), and continue a conversation with parent_id=."
             )
         self.id: str = session_id or uuid7(as_type="hex")  # type: ignore[assignment]
-        # The id is the thread's root run id (monolith#567): a new thread's first turn runs under it. Continuing a
-        # thread from parent_id without its session_id, the root is unknown here (the platform derives it).
-        self._id_is_root = session_id is not None or parent_id is None
+        # A caller's session_id is its own key and may be reused for the same conversation: running a turn under it
+        # would collide with the earlier thread's root run. Only an id generated here doubles as a run id.
+        self._generated_id = session_id is None
+        self.root_run_id: str | None = self.id if self._generated_id and parent_id is None else None
+        """The thread's root run (monolith#567), sent to the platform as the session hint. None while unknown:
+        continued from ``parent_id`` without it, or restored from a snapshot that did not record it."""
         self.busy_mode: SendMode = busy_mode
         self.on_dead_turn: OnDeadTurn = on_dead_turn
         # As what they mean, whatever number or truth value the caller passed: a snapshot holds them.
@@ -1314,6 +1317,7 @@ class ChatSession:
                 event.id for event in session._kept_events.values() if event.kept_for == session_id
             )
             session._version, session._leased, session._lease_from = snapshot.version, True, leased_at
+            session.root_run_id = snapshot.root_run_id
             session.turns, session.last_status, session._parked = snapshot.turns, snapshot.last_status, snapshot.parked
             session._last_prompt = _load_prompt(snapshot.last_prompt)
             session.log.restart_at(snapshot.log_cursor + _LOG_RESTART_GAP)
@@ -1822,13 +1826,17 @@ class ChatSession:
         try:
             kwargs, trigger, options = self._turn_inputs(followup, resume, wake)
             if scheduler.head is None:
-                # A new thread: its root run is the session, so the first turn runs under the session's id.
-                context = RunContext(id=self.id, tracing_provider=self._agent.tracing_provider)
+                # A new thread: this turn is its root.
+                if self._generated_id:
+                    context = RunContext(id=self.id, tracing_provider=self._agent.tracing_provider)
+                else:
+                    context = RunContext(tracing_provider=self._agent.tracing_provider)
+                self.root_run_id = context.id
             else:
                 context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
             context._tracing_provider = self._turn_provider(context._tracing_provider)
             context._steering = options.steer
-            context._session_id = self.id if self._id_is_root else None
+            context._session_id = self.root_run_id
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
             context._cut = asyncio.Event()
@@ -2193,6 +2201,7 @@ class ChatSession:
                 "kwargs_unstored": self._unstored_kwargs,
             },
             head=self.head,
+            root_run_id=self.root_run_id,
             turns=self.turns,
             last_status=self.last_status,
             parked=self.parked,
