@@ -612,6 +612,12 @@ class TestPerSpanStorage:
                 def __getattr__(self, name):
                     return getattr(conn, name)
 
+                def __enter__(self):
+                    return conn.__enter__()
+
+                def __exit__(self, *exc):
+                    return conn.__exit__(*exc)
+
                 def executemany(self, sql, rows):
                     rows = list(rows)
                     sizes.append(len(rows))
@@ -664,6 +670,76 @@ class TestPerSpanStorage:
         out = await _tool_loop_agent(provider, 1)(prompt="go").collect()
         trace = await provider.get(RunContext(parent_id=out.run_id, tracing_provider=provider))
         assert trace is not None and path.exists()
+
+    async def test_a_failed_save_leaves_its_spans_to_the_next_and_the_connection_clean(self, tmp_path):
+        from timbal.state import get_run_context, set_run_context
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "fail.db")
+        db = provider._db()
+        real = db.conn
+        failures = {"left": 0}
+
+        class Flaky:
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def __enter__(self):
+                return real.__enter__()
+
+            def __exit__(self, *exc):
+                return real.__exit__(*exc)
+
+            def executemany(self, sql, rows):
+                if failures["left"]:
+                    failures["left"] -= 1
+                    raise sqlite3.OperationalError("disk I/O error")
+                return real.executemany(sql, rows)
+
+        db.conn = Flaky()
+        seen = {}
+
+        async def probe():
+            run_context = get_run_context()
+            calls = sum(1 for s in run_context._trace.as_records() if s.path == "agent.step")
+            if calls == 1:
+                failures["left"] = 1  # the save as this step ends fails: its finished span never lands
+            if calls == 2:
+                assert failures["left"] == 0  # it did fail
+                assert not real.in_transaction  # rolled back, not left open on the shared connection
+            if calls == 3:
+                await provider._store(run_context)
+                finished = {s.call_id for s in run_context._trace.as_records() if s.t1 is not None}
+                trace = await provider.get(RunContext(parent_id=run_context.id, tracing_provider=provider))
+                seen["missing"] = finished - {s.call_id for s in trace.as_records()}
+
+        set_run_context(None)
+        out = await _tool_loop_agent(provider, 3, probe)(prompt="go").collect()
+        assert out.status.code == "success"
+        assert seen["missing"] == set()
+
+    async def test_a_file_deleted_mid_run_gets_every_finished_span_again(self, tmp_path):
+        from timbal.state import get_run_context, set_run_context
+
+        path = tmp_path / "mid.db"
+        provider = SqliteTracingProvider.configured(_path=path)
+        seen = {}
+
+        async def probe():
+            run_context = get_run_context()
+            calls = sum(1 for s in run_context._trace.as_records() if s.path == "agent.step")
+            if calls == 2:
+                for suffix in ("", "-wal", "-shm"):
+                    (tmp_path / f"mid.db{suffix}").unlink(missing_ok=True)
+            if calls == 3:
+                await provider._store(run_context)
+                finished = {s.call_id for s in run_context._trace.as_records() if s.t1 is not None}
+                trace = await provider.get(RunContext(parent_id=run_context.id, tracing_provider=provider))
+                seen["missing"] = finished - {s.call_id for s in trace.as_records()}
+
+        set_run_context(None)
+        out = await _tool_loop_agent(provider, 3, probe)(prompt="go").collect()
+        assert out.status.code == "success"
+        assert seen["missing"] == set()  # the new file holds the spans the old one had, not just the newest
 
     async def test_a_span_changed_after_the_root_ended_is_rewritten(self, tmp_path):
         from timbal.state import set_run_context

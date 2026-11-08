@@ -33,17 +33,27 @@ class _Database:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute(f"PRAGMA synchronous={synchronous}")
         _ensure_schema(self.conn)
+        # Per run: which spans are finished and committed to this file (not rewritten until the root ends),
+        # and the order spans were first seen. Kept per connection: a file recreated after being deleted
+        # holds none of them. Bounded: a run whose process died never ends.
+        self.runs: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     def alive(self) -> bool:
         return self.path.exists()
 
+    def run_state(self, run_id: str) -> dict[str, Any]:
+        state = self.runs.get(run_id)
+        if state is None:
+            state = self.runs[run_id] = {"stored": set(), "seq": {}}
+            while len(self.runs) > _RUN_STATE_MAX:
+                self.runs.popitem(last=False)
+        else:
+            self.runs.move_to_end(run_id)
+        return state
+
 
 _DATABASES: dict[tuple[str, str], _Database] = {}
 _DATABASES_LOCK = threading.Lock()
-
-# Per run: which spans are finished and stored (never rewritten until the root ends)
-# and the order spans were first seen. Bounded: a run whose process died never ends.
-_RUN_STATE: "OrderedDict[tuple[str, str], dict[str, Any]]" = OrderedDict()
 _RUN_STATE_MAX = 2048
 
 
@@ -189,15 +199,15 @@ class SqliteTracingProvider(TracingProvider):
         def _claim() -> bool:
             db = cls._db()
             with db.lock:
-                cursor = db.conn.execute(
-                    """
-                    INSERT OR IGNORE INTO approval_claims
-                        (parent_id, approval_id, claimed_by_run_id, claimed_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (str(parent_id), approval_id, run_id, int(time.time() * 1000)),
-                )
-                db.conn.commit()
+                with db.conn:  # committed, or rolled back on error: the shared connection never stays mid-transaction
+                    cursor = db.conn.execute(
+                        """
+                        INSERT OR IGNORE INTO approval_claims
+                            (parent_id, approval_id, claimed_by_run_id, claimed_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (str(parent_id), approval_id, run_id, int(time.time() * 1000)),
+                    )
                 if cursor.rowcount == 1:
                     return True
                 row = db.conn.execute(
@@ -223,30 +233,24 @@ class SqliteTracingProvider(TracingProvider):
         root = next((span for span in spans if span.parent_call_id is None), None)
         ended = root is not None and root.t1 is not None
 
-        key = (str(db.path), run_id)
-        state = _RUN_STATE.get(key)
-        if state is None:
-            state = _RUN_STATE[key] = {"stored": set(), "seq": {}}
-            while len(_RUN_STATE) > _RUN_STATE_MAX:
-                _RUN_STATE.popitem(last=False)
-        else:
-            _RUN_STATE.move_to_end(key)
+        state = db.run_state(run_id)
         order: dict[str, int] = state["seq"]
         rows = []
+        finished = []
         for span in spans:
             seq = order.setdefault(span.call_id, len(order))
             if not ended and span.call_id in state["stored"]:
                 continue
             rows.append((run_id, span.call_id, seq, json.dumps(span.model_dump(), default=str)))
             if span.t1 is not None:
-                state["stored"].add(span.call_id)
+                finished.append(span.call_id)
         stored_at = int(time.time() * 1000)
         # An ended run also gets the whole trace in runs.spans, as before: one write per run
         # keeps readers of that column working. While it runs, only its span rows are current.
         blob = "[" + ",".join(row[3] for row in rows) + "]" if ended else ""
 
         def _write() -> None:
-            with db.lock:
+            with db.lock, db.conn:  # one transaction: committed whole, or rolled back on any error
                 db.conn.execute(
                     """
                     INSERT INTO runs (run_id, parent_id, spans, stored_at) VALUES (?, ?, ?, ?)
@@ -258,9 +262,11 @@ class SqliteTracingProvider(TracingProvider):
                 db.conn.executemany(
                     "INSERT OR REPLACE INTO spans (run_id, call_id, seq, span) VALUES (?, ?, ?, ?)", rows
                 )
-                db.conn.commit()
 
         await asyncio.to_thread(_write)
+        # Only once committed: a save that failed leaves them for the next one to write.
         if ended:
             # Later saves (background work outliving the root) rewrite everything again.
             state["stored"].clear()
+        else:
+            state["stored"].update(finished)
