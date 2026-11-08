@@ -1383,7 +1383,7 @@ class VoiceSession:
         baseline = max(self._last_commit_at, self._last_partial_at if self._turn_is_event else 0.0)
         logger.info("end_call_requested", grace_secs=grace)
         self._end_call_task = self._spawn_session_task(
-            self._end_call_when_heard(baseline),
+            self._end_call_when_heard(baseline, committed=self._hangup_committed),
             name="voice-end-call",
         )
 
@@ -1731,15 +1731,24 @@ class VoiceSession:
         logger.info("end_call_cancelled", reason="caller_spoke")
         return True
 
-    async def _end_call_when_heard(self, commit_at: float) -> None:
+    async def _end_call_when_heard(self, commit_at: float, *, committed: bool = False) -> None:
         give_up_at = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
         # When playback first reported done. The tail after this is still
         # goodbye audio. VAD anchored here would treat that echo as the caller.
         heard_since: float | None = None
+
+        # ``committed``: commit_hangup already ran its quiet window. A late
+        # "Alright." or another goodbye answers the farewell; only a real
+        # follow-up keeps the call up. Bare end_call() cancels on any speech.
+        def caller_spoke() -> bool:
+            if committed:
+                return self._caller_retracted_since(commit_at)
+            return self._last_commit_at > commit_at
+
         try:
             while not self._closed:
                 await asyncio.sleep(0.1)
-                if self._last_commit_at > commit_at:
+                if caller_spoke():
                     logger.info("end_call_cancelled", reason="caller_spoke")
                     return
                 if self._end_call_output_busy():
@@ -1753,7 +1762,7 @@ class VoiceSession:
                     continue
                 # The tracker estimates playback; the last words may still be on the wire.
                 await asyncio.sleep(self.END_CALL_TAIL_SECS)
-                if self._last_commit_at > commit_at:
+                if caller_spoke():
                     logger.info("end_call_cancelled", reason="caller_spoke")
                     return
                 if self._end_call_output_busy():
@@ -1780,7 +1789,7 @@ class VoiceSession:
                     return
                 if self._end_call_busy(commit_at) and time.monotonic() < give_up_at:
                     continue
-                if self._last_commit_at > commit_at:
+                if caller_spoke():
                     logger.info("end_call_cancelled", reason="caller_spoke")
                     return
                 logger.info("end_call_hangup", timed_out=False)
@@ -3753,6 +3762,11 @@ class VoiceSession:
             return
         if self._speech_too_long_to_speculate():
             logger.info("speculative_skipped", reason="max_speech_duration", text_preview=text[:80])
+            return
+        if self._hangup_open and _hangup_utterance_kind(text) in ("ack", "goodbye"):
+            # The commit path drops this as an answer to the farewell. A confirmed
+            # attempt would skip that check and start a turn on it.
+            logger.info("speculative_skipped", reason="hangup_ack", text_preview=text[:80])
             return
         if self._caller_speech_started_at is None:
             self._caller_speech_started_at = time.monotonic()

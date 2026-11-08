@@ -1389,6 +1389,31 @@ class TestCommittedHangupEndsTheTurn:
         assert saved == ["ticket"]
         assert len(model.calls) == 1
 
+    async def test_a_late_ack_after_the_commit_still_hangs_up(self) -> None:
+        # The quiet window already passed. Flux can deliver an "Alright." spoken
+        # during the farewell after that, in the last moment before teardown.
+        model = _Model(_tool_only(), "Adiós.")
+        session, stt, _tts = _session(
+            model, tools=[Tool(name="end_call", handler=_committing_end_call)], hangup_grace_secs=0.05
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await _until(lambda: session._end_call_task is not None)
+        await stt.inject(TranscriptEvent(type="committed", text="Alright. Alright."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert len(model.calls) == 1
+
+    async def test_an_ack_does_not_start_a_speculative_reply_while_hanging_up(self) -> None:
+        session, _stt, _tts = _session(_Model(), speculative_generation=True)
+        session._hangup_open = True
+        await session._maybe_start_speculative("Alright. Alright.", source="eager_eot")
+        assert session.speculative_generations_started == 0
+        await session._maybe_start_speculative("Espera, una cosa más.", source="eager_eot")
+        assert session.speculative_generations_started == 1
+        await session._discard_speculative(reason="test")
+
     async def test_a_retract_after_the_commit_continues_from_the_tool_result(self) -> None:
         model = _Model(_tool_only(), "Sure, what else?")
         session, stt, _tts = _session(
