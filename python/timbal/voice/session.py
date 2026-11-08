@@ -5496,8 +5496,12 @@ class VoiceSession:
         ``_likely_stt_echo`` suppresses any verbatim substring, so a permanent
         entry would silently swallow a caller who later says a phrase the
         opener happened to contain ("your appointment").
+
+        An unconfirmed speculative reply is not included: its audio is held,
+        so nothing of it can echo, and it often opens with the caller's own
+        words ("Hola." answered by "Hola. ¿En qué…").
         """
-        spoken = self._turn_assistant_text
+        spoken = "" if self._speculative_unconfirmed() else self._turn_assistant_text
         if self._greeting_text and (
             self._turn_index == 0 or self._greeting_speaking or self._greeting_pending_bytes() > 0
         ):

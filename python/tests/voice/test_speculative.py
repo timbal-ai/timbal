@@ -104,6 +104,7 @@ def _session(
     speculative: SpeculativeGeneration | bool = True,
     tools: list | None = None,
     chunk: bytes = b"\x00\x01" * 16,
+    detector: str = "heuristic",
 ) -> tuple[VoiceSession, ScriptedSTT, ScriptedTTS, TestModel]:
     model = TestModel(responses=responses)
     agent = Agent(name="speculative_voice", model=model, tools=tools or [])
@@ -113,7 +114,7 @@ def _session(
         agent=agent,
         stt=stt,
         tts=tts,
-        turn_detector="heuristic",
+        turn_detector=detector,
         speculative_generation=speculative,
     )
     return session, stt, tts, model
@@ -365,6 +366,21 @@ class TestSpeculativeSession:
         assert metrics[-1].speculative_generations_discarded == 0
         assert metrics[-1].eou_to_first_audio_ms is not None
         assert metrics[-1].eou_to_first_audio_ms >= 0
+
+    @pytest.mark.parametrize("detector", ["heuristic", "provider"])
+    async def test_held_reply_is_not_echo_of_the_words_it_answers(self, detector: str) -> None:
+        # The held reply opens with the caller's own word. Nothing of it has
+        # played, so the confirming "Hola." cannot be echo of it.
+        session, stt, _tts, model = _session(["Hola. ¿En qué puedo ayudarle?"], detector=detector)
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="Hola."))
+            await _until(lambda: model.call_count == 1)
+            await _until(lambda: "ayudarle" in session._turn_assistant_text)
+            await stt.inject(TranscriptEvent(type="committed", text="Hola."))
+            await _until(lambda: drive.audio())
+        assert model.call_count == 1
+        assert [entry.text for entry in session.transcript if entry.role == "user"] == ["Hola."]
+        assert session.speculative_generations_discarded == 0
 
     async def test_turn_resumed_discards_and_a_later_commit_starts_over(self) -> None:
         # TestModel picks a response from assistant turns already in the run, so a
