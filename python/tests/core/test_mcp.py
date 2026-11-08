@@ -13,6 +13,7 @@ from timbal.core.mcp import (
     MCPServer,
     MCPTool,
     _convert_call_tool_result,
+    _pseudonym,
 )
 from timbal.types.content import FileContent, TextContent, ToolUseContent
 from timbal.types.message import Message
@@ -151,8 +152,10 @@ class TestProvenance:
         tool_out = next(e for e in events if getattr(e, "type", "") == "OUTPUT" and e.path == "agent.echo_meta")
         meta = json.loads(tool_out.output)
         if provenance:
-            assert meta[PROVENANCE_RUN_KEY] == tool_out.run_id
-            assert meta[PROVENANCE_CALL_KEY] == tool_out.call_id  # the tool's own span
+            # A third party that opted in: pseudonyms of the run and of the tool's own span.
+            assert meta[PROVENANCE_RUN_KEY] == _pseudonym(server._origin(), tool_out.run_id)
+            assert meta[PROVENANCE_CALL_KEY] == _pseudonym(server._origin(), tool_out.call_id)
+            assert tool_out.run_id not in json.dumps(meta) and "traceparent" not in meta
         else:
             assert PROVENANCE_RUN_KEY not in meta  # third-party servers never see run ids by default
 
@@ -193,8 +196,9 @@ class TestProvenance:
             await server.close()
         meta = json.loads(seen[0])
         # A caller's session id is its key, never a run id: the hint is the root run the first turn made.
-        assert meta[PROVENANCE_RUN_KEY] != "chat-123"
-        assert meta[PROVENANCE_SESSION_KEY] == meta[PROVENANCE_RUN_KEY] == session.root_run_id
+        assert session.root_run_id != "chat-123"
+        root = _pseudonym(server._origin(), session.root_run_id)
+        assert meta[PROVENANCE_SESSION_KEY] == meta[PROVENANCE_RUN_KEY] == root
         assert PROVENANCE_PARENT_KEY not in meta  # the root has no parent
         assert not any("token" in key for key in meta)  # identity is the request's credential, never _meta
 
@@ -211,7 +215,7 @@ class TestProvenance:
         )
         set_run_context(ctx)
         try:
-            meta = MCPServer(transport="http", url="https://api.example.test/mcp", provenance=True)._provenance_meta()
+            meta = platform_server()._provenance_meta()
         finally:
             set_run_context(None)
         assert meta[PROVENANCE_PARENT_KEY] == "run-parent" and meta[PROVENANCE_RUN_KEY] == ctx.id
@@ -220,6 +224,173 @@ class TestProvenance:
     def test_on_by_default_only_for_the_platform_server(self):
         assert MCPServer(transport="http", service="api")._sends_provenance()
         assert not MCPServer(transport="http", url="https://example.com/mcp")._sends_provenance()
+
+    def test_the_platform_gets_the_tools_span_as_traceparent(self):
+        from timbal.state import set_call_id, set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.exporters.otel import OTelExporter
+
+        ctx = RunContext()
+        set_run_context(ctx)
+        set_call_id("call-1")
+        try:
+            meta = platform_server()._provenance_meta()
+        finally:
+            set_run_context(None)
+            set_call_id(None)
+        # The same ids OTelExporter exports the run under: the server's spans join that trace.
+        assert meta["traceparent"] == f"00-{OTelExporter._trace_id(ctx.id)}-{OTelExporter._span_id('call-1')}-01"
+
+    def test_an_active_otel_span_wins_and_reaches_third_parties_too(self, monkeypatch):
+        import types
+
+        from timbal.state import set_call_id, set_run_context
+        from timbal.state.context import RunContext
+
+        valid = types.SimpleNamespace(is_valid=True)
+        trace_mod = types.ModuleType("opentelemetry.trace")
+        trace_mod.get_current_span = lambda: types.SimpleNamespace(get_span_context=lambda: valid)
+        propagate_mod = types.ModuleType("opentelemetry.propagate")
+        propagate_mod.inject = lambda carrier: carrier.update(
+            traceparent="00-" + "a" * 32 + "-" + "b" * 16 + "-01", tracestate="k=v"
+        )
+        root = types.ModuleType("opentelemetry")
+        root.trace, root.propagate = trace_mod, propagate_mod
+        for name, module in (
+            ("opentelemetry", root),
+            ("opentelemetry.trace", trace_mod),
+            ("opentelemetry.propagate", propagate_mod),
+        ):
+            monkeypatch.setitem(sys.modules, name, module)
+        set_run_context(RunContext())
+        set_call_id("call-1")
+        try:
+            first = platform_server()._provenance_meta()
+            third = MCPServer(transport="http", url="https://tools.example.com/mcp", provenance=True)._provenance_meta()
+        finally:
+            set_run_context(None)
+            set_call_id(None)
+        for meta in (first, third):
+            assert meta["traceparent"] == "00-" + "a" * 32 + "-" + "b" * 16 + "-01" and meta["tracestate"] == "k=v"
+
+    def test_third_parties_get_pseudonyms_stable_per_origin_and_unlinkable_across(self, monkeypatch):
+        from timbal.state import set_call_id, set_run_context
+        from timbal.state.context import RunContext
+
+        ctx = RunContext()
+        set_run_context(ctx)
+        set_call_id("call-1")
+        try:
+            one = MCPServer(transport="http", url="https://a.example.com/mcp", provenance=True)
+            same_origin = MCPServer(transport="http", url="https://A.example.com/other", provenance=True)
+            other = MCPServer(transport="http", url="https://b.example.com/mcp", provenance=True)
+            a, a2, b = one._provenance_meta(), same_origin._provenance_meta(), other._provenance_meta()
+            monkeypatch.setenv("TIMBAL_PROVENANCE_SECRET", "shared")
+            keyed = one._provenance_meta()
+        finally:
+            set_run_context(None)
+            set_call_id(None)
+        assert a == a2 and a[PROVENANCE_RUN_KEY] != b[PROVENANCE_RUN_KEY]
+        assert keyed[PROVENANCE_RUN_KEY] == _pseudonym(one._origin(), ctx.id) != a[PROVENANCE_RUN_KEY]
+        assert ctx.id not in str((a, b, keyed)) and "traceparent" not in a
+
+
+def platform_server():
+    server = MCPServer(transport="http", url="https://api.example.test/mcp", provenance=True)
+    server._first_party = True
+    return server
+
+
+class TestPlatformConnectionPerRun:
+    @pytest.fixture
+    def platform(self, tmp_path, monkeypatch):
+        """``service="api"`` connections, served by the stdio meta server; records each one opened."""
+        script = tmp_path / "meta_server.py"
+        script.write_text(META_SERVER_SCRIPT)
+        opened = []
+        credential = {"value": "Bearer run-a"}
+        monkeypatch.setattr(
+            "timbal.platform.utils._resolve_url_and_headers",
+            lambda *_: ("https://api.example.test/mcp", {"Authorization": credential["value"]}),
+        )
+
+        def new(_self, _url, headers):
+            server = MCPServer(transport="stdio", command=sys.executable, args=[str(script)])
+            server._first_party = True
+            opened.append((server, headers["Authorization"]))
+            return server
+
+        monkeypatch.setattr(MCPServer, "_new_project_server", new)
+        return opened, credential
+
+    @staticmethod
+    def calls(n, parallel=False):
+        def handler(messages):
+            done = sum(1 for m in messages if m.role == "tool")
+            if done >= n:
+                return "done"
+            ids = [f"m{done}-{i}" for i in range(n if parallel else 1)]
+            return Message(
+                role="assistant",
+                content=[ToolUseContent(id=i, name="echo_meta", input={}) for i in ids],
+                stop_reason="tool_use",
+            )
+
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_one_connection_per_run_reused_and_closed_at_its_end(self, platform):
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        opened, _ = platform
+        service = MCPServer(transport="http", service="api")
+        for parallel in (False, True):
+            set_run_context(None)
+            set_call_id(None)
+            set_parent_call_id(None)
+            agent = Agent(name="agent", model=TestModel(handler=self.calls(3, parallel)), tools=[service])
+            out = await agent(prompt="go").collect()
+            assert out.status.code == "success", out.error
+        await asyncio.sleep(0.2)  # closing happens in the background
+        # tools/list on every step and five tool calls across two runs: one connection each.
+        assert len(opened) == 2
+        assert all(server._session is None for server, _ in opened) and not service._run_connections
+        await service.close()
+
+    @pytest.mark.asyncio
+    async def test_a_changed_credential_gets_a_new_connection(self, platform):
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        opened, credential = platform
+        service = MCPServer(transport="http", service="api")
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+
+        def handler(messages):
+            if sum(1 for m in messages if m.role == "tool") == 1:
+                credential["value"] = "Bearer run-a-refreshed"
+            return self.calls(2)(messages)
+
+        out = await Agent(name="agent", model=TestModel(handler=handler), tools=[service])(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        await asyncio.sleep(0.2)
+        assert [auth for _, auth in opened] == ["Bearer run-a", "Bearer run-a-refreshed"]
+        assert all(server._session is None for server, _ in opened)
+        await service.close()
+
+    @pytest.mark.asyncio
+    async def test_outside_a_run_each_call_closes_its_own(self, platform):
+        opened, _ = platform
+        service = MCPServer(transport="http", service="api")
+        from timbal.state import set_run_context
+
+        set_run_context(None)
+        tools = await service.resolve()
+        assert [t.name for t in tools] == ["echo_meta"]
+        assert len(opened) == 1 and opened[0][0]._session is None and not service._run_connections
 
 
 class TestMCPToolNamespacing:

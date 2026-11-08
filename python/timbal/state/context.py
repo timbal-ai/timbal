@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 import time
 from collections import deque
@@ -359,6 +360,8 @@ class RunContext(BaseModel):
             # membership (offers send_to_agent), and the deepest reply chain of the agent messages it received.
             _peer=None,
             _peer_hops=None,
+            # Called once the run's root has ended and its end is stored (``on_end``); None until one is added.
+            _end_hooks=None,
             _tool_policy=None,
             _tool_policy_origin=None,
             _silence_token=None,
@@ -728,6 +731,25 @@ class RunContext(BaseModel):
         sink = _EmitSink(loop)
         span._emit_sink = sink
         return sink
+
+    def on_end(self, hook: Callable[[], Any]) -> None:
+        """Call ``hook()`` (sync, or returning an awaitable) once the run's root has ended and its end is stored.
+
+        Background children may still be running then. Hooks added after the root ended never run.
+        """
+        if self._end_hooks is None:
+            self._end_hooks = []
+        self._end_hooks.append(hook)
+
+    async def _run_end_hooks(self) -> None:
+        hooks, self._end_hooks = self._end_hooks, None
+        for hook in hooks or ():
+            try:
+                result = hook()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                _get_logger().exception("run_end_hook_failed", run_id=self.id)
 
     def update_usage(self, key: str, value: int) -> None:
         """Update usage statistics for the current call and all parent calls.
