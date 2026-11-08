@@ -223,6 +223,25 @@ async def test_backchannel_resumes_and_a_real_request_does_not() -> None:
     assert any(entry.role == "user" and entry.text == "What is the weather?" for entry in session._transcript)
 
 
+def test_a_request_that_starts_with_an_ignored_ack_is_not_a_replay() -> None:
+    session = VoiceSession(_agent(), MockSTT(), MockTTS(), audio_input=AudioInputConfig(language="en"))
+    session._settle_consumed_commit("Okay.")
+    assert session._is_replay_of_consumed("Okay.")
+    assert session._partial_extends_consumed("Okay")
+    assert not session._is_replay_of_consumed("Okay. What about order 1002?")
+    assert not session._partial_extends_consumed("Okay. What about order")
+
+
+def test_the_ack_window_opens_when_the_reply_stops_playing() -> None:
+    # Nobody spoke during the reply, so no caller event refreshed the clock.
+    session = VoiceSession(_agent(), MockSTT(), MockTTS(), audio_input=AudioInputConfig(language="en"))
+    session._note_turn_audio(session.audio_output.sample_rate)  # half a second of PCM16
+    assert not session._assistant_active
+    assert session._pure_ack_keeps_the_reply("Yeah. Okay.")
+    session._last_assistant_active_at = time.monotonic() - 2.0
+    assert not session._pure_ack_keeps_the_reply("Yeah. Okay.")
+
+
 async def test_empty_commit_speaks_the_unheard_tail_without_the_model() -> None:
     tts = MockTTS()
     session = VoiceSession(_agent(), MockSTT(), tts, audio_input=AudioInputConfig(language="en"))

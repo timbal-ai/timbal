@@ -483,6 +483,13 @@ _HANGUP_NON_RETRACT = frozenset(
 )
 
 
+def _repeats_consumed(consumed: str, text: str) -> bool:
+    """``text`` is the handled utterance again, or a revision of it, with no words past it."""
+    if len(_normalize_spoken(text).split()) > len(_normalize_spoken(consumed).split()):
+        return False
+    return _is_same_user_utterance_refinement(consumed, text) or _is_same_user_utterance_refinement(text, consumed)
+
+
 def _hangup_marker_in(norm: str, marker: str) -> bool:
     return f" {marker} " in f" {norm} "
 
@@ -589,9 +596,69 @@ def _hangup_utterance_kind(text: str) -> str:
         return "goodbye"
     if _is_ack_only(norm) or _is_pure_backchannel(text):
         return "ack"
-    if _grows_into_non_retract(norm):
+    if _grows_into_non_retract(norm) or _acks_then_growing(norm):
         return "pending"
     return "retract"
+
+
+def _acks_then_growing(norm: str) -> bool:
+    """Acknowledgements, then a partial still growing into one ("vale gracias ad")."""
+    words = norm.split()
+    for cut in range(len(words) - 1, 0, -1):
+        if _is_ack_only(" ".join(words[:cut])) and _grows_into_non_retract(" ".join(words[cut:])):
+            return True
+    return False
+
+
+# The caller asking for the hangup in so many words, wherever it sits in the turn.
+_HANGUP_REQUEST_MARKERS = (
+    "hang up",
+    "end the call",
+    "end this call",
+    "cuelga",
+    "cuelgue",
+    "colgar",
+    "corta la llamada",
+    "termina la llamada",
+    "penja",
+)
+_HANGUP_NEGATIONS = frozenset({"don't", "dont", "not", "no", "never", "nunca"})
+
+
+def _asks_for_hangup(norm: str) -> bool:
+    """A hangup request phrase that is not negated ("don't hang up", "no cuelgues")."""
+    words = norm.split()
+    for marker in _HANGUP_REQUEST_MARKERS:
+        size = len(marker.split())
+        for i in range(len(words) - size + 1):
+            phrase = " ".join(words[i : i + size])
+            if (phrase == marker or phrase.startswith(marker)) and (i == 0 or words[i - 1] not in _HANGUP_NEGATIONS):
+                return True
+    return False
+
+
+def _caller_ends_call(text: str, last_assistant: str = "") -> bool:
+    """Whether this caller turn ends the call, so a model's hangup may proceed.
+
+    A goodbye, an explicit hangup request ("Can you hang up?"), a goodbye with
+    only acknowledgements around it ("Bye, thank you."), or a yes to the agent
+    asking whether to end the call. Thanks alone, "vámonos", and any retract
+    ("wait", "don't hang up") are not.
+    """
+    if _hangup_utterance_kind(text) == "goodbye":
+        return True
+    norm = _normalize_spoken(text)
+    if not norm or any(_hangup_marker_in(norm, marker) for marker in _HANGUP_RETRACT_MARKERS):
+        return False
+    if _asks_for_hangup(norm):
+        return True
+    for tail in _HANGUP_GOODBYE_TAILS:
+        if _hangup_marker_in(norm, tail):
+            rest = " ".join(f" {norm} ".replace(f" {tail} ", " ", 1).split())
+            if not rest or _is_ack_only(rest):
+                return True
+    asked = _normalize_spoken(last_assistant)
+    return bool(asked and _is_ack_only(norm) and _asks_for_hangup(asked))
 
 
 def _is_hangup_tool_name(name: str) -> bool:
@@ -1519,7 +1586,8 @@ class VoiceSession:
         # are not a goodbye, even when the transcript is wrong. A clear goodbye
         # still proceeds. An empty turn (tests, no caller text yet) is unchanged.
         caller = (self._active_turn_user_text or "").strip()
-        if caller and _hangup_utterance_kind(caller) != "goodbye":
+        asked = next((e.text for e in reversed(self._transcript) if e.role == "assistant" and e.text), "")
+        if caller and not _caller_ends_call(caller, asked):
             logger.info("end_call_refused", reason="not_a_goodbye", text_preview=caller[:80])
             return False
         self._hangup_attempted = True
@@ -2167,6 +2235,8 @@ class VoiceSession:
         self._is_speaking = False
         if was_active:
             self.playback.on_interrupted()
+            # The queued audio is dropped, so it does not play until its estimate.
+            self._last_assistant_active_at = min(self._last_assistant_active_at, time.monotonic())
         self._cancel_turn.set()
         for t in list(self._tts_tasks):
             if not t.done():
@@ -2689,16 +2759,15 @@ class VoiceSession:
         """Same utterance as a commit we already handled, still inside its window.
 
         A provider commit of those words after the window, or after a different
-        partial, is a new turn. The match is not permanent.
+        partial, is a new turn. So is one that carries words past them
+        ("Okay." then "Okay. What about 1002?"). The match is not permanent.
         """
         consumed = self._consumed_utterance
         if not consumed or not (text or "").strip():
             return False
         if time.monotonic() - self._consumed_utterance_at > 3.0:
             return False
-        return _is_same_user_utterance_refinement(consumed, text) or _is_same_user_utterance_refinement(
-            text, consumed
-        )
+        return _repeats_consumed(consumed, text)
 
     def _partial_extends_consumed(self, text: str) -> bool:
         """A trailing caption of a commit we already handled, not new speech."""
@@ -2707,9 +2776,7 @@ class VoiceSession:
             return False
         if time.monotonic() - self._consumed_utterance_at > self._stale_partial_commit_secs:
             return False
-        return _is_same_user_utterance_refinement(consumed, text) or _is_same_user_utterance_refinement(
-            text, consumed
-        )
+        return _repeats_consumed(consumed, text)
 
     async def _sweep_stale_partials(self) -> None:
         """Watchdog: force-commit transcripts the provider never commits.
@@ -3085,7 +3152,7 @@ class VoiceSession:
         active = self._held_user_text if holding else self._active_turn_user_text
         assistant_active = self._assistant_active
         if assistant_active:
-            self._last_assistant_active_at = now
+            self._last_assistant_active_at = max(self._last_assistant_active_at, now)
         return TurnState(
             assistant_active=assistant_active,
             audio_playing=self._assistant_audio_playing,
@@ -3094,7 +3161,9 @@ class VoiceSession:
             seconds_since_turn_start=now - self._turn_started_at,
             seconds_since_last_commit=now - self._last_commit_at,
             seconds_since_assistant_active=(
-                None if assistant_active or not self._last_assistant_active_at else now - self._last_assistant_active_at
+                None
+                if assistant_active or not self._last_assistant_active_at
+                else max(0.0, now - self._last_assistant_active_at)
             ),
             mic_speech_since_last_commit=self._mic_speech_since_last_commit(),
             partials_since_last_commit=self._partials_since_last_commit,
@@ -6830,6 +6899,9 @@ class VoiceSession:
         self._turn_audio_playing_until = max(time.monotonic(), self._turn_audio_playing_until) + (
             num_bytes / (self.audio_output.sample_rate * 2)
         )
+        # Windows measured from "the assistant stopped" (backchannel, echo) start
+        # when this audio is expected to finish, not at the caller's next event.
+        self._last_assistant_active_at = max(self._last_assistant_active_at, self._turn_audio_playing_until)
 
     async def _await_tts_chain(self) -> None:
         """Wait for all segments scheduled with :meth:`_schedule_tts` for this turn.

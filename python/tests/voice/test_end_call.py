@@ -620,6 +620,29 @@ class TestCommitHangup:
         assert await session.commit_hangup() is True
         assert session._end_call_task is not None
 
+    @pytest.mark.parametrize(
+        ("text", "asked", "hangs_up"),
+        [
+            ("Can you hang up?", "", True),
+            ("Bye, thank you.", "", True),
+            ("Yes, please hang up.", "", True),
+            ("¿Puedes colgar?", "", True),
+            ("Yes.", "Shall I end the call?", True),
+            ("Sí.", "¿Quiere que cuelgue?", True),
+            ("Yes.", "Anything else?", False),
+            ("Don't hang up yet.", "", False),
+            ("No cuelgues.", "", False),
+            ("Wait, one more thing. Bye.", "", False),
+        ],
+    )
+    async def test_a_hangup_request_is_not_only_a_goodbye_phrase(self, text: str, asked: str, hangs_up: bool) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.05)
+        if asked:
+            session._transcript.append(TranscriptEntry(role="assistant", text=asked))
+        session._active_turn_user_text = text
+        session._last_commit_at = time.monotonic()
+        assert await session.commit_hangup() is hangs_up
+
     @pytest.mark.parametrize("text", ["Thank you so much.", "Vamos, vámonos.", "Gracias."])
     async def test_thanks_and_vamos_do_not_start_a_hangup(self, text: str) -> None:
         session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.2)
@@ -683,6 +706,9 @@ class TestHangupUtterance:
             ("Vamos, vámonos.", "retract"),
             ("No, I meant how antibiotics work.", "retract"),
             ("Vale, gracias. Adiós.", "goodbye"),
+            ("vale gracias ad", "pending"),
+            ("ok thanks b", "pending"),
+            ("vale gracias espera", "retract"),
             ("Ok, thanks, bye.", "goodbye"),
             ("Thank you. Goodbye.", "goodbye"),
             ("Vale, gracias.", "ack"),
