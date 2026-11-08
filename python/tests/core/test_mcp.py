@@ -150,6 +150,67 @@ class TestProvenance:
         else:
             assert PROVENANCE_RUN_KEY not in meta  # third-party servers never see run ids by default
 
+    @pytest.mark.asyncio
+    async def test_a_chat_session_run_sends_its_session_id_but_no_credential_to_a_third_party(self, tmp_path):
+        import json
+
+        from timbal.core.chat_session import ChatSession
+        from timbal.core.mcp import PROVENANCE_SESSION_KEY, PROVENANCE_TOKEN_KEY
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        script = tmp_path / "meta_server.py"
+        script.write_text(META_SERVER_SCRIPT)
+        server = MCPServer(transport="stdio", command=sys.executable, args=[str(script)], provenance=True)
+        seen = []
+
+        def handler(messages):
+            results = [m for m in messages if m.role == "tool"]
+            if results:
+                seen.append(results[-1].content[0].content[0].text)
+                return "done"
+            return Message(
+                role="assistant", content=[ToolUseContent(id="m1", name="echo_meta", input={})], stop_reason="tool_use"
+            )
+
+        agent = Agent(name="agent", model=TestModel(handler=handler), tools=[server])
+        try:
+            async with ChatSession(agent, session_id="chat-123") as session:
+                session.send("go")
+                async for item in session.events():
+                    if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                        break
+        finally:
+            await server.close()
+        meta = json.loads(seen[0])
+        assert meta[PROVENANCE_SESSION_KEY] == "chat-123"
+        assert PROVENANCE_TOKEN_KEY not in meta  # credentials go to the platform's own server only
+
+    def test_the_turn_token_goes_to_the_platform_server_only(self):
+        from timbal.core.mcp import PROVENANCE_TOKEN_KEY
+        from timbal.state import set_run_context
+        from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+        from timbal.state.context import RunContext
+
+        ctx = RunContext()
+        ctx.platform_config = PlatformConfig(
+            host="api.example.test",
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="turn-token-abc"),
+            subject=PlatformSubject(org_id="1", app_id="2"),
+        )
+        set_run_context(ctx)
+        try:
+            platform = MCPServer(transport="http", url="https://api.example.test/mcp", provenance=True)
+            platform._platform = True
+            assert platform._provenance_meta()[PROVENANCE_TOKEN_KEY] == "turn-token-abc"
+            other = MCPServer(transport="http", url="https://example.com/mcp", provenance=True)
+            assert PROVENANCE_TOKEN_KEY not in other._provenance_meta()
+        finally:
+            set_run_context(None)
+
     def test_on_by_default_only_for_the_platform_server(self):
         assert MCPServer(transport="http", service="api")._sends_provenance()
         assert not MCPServer(transport="http", url="https://example.com/mcp")._sends_provenance()
