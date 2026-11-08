@@ -1567,7 +1567,7 @@ class TestInterruptionTruncation:
         agent = Agent(name="t", model=TestModel(handler=lambda _messages: next(replies)), tools=[])
         stt = DelayedMockSTT()
         tts = MockTTS(chunk=b"\x00\x01" * 50, num_chunks=4)
-        session = _RaceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+        session = _RaceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic", playback_tracker=tracker)
 
         events: list[VoiceSessionEvent] = []
 
