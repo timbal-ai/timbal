@@ -1,9 +1,14 @@
 import asyncio
 import contextvars
+import functools
+import hashlib
+import hmac
 import inspect
 import itertools
+import json
 import os
 import re
+import secrets
 import string
 import types
 import unicodedata
@@ -13,6 +18,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import cached_property, partial
 from typing import Any, Literal, TypeVar
+from urllib.parse import urlsplit
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -388,6 +394,97 @@ class _InflightCall:
     ambiguous_with: int = 0
 
 
+PROVENANCE_SECRET_ENV = "TIMBAL_PROVENANCE_SECRET"
+_PROCESS_SECRET = secrets.token_bytes(32)
+
+
+def _pseudonym(origin: str, value: str) -> str:
+    """What a third-party server sees for one of our ids: stable for that server, unlinkable across servers.
+
+    Keyed by ``TIMBAL_PROVENANCE_SECRET`` (set it for pseudonyms that hold across processes), else by a
+    random per-process key."""
+    secret = os.environ.get(PROVENANCE_SECRET_ENV)
+    key = secret.encode() if secret else _PROCESS_SECRET
+    return hmac.new(key, f"{origin}\n{value}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def _ambient_trace_context() -> dict[str, str]:
+    """``traceparent`` / ``tracestate`` of the caller's active OpenTelemetry span, when there is one."""
+    try:
+        from opentelemetry import trace
+        from opentelemetry.propagate import inject
+    except ImportError:
+        return {}
+    if not trace.get_current_span().get_span_context().is_valid:
+        return {}
+    carrier: dict[str, str] = {}
+    inject(carrier)
+    return {key: carrier[key] for key in ("traceparent", "tracestate") if carrier.get(key)}
+
+
+def _timbal_trace_context(run_id: str, call_id: str | None) -> dict[str, str]:
+    """A ``traceparent`` naming the tool's span in the trace ``OTelExporter`` exports for the run."""
+    if not call_id:
+        return {}
+    from ..state.tracing.exporters.otel import OTelExporter
+
+    return {"traceparent": f"00-{OTelExporter._trace_id(run_id)}-{OTelExporter._span_id(call_id)}-01"}
+
+
+# W3C Trace Context as the platform keeps it (monolith ``src/mcp/meta.rs``): it drops a ``traceparent`` of another
+# shape, with its ``tracestate``.
+_TRACEPARENT = re.compile(r"00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}")
+_TRACESTATE_MAX = 512
+
+
+def _trace_claims(context: Mapping[str, Any]) -> dict[str, str]:
+    """The ``traceparent`` / ``tracestate`` of ``context`` that are sent: a version-``00`` ``traceparent``, and with it
+    a ``tracestate`` of at most 512 printable ASCII characters (or tabs). Neither may look like a credential: the
+    platform answers a whole call with one anywhere in its ``_meta`` with 400 (``_looks_like_a_credential``)."""
+    traceparent = context.get("traceparent")
+    if not isinstance(traceparent, str) or not _TRACEPARENT.fullmatch(traceparent):
+        return {}
+    claims = {"traceparent": traceparent}
+    tracestate = context.get("tracestate")
+    if (
+        isinstance(tracestate, str)
+        and tracestate.strip()
+        and len(tracestate) <= _TRACESTATE_MAX
+        and all(c == "\t" or " " <= c <= "~" for c in tracestate)
+        and not _looks_like_a_credential(tracestate)
+    ):
+        claims["tracestate"] = tracestate
+    return claims
+
+
+# A run's platform connection outlives its last call this long (background children after the run's end).
+_RUN_CONNECTION_IDLE_S = 60.0
+
+
+class _RunConnection:
+    """One run's ``service="api"`` connection (``MCPServer._project_connection``)."""
+
+    __slots__ = ("closing", "ended", "fingerprint", "idle", "server", "users")
+
+    def __init__(self, server: "MCPServer", fingerprint: str) -> None:
+        self.server = server
+        self.fingerprint = fingerprint
+        self.users = 0
+        self.ended = False
+        self.closing = False
+        self.idle: asyncio.TimerHandle | None = None
+
+    def cancel_idle(self) -> None:
+        if self.idle is not None:
+            self.idle.cancel()
+            self.idle = None
+
+
+def _log_close_failure(task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("MCP run connection close failed", error=str(task.exception()))
+
+
 class MCPTool(Tool):
     """A Tool whose parameter schema comes from an MCP server instead of handler introspection.
 
@@ -624,10 +721,11 @@ class MCPServer(ToolSet):
     """Resolve the project's API MCP endpoint with the current run's identity.
 
     ``MCPServer(transport="http", service="api")`` uses the same service routing
-    as platform requests: local API port or deployed origin + /api/mcp. Each
-    discovery/call owns a short-lived connection; credentials and tool lists
-    are never cached across callers. ``url`` and custom headers are not used
-    in this mode. External MCP servers continue to use an explicit ``url``.
+    as platform requests: local API port or deployed origin + /api/mcp. Each run
+    gets its own connection, opened on its first call, reused by its other calls
+    (and ``tools/list``), closed when the run ends; credentials and connections
+    are never shared across runs. ``url`` and custom headers are not used in this
+    mode. External MCP servers continue to use an explicit ``url``.
     """
 
     url: str | None = None
@@ -694,7 +792,14 @@ class MCPServer(ToolSet):
     Also ``timbal.ai/parent_run_id`` and ``timbal.ai/session_id`` when known; for the platform's
     server only, ``timbal.ai/app_id`` (a JSON integer), ``timbal.ai/rev`` (``platform_config.subject``)
     and ``timbal.ai/path`` (the tool span's). A value the platform would refuse is left out, never
-    sent, so a call never fails because of its provenance (see ``_claim_id``)."""
+    sent, so a call never fails because of its provenance (see ``_claim_id``).
+
+    Also W3C ``traceparent`` / ``tracestate``: the caller's active OpenTelemetry span when there is
+    one; for the platform, otherwise the tool's span as ``OTelExporter`` exports it (see
+    ``_trace_claims``). A third-party server that opts in (``True``) gets per-origin pseudonyms (HMAC,
+    keyed by ``TIMBAL_PROVENANCE_SECRET`` or a per-process key) instead of our ids, and only an
+    ambient trace context: it can correlate its own calls, not link them across servers. Never any
+    credential."""
 
     sampling_model: Any = None
     """Timbal model string (e.g. ``"anthropic/claude-haiku-4-5"``) or a ``TestModel`` used
@@ -715,6 +820,8 @@ class MCPServer(ToolSet):
     _tools_lock: asyncio.Lock | None = PrivateAttr(default=None)
     _inflight: dict[int, _InflightCall] = PrivateAttr(default_factory=dict)
     _inflight_seq: int = PrivateAttr(default=0)
+    # service="api": run id -> that run's platform connection (see _project_connection).
+    _run_connections: dict[str, "_RunConnection"] = PrivateAttr(default_factory=dict)
 
     def _provider_identity(self) -> tuple:
         # Its name, where it is reached and who it is reached as (headers, env, auth: two tenants of one endpoint are
@@ -767,15 +874,7 @@ class MCPServer(ToolSet):
                 raise ValueError("'url' is required for http transport unless service='api'")
         return self
 
-    @asynccontextmanager
-    async def _project_connection(self):
-        # Resolve BEFORE opening the transport's fresh-context owner task. It
-        # must inherit the caller's identity, never a process service secret.
-        # Never pool these across runs: the platform takes each call's principal and party from this
-        # connection's credential (monolith#565), so a shared connection would act as the wrong caller.
-        from ..platform.utils import _resolve_url_and_headers
-
-        url, headers = _resolve_url_and_headers("api", "mcp", {})
+    def _new_project_server(self, url: str, headers: dict[str, str]) -> "MCPServer":
         server = MCPServer(
             name=self.name,
             transport="http",
@@ -789,10 +888,70 @@ class MCPServer(ToolSet):
             provenance=self._sends_provenance(),
         )
         server._first_party = True
+        return server
+
+    @asynccontextmanager
+    async def _project_connection(self):
+        """The platform connection of the calling run: opened on its first call, reused by the rest, closed
+        when the run ends (or ``_RUN_CONNECTION_IDLE_S`` after its last call, for background children that
+        outlive it). Never shared across runs: the platform takes each call's principal and party from this
+        connection's credential (monolith#565), so another run on it would act as the wrong caller. A run whose
+        credential changes (a refreshed token) gets a new connection."""
+        # Resolve BEFORE opening the transport's fresh-context owner task. It
+        # must inherit the caller's identity, never a process service secret.
+        from ..platform.utils import _resolve_url_and_headers
+
+        url, headers = _resolve_url_and_headers("api", "mcp", {})
+        run_context = get_run_context()
+        if run_context is None:
+            server = self._new_project_server(url, headers)
+            try:
+                yield server
+            finally:
+                await server.close()
+            return
+        fingerprint = hashlib.sha256(json.dumps([url, sorted(headers.items())]).encode()).hexdigest()
+        key = run_context.id
+        entry = self._run_connections.get(key)
+        if entry is not None and entry.fingerprint != fingerprint:
+            self._retire_run_connection(key)
+            entry = None
+        if entry is None:
+            entry = self._run_connections[key] = _RunConnection(self._new_project_server(url, headers), fingerprint)
+            run_context.on_end(functools.partial(self._run_connection_ended, key, entry))
+        entry.users += 1
+        entry.cancel_idle()
         try:
-            yield server
+            yield entry.server
         finally:
-            await server.close()
+            entry.users -= 1
+            if entry.users == 0:
+                if entry.ended or self._run_connections.get(key) is not entry:
+                    self._retire_run_connection(key, entry)
+                else:
+                    entry.idle = asyncio.get_running_loop().call_later(
+                        _RUN_CONNECTION_IDLE_S, self._retire_run_connection, key, entry
+                    )
+
+    def _run_connection_ended(self, key: str, entry: "_RunConnection") -> None:
+        entry.ended = True
+        if entry.users == 0:
+            self._retire_run_connection(key, entry)
+
+    def _retire_run_connection(self, key: str, entry: "_RunConnection | None" = None) -> None:
+        """Forget a run's connection and close it once nothing uses it (in the background: callers don't wait)."""
+        current = self._run_connections.get(key)
+        if entry is None:
+            entry = current
+        if entry is None:
+            return
+        if current is entry:
+            del self._run_connections[key]
+        entry.cancel_idle()
+        if entry.users == 0 and not entry.closing:
+            entry.closing = True
+            task = asyncio.get_running_loop().create_task(entry.server.close())
+            task.add_done_callback(_log_close_failure)
 
     # ------------------------------------------------------------------ session
 
@@ -1349,15 +1508,28 @@ class MCPServer(ToolSet):
         if run_context is None:
             return None
         call_id = get_call_id()
-        claims = {
-            PROVENANCE_RUN_KEY: _claim_id(run_context.id),
-            PROVENANCE_CALL_KEY: _claim_id(call_id),
-            PROVENANCE_PARENT_KEY: _claim_id(run_context.parent_id),
-            PROVENANCE_SESSION_KEY: _claim_id(getattr(run_context, "_session_id", None)),
+        ids = {
+            PROVENANCE_RUN_KEY: run_context.id,
+            PROVENANCE_CALL_KEY: call_id,
+            PROVENANCE_PARENT_KEY: run_context.parent_id,
+            PROVENANCE_SESSION_KEY: getattr(run_context, "_session_id", None),
         }
         if self._first_party or self.service == "api":
+            claims = {key: _claim_id(value) for key, value in ids.items()}
             claims.update(_platform_claims(run_context, call_id))
+            claims.update(_trace_claims(_ambient_trace_context() or _timbal_trace_context(run_context.id, call_id)))
+        else:
+            # A third party that opted in: ids it can correlate among its own calls, but not across servers.
+            origin = self._origin()
+            claims = {key: _pseudonym(origin, value) for key, value in ids.items() if isinstance(value, str) and value}
+            claims.update(_trace_claims(_ambient_trace_context()))
         return {key: value for key, value in claims.items() if value is not None} or None
+
+    def _origin(self) -> str:
+        if self.transport == "http" and self.url:
+            parts = urlsplit(self.url)
+            return f"{parts.scheme}://{parts.netloc}".lower()
+        return "stdio:" + " ".join([self.command or "", *self.args])
 
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
         # Bare name for the wire call; qualified name for the agent registry.
@@ -1500,6 +1672,12 @@ class MCPServer(ToolSet):
 
     async def close(self) -> None:
         """Close the MCP server connection. Safe from any task, in any order."""
+        connections, self._run_connections = list(self._run_connections.values()), {}
+        for entry in connections:
+            entry.cancel_idle()
+            if not entry.closing:
+                entry.closing = True
+                await entry.server.close()
         async with self._get_tools_lock(), self._get_lock():
             task, closed = self._session_task, self._session_closed
             self._forget_session()
