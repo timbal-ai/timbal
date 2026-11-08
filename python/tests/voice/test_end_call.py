@@ -1271,8 +1271,59 @@ def _tool_results(messages: list[Message]) -> dict[str, str]:
     }
 
 
+def _stream_tool_calls_under_item_ids(session) -> None:
+    """Announce each tool call as a ToolUse delta under another id, before its final message.
+
+    OpenAI Responses streams ``fc_…`` and finishes with ``call_…``. Anthropic streams
+    a block index. TestModel streams nothing, so it never showed the mismatch.
+    """
+    from timbal.types.events.delta import DeltaEvent, ToolUse
+    from timbal.types.events.output import OutputEvent
+
+    inner = session.agent
+
+    class _Streaming:
+        def __getattr__(self, name: str):
+            return getattr(inner, name)
+
+        def __call__(self, **kwargs):
+            source = inner(**kwargs)
+
+            async def events():
+                async with aclosing(source):
+                    async for event in source:
+                        if isinstance(event, OutputEvent) and event.path.endswith(".llm"):
+                            for block in getattr(event.output, "content", None) or []:
+                                if isinstance(block, ToolUseContent):
+                                    yield DeltaEvent(
+                                        run_id=event.run_id,
+                                        path=event.path,
+                                        call_id=event.call_id,
+                                        item=ToolUse(id=f"fc_{block.id}", name=block.name, input=""),
+                                    )
+                        yield event
+
+            return events()
+
+    session.agent = _Streaming()
+
+
 class TestCommittedHangupEndsTheTurn:
     """Once ``commit_hangup`` is True the model is not asked for another step."""
+
+    async def test_a_call_streamed_under_another_id_is_counted_once(self) -> None:
+        model = _Model(_tool_only(), "Goodbye.")
+        session, stt, _tts = _session(
+            model, tools=[Tool(name="end_call", handler=_committing_end_call)], hangup_grace_secs=0.05
+        )
+        _stream_tool_calls_under_item_ids(session)
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert len(model.calls) == 1
+        assert session._turn_tool_batch_inflight == 0
 
     async def test_no_llm_call_after_the_hangup_tool_returns(self) -> None:
         model = _Model(_tool_only(), "Goodbye.")

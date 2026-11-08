@@ -4734,6 +4734,10 @@ class VoiceSession:
         empty_retried = False
         first_llm_memory: list[Message] | None = None
         llm_steps = 0
+        # Names of this LLM step's calls already counted from their ToolUse delta.
+        # Providers stream a call under their item id (``fc_…``, a block index)
+        # and finish it under the call id, so the id cannot dedupe the two.
+        streamed_tool_names: list[str] = []
         empty_llm_reply = False
         retry_blocked = False
         # This task's run, not ``_turn_run_context`` (a newer turn can replace that).
@@ -4897,6 +4901,7 @@ class VoiceSession:
                     self._note_tool_start(event.path, event.call_id)
                     if event.path == own_llm_path:
                         llm_steps += 1
+                        streamed_tool_names = []
                         if llm_steps == 1:
                             ctx = get_run_context()
                             root = ctx.root_span() if ctx is not None else None
@@ -4938,6 +4943,8 @@ class VoiceSession:
                     # Arm before the emit await so a barge-in cannot land in the
                     # gap between "the model called the tool" and the tool starting.
                     if (own_llm_path is None or event.path == own_llm_path) and not event.item.is_server_tool_use:
+                        if event.item.id not in self._turn_tool_call_ids:
+                            streamed_tool_names.append(event.item.name)
                         self._note_tool_call(event.item.name, event.item.id)
                     # Dead air while a tool runs — surface it so the playground
                     # doesn't look hung (live: get_datetime slept 3–5s with no UI).
@@ -5161,7 +5168,10 @@ class VoiceSession:
                             # ToolUse delta.
                             for block in out.content:
                                 if isinstance(block, ToolUseContent) and block.name and not block.is_server_tool_use:
-                                    self._note_tool_call(block.name, block.id)
+                                    if block.name in streamed_tool_names:
+                                        streamed_tool_names.remove(block.name)
+                                    else:
+                                        self._note_tool_call(block.name, block.id)
                             for block in out.content:
                                 if isinstance(block, ToolUseContent) and block.name:
                                     await self._emit(AgentStatus(text=f"Calling {block.name}…"))
