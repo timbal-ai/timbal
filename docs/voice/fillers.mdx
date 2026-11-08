@@ -61,7 +61,7 @@ agent.voice_config["filler"] = {
 
 A client can show a status such as "Calling lookup…" while a tool runs. That event is not speech, so a caller on the phone still hears silence. `soft_timeout_secs` speaks a short line once the caller has heard no agent audio for that many seconds during a tool wait, then keeps waiting for the result.
 
-With `soft_timeout_secs` unset, a tool wait is unchanged. When `soft_timeout_secs` is set, the classic `delay_secs` tool-wait path is not used; `think_delay_secs` still covers silence before the first tool. A tool that finishes inside the window stays silent. Audio already playing resets the wait, so the line does not talk over a preamble or the answer. The caller can interrupt the line the same way they interrupt a reply. A hangup tool does not get the line: `end_call`, `hangup`, and any tool that has entered `session.commit_hangup()` stay silent, so a progress phrase cannot sit in front of the goodbye.
+With `soft_timeout_secs` unset, a tool wait is unchanged. When `soft_timeout_secs` is set, the classic `delay_secs` tool-wait path is not used; `think_delay_secs` still covers silence before the first tool. A tool that finishes inside the window stays silent. The window counts only while a tool is running: the model writing its answer after the tool returns is not a tool wait. Audio already playing resets the wait, so the line does not talk over a preamble or the answer. The caller can interrupt the line the same way they interrupt a reply. A hangup tool does not get the line: `end_call`, `hangup`, and any tool that has entered `session.commit_hangup()` stay silent, so a progress phrase cannot sit in front of the goodbye.
 
 ```python
 agent.voice_config["filler"] = {

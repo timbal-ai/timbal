@@ -5747,9 +5747,12 @@ class VoiceSession:
         return bool(text.strip()) and len(scheduled) < len(text) and bool(text[len(scheduled) :].strip())
 
     def _soft_timeout_still_quiet(self) -> bool:
+        # Only a running tool is a wait. Once the batch has returned, the model
+        # is writing the answer, and a line then lands just ahead of it.
         return (
             not self._hangup_filler_blocked
             and self._turn_still_open()
+            and self._turn_tool_batch_inflight > 0
             and not self._progress_audio_busy()
             and self._turn_audio_bytes == self._soft_audio_baseline
             and self._turn_tts_segments == self._soft_segments_baseline
@@ -5767,7 +5770,7 @@ class VoiceSession:
         while self._turn_still_open():
             if self._hangup_filler_blocked:
                 return False
-            while self._turn_still_open() and self._progress_audio_busy():
+            while self._turn_still_open() and (self._progress_audio_busy() or self._turn_tool_batch_inflight == 0):
                 await asyncio.sleep(0.01)
             if not self._turn_still_open():
                 return False

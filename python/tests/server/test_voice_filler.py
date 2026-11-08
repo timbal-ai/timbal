@@ -1115,6 +1115,18 @@ class TestSoftTimeout:
         assert session.metrics[-1].filler_spoken is False
         assert session._filler_agent is None
 
+    async def test_fast_tool_then_slow_answer_stays_silent(self) -> None:
+        """The window is the tool's run. The model writing its answer after the tool is not a tool wait."""
+        session = _thinking_session(
+            think_secs=0.25,
+            tool_sleep=0.02,
+            responses=[_tool_call_message(), "The answer is 42."],
+            filler={"message": PHRASE, "soft_timeout_secs": 0.1, "delay_secs": 30.0},
+        )
+        await session._run_turn("what is the answer?")
+        assert not any(e.filler for e in session.transcript)
+        assert [e.text for e in session.transcript if e.role == "assistant"] == ["The answer is 42."]
+
     async def test_message_without_soft_timeout_does_not_speak(self) -> None:
         session = _make_session(tool_sleep=0.15, filler={"message": PHRASE, "delay_secs": 30.0})
         await session._run_turn("what is the answer?")
