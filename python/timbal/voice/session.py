@@ -486,6 +486,11 @@ def _hangup_marker_in(norm: str, marker: str) -> bool:
     return f" {marker} " in f" {norm} "
 
 
+def _goodbye_prefix(prefix: str) -> bool:
+    """What may come before a goodbye tail: one known prefix, or only acknowledgements ("vale, gracias")."""
+    return not prefix or prefix in _HANGUP_GOODBYE_PREFIXES or _is_ack_only(prefix)
+
+
 def _is_hangup_goodbye(norm: str) -> bool:
     if norm in _HANGUP_GOODBYE_EXACT:
         return True
@@ -493,14 +498,12 @@ def _is_hangup_goodbye(norm: str) -> bool:
         if norm == tail:
             return True
         prefix, sep, rest = norm.rpartition(" ")
-        if sep and rest == tail and (not prefix or prefix in _HANGUP_GOODBYE_PREFIXES):
+        if sep and rest == tail and _goodbye_prefix(prefix):
             return True
         # "good bye" / "hasta luego" are two words; the partition above only
         # strips one. Match the tail as a suffix of the whole line.
-        if norm.endswith(" " + tail):
-            prefix = norm[: -(len(tail) + 1)].strip()
-            if not prefix or prefix in _HANGUP_GOODBYE_PREFIXES:
-                return True
+        if norm.endswith(" " + tail) and _goodbye_prefix(norm[: -(len(tail) + 1)].strip()):
+            return True
     return False
 
 

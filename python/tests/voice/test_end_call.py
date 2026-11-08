@@ -682,6 +682,12 @@ class TestHangupUtterance:
             ("Thank you so much.", "retract"),
             ("Vamos, vámonos.", "retract"),
             ("No, I meant how antibiotics work.", "retract"),
+            ("Vale, gracias. Adiós.", "goodbye"),
+            ("Ok, thanks, bye.", "goodbye"),
+            ("Thank you. Goodbye.", "goodbye"),
+            ("Vale, gracias.", "ack"),
+            ("Gracias, espera. Adiós.", "retract"),
+            ("Thank you so much, bye.", "retract"),
         ],
     )
     def test_kind(self, text: str, kind: str) -> None:
