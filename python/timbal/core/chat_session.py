@@ -5,7 +5,7 @@ import contextlib
 import math
 import os
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Callable, Collection
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -65,6 +65,10 @@ _RECOVERY_ADVICE = (
     "check whether it already happened, or ask the user."
 )
 _AGENT_MESSAGES_KEPT = 512
+_INBOX_SEEN_KEPT = 256
+# A pull of the store's inbox waits this long for an item (long poll), and this long after a failure.
+_INBOX_WAIT_S = 20.0
+_INBOX_RETRY_S = 1.0
 # A restored log continues this far past the saved cursor: further than any client of the old process read.
 _LOG_RESTART_GAP = 1_000_000_000
 _PERSISTED_KINDS = frozenset(
@@ -398,6 +402,8 @@ class ChatSession:
         self._saver: asyncio.Task | None = None
         self._leased = False
         self._lease_task: asyncio.Task | None = None
+        self._inbox_task: asyncio.Task | None = None
+        self._inbox_seen: deque[str] = deque(maxlen=_INBOX_SEEN_KEPT)
         self._lost = False
         self._keep = False
         self._in_flight: dict[str, Any] | None = None
@@ -739,6 +745,7 @@ class ChatSession:
         session = cls(agent, parent_id=snapshot.head, session_id=session_id, session_store=session_store, **config)
         session._version, session._leased = snapshot.version, True
         session.root_run_id = snapshot.root_run_id
+        session._inbox_seen.extend(snapshot.inbox_seen)
         session.turns, session.last_status, session.parked = snapshot.turns, snapshot.last_status, snapshot.parked
         session._last_prompt = _load_prompt(snapshot.last_prompt)
         session._last_options = _TurnOptions(
@@ -756,7 +763,7 @@ class ChatSession:
             session._last_context = await session._load_run(session.head)
         session._record("restored", head=session.head, recovered=recovered, pending=len(snapshot.pending))
         session._persist()
-        session._lease_task = asyncio.get_running_loop().create_task(session._renew_lease())
+        session._start_lease_tasks()
         if session._wakes or session._resume is not None or session._store.pending_events():
             session._work.set()
             session._ensure_worker()
@@ -1089,6 +1096,7 @@ class ChatSession:
             resume=_dump_resume(self._resume),
             log_cursor=self.log.cursor_end,
             closed=self.closed and not self._keep,
+            inbox_seen=list(self._inbox_seen),
         )
 
     def persist(self) -> None:
@@ -1130,7 +1138,76 @@ class ChatSession:
                     self._lose(str(e))
                     return
                 self._leased = True
-                self._lease_task = asyncio.get_running_loop().create_task(self._renew_lease())
+                self._start_lease_tasks()
+
+    def _start_lease_tasks(self) -> None:
+        loop = asyncio.get_running_loop()
+        self._lease_task = loop.create_task(self._renew_lease())
+        if self._session_store is not None and self._session_store.supports_inbox:
+            self._inbox_task = loop.create_task(self._drain_inbox())
+
+    async def _drain_inbox(self) -> None:
+        """While this process holds the lease: apply what other processes queued for the session, store it, ack."""
+        store = self._session_store
+        assert store is not None
+        while not self.closed and not self._lost:
+            try:
+                items = await store.pull_inbox(self.id, PROCESS_OWNER, wait_s=_INBOX_WAIT_S)
+            except SessionLeased as e:
+                self._lose(str(e))
+                return
+            except LookupError:
+                return  # the stored session is gone
+            except Exception as e:
+                logger.warning("chat_session_inbox_pull_failed", session_id=self.id, error=str(e))
+                await asyncio.sleep(_INBOX_RETRY_S)
+                continue
+            if not items or self.closed:
+                continue
+            for item in items:
+                if item["id"] not in self._inbox_seen:
+                    await self._apply_inbox(item)
+                    self._inbox_seen.append(item["id"])
+            self._persist()
+            await self.flush()
+            if self._dirty or self._lost:
+                continue  # not stored: keep the items queued (inbox_seen skips the ones applied)
+            try:
+                await store.ack_inbox(self.id, PROCESS_OWNER, [item["id"] for item in items])
+            except Exception as e:
+                logger.warning("chat_session_inbox_ack_failed", session_id=self.id, error=str(e))
+
+    async def _apply_inbox(self, item: dict[str, Any]) -> None:
+        kind, body = item.get("kind"), item.get("body") or {}
+        try:
+            if kind == "message":
+                event = self.send(body["text"], mode=body.get("mode"))
+                self._record("inbox_item", inbox_id=item["id"], item_kind=kind, event_id=event.id)
+            elif kind == "wake":
+                wake_id = self.wake(
+                    body["text"],
+                    key=body.get("key"),
+                    tool_policy=_load_policy(body["tool_policy"]) if "tool_policy" in body else "read_only",
+                    silent_ok=body.get("silent_ok", True),
+                    trigger=body.get("trigger"),
+                )
+                self._record("inbox_item", inbox_id=item["id"], item_kind=kind, wake_id=wake_id)
+            elif kind == "agent_message":
+                receipt = await self.receive_agent_message(
+                    body["text"],
+                    sender=body["from"],
+                    message_id=body.get("message_id"),
+                    reply_to=body.get("reply_to"),
+                    priority=body.get("priority") or "normal",
+                    hops=body.get("hops") or 0,
+                )
+                self._record("inbox_item", inbox_id=item["id"], item_kind=kind, event_id=receipt["event_id"])
+            else:
+                raise ValueError(f"unknown inbox kind {kind!r}")
+        except Exception as e:
+            # Queued by another process that cannot be told: recorded, and acked so it does not come back.
+            logger.warning("chat_session_inbox_item_rejected", session_id=self.id, inbox_id=item["id"], error=str(e))
+            self._record("inbox_rejected", inbox_id=item["id"], item_kind=kind, error=str(e))
 
     async def _renew_lease(self) -> None:
         store = self._session_store
@@ -1161,9 +1238,10 @@ class ChatSession:
         store = self._session_store
         if store is None:
             return
-        lease, self._lease_task = self._lease_task, None
-        if lease is not None and not lease.done() and lease is not asyncio.current_task():
-            lease.cancel()
+        for task in (self._lease_task, self._inbox_task):
+            if task is not None and not task.done() and task is not asyncio.current_task():
+                task.cancel()
+        self._lease_task = self._inbox_task = None
         await self.flush()
         if self._lost:
             return
