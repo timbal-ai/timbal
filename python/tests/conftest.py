@@ -83,6 +83,7 @@ def clear_in_memory_tracing_storage():
     Both are class-level dicts: the storage otherwise grows unbounded across the
     full test suite, and a trace one test stored would answer another test's get().
     """
+    from timbal.state.tracing.providers import platform as platform_module
     from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
     from timbal.state.tracing.providers.platform import PlatformTracingProvider
 
@@ -98,6 +99,8 @@ def clear_in_memory_tracing_storage():
             task.cancel()
         PlatformTracingProvider._retries.clear()
         PlatformTracingProvider._closing = False
+        platform_module._TRACE_POOLS.clear()
+        PlatformTracingProvider._oversized.clear()
 
     clear()
     yield

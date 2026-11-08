@@ -249,6 +249,43 @@ def _header_items(headers) -> dict[str, str]:
     return {str(name).lower(): value for name, value in items() if isinstance(value, str)}
 
 
+_TRACE_POOLS: dict[asyncio.AbstractEventLoop, object] = {}
+
+
+@contextlib.contextmanager
+def _pooled():
+    """Trace requests on this loop share one connection pool, so a save does not pay a TLS handshake each time.
+
+    Uses the platform HTTP session (no response cookies, per loop and process); a caller that already scoped
+    one keeps it. Closed at :meth:`PlatformTracingProvider.flush`; a loop that ends without one only leaves
+    idle keep-alive sockets for the GC.
+    """
+    from ....platform._http_session import _SESSION, _Session
+
+    current = _SESSION.get()
+    if current is not None and current.usable():
+        yield
+        return
+    loop = asyncio.get_running_loop()
+    for stale in [other for other in _TRACE_POOLS if other.is_closed()]:
+        del _TRACE_POOLS[stale]
+    session = _TRACE_POOLS.get(loop)
+    if session is None or not session.usable():
+        session = _TRACE_POOLS[loop] = _Session()
+    token = _SESSION.set(session)
+    try:
+        yield
+    finally:
+        _SESSION.reset(token)
+
+
+async def _close_pool() -> None:
+    session = _TRACE_POOLS.pop(asyncio.get_running_loop(), None)
+    if session is not None:
+        session.retired = True
+        await session.close_if_idle()
+
+
 SNAPSHOT_HEADER = "x-timbal-snapshot"
 APPLIED_HEADER = "x-timbal-snapshot-applied"
 SELECT_HEADER = "x-timbal-select"
@@ -362,6 +399,8 @@ class PlatformTracingProvider(TracingProvider):
     _exit_hook: ClassVar[bool] = False
     # run key -> the background task resending an ended run whose last save failed on a transient error.
     _retries: ClassVar[dict[str, asyncio.Task]] = {}
+    # run key -> runs the platform refused as too large (413): saved whole with long strings cut from then on.
+    _oversized: ClassVar[OrderedDict[str, None]] = OrderedDict()
     # Waits between those resends (the last repeats), and how long to keep trying before giving up.
     _retry_delays_s: ClassVar[tuple[float, ...]] = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0)
     _retry_window_s: ClassVar[float] = 600.0
@@ -540,12 +579,13 @@ class PlatformTracingProvider(TracingProvider):
         if recalled is not None:
             return recalled
         caps = cls._host_caps(platform_config.host)
-        res = await _request(
-            method="GET",
-            path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.parent_id}",
-            # The root and the agent spans: what resuming reads, without the LLM and tool spans' bytes.
-            params={"select": "resume"} if caps.select_resume else None,
-        )
+        with _pooled():
+            res = await _request(
+                method="GET",
+                path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.parent_id}",
+                # The root and the agent spans: what resuming reads, without the LLM and tool spans' bytes.
+                params={"select": "resume"} if caps.select_resume else None,
+            )
         res.raise_for_status()
         caps.learn(getattr(res, "headers", None))
         res_json = res.json()
@@ -718,6 +758,7 @@ class PlatformTracingProvider(TracingProvider):
             return left
         finally:
             PlatformTracingProvider._closing = False
+            await _close_pool()
 
     @staticmethod
     def _own(key: str) -> deque[int]:
@@ -770,7 +811,9 @@ class PlatformTracingProvider(TracingProvider):
         platform_config, subject_path, key = cls._target(run_context)
         subject = platform_config.subject
         caps = cls._host_caps(platform_config.host)
-        delta = not plain and cls._sending_deltas(caps)
+        # A run the platform refused as too large goes whole with long strings cut, so its end still lands.
+        shrink = key in PlatformTracingProvider._oversized
+        delta = not plain and not shrink and cls._sending_deltas(caps)
         # Taken with no await before model_dump(), so numbers follow snapshot order.
         snapshot = _next_snapshot()
         # Serialized before the await: model_dump() shares the agent's live memory list, which keeps growing
@@ -779,7 +822,8 @@ class PlatformTracingProvider(TracingProvider):
         if delta:
             body, cache_body, sent, root_stored = cls._delta_body(run_context, subject.rev, key, snapshot)
         else:
-            payload = {"parent_id": run_context.parent_id, "trace": run_context._trace.model_dump()}
+            trace = run_context._trace.model_dump()
+            payload = {"parent_id": run_context.parent_id, "trace": _shrink(trace) if shrink else trace}
             if subject.rev is not None:
                 payload["rev"] = subject.rev
             body = cache_body = _encode(payload)
@@ -799,16 +843,27 @@ class PlatformTracingProvider(TracingProvider):
             headers["Content-Encoding"] = "gzip"
         try:
             wire = await _gzip(body) if compressed else body
-            res = await _request(
-                method="PATCH",
-                path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
-                headers=headers,
-                content=wire,
-                timeout=cls._patch_timeout(),
-            )
+            with _pooled():
+                res = await _request(
+                    method="PATCH",
+                    path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
+                    headers=headers,
+                    content=wire,
+                    timeout=cls._patch_timeout(),
+                )
             res.raise_for_status()
         except PlatformError as e:
             cls._remember(key, snapshot, None)
+            if getattr(e, "status_code", None) == 413 and not shrink:
+                # Over the platform's size limit: every later save of the run would carry the same span and be
+                # refused too, so the run would never store its end. From now on it goes whole and cut down.
+                oversized = PlatformTracingProvider._oversized
+                oversized[key] = None
+                while len(oversized) > _DELTA_RUNS_MAX:
+                    oversized.popitem(last=False)
+                logger.warning("platform_trace_too_large", run_id=run_context.id, bytes=len(body))
+                await cls._save(run_context, plain=plain, resend=resend)
+                return
             if not (delta or compressed) or getattr(e, "status_code", None) not in (400, 415, 422):
                 raise
             # Today's server answers a gzip body with 400 (its JSON extractor cannot parse it), a server
@@ -928,6 +983,45 @@ class PlatformTracingProvider(TracingProvider):
         if ended:
             cache_body = _encode({"parent_id": run_context.parent_id, "trace": [root_part, *full]})
         return _encode(payload), cache_body, sent, root_stored
+
+
+# Longest strings kept in a trace the platform refused as too large, tried in order until it fits under
+# the target (the platform's limit is 50 MB decompressed).
+_SHRINK_CAPS = (64 * 1024, 4 * 1024, 512)
+_SHRINK_TARGET_BYTES = 40 * 1024 * 1024
+
+
+def _shrink(trace: list) -> list:
+    """A copy of ``trace`` with long strings cut until it fits, the root marked ``metadata.trace_truncated``.
+
+    Walks the whole structure, so it is also the copy taken before the PATCH awaits (``model_dump`` shares
+    the agent's live memory). What the platform then stores is what a later read gets back.
+    """
+    for cap in _SHRINK_CAPS:
+        cut = 0
+
+        def walk(value, cap=cap):
+            nonlocal cut
+            if isinstance(value, str):
+                if len(value) <= cap:
+                    return value
+                cut += 1
+                return (
+                    f"{value[:cap]}… [{len(value) - cap} characters cut: the trace was over the platform's size limit]"
+                )
+            if isinstance(value, dict):
+                return {k: walk(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [walk(v) for v in value]
+            return value
+
+        shrunk = walk(trace)
+        if len(_encode(shrunk)) <= _SHRINK_TARGET_BYTES:
+            break
+    root = next((s for s in shrunk if isinstance(s, dict) and s.get("parent_call_id") is None), None)
+    if root is not None:
+        root["metadata"] = {**(root.get("metadata") or {}), "trace_truncated": {"max_chars": cap, "strings_cut": cut}}
+    return shrunk
 
 
 def _encode(payload) -> bytes:

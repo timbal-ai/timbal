@@ -19,6 +19,7 @@ from timbal.errors import PlatformError
 from timbal.state import get_run_context, set_call_id, set_parent_call_id, set_run_context
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.context import RunContext
+from timbal.state.tracing.providers import platform as platform_module
 from timbal.state.tracing.providers.platform import DELTA_MEDIA_TYPE, PlatformTracingProvider
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
@@ -51,8 +52,8 @@ def clean():
 
 
 class FakePlatform:
-    def __init__(self, *, deltas=True, gzip_ok=True, advertise=True):
-        self.deltas, self.gzip_ok, self.advertise = deltas, gzip_ok, advertise
+    def __init__(self, *, deltas=True, gzip_ok=True, advertise=True, limit=None):
+        self.deltas, self.gzip_ok, self.advertise, self.limit = deltas, gzip_ok, advertise, limit
         self.runs: dict[str, dict] = {}
         self.patches: list[dict] = []  # {"kind", "bytes", "body"}
         self.fail_next = 0
@@ -93,6 +94,8 @@ class FakePlatform:
             if not self.gzip_ok:
                 raise PlatformError("bad json", status_code=400)
             raw = gzip.decompress(content)
+        if self.limit is not None and len(raw) > self.limit:  # the limit applies to the decompressed body
+            raise PlatformError("payload too large", status_code=413)
         body = json.loads(raw)
         kind = "delta" if headers.get("Content-Type") == DELTA_MEDIA_TYPE else "full"
         if kind == "delta" and not self.deltas:
@@ -691,7 +694,45 @@ class TestSingleFlight:
         with patch("timbal.platform.utils._request", too_large), pytest.raises(PlatformError):
             await provider._store(ctx)
         caps = PlatformTracingProvider._host_caps(CONFIG.host)
-        assert len(calls) == 1 and not caps.delta_rejected and not caps.gzip_rejected
+        assert not caps.delta_rejected and not caps.gzip_rejected
+        # Sent once more, whole and cut down; a second 413 is final (never resent as is).
+        assert len(calls) == 2 and calls[1]["Content-Type"] == "application/json"
+
+    async def test_a_run_over_the_limit_still_stores_its_end_cut_down(self, monkeypatch):
+        monkeypatch.setattr(platform_module, "_SHRINK_TARGET_BYTES", 400_000)
+        server = FakePlatform(limit=500_000)
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+
+        def huge() -> str:
+            return "x" * 2_000_000
+
+        def handler(messages):
+            if any(m.role == "tool" for m in messages):
+                return "done"
+            return Message(
+                role="assistant", content=[ToolUseContent(id="h1", name="huge", input={})], stop_reason="tool_use"
+            )
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="huge", handler=huge)],
+            tracing_provider=provider,
+            tool_result_limit=None,
+        )
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, out = await run(agent, provider)
+        assert "tracing:save_failed" not in out.usage
+        stored = server.runs[ctx.id]["trace"]
+        root = next(s for s in stored if s["parent_call_id"] is None)
+        assert root["t1"] is not None and root["metadata"]["trace_truncated"]["strings_cut"] >= 1
+        tool = next(s for s in stored if s["path"] == "agent.huge")
+        assert len(tool["output"]) < 100_000 and "characters cut" in tool["output"]
+        assert {s["call_id"] for s in stored} == set(ctx._trace.keys())  # every span, just shorter
+        local = next(s for s in ctx._trace.values() if s.path == "agent.huge")
+        assert len(local.output) == 2_000_000  # the run's own trace is untouched
+        assert all(p["kind"] == "full" for p in server.patches[-2:])  # whole from the refusal on
 
 
 class TestShutdownFlush:
