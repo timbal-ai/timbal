@@ -629,10 +629,23 @@ class TestCommitHangup:
             ("¿Puedes colgar?", "", True),
             ("Yes.", "Shall I end the call?", True),
             ("Sí.", "¿Quiere que cuelgue?", True),
+            ("Cuelga, por favor.", "", True),
+            ("Okay you can hang up now, thanks.", "", True),
             ("Yes.", "Anything else?", False),
             ("Don't hang up yet.", "", False),
             ("No cuelgues.", "", False),
             ("Wait, one more thing. Bye.", "", False),
+            # Mentions of hanging up that are not a request.
+            ("I don't want to hang up.", "", False),
+            ("I don't want you to hang up.", "", False),
+            ("No quiero colgar.", "", False),
+            ("Did you hang up on me?", "", False),
+            ("No me cuelgues.", "", False),
+            # A yes that does not answer "shall I end the call?".
+            ("Yes.", "I won't hang up until you confirm the address.", False),
+            ("Vale.", "Puedo colgar o revisar el pedido.", False),
+            ("Sí.", "¿Cuelgo o reviso el pedido?", False),
+            ("Thanks.", "Shall I hang up?", False),
         ],
     )
     async def test_a_hangup_request_is_not_only_a_goodbye_phrase(self, text: str, asked: str, hangs_up: bool) -> None:

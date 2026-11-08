@@ -610,31 +610,113 @@ def _acks_then_growing(norm: str) -> bool:
     return False
 
 
-# The caller asking for the hangup in so many words, wherever it sits in the turn.
-_HANGUP_REQUEST_MARKERS = (
+# A caller hangup request is the whole turn: optional acknowledgements and
+# politeness, one of these forms, then politeness or "the call". A phrase
+# that only mentions hanging up ("I don't want to hang up", "Did you hang up
+# on me?", "no me cuelgues") is not one.
+_HANGUP_REQUEST_FORMS = (
+    frozenset(
+        f"{lead}{verb}"
+        for lead in ("", "can you ", "could you ", "would you ", "will you ", "you can ", "you may ", "go ahead and ")
+        for verb in ("hang up", "end the call", "end this call")
+    )
+    | frozenset(
+        f"{lead}{verb}"
+        for lead in ("", "ya ", "puedes ", "puede ", "podrias ", "podria ", "ya puedes ", "ya puede ", "me puedes ")
+        for verb in (
+            "cuelga",
+            "cuelgue",
+            "cuelgame",
+            "colgar",
+            "corta la llamada",
+            "termina la llamada",
+            "cortar la llamada",
+            "terminar la llamada",
+        )
+    )
+    | frozenset({"penja", "pots penjar", "ja pots penjar"})
+)
+_HANGUP_REQUEST_LEAD = frozenset({"please", "so", "then", "just", "now", "por", "favor"})
+_HANGUP_REQUEST_TRAIL = frozenset(
+    {
+        "please",
+        "now",
+        "then",
+        "thanks",
+        "thank",
+        "you",
+        "the",
+        "phone",
+        "call",
+        "for",
+        "me",
+        "por",
+        "favor",
+        "ya",
+        "gracias",
+        "si",
+        "us",
+        "plau",
+    }
+)
+# Words in the agent's question that make a "yes" mean something else.
+_HANGUP_NEGATIONS = frozenset(
+    {"don't", "dont", "not", "no", "never", "nunca", "won't", "wont", "can't", "cant", "cannot", "until", "hasta"}
+)
+_HANGUP_ASK_MARKERS = (
     "hang up",
     "end the call",
     "end this call",
-    "cuelga",
     "cuelgue",
+    "cuelgo",
     "colgar",
-    "corta la llamada",
-    "termina la llamada",
-    "penja",
+    "termine la llamada",
+    "penjo",
 )
-_HANGUP_NEGATIONS = frozenset({"don't", "dont", "not", "no", "never", "nunca"})
+_HANGUP_AFFIRMATIVES = frozenset(
+    {
+        "yes",
+        "yeah",
+        "yep",
+        "yup",
+        "sure",
+        "ok",
+        "okay",
+        "alright",
+        "please",
+        "si",
+        "vale",
+        "claro",
+        "dale",
+        "venga",
+        "perfecto",
+        "d'acord",
+        "dacord",
+    }
+)
 
 
 def _asks_for_hangup(norm: str) -> bool:
-    """A hangup request phrase that is not negated ("don't hang up", "no cuelgues")."""
+    """The caller's whole turn is a request to end the call ("Yes, please hang up.")."""
     words = norm.split()
-    for marker in _HANGUP_REQUEST_MARKERS:
-        size = len(marker.split())
-        for i in range(len(words) - size + 1):
-            phrase = " ".join(words[i : i + size])
-            if (phrase == marker or phrase.startswith(marker)) and (i == 0 or words[i - 1] not in _HANGUP_NEGATIONS):
-                return True
-    return False
+    while words and (words[0] in _HANGUP_REQUEST_LEAD or _is_ack_only(words[0])):
+        words = words[1:]
+    while words and words[-1] in _HANGUP_REQUEST_TRAIL:
+        words = words[:-1]
+    return " ".join(words) in _HANGUP_REQUEST_FORMS
+
+
+def _asked_whether_to_hang_up(assistant: str) -> bool:
+    """The agent's last sentence is a plain question about ending the call ("Shall I hang up?")."""
+    text = (assistant or "").strip()
+    if not text.endswith("?"):
+        return False
+    last = re.split(r"(?<=[.!])\s+", text)[-1]
+    norm = _normalize_spoken(last)
+    words = norm.split()
+    if any(word in _HANGUP_NEGATIONS for word in words) or "or" in words or "o" in words:
+        return False
+    return any(_hangup_marker_in(norm, marker) for marker in _HANGUP_ASK_MARKERS)
 
 
 def _caller_ends_call(text: str, last_assistant: str = "") -> bool:
@@ -657,8 +739,12 @@ def _caller_ends_call(text: str, last_assistant: str = "") -> bool:
             rest = " ".join(f" {norm} ".replace(f" {tail} ", " ", 1).split())
             if not rest or _is_ack_only(rest):
                 return True
-    asked = _normalize_spoken(last_assistant)
-    return bool(asked and _is_ack_only(norm) and _asks_for_hangup(asked))
+    words = norm.split()
+    return (
+        bool(words)
+        and all(word in _HANGUP_AFFIRMATIVES for word in words)
+        and _asked_whether_to_hang_up(last_assistant)
+    )
 
 
 def _is_hangup_tool_name(name: str) -> bool:
@@ -3286,7 +3372,7 @@ class VoiceSession:
         if eot_threshold is None and eot_timeout_ms is None and eager_eot_threshold is None:
             return True
         try:
-            await configure(
+            sent = await configure(
                 eot_threshold=eot_threshold,
                 eot_timeout_ms=eot_timeout_ms,
                 eager_eot_threshold=eager_eot_threshold,
@@ -3295,7 +3381,8 @@ class VoiceSession:
         except Exception as e:
             logger.warning("entity_patience_configure_failed", error=str(e))
             return False
-        return True
+        # False: never reached the socket, so the next sync tries again.
+        return sent is not False
 
     def _cancel_hold(self) -> None:
         if self._hold_task is not None and not self._hold_task.done():

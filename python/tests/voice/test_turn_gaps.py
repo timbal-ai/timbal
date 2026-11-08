@@ -232,6 +232,20 @@ def test_a_request_that_starts_with_an_ignored_ack_is_not_a_replay() -> None:
     assert not session._partial_extends_consumed("Okay. What about order")
 
 
+async def test_a_patience_update_that_was_not_sent_is_tried_again() -> None:
+    session = VoiceSession(_agent(), MockSTT(), MockTTS(), audio_input=AudioInputConfig(language="en"))
+    calls: list[bool] = []
+
+    async def configure_turn(**kwargs) -> bool:
+        calls.append(kwargs["patient"])
+        return len(calls) > 1
+
+    session.stt.configure_turn = configure_turn  # type: ignore[attr-defined]
+    assert await session._send_flux_thresholds(eot_threshold=1.0, eot_timeout_ms=2500, patient=True) is False
+    assert await session._send_flux_thresholds(eot_threshold=1.0, eot_timeout_ms=2500, patient=True) is True
+    assert calls == [True, True]
+
+
 def test_the_ack_window_opens_when_the_reply_stops_playing() -> None:
     # Nobody spoke during the reply, so no caller event refreshed the clock.
     session = VoiceSession(_agent(), MockSTT(), MockTTS(), audio_input=AudioInputConfig(language="en"))
