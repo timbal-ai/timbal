@@ -34,6 +34,17 @@ def _clean_store():
     demo.reset_demo_store()
 
 
+def test_a_long_first_sentence_can_start_at_the_comma() -> None:
+    from timbal.voice.session import _flush_segment
+
+    early = "Claro, Norte Market vende en tienda y en línea, y"
+    whole = early + " si quiere también puedo ayudarle a revisar un pedido o un envío."
+    cut = _flush_segment(early, first_segment=True, first_flush_min_words=4)
+    assert cut == "Claro, Norte Market vende en tienda y en línea, "
+    assert _flush_segment(early, first_segment=True, first_flush_min_words=None) is None
+    assert _flush_segment(whole, first_segment=True, first_flush_min_words=None) == whole
+
+
 def test_config_is_spanish_hint_and_follow_reply() -> None:
     cfg = demo.demo_voice_config("openai/gpt-5.4-mini")
     assert cfg["language"] == "es"
@@ -43,6 +54,11 @@ def test_config_is_spanish_hint_and_follow_reply() -> None:
     assert cfg["filler"]["message"] == "Un momento."
     assert cfg["speculative_generation"]["enabled"] is True
     assert cfg["speculative_generation"]["preemptive_tts"] is True
+    assert cfg["first_flush_min_words"] == 4
+    prompt = demo.agent.system_prompt
+    assert "Do not speak a farewell unless you are calling end_call." in prompt
+    assert "telling you to continue" in prompt
+    assert "vámonos" not in prompt
     other = demo.demo_voice_config("openai/gpt-5-mini")
     assert other["speculative_generation"]["enabled"] is False
     assert "voice" not in cfg
