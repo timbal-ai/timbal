@@ -254,14 +254,18 @@ async def end_call() -> str:
     if session is None:
         return "There is no call to end."
     if not await session.commit_hangup():
-        return "The caller spoke again. Do not hang up. Keep helping."
+        return "Do not hang up. Keep helping."
     return "Ending the call."
 
 
 agent = Agent(
     name="voice_assistant",
     model="openai/gpt-5-mini",
-    system_prompt="When the caller is done, say a short goodbye and then call end_call.",
+    system_prompt=(
+        "When the caller says a clear goodbye or asks you to hang up, "
+        "say a short goodbye and then call end_call. "
+        "Thanks or done is not a goodbye."
+    ),
     tools=[Tool(handler=end_call)],
     voice_config={"hangup_grace_secs": 1.5},
 )
