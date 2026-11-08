@@ -5,6 +5,7 @@ import contextlib
 import math
 import os
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Collection
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -33,6 +34,7 @@ from .session_scheduler import Followup, SessionScheduler, is_parked, user_batch
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .peers import PeerMembership, PeerPriority
 
 __all__ = ["SEND_MODES", "SILENT_REPLY", "ChatSession", "OnDeadTurn", "SendMode", "ToolPolicy"]
 
@@ -67,10 +69,21 @@ _RECOVERY_ADVICE = (
     "Continue where you left off. Do not repeat completed actions. Before redoing one that is not confirmed, "
     "check whether it already happened, or ask the user."
 )
+_AGENT_MESSAGES_KEPT = 512
 # A restored log continues this far past the saved cursor: further than any client of the old process read.
 _LOG_RESTART_GAP = 1_000_000_000
 _PERSISTED_KINDS = frozenset(
-    {"message", "message_settled", "wake", "wake_superseded", "turn_started", "turn_finished", "interrupt", "closed"}
+    {
+        "message",
+        "message_settled",
+        "agent_message",
+        "wake",
+        "wake_superseded",
+        "turn_started",
+        "turn_finished",
+        "interrupt",
+        "closed",
+    }
 )
 _READ_ONLY_NOTE = (
     "This turn can only read: tools that send, write, delete or buy are not available. If the task needs "
@@ -424,6 +437,10 @@ class ChatSession:
         self._lost = False
         self._keep = False
         self._in_flight: dict[str, Any] | None = None
+        # Messages from other agents (core/peers.py): the directory membership, and the last messages
+        # received by id, for dedupe and for the hops of a reply.
+        self._peer: PeerMembership | None = None
+        self._agent_messages: OrderedDict[str, SessionEvent] = OrderedDict()
 
     # -- Public API -------------------------------------------------------------
 
@@ -534,6 +551,104 @@ class ChatSession:
         self.last_activity = time.monotonic()
         self._record("task_message", task_id=task_id, event_id=event.id, text=event.text)
         return event
+
+    async def receive_agent_message(
+        self,
+        text: str,
+        *,
+        sender: str,
+        message_id: str | None = None,
+        reply_to: str | None = None,
+        priority: "PeerPriority" = "normal",
+        hops: int = 0,
+    ) -> dict[str, Any]:
+        """Take a message another agent sent (:class:`~timbal.core.peers.AgentDirectory`); returns its receipt.
+
+        It reaches the agent as a ``source="agent"`` event: the next turn takes it (one starts if the session
+        is idle), or with ``priority="urgent"`` the running turn does after its tool batch. A message id seen
+        before, or the same text from the same sender while that one is unread, is a ``duplicate`` and
+        delivered once. The agent's input guardrails screen the text. Raises
+        :class:`~timbal.core.peers.PeerRejected`.
+        """
+        from .peers import PeerRejected
+
+        if self.closed:
+            raise PeerRejected("closed", "The agent's session is closed.")
+        sender = sender.strip() if isinstance(sender, str) else ""
+        if not sender:
+            raise PeerRejected("invalid", "A message from an agent must name its sender.")
+        if priority not in ("normal", "urgent"):
+            raise PeerRejected("invalid", f"priority must be 'normal' or 'urgent', got {priority!r}")
+        if self._peer is not None and not self._peer.accepts_from(sender):
+            raise PeerRejected("not_accepted", f"{self._peer.name} does not take messages from {sender}.")
+        text = text.strip() if isinstance(text, str) else ""
+        earlier = self._agent_messages.get(message_id) if message_id else None
+        if earlier is None:
+            earlier = next(
+                (
+                    event
+                    for event in self._store.pending_events()
+                    if event.peer is not None and event.peer["from"] == sender and event.text == text
+                ),
+                None,
+            )
+        if earlier is not None:
+            return {**earlier.receipt(), "duplicate": True}
+        text, triggered = await self._screen_agent_message(text, sender)
+        peer = {
+            "from": sender,
+            "message_id": message_id or f"am_{uuid7(as_type='hex')}",
+            "reply_to": reply_to,
+            "priority": priority,
+            "hops": max(0, int(hops)),
+        }
+        urgent = priority == "urgent"
+        try:
+            event = self._store.post_event(
+                text,
+                source="agent",
+                peer=peer,
+                lane="next" if urgent else "later",
+                announce="interrupt" if urgent else None,
+            )
+        except ValueError as e:
+            raise PeerRejected("invalid", str(e)) from None
+        event.guardrails.extend(triggered)
+        self._agent_messages[peer["message_id"]] = event
+        while len(self._agent_messages) > _AGENT_MESSAGES_KEPT:
+            self._agent_messages.popitem(last=False)
+        self.last_activity = time.monotonic()
+        self._record(
+            "agent_message",
+            event_id=event.id,
+            sender=sender,
+            message_id=peer["message_id"],
+            reply_to=reply_to,
+            priority=priority,
+            hops=peer["hops"],
+            text=text,
+        )
+        self._ensure_worker()
+        return {**event.receipt(), "duplicate": False}
+
+    def _agent_message(self, message_id: str) -> SessionEvent | None:
+        """A message an agent sent this session, by id (while it is among the last ones kept)."""
+        return self._agent_messages.get(message_id)
+
+    async def _screen_agent_message(self, text: str, sender: str) -> tuple[str, list[Any]]:
+        from ..guardrails.types import GuardrailContext, GuardrailStage
+        from .peers import PeerRejected
+
+        runner = getattr(self._agent, "_guardrail_runner", None)
+        if runner is None or not runner.has_stage(GuardrailStage.INPUT):
+            return text, []
+        ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._agent._path)
+        outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
+        if outcome.verdict is not None:
+            # No run exists yet to carry a guardrail report, so the log is the record.
+            logger.warning("agent_message_blocked", rail=outcome.rail.name, sender=sender, text_preview=text[:120])
+            raise PeerRejected("blocked", f"Blocked by the recipient's {outcome.rail.name!r} guardrail.")
+        return outcome.text, list(outcome.triggered)
 
     def interrupt(self) -> bool:
         """Cut what the session is doing; queued messages then start the next turn.
@@ -649,6 +764,8 @@ class ChatSession:
         cut = self._in_flight if keep and self.busy else None
         self.closed = True
         self._keep = keep
+        if self._peer is not None:
+            self._peer.leave()
         worker, self._worker = self._worker, None
         if worker is not None and not worker.done():
             worker.cancel()
@@ -996,6 +1113,7 @@ class ChatSession:
             context._tracing_provider = self._turn_provider(context._tracing_provider)
             context._steering = options.steer
             context._session_id = self.root_run_id
+            context._peer = self._peer
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
             context._cut = asyncio.Event()
@@ -1312,13 +1430,15 @@ class ChatSession:
 
     def _restore_events(self, stored: list[dict[str, Any]]) -> None:
         # Restored in the same process (an idle session let go), the run's task store may still hold them.
-        held = {event.id for event in self._store.pending_events()}
+        held = {event.id: event for event in self._store.pending_events()}
         for data in stored:
-            if data["id"] in held:
-                continue
-            event = self._store.restore_event(data)
-            if event.source == "user":
-                self._watch(event)
+            event = held.get(data["id"])
+            if event is None:
+                event = self._store.restore_event(data)
+                if event.source == "user":
+                    self._watch(event)
+            if event.peer is not None and event.peer.get("message_id"):
+                self._agent_messages[event.peer["message_id"]] = event
 
     async def _load_run(self, run_id: str | None) -> RunContext | None:
         """A stored run of this session as a context (its trace loaded), or None when it was never stored."""
