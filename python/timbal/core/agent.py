@@ -326,7 +326,7 @@ class _CutWatch:
     caller handles a chunk is seen before the next wait instead.
     """
 
-    __slots__ = ("_cancelled", "_task", "_waiting", "_watch")
+    __slots__ = ("_cancelled", "_task", "_waiting", "_watch", "call_id")
 
     def __init__(self, cut: asyncio.Event) -> None:
         self._task = asyncio.current_task()
@@ -334,6 +334,28 @@ class _CutWatch:
         self._cancelled = False
         self._watch = asyncio.ensure_future(cut.wait())
         self._watch.add_done_callback(self._on_cut)
+        # The model call's own span (its first START), where a cut answer's partial output is.
+        self.call_id: str | None = None
+
+    async def events(self, stream: Any) -> AsyncGenerator[Any, None]:
+        """``stream``'s events, ending with :data:`_CUT` once the cut lands (before a wait, or during one)."""
+        while True:
+            try:
+                event = await self.next(stream)
+            except StopAsyncIteration:
+                return
+            except asyncio.CancelledError:
+                if not self.absorb():
+                    raise
+                yield _CUT
+                return
+            if event is _CUT or self.absorb():
+                # Cut before the wait, or during it with the call ending itself on the cancellation.
+                yield _CUT
+                return
+            if self.call_id is None and event.type == "START":
+                self.call_id = event.call_id
+            yield event
 
     def _on_cut(self, _future: "asyncio.Future") -> None:
         if self._waiting and not self._cancelled and self._task is not None:
@@ -507,6 +529,16 @@ def _cut_answer(message: Any) -> Message | None:
     if not texts:
         return None
     return Message(role="assistant", content=texts, stop_reason="interrupted", metadata={"interrupted": "steer_now"})
+
+
+_NO_NAMES: frozenset[str] = frozenset()
+
+
+def _has_deferred(tools: list[Any]) -> bool:
+    for tool in tools:
+        if getattr(tool, "defer_loading", False):
+            return True
+    return False
 
 
 def _empty_at_limit(message: Any) -> bool:
@@ -2511,6 +2543,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     @staticmethod
     def _dispatched(tools: list[Tool], tool_call: ToolUseContent) -> ToolUseContent:
         """A ``call_tool`` call as the call it stands for (same id, so its result answers it); else unchanged."""
+        if tool_call.name != CALL_TOOL_NAME and tool_call.name not in _CALL_TOOL_FALLBACKS:
+            return tool_call
         dispatcher = next((t for t in tools if isinstance(t, _CallTool) and t.name == tool_call.name), None)
         if dispatcher is None or not isinstance(tool_call.input, dict):
             return tool_call
@@ -2604,7 +2638,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         ``cut``: set by a 'now' message. The interruptible calls still running are
         cancelled (each gets a ``steered`` result); the others run to the end.
         """
-        tool_calls = [self._dispatched(tools, tool_call) for tool_call in tool_calls]
+        if self.tool_search == "dispatch":
+            tool_calls = [self._dispatched(tools, tool_call) for tool_call in tool_calls]
         # Fast path: a single tool call needs no queue/task fan-in — iterate the
         # tool directly, exactly like Workflow consumes its steps. This is the
         # common case for most agent iterations. A cuttable batch needs the tasks.
@@ -2692,6 +2727,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 tasks.append(task)
 
             remaining = len(tool_calls)
+            if cut is None:
+                while remaining > 0:
+                    tool_call, event = await queue.get()
+                    if event is None:
+                        remaining -= 1
+                    else:
+                        yield tool_call, event
+                return
             spans: dict[str, tuple[str, str | None]] = {}  # tool_call id -> its span (call_id, parent)
             finished: set[str] = set()
             dropped: set[str] = set()
@@ -2878,13 +2921,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         kwargs.pop("prompt", None)
         kwargs.pop("messages", None)
 
-        async def _append_memory(message: Message) -> None:
-            """Append a message to both memory and its serialized dump in lockstep."""
+        async def _append_memory(message: Message) -> bool:
+            """Append a message to both memory and its serialized dump in lockstep (False: empty, not kept)."""
             message = message.without_empty_text_blocks()
             if message is None:
-                return
+                return False
             current_span.memory.append(message)
             current_span._memory_dump.append(await dump(message))
+            return True
 
         # Input guardrails run blocking, before the first LLM call — a blocked input
         # spends zero tokens and executes zero tools.
@@ -2987,22 +3031,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # segment of its OutputEvent.
             tool_name = event.path.rsplit(".", 1)[-1]
             pinned = tool_name in pinned_tool_names
-            tool_result = Message.validate(
-                {
-                    "role": "tool",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "id": tool_call_id,
-                            "content": content,
-                            "pinned": pinned,
-                            "delivered": (event.metadata or {}).get(DELIVERED_KEY)
-                            if event.status.code == "success"
-                            else None,
-                        }
-                    ],
-                }
-            )
+            result = {"type": "tool_result", "id": tool_call_id, "content": content, "pinned": pinned}
+            if delivering and status_code == "success" and event.metadata and DELIVERED_KEY in event.metadata:
+                result["delivered"] = event.metadata[DELIVERED_KEY]
+            tool_result = Message.validate({"role": "tool", "content": [result]})
             # tool_result guardrails run BEFORE offload so rails see the full text and the
             # (possibly redacted) result is what gets spilled/persisted. Errors are exempt
             # (the model needs the full error), matching the offload contract below.
@@ -3061,11 +3093,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span._memory_dump.append(tool_result_dump)
 
         steering = self._steers(run_context, current_span)
-        # Fixed for the turn; checked after every tool batch.
+        # Only a tool set (MCP) or a tool the agent was given can be deferred; the tools added at run time never are.
+        may_defer = self.tool_search != "off" and any(
+            isinstance(t, ToolSet) or getattr(t, "defer_loading", False) for t in self.tools
+        )
+        # Fixed for the turn; checked on every step.
+        offer_salience = self.salience_tool and current_span.parent_call_id is None
+        dispatch_mode = self.tool_search == "dispatch"
         denial_window_on = self.max_denials_window is not None
-        denial_limit = self.max_consecutive_denials
-        if denial_limit is None:
-            denial_limit = math.inf
+        denial_limit = self.max_consecutive_denials if self.max_consecutive_denials is not None else math.inf
+        stores_first = _stores_before_acting(run_context)
         tool_policy = run_context._tool_policy
         # Set by ChatSession when a 'now' message arrives: cut the model's answer or the
         # interruptible tools in flight, then steer the message in (see _multiplex_tools).
@@ -3177,10 +3214,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 elif i < self.max_iter:
                     if delivering:
                         tools = [*tools, self._send_message_tool()]
-                    if self.salience_tool and current_span.parent_call_id is None:
+                    if offer_salience:
                         tools = [*tools, self._mark_salient_tool()]
                 # `tools` stays what the model may call: a deferred tool called by name runs (and loads).
-                llm_tools, tools, deferred_tools, unloaded_tools = await self._plan_tool_search(tools, model)
+                if not may_defer or not _has_deferred(tools):
+                    llm_tools, deferred_tools, unloaded_tools = tools, None, _NO_NAMES
+                else:
+                    llm_tools, tools, deferred_tools, unloaded_tools = await self._plan_tool_search(tools, model)
                 if i >= self.max_iter and not max_iter_handled:
                     # Budget spent: _resolve_tools withheld tools for this call. Apply on_max_iter.
                     max_iter_handled = True
@@ -3388,27 +3428,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     **({"deferred_tools": deferred_tools} if deferred_tools else {}),
                     **({**kwargs, "max_tokens": max_tokens_retry} if max_tokens_retry else kwargs),
                 )
-                llm_call_id: str | None = None
                 answer_cut = False
                 # A 'now' message stops this answer where it is: between chunks, and (the watch) while the
                 # model streams nothing at all, reasoning silently, by cancelling the wait for its next chunk.
                 cut_watch = _CutWatch(cut) if cut is not None else None
-                while True:
-                    try:
-                        event = await (cut_watch.next(active_events) if cut_watch else anext(active_events))
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.CancelledError:
-                        if cut_watch is None or not cut_watch.absorb():
-                            raise
+                llm_events = active_events if cut_watch is None else cut_watch.events(active_events)
+                async for event in llm_events:
+                    if event is _CUT:
                         answer_cut = True
                         break
-                    if event is _CUT or (cut_watch is not None and cut_watch.absorb()):
-                        # Cut before the wait, or during it with the call ending itself on the cancellation.
-                        answer_cut = True
-                        break
-                    if llm_call_id is None and event.type == "START":
-                        llm_call_id = event.call_id
                     if isinstance(event, OutputEvent):
                         # If the LLM call fails, we want to propagate the error upwards
                         if event.error is not None:
@@ -3576,9 +3604,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             invalidate_message_dump_caches(event.output)
 
                         # Add LLM response to conversation for next iteration
-                        before = len(current_span.memory)
-                        await _append_memory(event.output)
-                        last_output, last_output_stored = event.output, len(current_span.memory) > before
+                        last_output, last_output_stored = event.output, await _append_memory(event.output)
                         _llm_memory_saved = True
                         last_llm_usage = event.usage
                         self._record_context_measurement(current_span, event.usage, sent + 1)
@@ -3655,6 +3681,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     yield event
 
                 if cut_watch is not None:
+                    await llm_events.aclose()
                     cut_watch.close()
                 # Output validation/guardrails can break the loop early too.
                 await active_events.aclose()
@@ -3663,6 +3690,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     # Keep what was already said (unless output rails were holding it back),
                     # then let the message in and answer again with everything in context.
                     _llm_memory_saved = True
+                    llm_call_id = cut_watch.call_id
                     llm_span = run_context._trace.get(llm_call_id) if llm_call_id else None
                     partial = _cut_answer(llm_span.output if llm_span is not None else None)
                     kept = partial is not None and not buffer_stream
@@ -3702,7 +3730,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if found:
                         _record_tool_search(current_span, "native", found)
 
-                if not tool_calls and _empty_at_limit(last_output):
+                if (
+                    not tool_calls
+                    and getattr(last_output, "stop_reason", None) in _TRUNCATED_STOPS
+                    and _empty_at_limit(last_output)
+                ):
                     # A reasoning model can spend the whole budget thinking and write nothing.
                     if last_output_stored:
                         current_span.memory.pop()
@@ -3750,8 +3782,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 emit({"kind": "message", "text": draft, "index": 0, "end_turn": True, "fallback": True})
                     break
 
-                called_unloaded = [call.name for call in tool_calls if call.name in unloaded_tools]
-                if self.tool_search == "dispatch":
+                called_unloaded = (
+                    [call.name for call in tool_calls if call.name in unloaded_tools] if unloaded_tools else []
+                )
+                if dispatch_mode:
                     # Dispatch never loads: a deferred tool's schema is only ever in a search result.
                     shown = _schemas_found(current_span.memory)
                     called = {self._dispatched(tools, call).name for call in tool_calls}
@@ -3760,11 +3794,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         for t in tools
                         if getattr(t, "defer_loading", False) and t.name in called and t.name not in shown
                     }
-                else:
+                elif called_unloaded:
                     schemaless_calls = {t.name: t for t in tools if t.name in called_unloaded}
+                else:
+                    schemaless_calls = {}
                 if called_unloaded:
                     await self._load_tools(called_unloaded, current_span)
-                if _stores_before_acting(run_context) and self._acts(tools, tool_calls):
+                if stores_first and self._acts(tools, tool_calls):
                     # Buffered saves lag the run: store the calls before what they do, so a crash between the
                     # two can never leave a tool's effects with no record of the call (recovery reads it).
                     await run_context._save_trace(barrier=True)
