@@ -145,6 +145,61 @@ class TestSendMessage:
         assert agent._send_tool_name() == "send_to_user"
 
 
+def memory_of(out):
+    from timbal.state import get_run_context
+
+    return [Message.validate(m) for m in get_run_context()._trace[out.call_id].memory]
+
+
+class TestCompaction:
+    async def test_compacting_tool_results_keeps_what_the_user_was_told_as_text(self):
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.types.content import TextContent, ToolResultContent
+
+        fresh()
+        rail = guardrail(lambda text: text.replace("4111", "[card]"), stages=["model_output"], action="redact")
+        model = TestModel(responses=[calls(("work", {}), send("Card 4111 charged.")), calls(send("Done.", True))])
+        agent = Agent(
+            name="bot", model=model, tools=[Tool(name="work", handler=work)], delivery="tool", guardrails=[rail]
+        )
+        out, _ = await run(agent)
+        memory = memory_of(out)
+        results = [c for m in memory if m.role == "tool" for c in m.content if isinstance(c, ToolResultContent)]
+        assert [c.delivered for c in results] == [None, "Card [card] charged.", "Done."]  # what the user saw
+
+        for compact in (compact_tool_results(), compact_tool_results(replacement="[{tool_name} output removed]")):
+            compacted = compact(memory)
+            assistant = [
+                c.text for m in compacted if m.role == "assistant" for c in m.content if isinstance(c, TextContent)
+            ]
+            assert assistant == ["Card [card] charged.", "Done."]
+            assert not any(
+                isinstance(c, ToolUseContent) and c.name == SEND_MESSAGE_NAME for m in compacted for c in m.content
+            )
+            ids = {c.id for m in compacted for c in m.content if isinstance(c, ToolResultContent | ToolUseContent)}
+            assert all(not c.delivered for m in compacted for c in m.content if isinstance(c, ToolResultContent))
+            assert ids <= {"c0-work"}  # only the real tool's pair may remain (as a placeholder)
+
+    async def test_a_failed_send_or_an_ordinary_send_message_tool_is_compacted_like_any_tool(self):
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.types.content import ToolResultContent
+
+        fresh()
+        # delivery off: an app's own "send_message" tool (Slack, email) is tool output, not the conversation.
+        model = TestModel(responses=[calls(send("hi")), "ok"])
+        agent = Agent(name="bot", model=model, tools=[Tool(name=SEND_MESSAGE_NAME, handler=lambda **_: "posted")])
+        out, _ = await run(agent)
+        memory = memory_of(out)
+        assert not any(c.delivered for m in memory for c in m.content if isinstance(c, ToolResultContent))
+        assert all(m.role != "tool" for m in compact_tool_results()(memory))
+
+        fresh()
+        model = TestModel(responses=[calls(send("   ")), calls(send("fine", True))])  # an empty message fails
+        out, _ = await run(Agent(name="bot", model=model, delivery="tool"))
+        delivered = [c.delivered for m in memory_of(out) for c in m.content if isinstance(c, ToolResultContent)]
+        assert delivered == [None, "fine"]
+
+
 class TestWithChatSession:
     async def test_a_message_steered_in_during_the_last_batch_is_answered(self):
         from timbal.core.chat_session import ChatSession
