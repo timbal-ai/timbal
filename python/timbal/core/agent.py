@@ -151,6 +151,8 @@ SEARCH_TOOLS_NAME = "search_tools"
 # Used when an agent tool already has the name (e.g. an unprefixed MCP server's own search_tools).
 _SEARCH_TOOLS_FALLBACKS = ("find_tools", "load_tools", "search_deferred_tools")
 SEND_MESSAGE_NAME = "send_message"
+# Tool span metadata: the text a send_message call showed the user (becomes ToolResultContent.delivered).
+DELIVERED_KEY = "delivered"
 _SEND_MESSAGE_FALLBACKS = ("send_to_user", "reply_to_user")
 DEFAULT_DELIVERY_NOTE = (
     "Only what you send with {tool} reaches the user; the rest of your text is private and never shown. "
@@ -2243,6 +2245,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 text = outcome.text
             sent = agent_span.metadata.setdefault("messages_sent", [])
             sent.append(text)
+            run_context.current_span().metadata[DELIVERED_KEY] = text
             if end_turn:
                 agent_span.metadata["end_turn"] = True
             emit({"kind": "message", "text": text, "index": len(sent) - 1, "end_turn": end_turn})
@@ -2958,6 +2961,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             "id": tool_call_id,
                             "content": content,
                             "pinned": pinned,
+                            "delivered": (event.metadata or {}).get(DELIVERED_KEY)
+                            if event.status.code == "success"
+                            else None,
                         }
                     ],
                 }
