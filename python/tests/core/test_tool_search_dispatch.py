@@ -1,5 +1,6 @@
 """tool_search="dispatch": a fixed tool list (cache-friendly), schemas in search results, call_tool runs them."""
 
+import ast
 import json
 
 import pytest
@@ -105,6 +106,40 @@ class TestDispatch:
         trace = await trace_of(out)
         span = next(s for s in trace.values() if s.path == "agent.get_weather")
         assert span.status.code == "error"
+
+    @pytest.mark.parametrize(("mode", "by"), [("dispatch", "call_tool"), ("dispatch", "name"), ("client", "name")])
+    async def test_bad_arguments_without_the_schema_come_back_with_it(self, mode, by):
+        seen = []
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                seen.append(messages[-1].content[0].content[0].text)
+                return "Oops."
+            if by == "call_tool":
+                return dispatch("get_weather", arguments={"town": "Rome"})
+            return call("get_weather", town="Rome")
+
+        out = await agent(TestModel(handler=handler), tool_search=mode)(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        result = ast.literal_eval(seen[0])  # a tool error reaches the model as its repr
+        assert result["type"] == "ValidationError" and "without its schema" in result["hint"]
+        assert "city" in result["parameters"]["properties"]
+
+    async def test_bad_arguments_after_a_search_get_no_schema_back(self):
+        seen = []
+        responses = iter(
+            [call(SEARCH_TOOLS_NAME, query="weather"), dispatch("get_weather", "c2", arguments={"town": "Rome"})]
+        )
+
+        def handler(messages):
+            if messages[-1].role == "tool" and len(seen) < 2:
+                seen.append(messages[-1].content[0].content[0].text)
+            return next(responses, "Oops.")
+
+        out = await agent(TestModel(handler=handler), tool_search="dispatch")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        result = ast.literal_eval(seen[1])  # a tool error reaches the model as its repr
+        assert result["type"] == "ValidationError" and "parameters" not in result  # it was in the search result
 
     async def test_a_found_tool_called_by_its_own_name_runs_too(self):
         calls = []
