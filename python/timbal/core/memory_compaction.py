@@ -463,13 +463,37 @@ def compact_tool_results(
             }
 
         drop_mode = replacement is None
+        # Messages the user was shown through a tool (delivery="tool") are the conversation, not tool
+        # output: in either mode their call becomes the assistant text it delivered, as text replies stay.
+        delivered = {
+            c.id: c.delivered
+            for msg in memory
+            if msg.role == "tool"
+            for c in msg.content
+            if isinstance(c, ToolResultContent) and c.delivered and c.id not in kept_ids
+        }
 
         result: list[Message] = []
         for msg in memory:
+            if msg.role == "assistant" and delivered:
+                if any(isinstance(c, ToolUseContent) and c.id in delivered for c in msg.content):
+                    msg = Message(
+                        role=msg.role,
+                        content=[
+                            TextContent(text=delivered[c.id])
+                            if isinstance(c, ToolUseContent) and c.id in delivered
+                            else c
+                            for c in msg.content
+                        ],
+                        stop_reason=msg.stop_reason,
+                        metadata=msg.metadata or None,
+                    )
             if msg.role == "tool":
                 new_content = []
                 for c in msg.content:
                     if isinstance(c, ToolResultContent):
+                        if c.id in delivered:
+                            continue
                         if c.id in kept_ids:
                             new_content.append(c)
                         elif drop_mode:
