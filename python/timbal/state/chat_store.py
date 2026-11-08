@@ -11,6 +11,7 @@ and every save is a compare-and-swap on ``version``: an owner that lost its leas
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import socket
@@ -87,6 +88,8 @@ class SessionSnapshot:
     """Answers to a parked turn sent but not yet taken by a turn."""
     log_cursor: int = 0
     closed: bool = False
+    inbox_seen: list[str] = field(default_factory=list)
+    """Ids of the inbox items this session applied (the last few): a pull repeated after a crash skips them."""
     version: int = 0
 
     def to_json(self) -> str:
@@ -103,10 +106,51 @@ class SessionSnapshot:
         return not self.closed and bool(self.in_flight or self.pending or self.wakes or self.resume)
 
 
+INBOX_KINDS = ("message", "wake", "agent_message")
+"""What another process can queue for a session's owner (:meth:`ChatSessionStore.post_inbox`)."""
+_INBOX_SEEN_KEPT = 256
+
+
+def _inbox_item(session_id: str, kind: str, body: dict[str, Any]) -> dict[str, Any]:
+    if kind not in INBOX_KINDS:
+        raise ValueError(f"kind must be one of {list(INBOX_KINDS)}, got {kind!r}")
+    if not isinstance(body, dict):
+        raise TypeError("body must be a dict")
+    json.dumps(body)  # must survive the store
+    return {
+        "id": f"in_{uuid7(as_type='hex')}",
+        "session_id": session_id,
+        "kind": kind,
+        "body": body,
+        "posted_at": time.time(),
+    }
+
+
 class ChatSessionStore(ABC):
-    """Where snapshots live. Implementations must make ``save`` and ``acquire_lease`` atomic."""
+    """Where snapshots live. Implementations must make ``save`` and ``acquire_lease`` atomic.
+
+    A store that ``supports_inbox`` also carries work other processes queue for a session they do not serve
+    (a message, a wake, an agent message): the lease owner long-polls :meth:`pull_inbox`, applies each item,
+    stores the session, then :meth:`ack_inbox`. At least once: the snapshot remembers the items it applied
+    (``inbox_seen``), so a pull repeated after a crash applies nothing twice.
+    """
 
     lease_ttl_s: float = 30.0
+    supports_inbox: bool = False
+
+    async def post_inbox(self, session_id: str, kind: str, body: dict[str, Any]) -> str:
+        """Queue ``kind`` (:data:`INBOX_KINDS`) for the session's owner; returns the item id. ``LookupError``:
+        no such session."""
+        raise NotImplementedError(f"{type(self).__name__} has no inbox")
+
+    async def pull_inbox(self, session_id: str, owner: str, *, wait_s: float = 0.0) -> list[dict[str, Any]]:  # noqa: ARG002
+        """The items not acked yet, oldest first (``{id, kind, body, posted_at}``), waiting up to ``wait_s`` for
+        one. Only for the lease holder: :class:`SessionLeased` otherwise."""
+        return []
+
+    async def ack_inbox(self, session_id: str, owner: str, ids: list[str]) -> None:  # noqa: ARG002
+        """Forget items the owner applied and stored."""
+        return None
 
     @abstractmethod
     async def load(self, session_id: str) -> SessionSnapshot | None: ...
@@ -134,8 +178,43 @@ class ChatSessionStore(ABC):
 class InMemoryChatSessionStore(ChatSessionStore):
     """Process-local (the default): what sessions did before they were durable, through the same interface."""
 
+    supports_inbox = True
+
     def __init__(self) -> None:
         self._rows: dict[str, tuple[SessionSnapshot, str | None, float]] = {}
+        self._inbox: dict[str, list[dict[str, Any]]] = {}
+        self._inbox_changed: dict[str, asyncio.Event] = {}
+
+    def _check_holder(self, session_id: str, owner: str) -> None:
+        row = self._rows.get(session_id)
+        if row is None:
+            raise LookupError(f"No stored chat session {session_id!r}.")
+        if row[1] != owner or row[2] < time.time():
+            raise SessionLeased(f"session {session_id} is not leased to {owner}")
+
+    async def post_inbox(self, session_id: str, kind: str, body: dict[str, Any]) -> str:
+        if session_id not in self._rows:
+            raise LookupError(f"No stored chat session {session_id!r}.")
+        item = _inbox_item(session_id, kind, body)
+        self._inbox.setdefault(session_id, []).append(item)
+        changed = self._inbox_changed.get(session_id)
+        if changed is not None:
+            changed.set()
+        return item["id"]
+
+    async def pull_inbox(self, session_id: str, owner: str, *, wait_s: float = 0.0) -> list[dict[str, Any]]:
+        self._check_holder(session_id, owner)
+        if not self._inbox.get(session_id) and wait_s > 0:
+            changed = self._inbox_changed.setdefault(session_id, asyncio.Event())
+            changed.clear()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(changed.wait(), wait_s)
+            self._check_holder(session_id, owner)
+        return [dict(item) for item in self._inbox.get(session_id, [])]
+
+    async def ack_inbox(self, session_id: str, owner: str, ids: list[str]) -> None:  # noqa: ARG002
+        done = set(ids)
+        self._inbox[session_id] = [item for item in self._inbox.get(session_id, []) if item["id"] not in done]
 
     async def load(self, session_id: str) -> SessionSnapshot | None:
         row = self._rows.get(session_id)
@@ -156,10 +235,13 @@ class InMemoryChatSessionStore(ChatSessionStore):
 
     async def delete(self, session_id: str) -> None:
         self._rows.pop(session_id, None)
+        self._inbox.pop(session_id, None)
 
     async def list_ids(self, *, with_work: bool = False) -> list[str]:
         return [
-            sid for sid, (snap, _, _) in self._rows.items() if not snap.closed and (not with_work or snap.has_work())
+            sid
+            for sid, (snap, _, _) in self._rows.items()
+            if not snap.closed and (not with_work or snap.has_work() or self._inbox.get(sid))
         ]
 
     async def acquire_lease(self, session_id: str, owner: str) -> None:
@@ -182,9 +264,63 @@ class SqliteChatSessionStore(ChatSessionStore):
     :class:`~timbal.state.tracing.providers.SqliteTracingProvider`'s runs (same connection when it is the
     same file)."""
 
+    supports_inbox = True
+    # A pull waiting for an item polls the table this often (other processes write it; nothing notifies).
+    inbox_poll_s: float = 0.25
+
     def __init__(self, path: Path | str, *, synchronous: str = "NORMAL") -> None:
         self.path = Path(path)
         self.synchronous = synchronous
+
+    async def post_inbox(self, session_id: str, kind: str, body: dict[str, Any]) -> str:
+        item = _inbox_item(session_id, kind, body)
+
+        def write(conn):
+            if conn.execute("SELECT 1 FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone() is None:
+                return False
+            conn.execute(
+                "INSERT INTO chat_session_inbox (id, session_id, item, posted_at) VALUES (?, ?, ?, ?)",
+                (item["id"], session_id, json.dumps(item), item["posted_at"]),
+            )
+            conn.commit()
+            return True
+
+        if not await self._run(write):
+            raise LookupError(f"No stored chat session {session_id!r}.")
+        return item["id"]
+
+    async def pull_inbox(self, session_id: str, owner: str, *, wait_s: float = 0.0) -> list[dict[str, Any]]:
+        def query(conn):
+            held = conn.execute(
+                "SELECT lease_owner, lease_until FROM chat_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if held is None:
+                raise LookupError(f"No stored chat session {session_id!r}.")
+            if held[0] != owner or (held[1] or 0) < time.time():
+                raise SessionLeased(f"session {session_id} is not leased to {owner}")
+            rows = conn.execute(
+                "SELECT item FROM chat_session_inbox WHERE session_id = ? ORDER BY posted_at, id", (session_id,)
+            ).fetchall()
+            return [json.loads(row[0]) for row in rows]
+
+        deadline = time.monotonic() + wait_s
+        while True:
+            items = await self._run(query)
+            if items or time.monotonic() >= deadline:
+                return items
+            await asyncio.sleep(min(self.inbox_poll_s, max(0.0, deadline - time.monotonic())))
+
+    async def ack_inbox(self, session_id: str, owner: str, ids: list[str]) -> None:  # noqa: ARG002
+        if not ids:
+            return
+
+        def write(conn):
+            conn.executemany(
+                "DELETE FROM chat_session_inbox WHERE session_id = ? AND id = ?", [(session_id, i) for i in ids]
+            )
+            conn.commit()
+
+        await self._run(write)
 
     def _db(self):
         from .tracing.providers.sqlite import database
@@ -241,18 +377,22 @@ class SqliteChatSessionStore(ChatSessionStore):
     async def delete(self, session_id: str) -> None:
         def write(conn):
             conn.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM chat_session_inbox WHERE session_id = ?", (session_id,))
             conn.commit()
 
         await self._run(write)
 
     async def list_ids(self, *, with_work: bool = False) -> list[str]:
         def query(conn):
-            return conn.execute("SELECT session_id, snapshot FROM chat_sessions").fetchall()
+            rows = conn.execute("SELECT session_id, snapshot FROM chat_sessions").fetchall()
+            queued = {row[0] for row in conn.execute("SELECT DISTINCT session_id FROM chat_session_inbox")}
+            return rows, queued
 
+        rows, queued = await self._run(query)
         ids = []
-        for session_id, raw in await self._run(query):
+        for session_id, raw in rows:
             snapshot = SessionSnapshot.from_json(raw)
-            if not snapshot.closed and (not with_work or snapshot.has_work()):
+            if not snapshot.closed and (not with_work or snapshot.has_work() or session_id in queued):
                 ids.append(session_id)
         return ids
 

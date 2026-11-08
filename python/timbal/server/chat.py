@@ -61,10 +61,14 @@ def session_store_for(agent: Any) -> ChatSessionStore | None:
     raw = (os.environ.get(STORE_ENV) or "").strip()
     if raw.lower() in ("memory", "none", "off"):
         return None
+    if raw.lower() == "platform":
+        from ..state.platform_chat_store import PlatformChatSessionStore
+
+        return PlatformChatSessionStore()
     if raw:
         # SQLAlchemy's form: sqlite:///relative.db, sqlite:////absolute/path.db
         if not raw.startswith("sqlite:///") or len(raw) == len("sqlite:///"):
-            raise RuntimeError(f"{STORE_ENV} must be 'memory' or 'sqlite:///path/to.db', got {raw!r}")
+            raise RuntimeError(f"{STORE_ENV} must be 'memory', 'platform' or 'sqlite:///path/to.db', got {raw!r}")
         return SqliteChatSessionStore(raw[len("sqlite:///") :])
     provider = getattr(agent, "tracing_provider", None)
     if isinstance(provider, type) and issubclass(provider, SqliteTracingProvider) and provider._path is not None:
@@ -90,6 +94,31 @@ async def _session(request: Request, session_id: str, *, allow_closed: bool = Fa
     return session
 
 
+class _HeldElsewhere(HTTPException):
+    """Another process holds the session's lease."""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(status_code=409, detail=f"Chat session {session_id!r} is served by another process.")
+
+
+async def _owned_or_queued(
+    request: Request, session_id: str, kind: str, item: dict[str, Any]
+) -> ChatSession | JSONResponse:
+    """The session, or, when another process serves it and the store has an inbox, ``item`` queued for that
+    process (``202 {"queued": "inbox", "inbox_id"}``: it applies it within moments, stored before the ack)."""
+    try:
+        return await _session(request, session_id)
+    except _HeldElsewhere:
+        store = _store(request)
+        if store is None or not store.supports_inbox:
+            raise
+        try:
+            inbox_id = await store.post_inbox(session_id, kind, item)
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=f"No chat session {session_id!r}.") from e
+        return _json({"queued": "inbox", "inbox_id": inbox_id, "session_id": session_id}, status_code=202)
+
+
 async def _restore(request: Request, session_id: str) -> ChatSession | None:
     """A durable session this process does not hold, restored (once, however many requests ask at the same time)."""
     store = _store(request)
@@ -109,7 +138,7 @@ async def _restore(request: Request, session_id: str) -> ChatSession | None:
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except SessionLeased as e:
-        raise HTTPException(status_code=409, detail=f"Chat session {session_id!r} is served by another process.") from e
+        raise _HeldElsewhere(session_id) from e
     _sessions(request).setdefault(session_id, session)
     return _sessions(request)[session_id]
 
@@ -275,12 +304,16 @@ async def delete_session(request: Request, session_id: str) -> JSONResponse:
 @router.post("/sessions/{session_id}/messages")
 async def send_message(request: Request, session_id: str) -> JSONResponse:
     """Send a user message: ``{"text", "mode"?}`` (``steer`` | ``followup`` | ``collect`` | ``interrupt``)."""
-    session = await _session(request, session_id)
     body = await _body(request)
     text = body.get("text")
     mode = body.get("mode") or None
     if not isinstance(text, str):
         raise HTTPException(status_code=400, detail="'text' must be a string.")
+    if mode is not None and mode not in SEND_MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {list(SEND_MODES)}, got {mode!r}")
+    session = await _owned_or_queued(request, session_id, "message", {"text": text, "mode": mode})
+    if isinstance(session, JSONResponse):
+        return session
     busy = session.busy
     try:
         event = session.send(text, mode=mode)
@@ -309,7 +342,6 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
     """
     from ..core.peers import PeerRejected
 
-    session = await _session(request, session_id)
     body = await _body(request)
     sender, text, hops = body.get("from"), body.get("text"), body.get("hops", 0)
     if not isinstance(sender, str) or not isinstance(text, str):
@@ -319,13 +351,20 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
     for name in ("message_id", "reply_to"):
         if body.get(name) is not None and not isinstance(body[name], str):
             raise HTTPException(status_code=400, detail=f"{name!r} must be a string.")
+    priority = body.get("priority") or "normal"
+    if priority not in ("normal", "urgent"):
+        raise HTTPException(status_code=422, detail=f"priority must be 'normal' or 'urgent', got {priority!r}")
+    item = {key: body.get(key) for key in ("from", "text", "message_id", "reply_to")}
+    session = await _owned_or_queued(request, session_id, "agent_message", {**item, "priority": priority, "hops": hops})
+    if isinstance(session, JSONResponse):
+        return session
     try:
         receipt = await session.receive_agent_message(
             text,
             sender=sender,
             message_id=body.get("message_id"),
             reply_to=body.get("reply_to"),
-            priority=body.get("priority") or "normal",
+            priority=priority,
             hops=hops,
         )
     except PeerRejected as e:
@@ -343,7 +382,6 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
     pending, as a turn of its own, and may stay silent. ``trigger`` (an object)
     is merged into the turn's root ``metadata.trigger`` (a routine fire's ids).
     """
-    session = await _session(request, session_id)
     body = await _body(request)
     text = body.get("text")
     if not isinstance(text, str):
@@ -354,6 +392,10 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
     trigger = body.get("trigger")
     if trigger is not None and not isinstance(trigger, dict):
         raise HTTPException(status_code=400, detail="'trigger' must be an object.")
+    item = {"text": text, "key": body.get("key"), "tool_policy": policy, "silent_ok": bool(body.get("silent_ok", True))}
+    session = await _owned_or_queued(request, session_id, "wake", {**item, "trigger": trigger})
+    if isinstance(session, JSONResponse):
+        return session
     try:
         wake_id = session.wake(
             text,
