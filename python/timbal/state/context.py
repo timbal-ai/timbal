@@ -348,6 +348,8 @@ class RunContext(BaseModel):
         self._continuation_owner = None
         self._foreign_turn_of = None
         self._steering = False
+        # The ChatSession this run belongs to (its id), for MCP provenance (``timbal.ai/session_id``).
+        self._session_id: str | None = None
         self._tool_policy = None
         self._silence_token = None
         self._cut = None

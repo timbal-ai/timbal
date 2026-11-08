@@ -39,6 +39,23 @@ ELICITATION_KIND = "mcp_elicitation"
 # ``tools/call`` ``_meta`` keys naming the calling run and the tool's span (``MCPServer.provenance``).
 PROVENANCE_RUN_KEY = "timbal.ai/run_id"
 PROVENANCE_CALL_KEY = "timbal.ai/call_id"
+PROVENANCE_SESSION_KEY = "timbal.ai/session_id"
+PROVENANCE_TOKEN_KEY = "timbal.ai/turn_token"
+
+
+def _run_credential(run_context: Any) -> str | None:
+    """The run's platform bearer credential (the turn token on platform-hosted runs), or None."""
+    config = run_context.platform_config
+    if config is None:
+        from ..state.config_loader import resolve_platform_config
+
+        config = resolve_platform_config(None)
+    auth = getattr(config, "auth", None)
+    if auth is None or getattr(auth, "type", None) != "bearer":
+        return None
+    return auth.token.get_secret_value() or None
+
+
 """``InteractionEvent.kind`` used when an MCP server elicits input mid tool call."""
 
 _ELICIT_ACTIONS = frozenset({"accept", "decline", "cancel"})
@@ -421,6 +438,7 @@ class MCPServer(ToolSet):
     unsupported. Note the SDK answers server requests inline on the session's receive
     loop, so other traffic on this session waits while the LLM call runs."""
 
+    _platform: bool = PrivateAttr(default=False)
     _session: Any | None = PrivateAttr(default=None)
     _session_task: asyncio.Task | None = PrivateAttr(default=None)
     _session_closed: asyncio.Event | None = PrivateAttr(default=None)
@@ -482,6 +500,7 @@ class MCPServer(ToolSet):
             sampling_model=self.sampling_model,
             provenance=self._sends_provenance(),
         )
+        server._platform = True  # the platform's own server: it may receive the turn token
         try:
             yield server
         finally:
@@ -1025,7 +1044,12 @@ class MCPServer(ToolSet):
         return self.provenance if self.provenance is not None else self.service == "api"
 
     def _provenance_meta(self) -> dict[str, str] | None:
-        """``tools/call`` ``_meta`` naming the calling run and the tool's span, when enabled (see ``provenance``)."""
+        """``tools/call`` ``_meta`` naming the calling run and the tool's span, when enabled (see ``provenance``).
+
+        Also the session (when the run belongs to a ``ChatSession``) and, to the platform's own server only,
+        the run's platform credential as the turn token: the server takes the principal and the party from it,
+        never from the shared connection.
+        """
         if not self._sends_provenance():
             return None
         run_context = get_run_context()
@@ -1035,6 +1059,13 @@ class MCPServer(ToolSet):
         call_id = get_call_id()
         if call_id:
             meta[PROVENANCE_CALL_KEY] = call_id
+        session_id = getattr(run_context, "_session_id", None)
+        if session_id:
+            meta[PROVENANCE_SESSION_KEY] = session_id
+        if self.service == "api" or self._platform:
+            token = _run_credential(run_context)
+            if token:
+                meta[PROVENANCE_TOKEN_KEY] = token
         return meta
 
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
