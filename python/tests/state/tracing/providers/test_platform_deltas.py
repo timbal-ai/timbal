@@ -647,6 +647,41 @@ class TestSingleFlight:
             release.set()
             await first
 
+    @pytest.mark.parametrize("stalled_fails", [False, True])
+    async def test_a_stalled_patch_ending_after_the_end_landed_is_settled_quietly(self, monkeypatch, stalled_fails):
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.05)
+        sent, first_sent, release = [], asyncio.Event(), asyncio.Event()
+
+        async def request(*_args, content=None, **_):
+            sent.append(json.loads(content))
+            if len(sent) == 1:
+                first_sent.set()
+                await release.wait()
+                if stalled_fails:
+                    raise PlatformError("upstream", status_code=503)
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        loop = asyncio.get_running_loop()
+        errors = []
+        loop.set_exception_handler(lambda _loop, context: errors.append(context))
+        try:
+            with patch("timbal.platform.utils._request", request):
+                first = asyncio.create_task(provider._store(ctx))
+                await first_sent.wait()
+                ctx._trace["r"].t1 = 1
+                await asyncio.wait_for(provider._store(ctx), 1)  # the end goes past the stalled PATCH and lands
+                release.set()
+                await asyncio.wait_for(first, 1)  # settled by the end's save: it carried this state and newer
+                await asyncio.sleep(0.05)
+        finally:
+            loop.set_exception_handler(None)
+        assert errors == []  # the stalled PATCH finishing late raises nothing in its done callback
+        assert len(sent) == 2 and not PlatformTracingProvider._retries  # and nothing is resent
+
     async def test_never_more_than_two_patches_on_the_wire(self, monkeypatch):
         monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
         on_wire, most, release = [0], [0], asyncio.Event()
@@ -796,6 +831,32 @@ class TestShutdownFlush:
         with patch("timbal.platform.utils._request", server.request):
             assert await PlatformTracingProvider.flush(timeout=1) == []
         assert server.runs[ctx.id]["trace"][0]["t1"] == 1
+
+    async def test_a_flush_and_a_read_from_outside_the_run_use_its_own_credentials(self):
+        # Requests take host and credentials from the current run: a shutdown flush (or a read) runs outside it.
+        server = FakePlatform(advertise=False)
+        seen = []
+
+        async def request(method, path, **kwargs):
+            current = get_run_context()
+            seen.append((method, current.platform_config.host if current and current.platform_config else None))
+            return await server.request(method, path, **kwargs)
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}
+        _, _, key = PlatformTracingProvider._target(ctx)
+        PlatformTracingProvider._unsaved[key] = ctx
+        set_run_context(None)
+        with patch("timbal.platform.utils._request", request):
+            assert await PlatformTracingProvider.flush(timeout=1) == []
+            PlatformTracingProvider._recent.clear()
+            reader = RunContext(parent_id=ctx.id, tracing_provider=provider)
+            reader.platform_config = CONFIG
+            assert await provider.get(reader) is not None
+        assert seen == [("PATCH", CONFIG.host), ("GET", CONFIG.host)]
+        assert get_run_context() is None  # restored after each request
 
     def test_a_script_whose_loop_ended_mid_save_still_lands_at_exit(self, tmp_path):
         import subprocess
