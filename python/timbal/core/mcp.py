@@ -1,11 +1,18 @@
 import asyncio
 import contextvars
+import functools
+import hashlib
+import hmac
 import inspect
+import json
+import os
+import secrets
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, Literal, TypeVar
+from urllib.parse import urlsplit
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -287,6 +294,71 @@ class _InflightCall:
     ambiguous_with: int = 0
 
 
+PROVENANCE_SECRET_ENV = "TIMBAL_PROVENANCE_SECRET"
+_PROCESS_SECRET = secrets.token_bytes(32)
+
+
+def _pseudonym(origin: str, value: str) -> str:
+    """What a third-party server sees for one of our ids: stable for that server, unlinkable across servers.
+
+    Keyed by ``TIMBAL_PROVENANCE_SECRET`` (set it for pseudonyms that hold across processes), else by a
+    random per-process key."""
+    secret = os.environ.get(PROVENANCE_SECRET_ENV)
+    key = secret.encode() if secret else _PROCESS_SECRET
+    return hmac.new(key, f"{origin}\n{value}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def _ambient_trace_context() -> dict[str, str]:
+    """``traceparent`` / ``tracestate`` of the caller's active OpenTelemetry span, when there is one."""
+    try:
+        from opentelemetry import trace
+        from opentelemetry.propagate import inject
+    except ImportError:
+        return {}
+    if not trace.get_current_span().get_span_context().is_valid:
+        return {}
+    carrier: dict[str, str] = {}
+    inject(carrier)
+    return {key: carrier[key] for key in ("traceparent", "tracestate") if carrier.get(key)}
+
+
+def _timbal_trace_context(run_id: str, call_id: str | None) -> dict[str, str]:
+    """A ``traceparent`` naming the tool's span in the trace ``OTelExporter`` exports for the run."""
+    if not call_id:
+        return {}
+    from ..state.tracing.exporters.otel import OTelExporter
+
+    return {"traceparent": f"00-{OTelExporter._trace_id(run_id)}-{OTelExporter._span_id(call_id)}-01"}
+
+
+# A run's platform connection outlives its last call this long (background children after the run's end).
+_RUN_CONNECTION_IDLE_S = 60.0
+
+
+class _RunConnection:
+    """One run's ``service="api"`` connection (``MCPServer._project_connection``)."""
+
+    __slots__ = ("closing", "ended", "fingerprint", "idle", "server", "users")
+
+    def __init__(self, server: "MCPServer", fingerprint: str) -> None:
+        self.server = server
+        self.fingerprint = fingerprint
+        self.users = 0
+        self.ended = False
+        self.closing = False
+        self.idle: asyncio.TimerHandle | None = None
+
+    def cancel_idle(self) -> None:
+        if self.idle is not None:
+            self.idle.cancel()
+            self.idle = None
+
+
+def _log_close_failure(task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("MCP run connection close failed", error=str(task.exception()))
+
+
 class MCPTool(Tool):
     """A Tool whose parameter schema comes from an MCP server instead of handler introspection.
 
@@ -361,10 +433,11 @@ class MCPServer(ToolSet):
     """Resolve the project's API MCP endpoint with the current run's identity.
 
     ``MCPServer(transport="http", service="api")`` uses the same service routing
-    as platform requests: local API port or deployed origin + /api/mcp. Each
-    discovery/call owns a short-lived connection; credentials and tool lists
-    are never cached across callers. ``url`` and custom headers are not used
-    in this mode. External MCP servers continue to use an explicit ``url``.
+    as platform requests: local API port or deployed origin + /api/mcp. Each run
+    gets its own connection, opened on its first call, reused by its other calls
+    (and ``tools/list``), closed when the run ends; credentials and connections
+    are never shared across runs. ``url`` and custom headers are not used in this
+    mode. External MCP servers continue to use an explicit ``url``.
     """
 
     url: str | None = None
@@ -417,7 +490,14 @@ class MCPServer(ToolSet):
     (``timbal.ai/run_id``, ``timbal.ai/call_id``), so the server can attribute what the call did
     to the exact span (monolith#565). Per-call ids cannot ride on HTTP headers: those are fixed
     per connection, which runs share. ``None`` (default): on for ``service="api"`` (the platform's
-    own server) only, so third-party servers never see run ids."""
+    own server) only, so third-party servers never see run ids.
+
+    Also ``timbal.ai/parent_run_id`` / ``session_id`` when known, and W3C ``traceparent`` /
+    ``tracestate``: the caller's active OpenTelemetry span when there is one; for the platform,
+    otherwise the tool's span as ``OTelExporter`` exports it. A third-party server that opts in
+    (``True``) gets per-origin pseudonyms (HMAC, keyed by ``TIMBAL_PROVENANCE_SECRET`` or a
+    per-process key) instead of our ids, and only an ambient trace context: it can correlate
+    its own calls, not link them across servers. Never any credential."""
 
     sampling_model: Any = None
     """Timbal model string (e.g. ``"anthropic/claude-haiku-4-5"``) or a ``TestModel`` used
@@ -436,6 +516,10 @@ class MCPServer(ToolSet):
     _tools_lock: asyncio.Lock | None = PrivateAttr(default=None)
     _inflight: dict[int, _InflightCall] = PrivateAttr(default_factory=dict)
     _inflight_seq: int = PrivateAttr(default=0)
+    # service="api": run id -> that run's platform connection (see _project_connection).
+    _run_connections: dict[str, "_RunConnection"] = PrivateAttr(default_factory=dict)
+    # The per-run connection a service="api" server opened: the platform itself, which gets raw ids.
+    _first_party: bool = PrivateAttr(default=False)
 
     def _get_lock(self) -> asyncio.Lock:
         """Session lock: guards open/reset/close of the transport."""
@@ -467,15 +551,7 @@ class MCPServer(ToolSet):
                 raise ValueError("'url' is required for http transport unless service='api'")
         return self
 
-    @asynccontextmanager
-    async def _project_connection(self):
-        # Resolve BEFORE opening the transport's fresh-context owner task. It
-        # must inherit the caller's identity, never a process service secret.
-        # Never pool these across runs: the platform takes each call's principal and party from this
-        # connection's credential (monolith#565), so a shared connection would act as the wrong caller.
-        from ..platform.utils import _resolve_url_and_headers
-
-        url, headers = _resolve_url_and_headers("api", "mcp", {})
+    def _new_project_server(self, url: str, headers: dict[str, str]) -> "MCPServer":
         server = MCPServer(
             name=self.name,
             transport="http",
@@ -488,10 +564,71 @@ class MCPServer(ToolSet):
             sampling_model=self.sampling_model,
             provenance=self._sends_provenance(),
         )
+        server._first_party = True
+        return server
+
+    @asynccontextmanager
+    async def _project_connection(self):
+        """The platform connection of the calling run: opened on its first call, reused by the rest, closed
+        when the run ends (or ``_RUN_CONNECTION_IDLE_S`` after its last call, for background children that
+        outlive it). Never shared across runs: the platform takes each call's principal and party from this
+        connection's credential (monolith#565), so another run on it would act as the wrong caller. A run whose
+        credential changes (a refreshed token) gets a new connection."""
+        # Resolve BEFORE opening the transport's fresh-context owner task. It
+        # must inherit the caller's identity, never a process service secret.
+        from ..platform.utils import _resolve_url_and_headers
+
+        url, headers = _resolve_url_and_headers("api", "mcp", {})
+        run_context = get_run_context()
+        if run_context is None:
+            server = self._new_project_server(url, headers)
+            try:
+                yield server
+            finally:
+                await server.close()
+            return
+        fingerprint = hashlib.sha256(json.dumps([url, sorted(headers.items())]).encode()).hexdigest()
+        key = run_context.id
+        entry = self._run_connections.get(key)
+        if entry is not None and entry.fingerprint != fingerprint:
+            self._retire_run_connection(key)
+            entry = None
+        if entry is None:
+            entry = self._run_connections[key] = _RunConnection(self._new_project_server(url, headers), fingerprint)
+            run_context.on_end(functools.partial(self._run_connection_ended, key, entry))
+        entry.users += 1
+        entry.cancel_idle()
         try:
-            yield server
+            yield entry.server
         finally:
-            await server.close()
+            entry.users -= 1
+            if entry.users == 0:
+                if entry.ended or self._run_connections.get(key) is not entry:
+                    self._retire_run_connection(key, entry)
+                else:
+                    entry.idle = asyncio.get_running_loop().call_later(
+                        _RUN_CONNECTION_IDLE_S, self._retire_run_connection, key, entry
+                    )
+
+    def _run_connection_ended(self, key: str, entry: "_RunConnection") -> None:
+        entry.ended = True
+        if entry.users == 0:
+            self._retire_run_connection(key, entry)
+
+    def _retire_run_connection(self, key: str, entry: "_RunConnection | None" = None) -> None:
+        """Forget a run's connection and close it once nothing uses it (in the background: callers don't wait)."""
+        current = self._run_connections.get(key)
+        if entry is None:
+            entry = current
+        if entry is None:
+            return
+        if current is entry:
+            del self._run_connections[key]
+        entry.cancel_idle()
+        if entry.users == 0 and not entry.closing:
+            entry.closing = True
+            task = asyncio.get_running_loop().create_task(entry.server.close())
+            task.add_done_callback(_log_close_failure)
 
     # ------------------------------------------------------------------ session
 
@@ -1042,16 +1179,25 @@ class MCPServer(ToolSet):
         run_context = get_run_context()
         if run_context is None:
             return None
-        meta = {PROVENANCE_RUN_KEY: run_context.id}
         call_id = get_call_id()
-        if call_id:
-            meta[PROVENANCE_CALL_KEY] = call_id
-        if run_context.parent_id:
-            meta[PROVENANCE_PARENT_KEY] = run_context.parent_id
-        session_id = getattr(run_context, "_session_id", None)
-        if session_id:
-            meta[PROVENANCE_SESSION_KEY] = session_id
-        return meta
+        ids = {
+            PROVENANCE_RUN_KEY: run_context.id,
+            PROVENANCE_CALL_KEY: call_id,
+            PROVENANCE_PARENT_KEY: run_context.parent_id,
+            PROVENANCE_SESSION_KEY: getattr(run_context, "_session_id", None),
+        }
+        ids = {key: value for key, value in ids.items() if value}
+        if self._first_party or self.service == "api":
+            return {**ids, **(_ambient_trace_context() or _timbal_trace_context(run_context.id, call_id))}
+        # A third party that opted in: ids it can correlate among its own calls, but not across servers.
+        origin = self._origin()
+        return {**{key: _pseudonym(origin, value) for key, value in ids.items()}, **_ambient_trace_context()}
+
+    def _origin(self) -> str:
+        if self.transport == "http" and self.url:
+            parts = urlsplit(self.url)
+            return f"{parts.scheme}://{parts.netloc}".lower()
+        return "stdio:" + " ".join([self.command or "", *self.args])
 
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
         # Bare name for the wire call; qualified name for the agent registry.
@@ -1194,6 +1340,12 @@ class MCPServer(ToolSet):
 
     async def close(self) -> None:
         """Close the MCP server connection. Safe from any task, in any order."""
+        connections, self._run_connections = list(self._run_connections.values()), {}
+        for entry in connections:
+            entry.cancel_idle()
+            if not entry.closing:
+                entry.closing = True
+                await entry.server.close()
         async with self._get_tools_lock(), self._get_lock():
             task, closed = self._session_task, self._session_closed
             self._forget_session()
