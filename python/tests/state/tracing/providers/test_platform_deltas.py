@@ -1,0 +1,1221 @@
+"""PlatformTracingProvider span deltas and negotiated gzip, against a fake platform server.
+
+The fake implements the server side of rfcs/platform-trace-storage.md (A + C): request
+decompression, `Accept-Encoding` / `Accept-Patch` advertisement, span upserts ordered by
+`snapshot`, assembly at `ended`, and GET of a never-ended run from its span rows.
+"""
+
+import asyncio
+import gzip
+import json
+import time
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+from structlog.testing import capture_logs
+from timbal import Agent, Tool
+from timbal.core.test_model import TestModel
+from timbal.errors import PlatformError
+from timbal.state import get_run_context, set_call_id, set_parent_call_id, set_run_context
+from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+from timbal.state.context import RunContext
+from timbal.state.tracing.providers import platform as platform_module
+from timbal.state.tracing.providers.platform import DELTA_MEDIA_TYPE, PlatformTracingProvider
+from timbal.types.content import ToolUseContent
+from timbal.types.message import Message
+
+CONFIG = PlatformConfig(
+    host="api.deltas.test",
+    auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t2_test"),
+    subject=PlatformSubject(org_id="1", app_id="2"),
+)
+
+
+@pytest.fixture(autouse=True)
+def clean():
+    PlatformTracingProvider._caps.clear()
+    PlatformTracingProvider._delta_runs.clear()
+    PlatformTracingProvider._recent.clear()
+    PlatformTracingProvider._flights.clear()
+    PlatformTracingProvider._unsaved.clear()
+    set_run_context(None)
+    set_call_id(None)
+    set_parent_call_id(None)
+    yield
+    PlatformTracingProvider._caps.clear()
+    PlatformTracingProvider._delta_runs.clear()
+    PlatformTracingProvider._recent.clear()
+    PlatformTracingProvider._unsaved.clear()
+    for task in PlatformTracingProvider._retries.values():
+        task.cancel()
+    PlatformTracingProvider._retries.clear()
+
+
+class FakePlatform:
+    def __init__(self, *, deltas=True, gzip_ok=True, advertise=True, limit=None):
+        self.deltas, self.gzip_ok, self.advertise, self.limit = deltas, gzip_ok, advertise, limit
+        self.runs: dict[str, dict] = {}
+        self.patches: list[dict] = []  # {"kind", "bytes", "body"}
+        self.fail_next = 0
+
+    def _headers(self):
+        if not self.advertise:
+            return {}
+        headers = {}
+        if self.gzip_ok:
+            headers["Accept-Encoding"] = "gzip"
+        if self.deltas:
+            headers["Accept-Patch"] = f"application/json, {DELTA_MEDIA_TYPE}"
+        return headers
+
+    def _ok(self, payload=None, stored=None, applied=True):
+        headers = self._headers()
+        if stored is not None and self.deltas and self.advertise:
+            # A server that takes deltas implements 0.1: it echoes the snapshot it holds.
+            headers = {**headers, "X-Timbal-Snapshot": str(stored), "X-Timbal-Snapshot-Applied": str(applied).lower()}
+        return SimpleNamespace(raise_for_status=lambda: None, headers=headers, json=lambda: payload or {})
+
+    async def request(self, method, path, headers=None, content=None, **_):
+        run_id = path.rsplit("/", 1)[-1]
+        if method == "GET":
+            run = self.runs.get(run_id)
+            if run is None:
+                return self._ok({})
+            if run.get("trace") is not None:
+                return self._ok({"trace": run["trace"], "parent_id": run["parent_id"]})
+            rows = [span for _seq, span in sorted(run["spans"].values(), key=lambda row: row[0])]
+            return self._ok({"trace": [run["root"], *rows], "parent_id": run["parent_id"]})
+        headers = headers or {}
+        if self.fail_next:
+            self.fail_next -= 1
+            raise PlatformError("upstream", status_code=503)
+        raw = content
+        if headers.get("Content-Encoding") == "gzip":
+            if not self.gzip_ok:
+                raise PlatformError("bad json", status_code=400)
+            raw = gzip.decompress(content)
+        if self.limit is not None and len(raw) > self.limit:  # the limit applies to the decompressed body
+            raise PlatformError("payload too large", status_code=413)
+        body = json.loads(raw)
+        kind = "delta" if headers.get("Content-Type") == DELTA_MEDIA_TYPE else "full"
+        if kind == "delta" and not self.deltas:
+            raise PlatformError("unsupported media type", status_code=415)
+        self.patches.append(
+            {"kind": kind, "bytes": len(content), "body": body, "gzip": headers.get("Content-Encoding") == "gzip"}
+        )
+        run = self.runs.setdefault(run_id, {"spans": {}, "trace": None, "root": None, "parent_id": None, "snapshot": 0})
+        # 0.1: an older snapshot is acked and dropped; an equal one is a retry and applies again.
+        sent = int(headers["X-Timbal-Snapshot"]) if "X-Timbal-Snapshot" in headers else None
+        if sent is not None and sent < run["snapshot"]:
+            return self._ok(stored=run["snapshot"], applied=False)
+        if sent is not None:
+            run["snapshot"] = sent
+        run["parent_id"] = body.get("parent_id")
+        if kind == "full":  # authoritative: replaces the span rows
+            run.update(trace=body["trace"], spans={}, root=None)
+            return self._ok(stored=sent)
+        for entry in body["spans"]:
+            assert set(entry) == {"seq", "span"}, entry
+            if entry["seq"] <= 0 or not entry["span"].get("parent_call_id"):
+                raise PlatformError("malformed delta", status_code=400)
+        root = body["root"]
+        if body["ended"]:
+            for entry in body["spans"]:
+                run["spans"][entry["span"]["call_id"]] = (entry["seq"], entry["span"])
+            rows = [span for _seq, span in sorted(run["spans"].values(), key=lambda row: row[0])]
+            run.update(trace=[root, *rows], spans={}, root=None)  # assembled: the rows are gone
+        elif run["trace"] is not None and any(s["parent_call_id"] is None and s.get("t1") for s in run["trace"]):
+            # After the end (background children): merged into the stored trace by call_id.
+            by_id = {span["call_id"]: span for span in run["trace"]}
+            for entry in body["spans"]:
+                by_id[entry["span"]["call_id"]] = entry["span"]
+            if root is not None:
+                by_id[root["call_id"]] = {**by_id.get(root["call_id"], {}), **root}
+            run["trace"] = list(by_id.values())
+        else:
+            if run["trace"] is not None:  # a whole save mid-run, then deltas: its spans become the rows
+                stored_root = next(s for s in run["trace"] if s["parent_call_id"] is None)
+                run["spans"] = {s["call_id"]: (i + 1, s) for i, s in enumerate(run["trace"]) if s is not stored_root}
+                run.update(trace=None, root=stored_root)
+            for entry in body["spans"]:
+                run["spans"][entry["span"]["call_id"]] = (entry["seq"], entry["span"])
+            if root is not None:  # a header merges into the stored root, never wiping memory, input or session
+                run["root"] = {**(run["root"] or {}), **root}
+        return self._ok(stored=sent)
+
+
+def tool_loop(steps, probe=None):
+    def handler(messages):
+        done = sum(1 for m in messages if m.role == "tool")
+        if done >= steps:
+            return "done"
+        return Message(
+            role="assistant", content=[ToolUseContent(id=f"c{done}", name="step", input={})], stop_reason="tool_use"
+        )
+
+    async def step() -> str:
+        if probe is not None:
+            await probe()
+        return "out " * 100
+
+    provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+    agent = Agent(
+        name="agent",
+        model=TestModel(handler=handler),
+        tools=[Tool(name="step", handler=step)],
+        tracing_provider=provider,
+        max_iter=steps + 5,
+    )
+    return agent, provider
+
+
+async def run(agent, provider):
+    ctx = RunContext(tracing_provider=provider)
+    ctx.platform_config = CONFIG
+    set_run_context(ctx)
+    out = await agent(prompt="go").collect()
+    assert out.status.code == "success", out.error
+    return ctx, out
+
+
+async def read_back(provider, run_id):
+    PlatformTracingProvider._recent.clear()  # from the platform, not this process's cache
+    reader = RunContext(parent_id=run_id, tracing_provider=provider)
+    reader.platform_config = CONFIG
+    return await provider.get(reader)
+
+
+def same_trace(stored, local, server):
+    """What the platform holds is what the run produced (raw JSON), and get() returns every span."""
+    assert {s.call_id for s in stored.as_records()} == set(local._trace.keys())
+    raw = server.runs[local.id]["trace"]
+    want = json.loads(json.dumps(local._trace.model_dump(), default=str))
+    got = {s["call_id"]: s for s in raw}
+    for span in want:
+        diff = {k for k in set(got[span["call_id"]]) | set(span) if got[span["call_id"]].get(k) != span.get(k)}
+        # Usage counters about saving itself are added after the last save lands.
+        diff.discard("usage") if span["parent_call_id"] is None else None
+        assert not diff, (span["path"], diff)
+
+
+class TestNegotiation:
+    async def test_without_advertisement_saves_are_whole_and_plain(self):
+        server = FakePlatform(advertise=False)
+        agent, provider = tool_loop(3)
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, _ = await run(agent, provider)
+            stored = await read_back(provider, ctx.id)
+        assert {p["kind"] for p in server.patches} == {"full"}
+        assert not any(p["gzip"] for p in server.patches)
+        same_trace(stored, ctx, server)
+
+    async def test_switches_to_gzipped_deltas_once_advertised(self):
+        server = FakePlatform()
+        agent, provider = tool_loop(5)
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, _ = await run(agent, provider)
+            stored = await read_back(provider, ctx.id)
+        kinds = [p["kind"] for p in server.patches]
+        assert kinds[0] == "full" and set(kinds[1:]) == {"delta"}
+        assert all(p["gzip"] for p in server.patches[1:])
+        same_trace(stored, ctx, server)
+
+    async def test_a_host_that_rejects_deltas_gets_whole_traces(self):
+        server = FakePlatform(deltas=False)
+        agent, provider = tool_loop(3)
+        server.deltas = True  # advertises at first...
+        with patch("timbal.platform.utils._request", server.request):
+            ctx = RunContext(tracing_provider=provider)
+            ctx.platform_config = CONFIG
+            set_run_context(ctx)
+            server.deltas = False  # ...then rejects
+            PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+            out = await agent(prompt="go").collect()
+            stored = await read_back(provider, ctx.id)
+        assert out.status.code == "success"
+        assert PlatformTracingProvider._host_caps(CONFIG.host).delta_rejected
+        assert server.patches and {p["kind"] for p in server.patches} == {"full"}
+        same_trace(stored, ctx, server)
+
+    async def test_a_host_that_cannot_decompress_gets_plain_bodies(self):
+        server = FakePlatform(gzip_ok=False)
+        agent, provider = tool_loop(2)
+        PlatformTracingProvider._host_caps(CONFIG.host).gzip = True
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, _ = await run(agent, provider)
+            stored = await read_back(provider, ctx.id)
+        assert PlatformTracingProvider._host_caps(CONFIG.host).gzip_rejected
+        assert server.patches and not any(p["gzip"] for p in server.patches)
+        same_trace(stored, ctx, server)
+
+    async def test_forced_gzip_on_todays_server_falls_back(self):
+        # Today's API has no decompression layer: its JSON extractor answers a gzip body with 400.
+        server = FakePlatform(advertise=False, gzip_ok=False)
+        agent, _ = tool_loop(2)
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, compress=True)
+        agent.tracing_provider = provider
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, out = await run(agent, provider)
+            stored = await read_back(provider, ctx.id)
+        assert "tracing:save_failed" not in out.usage
+        assert PlatformTracingProvider._host_caps(CONFIG.host).gzip_rejected
+        same_trace(stored, ctx, server)
+
+    async def test_a_rejection_outlives_later_advertisements(self):
+        server = FakePlatform(deltas=False)  # advertises gzip, takes it, rejects deltas
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        agent, provider = tool_loop(3)
+        with patch("timbal.platform.utils._request", server.request):
+            await run(agent, provider)
+            server.advertise, server.deltas = True, False
+            server._headers = lambda: {"Accept-Patch": DELTA_MEDIA_TYPE}
+            server.patches.clear()
+            await run(agent, provider)
+        assert server.patches and {p["kind"] for p in server.patches} == {"full"}
+
+    async def test_a_bad_save_is_not_taken_for_a_rejected_format(self):
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        PlatformTracingProvider._host_caps(CONFIG.host).gzip = True
+        calls = []
+
+        async def always_400(*_args, **kwargs):
+            calls.append(kwargs.get("headers", {}))
+            raise PlatformError("bad request", status_code=400)
+
+        agent, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        with patch("timbal.platform.utils._request", always_400), pytest.raises(PlatformError):
+            await provider._store(ctx)
+        caps = PlatformTracingProvider._host_caps(CONFIG.host)
+        assert not caps.delta_rejected and not caps.gzip_rejected
+        assert [h.get("Content-Encoding") for h in calls] == ["gzip", None]  # retried plain once, then raised
+
+
+class TestDeltas:
+    async def test_each_finished_span_goes_once_and_the_root_at_the_end(self):
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        agent, provider = tool_loop(6)
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, _ = await run(agent, provider)
+        deltas = [p["body"] for p in server.patches]
+        sent = [s["span"]["call_id"] for body in deltas for s in body["spans"]]
+        assert len(sent) == len(set(sent)) == len(ctx._trace) - 1
+        start_order = {call_id: i for i, call_id in enumerate(ctx._trace.keys())}
+        assert next(iter(ctx._trace.values())).parent_call_id is None  # the root is index 0
+        assert all(s["seq"] == start_order[s["span"]["call_id"]] for body in deltas for s in body["spans"])
+        assert [b["ended"] for b in deltas].count(True) == 1 and deltas[-1]["ended"]
+        # The running root goes whole until it is stored with its memory, then as a header.
+        whole = [i for i, body in enumerate(deltas[:-1]) if "memory" in body["root"]]
+        assert whole and whole == list(range(len(whole))) and deltas[whole[-1]]["root"]["memory"]
+        assert all(set(body["root"]) == {"call_id", "path", "parent_call_id", "t0"} for body in deltas[len(whole) : -1])
+        assert deltas[-1]["root"]["memory"]
+
+    async def test_a_failed_save_is_resent_by_the_next(self):
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        fail_once = {"done": False}
+
+        async def probe():
+            if not fail_once["done"]:
+                fail_once["done"] = True
+                server.fail_next = 1
+
+        agent, provider = tool_loop(4, probe)
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, out = await run(agent, provider)
+            stored = await read_back(provider, ctx.id)
+        assert out.usage.get("tracing:save_failed") == 1
+        same_trace(stored, ctx, server)
+
+    async def test_a_run_that_died_reads_back_its_finished_spans(self):
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        seen = []
+
+        async def probe():
+            ctx = get_run_context()
+            stored = await read_back(PlatformTracingProvider.configured(platform_config=CONFIG), ctx.id)
+            seen.append(sorted(s.path for s in stored.as_records()) if stored else None)
+
+        agent, provider = tool_loop(3, probe)
+        with patch("timbal.platform.utils._request", server.request):
+            await run(agent, provider)
+        assert seen[-1].count("agent.step") == 2 and "agent.llm" in seen[-1]  # earlier calls, as a crash leaves them
+
+    async def test_a_run_that_died_keeps_its_prompt_and_history(self):
+        """Mid-run reads (as a crash leaves the run) find the root's input and memory, also after header deltas."""
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        roots = []
+
+        async def probe():
+            ctx = get_run_context()
+            stored = await read_back(PlatformTracingProvider.configured(platform_config=CONFIG), ctx.id)
+            if stored is not None:
+                roots.append(next(s for s in stored.as_records() if s.parent_call_id is None))
+
+        agent, provider = tool_loop(4, probe)
+        with patch("timbal.platform.utils._request", server.request):
+            await run(agent, provider)
+        headers_only = [p for p in server.patches if not p["body"]["ended"] and "memory" not in p["body"]["root"]]
+        assert headers_only  # later saves did go out as headers
+        last = roots[-1]
+        assert last.input["prompt"] == "go"
+        assert [m["role"] if isinstance(m, dict) else m.role for m in last.memory][:1] == ["user"]
+
+    async def test_the_root_goes_whole_again_until_it_is_stored(self):
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        original = server.request
+        dropped = {"n": 0}
+
+        async def request(method, path, headers=None, content=None, **kwargs):
+            body = json.loads(
+                gzip.decompress(content) if (headers or {}).get("Content-Encoding") == "gzip" else content
+            )
+            if method == "PATCH" and "memory" in (body.get("root") or {}) and not body["ended"] and not dropped["n"]:
+                dropped["n"] = 1
+                raise PlatformError("upstream", status_code=503)
+            return await original(method, path, headers=headers, content=content, **kwargs)
+
+        agent, provider = tool_loop(4)
+        with patch("timbal.platform.utils._request", request):
+            await run(agent, provider)
+        mid = [p["body"] for p in server.patches if not p["body"]["ended"]]
+        assert dropped["n"] == 1 and "memory" in mid[0]["root"]  # the failed whole root went again
+
+    async def test_a_span_changed_after_the_end_is_resent_alone(self):
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        agent, provider = tool_loop(2)
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, _ = await run(agent, provider)
+            step = next(s for s in ctx._trace.as_records() if s.path == "agent.step")
+            step._output_dump = "late real output"
+            await provider._store(ctx)
+            stored = await read_back(provider, ctx.id)
+        last = server.patches[-1]["body"]
+        assert [s["span"]["call_id"] for s in last["spans"]] == [step.call_id]
+        assert next(s for s in stored.as_records() if s.call_id == step.call_id).output == "late real output"
+
+    async def test_snapshots_keep_rising_in_a_new_process(self):
+        from timbal.state.tracing.providers import platform as platform_module
+
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        agent, provider = tool_loop(2)
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, _ = await run(agent, provider)
+            first = max(p["body"]["snapshot"] for p in server.patches)
+            # Another process continues the run (an approval resumed elsewhere): no counter carried over.
+            platform_module._last_snapshot = 0
+            PlatformTracingProvider._delta_runs.clear()
+            step = next(s for s in ctx._trace.as_records() if s.path == "agent.step")
+            step._output_dump = "resumed elsewhere"
+            await provider._store(ctx)
+            stored = await read_back(provider, ctx.id)
+        assert server.patches[-1]["body"]["snapshot"] > first
+        assert next(s for s in stored.as_records() if s.call_id == step.call_id).output == "resumed elsewhere"
+
+    async def test_bytes(self):
+        full_server, delta_server = FakePlatform(advertise=False), FakePlatform()
+        for server, deltas in ((full_server, False), (delta_server, True)):
+            PlatformTracingProvider._caps.clear()
+            PlatformTracingProvider._delta_runs.clear()
+            PlatformTracingProvider._host_caps(CONFIG.host).delta = deltas
+            PlatformTracingProvider._host_caps(CONFIG.host).gzip = deltas
+            agent, provider = tool_loop(20)
+            with patch("timbal.platform.utils._request", server.request):
+                await run(agent, provider)
+        full = sum(p["bytes"] for p in full_server.patches)
+        delta = sum(p["bytes"] for p in delta_server.patches)
+        assert delta * 20 < full, (full, delta)
+
+
+class TestSingleFlight:
+    """rfcs/platform-trace-storage.md 0.1–0.4 on the SDK side."""
+
+    @staticmethod
+    def held(server):
+        """The first PATCH waits for ``release``; the rest go through."""
+        first_sent, release = asyncio.Event(), asyncio.Event()
+        original = server.request
+
+        async def request(method, path, **kwargs):
+            if method == "PATCH" and not first_sent.is_set():
+                first_sent.set()
+                await release.wait()
+            return await original(method, path, **kwargs)
+
+        return request, first_sent, release
+
+    async def test_saves_arriving_meanwhile_go_out_once_from_the_latest_state(self):
+        server = FakePlatform(advertise=False)
+        request, first_sent, release = self.held(server)
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        with patch("timbal.platform.utils._request", request):
+            first = asyncio.create_task(provider._store(ctx))
+            await first_sent.wait()
+            later = []
+            for i in range(5):
+                ctx._trace[f"c{i}"] = {"call_id": f"c{i}", "path": "a.x", "t0": i, "parent_call_id": "r"}
+                later.append(asyncio.create_task(provider._store(ctx)))
+            await asyncio.sleep(0.01)
+            release.set()
+            await asyncio.gather(first, *later)
+        assert len(server.patches) == 2
+        assert len(server.patches[1]["body"]["trace"]) == 6  # every save's state, in one round
+        assert not PlatformTracingProvider._flights
+
+    async def test_every_patch_carries_its_snapshot_and_they_rise(self):
+        seen = []
+
+        async def request(*_args, headers=None, **_):
+            seen.append(int(headers["X-Timbal-Snapshot"]))
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        agent, provider = tool_loop(3)
+        with patch("timbal.platform.utils._request", request):
+            await run(agent, provider)
+        assert len(seen) > 2 and seen == sorted(set(seen))
+
+    async def test_continues_above_the_snapshot_the_platform_holds(self):
+        from timbal.state.tracing.providers import platform as platform_module
+
+        ahead = platform_module._last_snapshot + 10**15  # another process' clock runs ahead
+        sent = []
+
+        async def request(*_args, headers=None, **_):
+            sent.append(int(headers["X-Timbal-Snapshot"]))
+            return SimpleNamespace(
+                raise_for_status=lambda: None, headers={"X-Timbal-Snapshot": str(ahead)}, json=lambda: {}
+            )
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        with patch("timbal.platform.utils._request", request):
+            await provider._store(ctx)
+            await provider._store(ctx)
+        assert sent[0] < ahead < sent[1]
+
+    async def test_the_end_of_a_run_waits_for_the_save_on_the_wire_and_still_goes(self):
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        request, first_sent, release = self.held(server)
+        agent, provider = tool_loop(3)
+        with patch("timbal.platform.utils._request", request):
+            ctx = RunContext(tracing_provider=provider)
+            ctx.platform_config = CONFIG
+            set_run_context(ctx)
+            running = asyncio.create_task(agent(prompt="go").collect())
+            await first_sent.wait()
+            await asyncio.sleep(0.05)
+            release.set()
+            out = await running
+            stored = await read_back(provider, ctx.id)
+        assert out.status.code == "success"
+        assert server.patches[-1]["body"]["ended"]
+        same_trace(stored, ctx, server)
+
+    async def test_a_read_waits_for_a_round_queued_behind_the_wire(self):
+        server = FakePlatform(advertise=False)
+        request, first_sent, release = self.held(server)
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["c0"] = {"call_id": "c0", "path": "x", "t0": 0, "parent_call_id": None}
+        reader = RunContext(parent_id=ctx.id, tracing_provider=provider)
+        reader.platform_config = CONFIG
+        with patch("timbal.platform.utils._request", request):
+            first = asyncio.create_task(provider._store(ctx))
+            await first_sent.wait()
+            ctx._trace["c0"].metadata["final"] = True
+            final = asyncio.create_task(provider._store(ctx))  # queued behind the first
+            read = asyncio.create_task(provider.get(reader))
+            await asyncio.sleep(0.01)
+            release.set()
+            trace = await read
+            await asyncio.gather(first, final)
+        assert trace["c0"].metadata == {"final": True}
+
+    async def test_resume_reads_ask_for_the_projection_once_advertised(self):
+        calls = []
+
+        async def request(*_args, params=None, **_):
+            calls.append(params)
+            return SimpleNamespace(
+                raise_for_status=lambda: None,
+                headers={"X-Timbal-Select": "resume"},
+                json=lambda: {"trace": [{"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}]},
+            )
+
+        _, provider = tool_loop(1)
+        with patch("timbal.platform.utils._request", request):
+            for _ in range(2):
+                await read_back(provider, "some-run")
+        assert calls == [None, {"select": "resume"}]
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            ({"parent_id": "4270383", "parent_idempotency_key": "run-a"}, "run-a"),  # newer hosts: the run id
+            ({"parent_id": "4270383"}, "4270383"),  # older hosts: the row id, which a GET also resolves
+            ({"parent_id": None, "parent_idempotency_key": None}, None),  # a thread root
+        ],
+    )
+    async def test_the_parent_is_read_as_a_run_id_when_the_host_gives_one(self, body, expected):
+        async def request(*_args, **_):
+            trace = [{"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}]
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {"trace": trace, **body})
+
+        _, provider = tool_loop(1)
+        with patch("timbal.platform.utils._request", request):
+            stored = await read_back(provider, "some-run")
+        assert stored.parent_id == expected
+
+    async def test_every_agent_span_is_in_the_resume_projection(self):
+        """The platform keeps the root and every span with a ``memory`` key: a nested agent cut before it
+        assembled its memory must still be there, or the next turn loses the conversation."""
+        from timbal import Workflow
+
+        gate = asyncio.Event()
+
+        async def slow_prompt() -> str:
+            await gate.wait()
+            return "sys"
+
+        inner = Agent(name="inner", model=TestModel(responses=["hi"]), system_prompt=slow_prompt)
+        flow = Workflow(name="flow").step(inner, prompt="go")
+        server = FakePlatform(advertise=False)
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+        with patch("timbal.platform.utils._request", server.request):
+            ctx = RunContext(tracing_provider=provider)
+            ctx.platform_config = CONFIG
+            set_run_context(ctx)
+            running = asyncio.create_task(flow(prompt="go").collect())
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if any(s.path == "flow.inner" for s in ctx._trace.as_records()):
+                    break
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)  # the run settles as cancelled
+            await provider._store(ctx)
+        stored = server.runs[ctx.id]["trace"]
+        projection = [s for s in stored if s["parent_call_id"] is None or "memory" in s]
+        assert [s["path"] for s in projection] == ["flow", "flow.inner"]
+        assert projection[1]["memory"] is None
+        assert all("memory" not in s for s in stored if s["path"] not in ("flow", "flow.inner"))
+
+    @staticmethod
+    def stalled_run():
+        """A context whose first PATCH hangs until ``release``; every PATCH is recorded."""
+        sent, first_sent, release = [], asyncio.Event(), asyncio.Event()
+
+        async def request(*_args, content=None, **_):
+            sent.append(json.loads(content))
+            if len(sent) == 1:
+                first_sent.set()
+                await release.wait()
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        return ctx, provider, request, sent, first_sent, release
+
+    async def test_mid_run_saves_wait_out_a_stalled_patch_and_the_end_does_not(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.05)
+        ctx, provider, request, sent, first_sent, release = self.stalled_run()
+        with patch("timbal.platform.utils._request", request):
+            first = asyncio.create_task(provider._store(ctx))
+            await first_sent.wait()
+            mid = asyncio.create_task(provider._store(ctx))
+            await asyncio.sleep(0.15)
+            assert len(sent) == 1  # mid-run: superseded anyway, waits however long it takes
+            ctx._trace["r"].t1 = 1
+            end = asyncio.create_task(provider._store(ctx))
+            await asyncio.wait_for(end, 1)  # the end goes past the stalled one
+            assert mid.done()  # and carried the mid-run state with it
+            assert len(sent) == 2 and sent[1]["trace"][0]["t1"] == 1
+            release.set()
+            await first
+
+    @pytest.mark.parametrize("stalled_fails", [False, True])
+    async def test_a_stalled_patch_ending_after_the_end_landed_is_settled_quietly(self, monkeypatch, stalled_fails):
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.05)
+        sent, first_sent, release = [], asyncio.Event(), asyncio.Event()
+
+        async def request(*_args, content=None, **_):
+            sent.append(json.loads(content))
+            if len(sent) == 1:
+                first_sent.set()
+                await release.wait()
+                if stalled_fails:
+                    raise PlatformError("upstream", status_code=503)
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        loop = asyncio.get_running_loop()
+        errors = []
+        loop.set_exception_handler(lambda _loop, context: errors.append(context))
+        try:
+            with patch("timbal.platform.utils._request", request):
+                first = asyncio.create_task(provider._store(ctx))
+                await first_sent.wait()
+                ctx._trace["r"].t1 = 1
+                await asyncio.wait_for(provider._store(ctx), 1)  # the end goes past the stalled PATCH and lands
+                release.set()
+                await asyncio.wait_for(first, 1)  # settled by the end's save: it carried this state and newer
+                await asyncio.sleep(0.05)
+        finally:
+            loop.set_exception_handler(None)
+        assert errors == []  # the stalled PATCH finishing late raises nothing in its done callback
+        assert len(sent) == 2 and not PlatformTracingProvider._retries  # and nothing is resent
+
+    async def test_never_more_than_two_patches_on_the_wire(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        on_wire, most, release = [0], [0], asyncio.Event()
+
+        async def request(*_args, **_):
+            on_wire[0] += 1
+            most[0] = max(most[0], on_wire[0])
+            await release.wait()
+            on_wire[0] -= 1
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}
+        with patch("timbal.platform.utils._request", request):
+            saves = []
+            for _ in range(6):  # each arrives once the one before is on the wire
+                saves.append(asyncio.create_task(provider._store(ctx)))
+                await asyncio.sleep(0.01)
+            assert most[0] == 2
+            release.set()
+            await asyncio.gather(*saves)
+
+    @pytest.mark.parametrize("writer", ["another_process", "this_process"])
+    async def test_a_save_dropped_as_stale_is_resent_only_if_the_newer_one_was_not_ours(self, writer):
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        _, _, key = PlatformTracingProvider._target(ctx)
+        sent = []
+
+        async def request(*_args, headers=None, **_):
+            mine = int(headers["X-Timbal-Snapshot"])
+            sent.append(mine)
+            if len(sent) > 1:
+                return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+            stored = mine + 10**12  # the platform already holds something newer
+            if writer == "this_process":
+                PlatformTracingProvider._own(key).append(stored)  # a round of ours that overtook this one
+            headers_out = {"X-Timbal-Snapshot": str(stored), "X-Timbal-Snapshot-Applied": "false"}
+            return SimpleNamespace(raise_for_status=lambda: None, headers=headers_out, json=lambda: {})
+
+        with patch("timbal.platform.utils._request", request):
+            await provider._store(ctx)
+        if writer == "another_process":
+            assert len(sent) == 2 and sent[1] > sent[0] + 10**12  # numbered above what it lost to
+        else:
+            assert len(sent) == 1
+
+    async def test_413_is_not_a_format_rejection(self):
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        PlatformTracingProvider._host_caps(CONFIG.host).gzip = True
+        calls = []
+
+        async def too_large(*_args, **kwargs):
+            calls.append(kwargs["headers"])
+            raise PlatformError("payload too large", status_code=413)
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        with patch("timbal.platform.utils._request", too_large), pytest.raises(PlatformError):
+            await provider._store(ctx)
+        caps = PlatformTracingProvider._host_caps(CONFIG.host)
+        assert not caps.delta_rejected and not caps.gzip_rejected
+        # Sent once more, whole and cut down; a second 413 is final (never resent as is).
+        assert len(calls) == 2 and calls[1]["Content-Type"] == "application/json"
+
+    async def test_a_run_over_the_limit_still_stores_its_end_cut_down(self, monkeypatch):
+        monkeypatch.setattr(platform_module, "_SHRINK_TARGET_BYTES", 400_000)
+        server = FakePlatform(limit=500_000)
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+
+        def huge() -> str:
+            return "x" * 2_000_000
+
+        def handler(messages):
+            if any(m.role == "tool" for m in messages):
+                return "done"
+            return Message(
+                role="assistant", content=[ToolUseContent(id="h1", name="huge", input={})], stop_reason="tool_use"
+            )
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="huge", handler=huge)],
+            tracing_provider=provider,
+            tool_result_limit=None,
+        )
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, out = await run(agent, provider)
+        assert "tracing:save_failed" not in out.usage
+        stored = server.runs[ctx.id]["trace"]
+        root = next(s for s in stored if s["parent_call_id"] is None)
+        assert root["t1"] is not None and root["metadata"]["trace_truncated"]["strings_cut"] >= 1
+        tool = next(s for s in stored if s["path"] == "agent.huge")
+        assert len(tool["output"]) < 100_000 and "characters cut" in tool["output"]
+        assert {s["call_id"] for s in stored} == set(ctx._trace.keys())  # every span, just shorter
+        local = next(s for s in ctx._trace.values() if s.path == "agent.huge")
+        assert len(local.output) == 2_000_000  # the run's own trace is untouched
+        assert all(p["kind"] == "full" for p in server.patches[-2:])  # whole from the refusal on
+
+
+class TestShutdownFlush:
+    async def test_saves_owed_land_before_shutdown_ends(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 60.0)
+        ctx, provider, request, sent, first_sent, release = TestSingleFlight.stalled_run()
+        with patch("timbal.platform.utils._request", request):
+            caller = asyncio.create_task(provider._store(ctx))
+            await first_sent.wait()
+            caller.cancel()  # the turn went away; its save did not
+            ctx._trace["r"].t1 = 1
+            end = asyncio.create_task(provider._store(ctx))
+            await asyncio.sleep(0)  # joined the next round
+            end.cancel()
+            from timbal.state.tracing.uploads import flush_all
+
+            flushing = asyncio.create_task(flush_all(timeout=2))
+            await asyncio.sleep(0.05)
+            assert sent[-1]["trace"][0]["t1"] == 1  # the end did not wait out the 60 s stall
+            release.set()
+            await flushing
+        assert not PlatformTracingProvider._unsaved
+
+    async def test_saves_that_cannot_land_are_reported_within_the_bound(self):
+        ctx, provider, request, sent, first_sent, release = TestSingleFlight.stalled_run()
+        with patch("timbal.platform.utils._request", request), capture_logs() as logs:
+            caller = asyncio.create_task(provider._store(ctx))
+            await first_sent.wait()
+            caller.cancel()
+            left = await asyncio.wait_for(PlatformTracingProvider.flush(timeout=0.1), 1)
+            release.set()
+        assert left == [ctx.id]
+        assert any(log["event"] == "platform_trace_flush_incomplete" and log["run_ids"] == [ctx.id] for log in logs)
+
+    async def test_saves_that_died_with_an_earlier_loop_are_sent_again(self):
+        server = FakePlatform(advertise=False)
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}
+        _, _, key = PlatformTracingProvider._target(ctx)
+        PlatformTracingProvider._unsaved[key] = ctx  # asked for; its loop was torn down before it landed
+        with patch("timbal.platform.utils._request", server.request):
+            assert await PlatformTracingProvider.flush(timeout=1) == []
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 1
+
+    async def test_a_flush_and_a_read_from_outside_the_run_use_its_own_credentials(self):
+        # Requests take host and credentials from the current run: a shutdown flush (or a read) runs outside it.
+        server = FakePlatform(advertise=False)
+        seen = []
+
+        async def request(method, path, **kwargs):
+            current = get_run_context()
+            seen.append((method, current.platform_config.host if current and current.platform_config else None))
+            return await server.request(method, path, **kwargs)
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}
+        _, _, key = PlatformTracingProvider._target(ctx)
+        PlatformTracingProvider._unsaved[key] = ctx
+        set_run_context(None)
+        with patch("timbal.platform.utils._request", request):
+            assert await PlatformTracingProvider.flush(timeout=1) == []
+            PlatformTracingProvider._recent.clear()
+            reader = RunContext(parent_id=ctx.id, tracing_provider=provider)
+            reader.platform_config = CONFIG
+            assert await provider.get(reader) is not None
+        assert seen == [("PATCH", CONFIG.host), ("GET", CONFIG.host)]
+        assert get_run_context() is None  # restored after each request
+
+    def test_a_script_whose_loop_ended_mid_save_still_lands_at_exit(self, tmp_path):
+        import subprocess
+        import sys
+
+        log = tmp_path / "patches.jsonl"
+        script = tmp_path / "script.py"
+        script.write_text(
+            f"""
+import asyncio, json
+from types import SimpleNamespace
+from unittest.mock import patch
+from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+from timbal.state.context import RunContext
+from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+CONFIG = PlatformConfig(host="api.exit.test", auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t"),
+                        subject=PlatformSubject(org_id="1", app_id="2"))
+calls = []
+
+async def request(method, path, content=None, **_):
+    calls.append(1)
+    if len(calls) == 1:
+        await asyncio.Event().wait()  # the first PATCH hangs; asyncio.run cancels it on the way out
+    with open({str(log)!r}, "a") as f:
+        f.write(content.decode() + "\\n")
+    return SimpleNamespace(raise_for_status=lambda: None, headers={{}}, json=lambda: {{}})
+
+patch("timbal.platform.utils._request", request).start()
+provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+
+async def main():
+    ctx = RunContext(tracing_provider=provider)
+    ctx.platform_config = CONFIG
+    ctx._trace["r"] = {{"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}}
+    asyncio.create_task(provider._store(ctx))
+    await asyncio.sleep(0.05)
+
+asyncio.run(main())
+"""
+        )
+        subprocess.run([sys.executable, str(script)], check=True, timeout=30)
+        lines = log.read_text().splitlines()
+        assert len(lines) == 1 and json.loads(lines[0])["trace"][0]["t1"] == 1
+
+    def test_patch_reads_are_bounded_unless_configured(self, monkeypatch):
+        monkeypatch.delenv("TIMBAL_HTTP_READ_TIMEOUT", raising=False)
+        assert PlatformTracingProvider._patch_timeout().read == PlatformTracingProvider._patch_read_timeout_s
+        monkeypatch.setenv("TIMBAL_HTTP_READ_TIMEOUT", "none")
+        assert PlatformTracingProvider._patch_timeout().read is None
+
+
+class TestTransientFailures:
+    @staticmethod
+    def context(provider, *, ended=True):
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        root = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        ctx._trace["r"] = {**root, "t1": 1} if ended else root
+        return ctx
+
+    @staticmethod
+    async def until(predicate, timeout=5.0):
+        # A real time bound, and sleeps longer than a clock tick: on Windows before 3.13 asyncio's clock moves
+        # in 15.6 ms steps, so sleep(0.01) can come back at once and a step count passes in no time at all.
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
+            if predicate():
+                return
+            await asyncio.sleep(0.02)
+
+    async def test_an_ended_run_whose_save_failed_is_resent_in_the_background(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01,))
+        server = FakePlatform(advertise=False)
+        server.fail_next = 3  # the save, then two background resends: a platform restart
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", server.request):
+            with pytest.raises(PlatformError):
+                await provider._store(ctx)
+            await self.until(lambda: not PlatformTracingProvider._retries)
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 1
+        assert not PlatformTracingProvider._unsaved
+
+    @pytest.mark.parametrize("by", ["background_resend", "shutdown_flush"])
+    async def test_resends_keep_the_configured_provider(self, monkeypatch, by):
+        """``deltas=False`` on a host that advertises deltas: a resend from a run's context must not fall back
+        to the base class's negotiation."""
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01 if by == "background_resend" else 60.0,))
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        kinds = []
+
+        async def request(*_args, headers=None, **_kwargs):
+            kinds.append(headers["Content-Type"])
+            if len(kinds) == 1:
+                raise PlatformError("down", status_code=503)
+            echo = {"X-Timbal-Snapshot": headers["X-Timbal-Snapshot"]}
+            return SimpleNamespace(raise_for_status=lambda: None, headers=echo, json=lambda: {})
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, deltas=False)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", request):
+            with pytest.raises(PlatformError):
+                await provider._store(ctx)
+            if by == "shutdown_flush":
+                assert await PlatformTracingProvider.flush(timeout=1) == []
+            await self.until(lambda: not PlatformTracingProvider._retries and len(kinds) > 1)
+        assert kinds == ["application/json", "application/json"]
+
+    async def test_a_buffered_run_whose_end_failed_is_resent_in_the_background(self, monkeypatch):
+        """The end barrier holds the run in buffered uploads while it fails, then lets it go: the background
+        resend must not take "uploads hold it" at that moment as "uploads will retry it"."""
+        from timbal.state.tracing import uploads
+
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01,))
+        server = FakePlatform(advertise=False)
+        server.fail_next = 1
+        provider = PlatformTracingProvider.configured(
+            platform_config=CONFIG, durability="buffered", flush_interval_s=0.05
+        )
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", server.request):
+            with pytest.raises(PlatformError):
+                await uploads.write_through(ctx, provider.put)
+            await self.until(lambda: ctx.id in server.runs)
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 1
+
+    async def test_the_background_resends_give_up_after_the_window(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01,))
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_window_s", 0.05)
+        server = FakePlatform(advertise=False)
+        server.fail_next = 10**6
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", server.request), capture_logs() as logs:
+            with pytest.raises(PlatformError):
+                await provider._store(ctx)
+            await self.until(lambda: not PlatformTracingProvider._retries)
+        assert not PlatformTracingProvider._retries
+        assert any(log["event"] == "platform_trace_retry_exhausted" for log in logs)
+        assert list(PlatformTracingProvider._unsaved.values()) == [ctx]  # still owed: a shutdown flush reports it
+
+    async def test_a_run_buffered_uploads_hold_all_window_is_not_reported_as_given_up(self, monkeypatch):
+        from timbal.state.tracing import uploads
+
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01,))
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_window_s", 0.05)
+        monkeypatch.setattr(uploads, "tracked", lambda _context: True)
+        server = FakePlatform(advertise=False)
+        server.fail_next = 1
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", server.request), capture_logs() as logs:
+            with pytest.raises(PlatformError):
+                await provider._store(ctx)
+            await self.until(lambda: not PlatformTracingProvider._retries)
+        events = [log["event"] for log in logs]
+        assert "platform_trace_retry_handed_to_uploads" in events
+        assert "platform_trace_retry_exhausted" not in events
+        assert ctx.id not in server.runs  # every turn was left to the uploads
+
+    async def test_a_rejected_or_mid_run_save_is_not_resent_in_the_background(self):
+        async def forbidden(*_args, **_kwargs):
+            raise PlatformError("forbidden", status_code=403)
+
+        async def down(*_args, **_kwargs):
+            raise PlatformError("down", status_code=503)
+
+        _, provider = tool_loop(1)
+        with patch("timbal.platform.utils._request", forbidden), pytest.raises(PlatformError):
+            await provider._store(self.context(provider))
+        with patch("timbal.platform.utils._request", down), pytest.raises(PlatformError):
+            await provider._store(self.context(provider, ended=False))  # its next save carries it
+        assert not PlatformTracingProvider._retries
+
+    async def test_a_shutdown_flush_takes_over_the_background_resends(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (60.0,))
+        server = FakePlatform(advertise=False)
+        server.fail_next = 1
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", server.request):
+            with pytest.raises(PlatformError):
+                await provider._store(ctx)
+            assert PlatformTracingProvider._retries
+            assert await PlatformTracingProvider.flush(timeout=1) == []  # does not wait out the 60 s
+            await asyncio.sleep(0)
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 1
+        assert not PlatformTracingProvider._retries
+
+    async def test_a_delta_the_server_did_not_confirm_is_resent_whole(self):
+        # Today's API reads a delta as a PATCH without `trace` and answers 204, echoing no snapshot.
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        kinds = []
+
+        async def todays_api(*_args, headers=None, **_kwargs):
+            kinds.append(headers["Content-Type"])
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", todays_api):
+            await provider._store(ctx)
+            await provider._store(ctx)
+        assert kinds == [DELTA_MEDIA_TYPE, "application/json", "application/json"]
+        assert PlatformTracingProvider._host_caps(CONFIG.host).delta_rejected
+
+    async def test_no_span_takes_the_roots_seq(self):
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["c"] = {"call_id": "c", "path": "a.x", "t0": 1, "t1": 2, "parent_call_id": "r"}  # before the root
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        with patch("timbal.platform.utils._request", server.request):
+            await provider._store(ctx)
+        assert [s["seq"] for s in server.patches[-1]["body"]["spans"]] == [1]
+
+    async def test_large_bodies_compress_off_the_event_loop(self, monkeypatch):
+        offloaded = []
+        original = asyncio.to_thread
+
+        async def spy(func, *args, **kwargs):
+            offloaded.append(func)
+            return await original(func, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "to_thread", spy)
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).gzip = True
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        blob = "x" * (512 * 1024)
+        ctx._trace["r"].metadata["blob"] = blob
+        with patch("timbal.platform.utils._request", server.request):
+            await provider._store(ctx)
+        assert offloaded == [gzip.compress]
+        assert server.patches[-1]["gzip"] and server.runs[ctx.id]["trace"][0]["metadata"]["blob"] == blob
+
+    async def test_an_owed_save_pushed_out_of_the_bound_is_logged(self, monkeypatch):
+        from timbal.state.tracing.providers import platform as platform_module
+
+        monkeypatch.setattr(platform_module, "_UNSAVED_MAX", 1)
+
+        async def down(*_args, **_kwargs):
+            raise PlatformError("down", status_code=503)
+
+        _, provider = tool_loop(1)
+        first, second = self.context(provider, ended=False), self.context(provider, ended=False)
+        with patch("timbal.platform.utils._request", down), capture_logs() as logs:
+            for ctx in (first, second):
+                with pytest.raises(PlatformError):
+                    await provider._store(ctx)
+        assert [log["run_id"] for log in logs if log["event"] == "platform_trace_unsaved_evicted"] == [first.id]
+
+    def test_snapshots_are_unique_across_threads(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from timbal.state.tracing.providers.platform import _next_snapshot
+
+        with ThreadPoolExecutor(8) as pool:
+            batches = list(pool.map(lambda _: [_next_snapshot() for _ in range(5000)], range(8)))
+        flat = [snapshot for batch in batches for snapshot in batch]
+        assert len(set(flat)) == len(flat)
+
+
+def long_tool(provider, seconds, marks):
+    """One tool call that takes ``seconds``; ``marks`` records how many PATCHes had landed as it started and ended."""
+
+    async def wait(server):
+        marks.append(len(server.patches))
+        await asyncio.sleep(seconds)
+        marks.append(len(server.patches))
+
+    def handler(messages):
+        if any(m.role == "tool" for m in messages):
+            return "done"
+        return Message(
+            role="assistant", content=[ToolUseContent(id="c0", name="wait", input={})], stop_reason="tool_use"
+        )
+
+    def agent(server):
+        async def wait_tool() -> str:
+            await wait(server)
+            return "waited"
+
+        return Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="wait", handler=wait_tool)],
+            tracing_provider=provider,
+        )
+
+    return agent
+
+
+class TestKeepAlive:
+    @pytest.fixture(autouse=True)
+    def no_timers(self):
+        yield
+        for entry in PlatformTracingProvider._keepalives.values():
+            entry.cancel()
+        PlatformTracingProvider._keepalives.clear()
+
+    async def test_a_long_tool_keeps_the_run_saving_with_root_headers_only(self):
+        server, marks = FakePlatform(), []
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, keepalive_s=0.05)
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, _ = await run(long_tool(provider, 0.4, marks)(server), provider)
+            # The model step's own save may land as the tool starts; the rest are keep-alives.
+            during = [p for p in server.patches[marks[0] : marks[1]] if p["body"].get("spans") == []]
+            assert len(during) >= 4  # every ~50 ms of a 400 ms tool
+            assert all(p["kind"] == "delta" and not p["body"]["ended"] for p in during)
+            assert all(set(p["body"]["root"]) == {"call_id", "parent_call_id", "path", "t0"} for p in during)
+            ended = len(server.patches)
+            await asyncio.sleep(0.2)
+            assert len(server.patches) == ended  # nothing after the end
+            assert not any(entry.context is ctx for entry in PlatformTracingProvider._keepalives.values())
+            same_trace(await read_back(provider, ctx.id), ctx, server)
+
+    async def test_off_and_end_only_runs_do_not_keep_alive(self, monkeypatch):
+        for provider in (
+            PlatformTracingProvider.configured(platform_config=CONFIG, keepalive_s=0),
+            PlatformTracingProvider.configured(platform_config=CONFIG, keepalive_s=0.05, durability="end"),
+        ):
+            server, marks = FakePlatform(), []
+            with patch("timbal.platform.utils._request", server.request):
+                await run(long_tool(provider, 0.3, marks)(server), provider)
+            assert marks[1] == marks[0], provider.durability
+        monkeypatch.setenv("TIMBAL_TRACE_KEEPALIVE_SECS", "0")
+        server, marks = FakePlatform(), []
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+        with patch("timbal.platform.utils._request", server.request):
+            await run(long_tool(provider, 0.3, marks)(server), provider)
+        assert marks[1] == marks[0]
+
+    async def test_a_run_that_stopped_saving_for_itself_stops_keeping_alive(self, monkeypatch):
+        monkeypatch.setenv("TIMBAL_TRACE_KEEPALIVE_MAX_SECS", "0.12")
+        server, marks = FakePlatform(), []
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, keepalive_s=0.03)
+        with patch("timbal.platform.utils._request", server.request), capture_logs() as logs:
+            await run(long_tool(provider, 0.5, marks)(server), provider)
+        during = marks[1] - marks[0]
+        assert 2 <= during <= 5  # ~120 ms of keep-alives, then nothing until the tool ends
+        assert [log for log in logs if log["event"] == "platform_trace_keepalive_stopped"]
+
+    async def test_a_failed_keep_alive_is_logged_and_the_next_one_tries_again(self):
+        server, marks = FakePlatform(), []
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, keepalive_s=0.05)
+
+        async def flaky(method, path, **kwargs):
+            if method == "PATCH" and marks and len(marks) == 1 and not flaky.failed:
+                flaky.failed = True
+                raise PlatformError("upstream", status_code=503)
+            return await server.request(method, path, **kwargs)
+
+        flaky.failed = False
+        with patch("timbal.platform.utils._request", flaky), capture_logs() as logs:
+            await run(long_tool(provider, 0.35, marks)(server), provider)
+        assert flaky.failed and marks[1] - marks[0] >= 2
+        assert [log for log in logs if log["event"] == "platform_trace_keepalive_failed"]

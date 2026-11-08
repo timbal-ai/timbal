@@ -83,16 +83,28 @@ def clear_in_memory_tracing_storage():
     Both are class-level dicts: the storage otherwise grows unbounded across the
     full test suite, and a trace one test stored would answer another test's get().
     """
+    from timbal.state.tracing.providers import platform as platform_module
     from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
     from timbal.state.tracing.providers.platform import PlatformTracingProvider
 
-    InMemoryTracingProvider._storage.clear()
-    PlatformTracingProvider._recent.clear()
-    PlatformTracingProvider._saving.clear()
+    def clear():
+        InMemoryTracingProvider._storage.clear()
+        PlatformTracingProvider._recent.clear()
+        PlatformTracingProvider._saving.clear()
+        # Saves a test left unlanded would otherwise be resent by the exit flush, to a host that was mocked.
+        PlatformTracingProvider._flights.clear()
+        PlatformTracingProvider._unsaved.clear()
+        PlatformTracingProvider._own_snapshots.clear()
+        for task in PlatformTracingProvider._retries.values():
+            task.cancel()
+        PlatformTracingProvider._retries.clear()
+        PlatformTracingProvider._closing = False
+        platform_module._TRACE_POOLS.clear()
+        PlatformTracingProvider._oversized.clear()
+
+    clear()
     yield
-    InMemoryTracingProvider._storage.clear()
-    PlatformTracingProvider._recent.clear()
-    PlatformTracingProvider._saving.clear()
+    clear()
 
 
 def assert_has_output_event(output: OutputEvent):

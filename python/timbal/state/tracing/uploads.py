@@ -203,8 +203,16 @@ def _finished(run_context: RunContext) -> bool:
     return root is not None and root.t1 is not None and run_context._live_background == 0
 
 
-async def flush_all(timeout: float | None = 10.0) -> None:
-    """Store every buffered run's latest state now (process shutdown)."""
+async def flush_all(timeout: float | None = None) -> None:
+    """Store every buffered run's latest state now, then wait for the platform saves still owed
+    (process shutdown). One bound for both: ``timeout``, default ``TIMBAL_TRACE_FLUSH_TIMEOUT_SECS``
+    (5 s), inside a pod's termination grace period."""
+    from .providers.platform import PlatformTracingProvider, _flush_timeout
+
+    if timeout is None:
+        timeout = _flush_timeout()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     runs = list(_RUNS.values())
 
     async def flush(run: _RunUploads) -> None:
@@ -218,6 +226,7 @@ async def flush_all(timeout: float | None = 10.0) -> None:
             await asyncio.wait_for(asyncio.gather(*map(flush, runs)), timeout)
         except TimeoutError:
             logger.error("trace_flush_timed_out", runs=[run.context.id for run in runs], timeout_s=timeout)
+    await PlatformTracingProvider.flush(max(0.0, deadline - loop.time()))
 
 
 async def _drain(run: _RunUploads) -> None:
