@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+import sys
 
 import pytest
 from timbal.state.context import RunContext
@@ -8,6 +9,9 @@ from timbal.state.tracing.providers.base import Exporter, TracingProvider
 from timbal.state.tracing.providers.sqlite import SqliteTracingProvider
 from timbal.state.tracing.span import Span
 from timbal.state.tracing.trace import Trace
+
+# Windows refuses to delete a file a connection has open: a database cannot disappear under one there.
+unix_only_deletion = pytest.mark.skipif(sys.platform == "win32", reason="an open file cannot be deleted on Windows")
 
 
 def _make_run_context(provider, run_id: str, parent_id: str | None = None) -> RunContext:
@@ -657,6 +661,7 @@ class TestPerSpanStorage:
         with pytest.raises(ValueError, match="synchronous"):
             bad._db()
 
+    @unix_only_deletion
     async def test_a_deleted_file_is_recreated(self, tmp_path):
         from timbal.state import set_run_context
 
@@ -717,6 +722,7 @@ class TestPerSpanStorage:
         assert out.status.code == "success"
         assert seen["missing"] == set()
 
+    @unix_only_deletion
     async def test_a_file_deleted_mid_run_gets_every_finished_span_again(self, tmp_path):
         from timbal.state import get_run_context, set_run_context
 
