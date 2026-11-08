@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from .fallback_model import FallbackModel, ModelEntry
     from .mcp import MCPServer
     from .memory_compaction import MemoryCompactor  # noqa: F401 - type alias
+    from .peers import AgentDirectory, RemotePeer
     from .skill import Skill
     from .test_model import TestModel
     from .tool import Tool
@@ -19,12 +20,14 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Agent",
+    "AgentDirectory",
     "ChatSession",
     "FallbackModel",
     "LocalOffloadStore",
     "MCPServer",
     "ModelEntry",
     "OffloadStore",
+    "RemotePeer",
     "Skill",
     "Spill",
     "TestModel",
@@ -37,12 +40,14 @@ __all__ = [
 
 _LAZY_IMPORTS = {
     "Agent": ".agent",
+    "AgentDirectory": ".peers",
     "ChatSession": ".chat_session",
     "FallbackModel": ".fallback_model",
     "LocalOffloadStore": ".tool_result_offload",
     "MCPServer": ".mcp",
     "ModelEntry": ".fallback_model",
     "OffloadStore": ".tool_result_offload",
+    "RemotePeer": ".peers",
     "Skill": ".skill",
     "Spill": ".tool_result_offload",
     "TestModel": ".test_model",

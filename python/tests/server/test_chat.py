@@ -73,6 +73,26 @@ def test_steer_joins_the_running_turn(client):
     assert state["turns"] == 1 and state["busy"] is False and state["pending"] == []
 
 
+def test_an_agent_message_starts_a_turn_and_a_repeat_is_a_duplicate(client):
+    session_id = open_session(client)
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi"})
+    read_log(client, session_id, until_kind="turn_finished", count=1)
+    url = f"/chat/sessions/{session_id}/agent_messages"
+    body = {"from": "planner", "text": "the build is green", "message_id": "am_1", "hops": 1}
+    sent = client.post(url, json=body)
+    assert sent.status_code == 202, sent.text
+    assert sent.json()["duplicate"] is False and sent.json()["message_id"] == "am_1"
+    assert client.post(url, json=body).json()["duplicate"] is True
+    items = read_log(client, session_id, until_kind="turn_finished", count=2)
+    (received,) = [item for _, item in items if item.get("kind") == "agent_message"]
+    assert received["sender"] == "planner" and received["hops"] == 1
+    started = [item for _, item in items if item.get("kind") == "turn_started"]
+    assert started[-1]["trigger"]["kind"] == "session_event"
+    assert client.post(url, json={"from": "planner"}).status_code == 400
+    assert client.post(url, json={"from": "planner", "text": "x", "priority": "asap"}).status_code == 422
+    assert client.post("/chat/sessions/nope/agent_messages", json=body).status_code == 404
+
+
 def test_followup_gets_its_own_turn_and_the_log_resumes_from_a_cursor(client):
     session_id = open_session(client)
     client.post(f"/chat/sessions/{session_id}/messages", json={"text": "start"})

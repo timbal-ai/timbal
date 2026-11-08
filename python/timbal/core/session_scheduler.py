@@ -108,6 +108,11 @@ def record_delivery(run_context: Any, span: Any, events: list[SessionEvent]) -> 
     """Settle ``events`` as delivered to ``run_context``'s run and account for them on ``span``."""
     for event in events:
         event._settle("delivered", run_context.id)
+        if event.peer is not None:
+            # How deep in a chain of agent replies this run is: its own messages to agents go one further.
+            hops = event.peer.get("hops") or 0
+            if run_context._peer_hops is None or hops > run_context._peer_hops:
+                run_context._peer_hops = hops
     if span is None or not events:
         return
     span.usage["session_events:delivered"] = span.usage.get("session_events:delivered", 0) + len(events)

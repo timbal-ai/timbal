@@ -2045,6 +2045,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 _register(bg_tool)
 
         run_context = get_run_context()
+        peer = run_context._peer if run_context is not None else None
+        if peer is not None and "." not in self._path:
+            _register(peer.tool(self))
         policy = run_context._tool_policy if run_context is not None else None
         if policy is not None:
             tools = [tool for tool in tools if self._tool_allowed(tool, policy)]

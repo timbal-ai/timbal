@@ -290,6 +290,45 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
     )
 
 
+_REJECTED_STATUS = {"not_accepted": 403, "blocked": 403, "closed": 409, "invalid": 422, "unknown": 404}
+
+
+@router.post("/sessions/{session_id}/agent_messages")
+async def agent_message(request: Request, session_id: str) -> JSONResponse:
+    """A message from another agent (:class:`~timbal.core.peers.RemotePeer`):
+    ``{"from", "text", "message_id"?, "reply_to"?, "priority"?, "hops"?}``.
+
+    ``from`` is the sender's claim: the route trusts whoever may call this
+    server's API (as for user messages). 403 when the session's ``accepts``
+    refuses the sender or its input guardrails block the text.
+    """
+    from ..core.peers import PeerRejected
+
+    session = await _session(request, session_id)
+    body = await _body(request)
+    sender, text, hops = body.get("from"), body.get("text"), body.get("hops", 0)
+    if not isinstance(sender, str) or not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="'from' and 'text' must be strings.")
+    if not isinstance(hops, int) or isinstance(hops, bool):
+        raise HTTPException(status_code=400, detail="'hops' must be an integer.")
+    for name in ("message_id", "reply_to"):
+        if body.get(name) is not None and not isinstance(body[name], str):
+            raise HTTPException(status_code=400, detail=f"{name!r} must be a string.")
+    try:
+        receipt = await session.receive_agent_message(
+            text,
+            sender=sender,
+            message_id=body.get("message_id"),
+            reply_to=body.get("reply_to"),
+            priority=body.get("priority") or "normal",
+            hops=hops,
+        )
+    except PeerRejected as e:
+        raise HTTPException(status_code=_REJECTED_STATUS.get(e.reason, 422), detail=str(e)) from e
+    await session.flush()  # durable: the 202 means it survives a restart
+    return _json(receipt, status_code=202)
+
+
 @router.post("/sessions/{session_id}/wake")
 async def wake_session(request: Request, session_id: str) -> JSONResponse:
     """Start a turn for the application: ``{"text", "key"?, "tool_policy"?, "silent_ok"?, "trigger"?}``.

@@ -350,6 +350,10 @@ class RunContext(BaseModel):
         self._steering = False
         # The ChatSession this run belongs to (its id), for MCP provenance (``timbal.ai/session_id``).
         self._session_id: str | None = None
+        # The run's place among agents that message each other (core/peers.py): the session's directory
+        # membership (offers send_to_agent), and the deepest reply chain of the agent messages it received.
+        self._peer = None
+        self._peer_hops: int | None = None
         self._tool_policy = None
         self._silence_token = None
         self._cut = None
