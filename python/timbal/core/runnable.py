@@ -2215,6 +2215,8 @@ class Runnable(ABC, BaseModel):
             if run_context._tool_policy is not None:
                 # What a run resuming this one restores when it does not say (see server/http.py).
                 metadata["tool_policy"] = describe_tool_policy(run_context._tool_policy)
+            if isinstance(run_context.trigger, dict) and "trigger" not in metadata:
+                metadata["trigger"] = dict(run_context.trigger)
         span = Span(
             path=self._path,
             call_id=_new_call_id,
