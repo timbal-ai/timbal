@@ -231,7 +231,7 @@ async def end_call() -> str:
     if session is None:
         return "No live call. Do not hang up."
     if not await session.commit_hangup():
-        return "The caller spoke again. Do not hang up. Keep helping."
+        return "Do not hang up. Keep helping."
     return "Ending the call."
 
 
@@ -254,8 +254,9 @@ _PROMPT = (
     "To open a ticket, call stage_support_ticket, read the preview, and wait. "
     "Call apply_pending only after they clearly say yes. If they say no, call cancel_pending. "
     "Never say a change is saved until apply_pending says it is saved. "
-    "When they say goodbye or ask you to hang up, say one short goodbye and call end_call. "
-    "If end_call says they spoke again, stay on the line and help them. "
+    "When they say a clear goodbye or ask you to hang up, say one short goodbye and call end_call. "
+    "Thanks, vamos, and vámonos are not a goodbye. "
+    "If end_call says not to hang up, stay on the line and help them. "
     "If they say goodbye again, say one short goodbye and call end_call again."
 )
 

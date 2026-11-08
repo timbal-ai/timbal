@@ -134,6 +134,7 @@ from .speculative import (
     transcripts_equivalent,
 )
 from .turn_detection import (
+    _BACKCHANNEL_GRACE_SECS,
     _BACKCHANNEL_PHRASES,
     _BACKCHANNEL_WORDS,
     _INTERRUPT_COMMANDS,
@@ -527,6 +528,41 @@ def _grows_into_non_retract(norm: str) -> bool:
     return False
 
 
+def _is_ack_only(norm: str) -> bool:
+    """True when every word is an acknowledgement, including a repeat.
+
+    "Alright. Alright." is still the caller accepting the goodbye. One extra
+    word ("Alright, wait", "thank you so much") is not.
+    """
+    words = norm.split()
+    if not words:
+        return False
+    phrases = tuple(
+        phrase.split()
+        for phrase in sorted(
+            (item for item in (_HANGUP_ACKS | _BACKCHANNEL_WORDS) if " " in item),
+            key=lambda item: len(item.split()),
+            reverse=True,
+        )
+    )
+    index = 0
+    while index < len(words):
+        matched = False
+        for phrase in phrases:
+            size = len(phrase)
+            if words[index : index + size] == phrase:
+                index += size
+                matched = True
+                break
+        if matched:
+            continue
+        if words[index] in _HANGUP_ACKS or words[index] in _BACKCHANNEL_WORDS:
+            index += 1
+            continue
+        return False
+    return True
+
+
 def _hangup_utterance_kind(text: str) -> str:
     """``goodbye``, ``ack``, ``pending``, or ``retract``.
 
@@ -547,7 +583,7 @@ def _hangup_utterance_kind(text: str) -> str:
         return "retract"
     if _is_hangup_goodbye(norm):
         return "goodbye"
-    if norm in _HANGUP_ACKS or norm in _BACKCHANNEL_WORDS or _is_pure_backchannel(text):
+    if _is_ack_only(norm) or _is_pure_backchannel(text):
         return "ack"
     if _grows_into_non_retract(norm):
         return "pending"
@@ -1470,6 +1506,13 @@ class VoiceSession:
         """
         if self._closed:
             return False
+        # The model decides to call this. Thanks, "vamos", and a new question
+        # are not a goodbye, even when the transcript is wrong. A clear goodbye
+        # still proceeds. An empty turn (tests, no caller text yet) is unchanged.
+        caller = (self._active_turn_user_text or "").strip()
+        if caller and _hangup_utterance_kind(caller) != "goodbye":
+            logger.info("end_call_refused", reason="not_a_goodbye", text_preview=caller[:80])
+            return False
         self._hangup_attempted = True
         self._hangup_open = True
         self._block_hangup_filler()
@@ -1890,6 +1933,23 @@ class VoiceSession:
         await self._speak(text)
         self._transcript.append(TranscriptEntry(role="assistant", text=text))
         await self._emit(AgentTextDone(text=text))
+
+    def _pure_ack_keeps_the_reply(self, text: str) -> bool:
+        """A pure acknowledgement should not cut audio or start a model turn.
+
+        A resumable tail is left for :meth:`_begin_user_turn`, which speaks it.
+        While audio is playing, or within the backchannel window after it, the
+        ack is dropped. Idle "okay" later is still a turn.
+        """
+        if not false_interrupt_followup(text):
+            return False
+        if (self._unheard_tail or "").strip() and self._unheard_tail_resumable:
+            return False
+        if self._assistant_active:
+            return True
+        if not self._last_assistant_active_at:
+            return False
+        return time.monotonic() - self._last_assistant_active_at <= _BACKCHANNEL_GRACE_SECS
 
     def effective_reply_language(self) -> str | None:
         """Tag the reply instruction uses. ``set_language`` does not move this when ``reply_language`` is set."""
@@ -4127,6 +4187,14 @@ class VoiceSession:
                 action=decision.action.value,
                 text_preview=final_text[:160],
             )
+            return
+
+        # A pure "Yeah." / "Yeah. Okay." while the reply or its resumed tail is
+        # still in the ear does not start a new model call. A real request still
+        # does. The first ack after playback has already stopped resumes a
+        # finished tail below.
+        if false_interrupt_followup(final_text) and self._pure_ack_keeps_the_reply(final_text):
+            logger.info("stt_backchannel_ignored", text_preview=final_text[:80])
             return
 
         # A real accept cancels any pending HOLD, then interrupts so truncation

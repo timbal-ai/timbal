@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import sys
+import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
@@ -176,8 +177,26 @@ def test_unheard_suffix_keeps_only_the_rest() -> None:
 def test_a_pure_ack_is_not_a_new_request() -> None:
     assert false_interrupt_followup("")
     assert false_interrupt_followup("Yeah.")
+    assert false_interrupt_followup("Yeah. Okay.")
     assert false_interrupt_followup("d'acord")
     assert not false_interrupt_followup("What is the weather?")
+    assert not false_interrupt_followup("No, I meant how antibiotics work.")
+    assert not false_interrupt_followup("Okay. Let's go.")
+
+
+def test_a_second_ack_does_not_cut_audio_and_a_request_does() -> None:
+    session = VoiceSession(_agent(), MockSTT(), MockTTS(), audio_input=AudioInputConfig(language="en"))
+    session._is_speaking = True
+    assert session._pure_ack_keeps_the_reply("Yeah. Okay.") is True
+    assert session._pure_ack_keeps_the_reply("No, I meant how antibiotics work.") is False
+    session._is_speaking = False
+    session._last_assistant_active_at = time.monotonic() - 10
+    assert session._pure_ack_keeps_the_reply("Yeah.") is False
+    session._last_assistant_active_at = time.monotonic()
+    assert session._pure_ack_keeps_the_reply("Yeah. Okay.") is True
+    session._unheard_tail = "train rolled out."
+    session._unheard_tail_resumable = True
+    assert session._pure_ack_keeps_the_reply("Yeah.") is False
 
 
 async def test_backchannel_resumes_and_a_real_request_does_not() -> None:

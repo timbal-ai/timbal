@@ -605,6 +605,28 @@ class TestCommitHangup:
         assert await session.commit_hangup() is True
         assert session._end_call_task is not None
 
+    async def test_repeated_alright_does_not_cancel_the_grace_window(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.35)
+        session._active_turn_user_text = "Adiós."
+
+        async def again() -> None:
+            await asyncio.sleep(0.05)
+            session._latest_partial_text = "Alright. Alright."
+            session._last_partial_at = time.monotonic()
+
+        session._last_commit_at = time.monotonic()
+        asyncio.create_task(again())
+        assert await session.commit_hangup() is True
+        assert session._end_call_task is not None
+
+    @pytest.mark.parametrize("text", ["Thank you so much.", "Vamos, vámonos.", "Gracias."])
+    async def test_thanks_and_vamos_do_not_start_a_hangup(self, text: str) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.2)
+        session._active_turn_user_text = text
+        session._last_commit_at = time.monotonic()
+        assert await session.commit_hangup() is False
+        assert session._end_call_task is None
+
     async def test_a_later_commit_does_not_request_hangup(self) -> None:
         session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
         session._last_commit_at = time.monotonic()
@@ -652,6 +674,13 @@ class TestHangupUtterance:
             ("Espera, una cosa más.", "retract"),
             ("No, espera, todavía necesito ayuda.", "retract"),
             ("What's my order?", "retract"),
+            ("Alright. Alright.", "ack"),
+            ("Alright. Alright. Alright.", "ack"),
+            ("Yeah. Okay.", "ack"),
+            ("Thank you.", "ack"),
+            ("Thank you so much.", "retract"),
+            ("Vamos, vámonos.", "retract"),
+            ("No, I meant how antibiotics work.", "retract"),
         ],
     )
     def test_kind(self, text: str, kind: str) -> None:
