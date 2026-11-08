@@ -255,6 +255,26 @@ class TestFluxEventMapping:
         assert stt.patient_thresholds_live is False
         await stt.close()
 
+    async def test_an_answer_that_never_comes_does_not_hold_the_queue(self, monkeypatch) -> None:
+        # Reproduction from review: the first answer is lost, only the restore's arrives.
+        from timbal.voice import deepgram
+
+        monkeypatch.setattr(deepgram, "_CONFIGURE_ACK_TIMEOUT_SECS", 0.05)
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await asyncio.sleep(0.07)
+        assert len(stt._ws.sent) == 2
+        await stt._handle_message({"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 0.8}})
+        assert stt.patient_thresholds_live is False
+        await asyncio.sleep(0.15)
+        assert stt._configure_unanswered == 0
+        assert await stt.configure_turn(eot_threshold=0.9)
+        assert len(stt._ws.sent) == 3
+        assert json.loads(stt._ws.sent[-1])["thresholds"]["eot_threshold"] == 0.9
+        await stt.close()
+
     async def test_a_refusal_while_another_is_pending_is_sent_again_after_it(self, monkeypatch) -> None:
         from timbal.voice import deepgram
 

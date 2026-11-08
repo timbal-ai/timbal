@@ -646,6 +646,17 @@ class TestCommitHangup:
             ("Vale.", "Puedo colgar o revisar el pedido.", False),
             ("Sí.", "¿Cuelgo o reviso el pedido?", False),
             ("Thanks.", "Shall I hang up?", False),
+            ("Yes.", "Shall I hang up if you're done?", False),
+            ("Sí.", "¿Quiere que cuelgue si ya terminó?", False),
+            ("Please end the call when I say so.", "", False),
+            ("Can you hang up and call me back?", "", False),
+            # Requests the trailing "the call" or an inner "please" must not hide.
+            ("End the call.", "", True),
+            ("End this call, please.", "", True),
+            ("Can you please hang up?", "", True),
+            ("¿Puedes colgar, por favor?", "", True),
+            ("Sí.", "Perfecto. ¿Quiere que cuelgue?", True),
+            ("Yes.", "Anything else? Shall I hang up?", True),
         ],
     )
     async def test_a_hangup_request_is_not_only_a_goodbye_phrase(self, text: str, asked: str, hangs_up: bool) -> None:

@@ -659,9 +659,14 @@ _HANGUP_REQUEST_TRAIL = frozenset(
         "plau",
     }
 )
-# Words in the agent's question that make a "yes" mean something else.
+# Politeness that may sit anywhere in a request ("can you please hang up").
+_HANGUP_REQUEST_POLITE = (" please ", " por favor ", " si us plau ")
+# Words in the agent's question that make a "yes" mean something else: a
+# negation, a condition ("if you're done"), or an alternative ("or").
 _HANGUP_NEGATIONS = frozenset(
-    {"don't", "dont", "not", "no", "never", "nunca", "won't", "wont", "can't", "cant", "cannot", "until", "hasta"}
+    {"don't", "dont", "not", "no", "never", "nunca", "won't", "wont", "can't", "cant", "cannot"}
+    | {"if", "si", "when", "cuando", "once", "unless", "until", "hasta", "after", "before", "antes", "despues"}
+    | {"or", "o"}
 )
 _HANGUP_ASK_MARKERS = (
     "hang up",
@@ -698,12 +703,18 @@ _HANGUP_AFFIRMATIVES = frozenset(
 
 def _asks_for_hangup(norm: str) -> bool:
     """The caller's whole turn is a request to end the call ("Yes, please hang up.")."""
-    words = norm.split()
+    padded = f" {norm} "
+    for polite in _HANGUP_REQUEST_POLITE:
+        while polite in padded:
+            padded = padded.replace(polite, " ")
+    words = padded.split()
     while words and (words[0] in _HANGUP_REQUEST_LEAD or _is_ack_only(words[0])):
         words = words[1:]
-    while words and words[-1] in _HANGUP_REQUEST_TRAIL:
-        words = words[:-1]
-    return " ".join(words) in _HANGUP_REQUEST_FORMS
+    for form in _HANGUP_REQUEST_FORMS:
+        size = len(form.split())
+        if " ".join(words[:size]) == form and all(word in _HANGUP_REQUEST_TRAIL for word in words[size:]):
+            return True
+    return False
 
 
 def _asked_whether_to_hang_up(assistant: str) -> bool:
@@ -711,10 +722,9 @@ def _asked_whether_to_hang_up(assistant: str) -> bool:
     text = (assistant or "").strip()
     if not text.endswith("?"):
         return False
-    last = re.split(r"(?<=[.!])\s+", text)[-1]
+    last = re.split(r"(?<=[.!?])\s+", text)[-1]
     norm = _normalize_spoken(last)
-    words = norm.split()
-    if any(word in _HANGUP_NEGATIONS for word in words) or "or" in words or "o" in words:
+    if any(word in _HANGUP_NEGATIONS for word in norm.split()):
         return False
     return any(_hangup_marker_in(norm, marker) for marker in _HANGUP_ASK_MARKERS)
 

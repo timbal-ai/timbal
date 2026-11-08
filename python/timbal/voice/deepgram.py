@@ -85,6 +85,7 @@ class _PendingConfigure:
     patient: bool = False
     attempts: int = 0
 
+
 # Query params Flux accepts (used to filter stt_extra passthrough).
 _FLUX_QUERY_KEYS = frozenset(
     {
@@ -366,6 +367,10 @@ class _DeepgramSTTBase(SpeechToText):
             self._configure_unanswered = min(self._configure_unanswered, 1)
         self._configure_inflight = None
         await self._send_next_configure(force=True)
+        if self._configure_inflight is None and self._configure_unanswered:
+            # Nothing else was sent: give the late answer one more window, then
+            # stop counting it, so a lost answer cannot hold the queue for good.
+            self._arm_configure_timeout()
 
     async def _configure_answered(self, ok: bool, msg: dict[str, Any]) -> None:
         """One ``ConfigureSuccess`` / ``ConfigureFailure``.
@@ -548,6 +553,8 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
 
         Already transcribed audio is left as it was. An empty list clears the
         terms. ``flux-general-en`` and ``flux-general-multi`` both accept this.
+        True once sent or queued, not once Flux applied it: a rejection is
+        only logged (``dg_flux_configure_failed``).
         """
         from .config import validate_keyterms
 
@@ -568,7 +575,8 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
         ``[]`` clears it and the model goes back to auto-detect. Already
         transcribed audio is not reprocessed. ``flux-general-en`` rejects
         language hints, so this returns False there and the stored config is
-        what a later ``connect`` would use.
+        what a later ``connect`` would use. Like :meth:`update_keyterms`, True
+        means sent or queued, not applied.
         """
         config = self._input_config
         if config is None or self._ws is None or self._stop.is_set():
