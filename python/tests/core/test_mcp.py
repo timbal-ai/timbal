@@ -264,12 +264,25 @@ class TestProvenance:
         assert not {PROVENANCE_APP_KEY, PROVENANCE_REV_KEY, PROVENANCE_PATH_KEY, PROVENANCE_TOOL_CALL_KEY} & set(third)
         assert "t2_secret" not in str(meta)
 
+    def test_free_text_revisions_and_agent_names_are_sent(self):
+        from timbal.core.mcp import PROVENANCE_PATH_KEY, PROVENANCE_REV_KEY
+        from timbal.state import set_call_id, set_run_context
+
+        self._platform_run({"org_id": "1", "app_id": "2", "rev": "rama de prueba"}, path="Asistente Médico.buscar")
+        try:
+            meta = platform_server()._provenance_meta()
+        finally:
+            set_run_context(None)
+            set_call_id(None)
+        assert meta[PROVENANCE_REV_KEY] == "rama de prueba"
+        assert meta[PROVENANCE_PATH_KEY] == "Asistente Médico.buscar"
+
     @pytest.mark.parametrize(
         ("subject", "path", "tool_call_id"),
         [
-            ({"org_id": "1", "app_id": "abc", "rev": "has space"}, "agent.with space", "toolu 1"),
+            ({"org_id": "1", "app_id": "abc", "rev": "tab\there"}, "agent.new\nline", "toolu 1"),
             ({"org_id": "1", "app_id": "0", "rev": "r" * 256}, "a." + "p" * 511, "t" * 256),
-            ({"org_id": "1", "app_id": None, "rev": "ünïcode"}, "agent.tab\there", ""),
+            ({"org_id": "1", "app_id": None, "rev": "nul\x00"}, "agent.bell\x07", "toolu_ü"),
         ],
     )
     def test_values_the_platform_would_refuse_are_left_out(self, subject, path, tool_call_id):
