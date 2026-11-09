@@ -529,3 +529,54 @@ class TestServerLifecycle:
                 os.environ["TIMBAL_ENABLE_NGROK"] = original_value
             elif "TIMBAL_ENABLE_NGROK" in os.environ:
                 del os.environ["TIMBAL_ENABLE_NGROK"]
+
+
+class TestContextToolPolicy:
+    """``context.tool_policy`` on ``/run`` and ``/stream``: the tools the run's agents offer their models."""
+
+    @pytest.fixture
+    def app(self, monkeypatch):
+        import_spec = ImportSpec(
+            path=Path(__file__).parent / "fixtures" / "policy_agent_fixture.py", target="policy_agent"
+        )
+        monkeypatch.setenv("TIMBAL_RUNNABLE", f"{import_spec.path}::{import_spec.target}")
+        app = create_app()
+        app.state.runnable = import_spec.load()
+        app.state.job_store = JobStore()
+        writes().clear()
+        return app
+
+    @pytest.mark.parametrize(
+        ("context", "ran"),
+        [
+            ({}, ["write"]),
+            ({"tool_policy": None}, ["write"]),
+            ({"tool_policy": "read_only"}, []),
+            ({"tool_policy": ["peek"]}, []),
+            ({"tool_policy": ["write"]}, ["write"]),
+        ],
+    )
+    def test_run_applies_the_policy(self, app, context, ran):
+        response = TestClient(app).post("/run", json={"prompt": "go", "context": context})
+        assert response.status_code == 200, response.text
+        assert response.json()["status"]["code"] == "success"
+        assert writes() == ran
+
+    def test_stream_applies_the_policy(self, app):
+        response = TestClient(app).post("/stream", json={"prompt": "go", "context": {"tool_policy": "read_only"}})
+        assert response.status_code == 200
+        assert writes() == []
+
+    @pytest.mark.parametrize("policy", ["everything", 3, [1, 2], {"names": ["peek"]}])
+    @pytest.mark.parametrize("route", ["/run", "/stream"])
+    def test_an_invalid_policy_is_a_400(self, app, route, policy):
+        response = TestClient(app).post(route, json={"prompt": "go", "context": {"tool_policy": policy}})
+        assert response.status_code == 400
+        assert "tool_policy" in response.json()["detail"]
+        assert writes() == []
+
+
+def writes() -> list[str]:
+    """``WRITES`` of the fixture module ``ImportSpec`` loaded (under a name of its own)."""
+    module = next(m for name, m in list(sys.modules.items()) if name.endswith("policy_agent_fixture"))
+    return module.WRITES

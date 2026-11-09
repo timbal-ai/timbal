@@ -7,6 +7,7 @@ import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -113,6 +114,17 @@ async def lifespan(
             app.state.single_session_guard.shutdown()
 
 
+def _tool_policy(value: Any) -> Any:
+    """A JSON tool policy: ``"read_only"``, a list of tool names, or ``None``."""
+    if value is None or value == "read_only":
+        return value
+    if isinstance(value, list) and all(isinstance(name, str) for name in value):
+        return frozenset(value)
+    raise HTTPException(
+        status_code=400, detail="'context.tool_policy' must be 'read_only', a list of tool names, or null."
+    )
+
+
 def create_app() -> FastAPI:
     """Factory for the FastAPI app. Called by uvicorn in each worker process.
 
@@ -201,16 +213,31 @@ def create_app() -> FastAPI:
                 detail=f"Run id '{e.job_id}' is already in use by a running run.",
             ) from e
 
+    def _request_context(req_data: dict) -> RunContext | None:
+        """The request's ``context`` (or ``run_context``) as the run's context.
+
+        ``tool_policy`` narrows the tools every agent in the run offers its model, as for a chat
+        session's wake: ``"read_only"``, a list of tool names, or ``null`` (all tools).
+        """
+        raw = req_data.pop("context", None)
+        if raw is None:
+            raw = req_data.pop("run_context", None)
+        if raw is None:
+            return None
+        policy = None
+        if isinstance(raw, dict) and "tool_policy" in raw:
+            raw = dict(raw)
+            policy = _tool_policy(raw.pop("tool_policy"))
+        run_context = RunContext.model_validate(raw)
+        run_context.__dict__["_tool_policy"] = policy
+        return run_context
+
     @app.post("/run")
     async def run(req: Request) -> Response:
         req_data = await req.json()
-        run_context = req_data.pop("context", None)
-        if run_context is None:
-            run_context = req_data.pop("run_context", None)
-
+        run_context = _request_context(req_data)
         run_id = None
         if run_context is not None:
-            run_context = RunContext.model_validate(run_context)
             set_run_context(run_context)
             run_id = run_context.id
 
@@ -244,13 +271,9 @@ def create_app() -> FastAPI:
     @app.post("/stream")
     async def stream(req: Request) -> Response:
         req_data = await req.json()
-        run_context = req_data.pop("context", None)
-        if run_context is None:
-            run_context = req_data.pop("run_context", None)
-
+        run_context = _request_context(req_data)
         run_id = None
         if run_context is not None:
-            run_context = RunContext.model_validate(run_context)
             set_run_context(run_context)
             run_id = run_context.id
 
