@@ -538,6 +538,19 @@ class TestRunIdCollision:
         assert await drain(job) == ["a"]
 
     @pytest.mark.asyncio
+    async def test_require_new_accepts_an_id_whose_window_lapsed_before_it_was_read(self):
+        """Reading an expired job forgets it; that must not start a fresh window for ``require_new``."""
+        store = JobStore(retention_secs=0.1)
+
+        _, first = store.create_job(MockRunnable(events=["a"]), {}, job_id="dup")
+        await first.task
+        await asyncio.sleep(0.15)
+        assert store.get_job("dup") is None
+
+        _, second = store.create_job(MockRunnable(events=["b"]), {}, job_id="dup", require_new=True)
+        assert await drain(second) == ["b"]
+
+    @pytest.mark.asyncio
     async def test_a_finished_run_id_can_be_reused(self):
         store = JobStore()
 

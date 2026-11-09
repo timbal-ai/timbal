@@ -359,7 +359,8 @@ class JobStore:
         """Drop ``job_id``, but only while it still refers to ``job``."""
         if self._jobs.get(job_id) is job:
             del self._jobs[job_id]
-            self._finished_ids[job_id] = time.monotonic()
+            # From when it ended, not now: a job dropped once its window lapsed must not refuse its id for another.
+            self._finished_ids[job_id] = job.finished_at if job.finished_at is not None else time.monotonic()
 
     async def _run(self, runnable, params, job: Job):
         from ..platform._http_session import platform_http_session
