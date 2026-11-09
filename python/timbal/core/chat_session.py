@@ -51,6 +51,9 @@ WAKE_KIND = "wake"
 
 _SILENCE_NOTE = f"If nothing here needs the user's attention, reply with exactly {SILENT_REPLY} and nothing else."
 _WAKE_HEADER = "Scheduled wake-up (the user did not write this):"
+# A turn that fails before it starts: retried after 0.5 s, then 1 s; past that, only when new work arrives.
+_MAX_TURN_FAILURES = 3
+_TURN_RETRY_DELAY_S = 0.5
 _READ_ONLY_NOTE = (
     "This turn can only read: tools that send, write, delete or buy are not available. If the task needs "
     "one, do not retry or look for a way around it; say what you would do and that it needs the user."
@@ -73,6 +76,9 @@ class _TurnOptions:
 
     tool_policy: Any = None
     silence: bool = False
+    # Takes the session's lane="next" messages between steps. A wake does not: a user message would be
+    # answered under the wake's tool policy and silence, so it waits for a turn of its own.
+    steer: bool = True
 
 
 def _check_tool_policy(policy: Any) -> Any:
@@ -169,6 +175,7 @@ class ChatSession:
         self.id: str = uuid7(as_type="hex")  # type: ignore[assignment]
         self.busy_mode: SendMode = busy_mode
         self.collect_window = collect_window
+        self._turn_failures = 0
         self.allow_silence = allow_silence
         self.log = BackgroundEventLog(max_events=max_log_events, max_bytes=max_log_bytes)
         self.closed = False
@@ -384,6 +391,14 @@ class ChatSession:
         scheduler = self._scheduler
         while not self.closed:
             self._work.clear()
+            if self._turn_failures >= _MAX_TURN_FAILURES:
+                # The same work failed before it started, time after time (a broken model setup, a store
+                # that is down): try again when new work arrives, not in a loop.
+                await self._work.wait()
+                self._turn_failures = _MAX_TURN_FAILURES - 1
+                continue
+            if self._turn_failures:
+                await asyncio.sleep(_TURN_RETRY_DELAY_S * 2 ** (self._turn_failures - 1))
             if self._resume is not None:
                 values, self._resume = self._resume, None
                 scheduler.turn_started()
@@ -444,9 +459,10 @@ class ChatSession:
     async def _admit(self) -> None:
         """Hold a turn for collected messages until none has arrived for ``collect_window`` seconds, and while
         another client's run of the session waits for its caller (a turn would chain onto it, see _serve_turns)."""
-        while self._scheduler.head_parked:
-            await self._scheduler._wait_change()
         while True:
+            if self._scheduler.head_parked:
+                await self._scheduler._wait_change()
+                continue
             collected = [
                 event.posted_at for event in user_batch(self._store.pending_events()) if event.mode == "collect"
             ]
@@ -468,7 +484,9 @@ class ChatSession:
             kwargs["resume"] = resume
             return kwargs, {"kind": "resume"}, self._last_options
         if wake is not None:
-            options = _TurnOptions(tool_policy=wake.tool_policy, silence=self.allow_silence and wake.silent_ok)
+            options = _TurnOptions(
+                tool_policy=wake.tool_policy, silence=self.allow_silence and wake.silent_ok, steer=False
+            )
             text = f"{_WAKE_HEADER}\n\n{wake.text}"
             if wake.tool_policy == "read_only":
                 text += f"\n\n{_READ_ONLY_NOTE}"
@@ -506,7 +524,7 @@ class ChatSession:
         try:
             kwargs, trigger, options = self._turn_inputs(followup, resume, wake)
             context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
-            context._steering = True
+            context._steering = options.steer
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
             adopt_background_store(context, self._store)
@@ -531,8 +549,12 @@ class ChatSession:
             error = turn.exception()
             if error is not None:
                 logger.error("chat_session_turn_failed", session_id=self.id, run_id=context.id, error=str(error))
+                self._turn_failures += 1
+                self._record("turn_failed", run_id=context.id, error=str(error), attempt=self._turn_failures)
             else:
                 output = turn.result()
+        if output is not None:
+            self._turn_failures = 0
         if output is None:
             # Never started (cut before its first event): the head stays on the last run that did.
             if wake is not None and not self.closed:

@@ -2233,7 +2233,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         async for steer_event in _steer():
                             yield steer_event
                         if steered_user:
-                            i, max_iter_handled = 0, False
+                            i, max_iter_handled, withhold_tools = 0, False, False
                     continue
 
                 # Mid-loop compaction: a single turn that makes many (or large) tool calls
@@ -2560,6 +2560,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         if steered:
                             # Something arrived for this turn before it ended: answer it too.
                             i, max_iter_handled = (0, False) if steered_user else (i + 1, max_iter_handled)
+                            if steered_user:
+                                withhold_tools = False
                             continue
                     token = run_context._silence_token
                     if (
@@ -2603,8 +2605,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     async for steer_event in _steer():
                         yield steer_event
                     if steered_user:
-                        # A user message is a new request: it gets the full tool budget.
-                        i, max_iter_handled = 0, False
+                        # A user message is a new request: it gets the full tool budget, and its tools back
+                        # even when the denial breaker took them away for this step.
+                        i, max_iter_handled, withhold_tools = 0, False, False
         finally:
             try:
                 if active_events is not None:

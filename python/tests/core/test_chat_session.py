@@ -666,6 +666,126 @@ class TestRobustness:
             memory = await stored_memory(root_outputs(session)[1])
             assert [m.collect_text() for m in memory if m.role == "user"] == ["hi", "pay", "new question"]
 
+    async def test_a_steered_user_message_gets_its_tools_back_after_the_denial_breaker(self):
+        holder = {}
+
+        def act() -> str:
+            return "acted"
+
+        def handler(messages):
+            if last_user_text(messages) == "and this?":
+                return "here you go"
+            if messages[-1].role == "user" and last_user_text(messages) == "start":
+                holder["session"].send("and this?")  # arrives while the turn runs: steered in
+                return tool_call("act")
+            return "stopping"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[
+                Tool(
+                    name="act",
+                    handler=act,
+                    guardrails=[guardrail(lambda _t: Verdict.block("no"), stages=["tool_args"])],
+                )
+            ],
+            max_consecutive_denials=1,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent) as session:
+            holder["session"] = session
+            session.send("start")
+            (finished,) = await records(session, "turn_finished", 1)
+            assert finished["status"]["code"] == "success"
+            trace = await RunContext(tracing_provider=InMemoryTracingProvider)._get_parent_trace(finished["run_id"])
+            llm_calls = [span for span in trace.values() if span.path == "agent.llm"]
+            assert llm_calls[-1].input.get("tools"), "the steered user request was answered without tools"
+
+    async def test_a_user_message_does_not_join_a_running_wake(self):
+        gate = Gate()
+
+        def handler(messages):
+            last = messages[-1]
+            prompt = next(m for m in reversed(messages) if m.role == "user")
+            if last.role == "tool":
+                return "NO_REPLY"
+            if prompt.is_runtime() and prompt.metadata.get("kind") == "wake":
+                return tool_call("peek", call_id=f"call-{len(messages)}")
+            return f"echo: {last_user_text(messages)}"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="peek", handler=gate.work, read_only=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent) as session:
+            session.wake("Check the inbox.")
+            await asyncio.wait_for(gate.entered.wait(), 2)
+            session.send("hello")  # default mode: steer
+            gate.release.set()
+            finished = await records(session, "turn_finished", 2)
+            started = await records(session, "turn_started", 2)
+            assert [s["trigger"]["kind"] for s in started] == ["wake", "user_message"]
+            assert finished[0]["silent"] is True and finished[1]["silent"] is False
+            wake_memory = await stored_memory(root_outputs(session)[0])
+            assert "hello" not in [m.collect_text() for m in wake_memory if m.role == "user"]
+            assert root_outputs(session)[1].output.collect_text() == "echo: hello"
+
+    async def test_a_foreign_run_parking_during_the_collect_window_holds_the_turn(self):
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "tool":
+                return "paid"
+            return tool_call("charge") if last_user_text(messages) == "pay" else f"echo: {last_user_text(messages)}"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: "charged", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent, collect_window=0.3) as session:
+            session.send("hi")
+            await records(session, "turn_finished", 1)
+            waiting = session.send("later", mode="collect")
+            await asyncio.sleep(0.05)  # the session is inside its quiet window now
+            events = [e async for e in agent(prompt="pay", parent_id=session.head)]
+            approval = next(e for e in events if isinstance(e, ApprovalEvent))
+            parked = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == "agent")
+            await asyncio.sleep(0.5)  # past the window
+            assert waiting.state == "pending" and session.turns == 1
+            await agent(prompt="pay", parent_id=parked.run_id, resume={approval.approval_id: True}).collect()
+            await records(session, "turn_finished", 2)
+            memory = await stored_memory(root_outputs(session)[1])
+            assert [m.collect_text() for m in memory if m.role == "user"] == ["hi", "pay", "later"]
+
+    async def test_a_turn_failing_before_it_starts_backs_off_then_waits_for_new_work(self, monkeypatch):
+        import timbal.core.chat_session as chat_session_module
+
+        monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.01)
+        attempts = []
+        async with ChatSession(make_agent(Gate())) as session:
+
+            async def broken_pump(_context, _kwargs, followup, trigger):
+                attempts.append(trigger["kind"])
+                if followup is not None:
+                    followup.release()
+                raise RuntimeError("model setup is broken")
+
+            monkeypatch.setattr(session, "_pump", broken_pump)
+            waiting = session.send("hi")
+            failed = await records(session, "turn_failed", 3)
+            await asyncio.sleep(0.2)
+            assert len(attempts) == 3, "kept retrying the same failing work"
+            assert [f["attempt"] for f in failed] == [1, 2, 3]
+            assert waiting.state == "pending"
+            session.send("again")  # new work: one more try
+            await records(session, "turn_failed", 4)
+            await asyncio.sleep(0.2)
+            assert len(attempts) == 4
+
     async def test_interrupting_a_tool_runs_its_cleanup_and_the_next_turn_has_a_result_for_it(self):
         cleaned = asyncio.Event()
 
