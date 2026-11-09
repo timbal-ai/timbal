@@ -392,6 +392,12 @@ class ChatSession:
             if self.parked:
                 await self._work.wait()
                 continue
+            if scheduler.head_parked:
+                # Another client's run of this session waits for its caller (an approval, a question): a
+                # turn now would chain onto it, and that run's resume would drop the turn's prompt. Its
+                # resume, or any newer head, lets the session go on; messages stay pending until then.
+                await self._until_scheduler_or_work()
+                continue
             if self._wakes and scheduler.pending_turn() is None and not scheduler.other_turn_first():
                 wake = self._wakes.pop(0)
                 scheduler.turn_started()
@@ -405,6 +411,17 @@ class ChatSession:
                 continue
             scheduler.turn_started()
             await self._run_turn(followup=followup)
+
+    async def _until_scheduler_or_work(self) -> None:
+        loop = asyncio.get_running_loop()
+        changed = loop.create_task(self._scheduler._wait_change())
+        work = loop.create_task(self._work.wait())
+        try:
+            await asyncio.wait({changed, work}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (changed, work):
+                if not task.done():
+                    task.cancel()
 
     async def _turn_due(self) -> bool:
         """True once the scheduler says a turn is due; False when other work arrived first (a wake, a resume)."""
@@ -425,7 +442,10 @@ class ChatSession:
                     task.cancel()
 
     async def _admit(self) -> None:
-        """Hold a turn for collected messages until none has arrived for ``collect_window`` seconds."""
+        """Hold a turn for collected messages until none has arrived for ``collect_window`` seconds, and while
+        another client's run of the session waits for its caller (a turn would chain onto it, see _serve_turns)."""
+        while self._scheduler.head_parked:
+            await self._scheduler._wait_change()
         while True:
             collected = [
                 event.posted_at for event in user_batch(self._store.pending_events()) if event.mode == "collect"

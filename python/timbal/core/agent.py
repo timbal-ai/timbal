@@ -100,6 +100,9 @@ DEFAULT_MAX_ITER_NOTICE = (
 )
 """User message injected before the final tool-less LLM call (``on_max_iter="final_answer"``)."""
 
+# Session data: per agent path, the denial streak a paused run left, for the run that resumes it.
+_DENIAL_STREAK_KEY = "denial_streak"
+
 DEFAULT_DENIAL_NOTICE = (
     "[System notice] Your last {count} tool calls were denied or blocked, so no tools are available "
     "for this reply. Do not look for another way to do the same thing. Tell the user what you were "
@@ -1360,6 +1363,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             "passes": passes,
         }
 
+    async def _resumed_denials(self, run_context: Any) -> int:
+        """The denial streak of the paused run this turn resumes; 0 when it resumes another run, or none."""
+        session = await run_context.get_session()
+        streak = session.get(_DENIAL_STREAK_KEY, {}).get(self._path)
+        if streak and streak.get("run_id") == run_context.parent_id:
+            return streak["count"]
+        return 0
+
+    async def _save_denials(self, run_context: Any, denials: int) -> None:
+        """At a pause: the streak the run that resumes this one continues (a denied approval counts on top)."""
+        if not denials:
+            return  # a resume of this run reads 0: the entry it finds names another run
+        session = await run_context.get_session()
+        session.setdefault(_DENIAL_STREAK_KEY, {})[self._path] = {"run_id": run_context.id, "count": denials}
+
     async def _stop_after_denials(self, current_span: Any, denials: int, append_memory: Any) -> None:
         """After a tool batch past the denial limit: tell the model to stop routing around refusals (the caller
         takes its tools away for the next call)."""
@@ -1877,8 +1895,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # GuardrailEvents produced inside _process_tool_event (not a generator) — drained
         # and yielded by the loop right after each call.
         pending_guardrail_events: list[BaseEvent] = []
-        # Denied / blocked tool results in a row (max_consecutive_denials); any other result resets it.
+        # Denied / blocked tool results in a row (max_consecutive_denials); any other result resets it. A
+        # resumed turn continues the streak its paused run left (an approval denial ends a run each time).
         consecutive_denials = 0
+        denials_resumed = False
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
@@ -2176,6 +2196,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 pending_tool_uses = self._find_pending_tool_uses(current_span.memory)
                 if pending_tool_uses:
                     _llm_memory_saved = True  # nothing to salvage; we never called the LLM
+                    if not denials_resumed:
+                        denials_resumed = True
+                        consecutive_denials = await self._resumed_denials(run_context)
                     tool_calls = pending_tool_uses
                     first_pending: OutputEvent | None = None
                     active_events = self._multiplex_tools(tools, tool_calls)
@@ -2200,6 +2223,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             first_pending = event
                     active_events = None
                     if first_pending is not None:
+                        await self._save_denials(run_context, consecutive_denials)
                         raise PauseRequired(first_pending)
                     i += 1
                     if consecutive_denials >= denial_limit:
@@ -2569,6 +2593,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         first_pending = event
                 active_events = None
                 if first_pending is not None:
+                    await self._save_denials(run_context, consecutive_denials)
                     raise PauseRequired(first_pending)
                 i += 1
                 if consecutive_denials >= denial_limit:

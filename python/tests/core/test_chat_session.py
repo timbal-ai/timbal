@@ -632,6 +632,40 @@ class TestRobustness:
             assert [m.collect_text() for m in memory if m.role == "user"] == ["start", "from elsewhere", "and now?"]
             assert finished[1]["status"]["code"] == "success"
 
+    async def test_messages_wait_while_a_foreign_run_of_the_session_is_parked(self):
+        def charge() -> str:
+            return "charged"
+
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "tool":
+                return "paid"
+            return tool_call("charge") if last_user_text(messages) == "pay" else f"echo: {last_user_text(messages)}"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=charge, requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent) as session:
+            session.send("hi")
+            await records(session, "turn_finished", 1)
+            # Another client continues the conversation directly and parks on an approval.
+            events = [e async for e in agent(prompt="pay", parent_id=session.head)]
+            approval = next(e for e in events if isinstance(e, ApprovalEvent))
+            parked = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == "agent")
+            assert parked.status.reason == "approval_required" and session.head == parked.run_id
+            waiting = session.send("new question")
+            await asyncio.sleep(0.1)
+            assert waiting.state == "pending" and session.turns == 1
+            # That client answers its approval; the session then goes on from its resume.
+            resumed = await agent(prompt="pay", parent_id=parked.run_id, resume={approval.approval_id: True}).collect()
+            assert resumed.output.collect_text() == "paid"
+            await records(session, "turn_finished", 2)
+            memory = await stored_memory(root_outputs(session)[1])
+            assert [m.collect_text() for m in memory if m.role == "user"] == ["hi", "pay", "new question"]
+
     async def test_interrupting_a_tool_runs_its_cleanup_and_the_next_turn_has_a_result_for_it(self):
         cleaned = asyncio.Event()
 
@@ -815,8 +849,9 @@ class TestSessionLifecycle:
 
         from timbal.tools.interaction import ask_user
 
-        agent = Agent(name="agent", model=TestModel(handler=handler), tools=[ask_user],
-                      tracing_provider=InMemoryTracingProvider)
+        agent = Agent(
+            name="agent", model=TestModel(handler=handler), tools=[ask_user], tracing_provider=InMemoryTracingProvider
+        )
         async with ChatSession(agent) as session:
             session.send("ask me")
             await records(session, "turn_finished", 1)

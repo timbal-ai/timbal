@@ -14,6 +14,7 @@ from timbal.state import get_run_context, set_call_id, set_parent_call_id, set_r
 from timbal.state.context import RunContext
 from timbal.state.tracing.providers import InMemoryTracingProvider
 from timbal.types.content import ToolUseContent
+from timbal.types.events import ApprovalEvent, OutputEvent
 from timbal.types.message import Message
 
 
@@ -235,6 +236,82 @@ class TestDenialBreaker:
         assert output.metadata["denial_limit"] == [{"denials": 3}]
         # 0, 1 blocked; 2 ran; 3, 4, 5 blocked -> limit after attempt 5.
         assert len(calls["model"]) == 7
+
+    async def test_denied_approvals_count_across_resumes(self):
+        """Each denied approval ends its run; the streak goes on in the run that resumes it."""
+
+        def charge(n: int) -> str:
+            return f"charged {n}"
+
+        def handler(messages):
+            last = messages[-1]
+            if last.is_runtime() and last.metadata.get("kind") == "denial_limit":
+                return "I will stop and ask how to proceed."
+            attempts = sum(1 for m in messages if m.role == "assistant")
+            return call("charge", call_id=f"c{attempts}", n=attempts)
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=charge, requires_approval=True)],
+            max_iter=20,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        events = [e async for e in agent(prompt="pay")]
+        denied = 0
+        while denied < 5:
+            denied += 1
+            approval = next(e for e in events if isinstance(e, ApprovalEvent))
+            run_id = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == "agent").run_id
+            events = [e async for e in agent(prompt="pay", parent_id=run_id, resume={approval.approval_id: False})]
+            final = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == "agent")
+            if not any(isinstance(e, ApprovalEvent) for e in events):
+                break
+        assert denied == 3
+        assert final.status.code == "success"
+        assert final.metadata["denial_limit"] == [{"denials": 3}]
+        assert final.output.collect_text() == "I will stop and ask how to proceed."
+
+    async def test_a_new_turn_starts_a_new_streak(self):
+        """A streak a paused run left applies to its resume only, not to a turn chained after another one."""
+
+        def charge(n: int) -> str:
+            return f"charged {n}"
+
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "user" and not last.is_runtime() and last.collect_text() == "hello":
+                return "hi"
+            if last.is_runtime() and last.metadata.get("kind") == "denial_limit":
+                return "stopping"
+            attempts = sum(1 for m in messages if m.role == "assistant")
+            return call("charge", call_id=f"c{attempts}", n=attempts)
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=charge, requires_approval=True)],
+            max_iter=20,
+            tracing_provider=InMemoryTracingProvider,
+        )
+
+        def root(events):
+            return next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == "agent")
+
+        events = [e async for e in agent(prompt="pay")]
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        events = [
+            e async for e in agent(prompt="pay", parent_id=root(events).run_id, resume={approval.approval_id: False})
+        ]
+        paused = root(events)  # one denial so far, paused on the next approval
+        chat = await agent(prompt="hello", parent_id=paused.run_id).collect()
+        events = [e async for e in agent(prompt="pay", parent_id=chat.run_id)]
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        events = [
+            e async for e in agent(prompt="pay", parent_id=root(events).run_id, resume={approval.approval_id: False})
+        ]
+        assert "denial_limit" not in root(events).metadata  # one denial in this streak, not two
+        assert any(isinstance(e, ApprovalEvent) for e in events)
 
     async def test_none_turns_it_off(self):
         agent, calls = blocking_agent(limit=None)
