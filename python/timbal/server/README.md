@@ -17,6 +17,8 @@ Two things are documented here: [running a runnable over HTTP](#runs-run-stream-
 
 Set `context.id` on the request to choose the run id; otherwise one is generated and you can read it off the first event. Naming an id that a *running* run already holds is a `409` — the alternative is silently orphaning that run, leaving it executing with nothing able to read or cancel it.
 
+Set `context.tool_policy` to narrow the tools the run's agents offer their models, as a chat wake does: `"read_only"` (tools declared `read_only`, MCP tools whose server says `readOnlyHint`, and the agent's own readers), a list of tool names, or `null` (all tools, the default). A call to a hidden tool gets the usual `tool_not_found` result. Any other value is a `400`. Meant for unattended runs (a scheduled routine): it is enforced per run, for every agent in it, subagents included.
+
 Reusing the id of a run that has *finished* but is still inside its retention window is allowed, and rebinds the id: anything still polling `/runs/{run_id}/events` for the old run starts receiving the new one's events, with seqs counting from 1 again. Use fresh ids per run unless you mean that.
 
 ### A dropped connection does not stop the run

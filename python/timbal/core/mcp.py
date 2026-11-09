@@ -48,6 +48,12 @@ PROVENANCE_RUN_KEY = "timbal.ai/run_id"
 PROVENANCE_CALL_KEY = "timbal.ai/call_id"
 PROVENANCE_PARENT_KEY = "timbal.ai/parent_run_id"
 PROVENANCE_SESSION_KEY = "timbal.ai/session_id"
+# Platform server only: the app and revision the run belongs to, the calling tool's span path, and the model's
+# id for the tool call (kept when a resume re-issues it, unlike the span's call_id).
+PROVENANCE_APP_KEY = "timbal.ai/app_id"
+PROVENANCE_REV_KEY = "timbal.ai/rev"
+PROVENANCE_PATH_KEY = "timbal.ai/path"
+PROVENANCE_TOOL_CALL_KEY = "timbal.ai/tool_call_id"
 
 
 """``InteractionEvent.kind`` used when an MCP server elicits input mid tool call."""
@@ -322,6 +328,38 @@ def _ambient_trace_context() -> dict[str, str]:
     return {key: carrier[key] for key in ("traceparent", "tracestate") if carrier.get(key)}
 
 
+def _platform_claims(run_context: Any, call_id: str | None) -> dict[str, Any]:
+    """The platform-only ``_meta`` claims: app, revision, tool span path, the model's tool call id.
+
+    A value the platform would refuse (``app_id`` not a positive integer; the others not printable ASCII
+    without whitespace, or too long) is left out: the call goes through unlinked rather than failing.
+    """
+    claims: dict[str, Any] = {}
+    subject = getattr(run_context.platform_config, "subject", None)
+    app_id = str(getattr(subject, "app_id", None) or "")
+    if app_id.isdigit() and int(app_id) > 0:
+        claims[PROVENANCE_APP_KEY] = int(app_id)
+    if _wire_token(rev := getattr(subject, "rev", None), 255):
+        claims[PROVENANCE_REV_KEY] = rev
+    span = run_context._trace.get(call_id) if call_id else None
+    if span is not None:
+        if _wire_token(span.path, 512):
+            claims[PROVENANCE_PATH_KEY] = span.path
+        if _wire_token(tool_call_id := (span.metadata or {}).get("tool_call_id"), 255):
+            claims[PROVENANCE_TOOL_CALL_KEY] = tool_call_id
+    return claims
+
+
+def _wire_token(value: Any, limit: int) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= limit
+        and value.isascii()
+        and value.isprintable()
+        and not any(c.isspace() for c in value)
+    )
+
+
 def _timbal_trace_context(run_id: str, call_id: str | None) -> dict[str, str]:
     """A ``traceparent`` naming the tool's span in the trace ``OTelExporter`` exports for the run."""
     if not call_id:
@@ -492,7 +530,10 @@ class MCPServer(ToolSet):
     per connection, which runs share. ``None`` (default): on for ``service="api"`` (the platform's
     own server) only, so third-party servers never see run ids.
 
-    Also ``timbal.ai/parent_run_id`` / ``session_id`` when known, and W3C ``traceparent`` /
+    Also ``timbal.ai/parent_run_id`` / ``session_id`` when known; for the platform only,
+    ``timbal.ai/app_id`` (an integer), ``rev`` (``platform_config.subject``), ``path`` (the tool
+    span's) and ``tool_call_id`` (the model's id for the call, kept when a resume re-issues it),
+    each left out when the platform would refuse its value; and W3C ``traceparent`` /
     ``tracestate``: the caller's active OpenTelemetry span when there is one; for the platform,
     otherwise the tool's span as ``OTelExporter`` exports it. A third-party server that opts in
     (``True``) gets per-origin pseudonyms (HMAC, keyed by ``TIMBAL_PROVENANCE_SECRET`` or a
@@ -1167,7 +1208,7 @@ class MCPServer(ToolSet):
     def _sends_provenance(self) -> bool:
         return self.provenance if self.provenance is not None else self.service == "api"
 
-    def _provenance_meta(self) -> dict[str, str] | None:
+    def _provenance_meta(self) -> dict[str, Any] | None:
         """``tools/call`` ``_meta`` naming the calling run and the tool's span, when enabled (see ``provenance``).
 
         Also the parent run (when chained: the server derives the thread from it before the run is stored) and
@@ -1188,7 +1229,11 @@ class MCPServer(ToolSet):
         }
         ids = {key: value for key, value in ids.items() if value}
         if self._first_party or self.service == "api":
-            return {**ids, **(_ambient_trace_context() or _timbal_trace_context(run_context.id, call_id))}
+            return {
+                **ids,
+                **_platform_claims(run_context, call_id),
+                **(_ambient_trace_context() or _timbal_trace_context(run_context.id, call_id)),
+            }
         # A third party that opted in: ids it can correlate among its own calls, but not across servers.
         origin = self._origin()
         return {**{key: _pseudonym(origin, value) for key, value in ids.items()}, **_ambient_trace_context()}
