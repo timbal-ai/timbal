@@ -6,7 +6,7 @@ from timbal.platform import _http_session
 from timbal.state.tracing.providers import platform as platform_module
 from timbal.state.tracing.providers.platform import PlatformTracingProvider
 
-from .test_platform_deltas import run, tool_loop
+from .test_platform_deltas import awaited_saves, run, tool_loop  # noqa: F401 (awaited_saves: autouse here too)
 
 
 @pytest.fixture

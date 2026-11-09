@@ -436,6 +436,11 @@ class PlatformTracingProvider(TracingProvider):
 
     platform_config: PlatformConfig | None = None
 
+    default_durability = "buffered"
+    """A save is a PATCH round trip: awaiting one per finished span adds seconds to a long turn. Saves while
+    the run goes are stored in the background instead; its end, and every other barrier, still waits.
+    ``durability="sync"`` or ``TIMBAL_TRACE_DURABILITY=sync`` awaits every save again."""
+
     compress: bool | None = None
     """Gzip each PATCH body (``Content-Encoding: gzip``). ``None``: when ``TIMBAL_TRACE_GZIP`` is set, or
     once the host advertised it (``Accept-Encoding: gzip`` on a response, RFC 7694)."""
