@@ -1256,33 +1256,3 @@ class TestChatSessionOverDeltas:
         users = [m for m in root["memory"] if m["role"] == "user"]
         assert len(users) == 2  # the first turn's prompt came back from the platform
         assert all(p["kind"] == "delta" for p in server.patches)
-
-
-def long_tool(provider, seconds, marks):
-    """One tool call that takes ``seconds``; ``marks`` records how many PATCHes had landed as it started and ended."""
-
-    async def wait(server):
-        marks.append(len(server.patches))
-        await asyncio.sleep(seconds)
-        marks.append(len(server.patches))
-
-    def handler(messages):
-        if any(m.role == "tool" for m in messages):
-            return "done"
-        return Message(
-            role="assistant", content=[ToolUseContent(id="c0", name="wait", input={})], stop_reason="tool_use"
-        )
-
-    def agent(server):
-        async def wait_tool() -> str:
-            await wait(server)
-            return "waited"
-
-        return Agent(
-            name="agent",
-            model=TestModel(handler=handler),
-            tools=[Tool(name="wait", handler=wait_tool)],
-            tracing_provider=provider,
-        )
-
-    return agent

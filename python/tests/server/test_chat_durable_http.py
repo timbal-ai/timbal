@@ -90,14 +90,14 @@ def test_idle_reaping_keeps_the_session_for_later(client, monkeypatch):
 def test_requests_racing_for_one_session_restore_it_once(client, monkeypatch):
     session_id = client.post("/chat/sessions", json={}).json()["session_id"]
     forget(client, session_id)
-    real, calls = ChatSession.restore.__func__, []
+    real, calls = ChatSession.from_store.__func__, []
 
     async def slow_restore(cls, *args, **kwargs):
         calls.append(1)
         await asyncio.sleep(0.2)  # every request arrives while the first restore is still going
         return await real(cls, *args, **kwargs)
 
-    monkeypatch.setattr(ChatSession, "restore", classmethod(slow_restore))
+    monkeypatch.setattr(ChatSession, "from_store", classmethod(slow_restore))
     with ThreadPoolExecutor(6) as pool:
         codes = list(pool.map(lambda _: client.get(f"/chat/sessions/{session_id}").status_code, range(6)))
     assert codes == [200] * 6 and len(calls) == 1
