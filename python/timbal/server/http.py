@@ -114,8 +114,8 @@ async def lifespan(
             app.state.single_session_guard.shutdown()
 
 
-CAPABILITIES = ("tool_policy",)
-"""Request features this server enforces, advertised on ``/healthcheck`` (``X-Timbal-Capabilities``)."""
+CAPABILITIES = ("context.tool_policy", "context.require_new")
+"""Request features this server enforces: ``GET /meta``, and ``X-Timbal-Capabilities`` on ``/healthcheck``."""
 
 
 def _policy_headers(run_context: RunContext | None) -> dict[str, str] | None:
@@ -171,10 +171,15 @@ def create_app() -> FastAPI:
     app.include_router(rtc_router)
     app.include_router(telephony_router)
 
+    @app.get("/meta")
+    async def meta() -> Response:
+        """This server's version and the request features it enforces (``CAPABILITIES``), so a caller can
+        check before relying on one: an older SDK ignores what it does not know instead of refusing it."""
+        return JSONResponse(status_code=200, content={"version": __version__, "capabilities": list(CAPABILITIES)})
+
     @app.get("/healthcheck")
     async def healthcheck() -> Response:
-        # What this server can enforce, so a caller can check before relying on it (an older SDK
-        # ignores ``context.tool_policy`` instead of refusing it).
+        # The same as /meta, for a caller that only probes the health check.
         return Response(
             status_code=204,
             headers={"X-Timbal-Version": __version__, "X-Timbal-Capabilities": ",".join(CAPABILITIES)},
@@ -212,7 +217,7 @@ def create_app() -> FastAPI:
             content=return_model_schema,
         )
 
-    def _create_job(run_id: str | None, req_data: dict, replayable: bool = True):
+    def _create_job(run_id: str | None, req_data: dict, replayable: bool = True, require_new: bool = False):
         """Start a job, turning a colliding client-supplied run id into a 409.
 
         `context.id` is client-controlled, so two requests can name the same
@@ -222,37 +227,41 @@ def create_app() -> FastAPI:
         """
         try:
             return app.state.job_store.create_job(
-                app.state.runnable, req_data, job_id=run_id, replayable=replayable
+                app.state.runnable, req_data, job_id=run_id, replayable=replayable, require_new=require_new
             )
         except RunIdInUse as e:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Run id '{e.job_id}' is already in use by a running run.",
-            ) from e
+            state = "a finished run (context.require_new)" if e.finished else "a running run"
+            raise HTTPException(status_code=409, detail=f"Run id '{e.job_id}' is already in use by {state}.") from e
 
-    def _request_context(req_data: dict) -> RunContext | None:
-        """The request's ``context`` (or ``run_context``) as the run's context.
+    def _request_context(req_data: dict) -> tuple[RunContext | None, bool]:
+        """The request's ``context`` (or ``run_context``) as the run's context, and ``require_new``.
 
         ``tool_policy`` narrows the tools every agent in the run offers its model, as for a chat
         session's wake: ``"read_only"``, a list of tool names, or ``null`` (all tools).
+        ``require_new: true`` refuses (409) an ``id`` this server still knows, finished runs included.
         """
         raw = req_data.pop("context", None)
         if raw is None:
             raw = req_data.pop("run_context", None)
         if raw is None:
-            return None
-        policy = None
-        if isinstance(raw, dict) and "tool_policy" in raw:
+            return None, False
+        policy, require_new = None, False
+        if isinstance(raw, dict) and ("tool_policy" in raw or "require_new" in raw):
             raw = dict(raw)
-            policy = _tool_policy(raw.pop("tool_policy"))
+            if "tool_policy" in raw:
+                policy = _tool_policy(raw.pop("tool_policy"))
+            if "require_new" in raw:
+                require_new = raw.pop("require_new")
+                if not isinstance(require_new, bool):
+                    raise HTTPException(status_code=400, detail="'context.require_new' must be a boolean.")
         run_context = RunContext.model_validate(raw)
         run_context.__dict__["_tool_policy"] = policy
-        return run_context
+        return run_context, require_new
 
     @app.post("/run")
     async def run(req: Request) -> Response:
         req_data = await req.json()
-        run_context = _request_context(req_data)
+        run_context, require_new = _request_context(req_data)
         run_id = None
         if run_context is not None:
             set_run_context(run_context)
@@ -260,7 +269,7 @@ def create_app() -> FastAPI:
 
         # Nothing can reconnect to a `/run`, so its events are dropped as they
         # are consumed instead of being kept for the retention window.
-        _, job = _create_job(run_id, req_data, replayable=False)
+        _, job = _create_job(run_id, req_data, replayable=False, require_new=require_new)
 
         output_event = None
         last_seen = 0
@@ -289,13 +298,13 @@ def create_app() -> FastAPI:
     @app.post("/stream")
     async def stream(req: Request) -> Response:
         req_data = await req.json()
-        run_context = _request_context(req_data)
+        run_context, require_new = _request_context(req_data)
         run_id = None
         if run_context is not None:
             set_run_context(run_context)
             run_id = run_context.id
 
-        job_id, job = _create_job(run_id, req_data)
+        job_id, job = _create_job(run_id, req_data, require_new=require_new)
 
         async def event_streamer() -> AsyncGenerator[str, None]:
             # `id:` carries the seq so a client reading the stream always knows

@@ -2053,6 +2053,10 @@ class Runnable(ABC, BaseModel):
                         tracing_provider=self.tracing_provider,
                         platform_config=_inherited_platform_config,
                     )
+                    if _entry_call_id is not None:
+                        # Started by a call that outlived its run (a background tool): its tools are still
+                        # that run's, so a read-only tool cannot run an agent with write tools.
+                        run_context.__dict__["_tool_policy"] = _entry_run_context._tool_policy
                 else:
                     run_context = RunContext(
                         parent_id=explicit_parent_id,
@@ -2063,6 +2067,8 @@ class Runnable(ABC, BaseModel):
                         # Started by a running call's code (an Agent inside a tool or step
                         # body): link the two runs both ways so a trace viewer can follow it.
                         run_context._invoked_by = {"run_id": _entry_run_context.id, "call_id": _entry_call_id}
+                        # Its tools are the caller's run's: a read-only tool cannot run an agent with write tools.
+                        run_context.__dict__["_tool_policy"] = _entry_run_context._tool_policy
                         caller_span = _entry_run_context._trace.get(_entry_call_id)
                         if caller_span is not None:
                             caller_span.metadata.setdefault("invoked_runs", []).append(run_context.id)
