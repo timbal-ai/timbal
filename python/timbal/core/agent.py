@@ -123,8 +123,7 @@ _READ_ONLY_BUILTINS = frozenset(
 )
 
 DEFAULT_MAX_ITER_STOP_MESSAGE = (
-    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final "
-    "answer was produced.]"
+    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final answer was produced.]"
 )
 """Assistant reply returned without an LLM call (``on_max_iter="stop"``)."""
 
@@ -370,7 +369,8 @@ class Agent(Runnable):
     messages sent with ``mode="steer"`` (``ChatSession.send``). A user message joins as a user
     message (input guardrails screen it, and it restores the ``max_iter`` budget); an event as a
     runtime notice. The turn does not end while one is waiting: it calls the model once more.
-    ``None`` (default): on for runs a ``ChatSession`` starts, off otherwise. Root agents only."""
+    ``None`` (default): on for runs a ``ChatSession`` starts, off otherwise. Never for a turn its
+    channel keeps closed (a ``ChatSession`` wake), even when ``True``. Root agents only."""
     stream_idle_timeout: float | None = 300.0
     """Seconds a model stream may send nothing before the call is given up
     (:class:`timbal.errors.ModelStreamStalled`). Before the first chunk the attempt is
@@ -1153,9 +1153,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """Whether this turn takes ``lane="next"`` events between steps (see ``steering``)."""
         if current_span.parent_call_id is not None:
             return False
-        if self.steering is not None:
-            return self.steering
-        return run_context._steering
+        if self.steering is None:
+            return run_context._steering is True
+        # A channel's False (a wake: its tool policy and silence are not a user's) beats the agent's True.
+        return self.steering and run_context._steering is not False
 
     def _take_steering(self, run_context: Any, current_span: Any) -> list[Any]:
         """The messages posted for the running turn (``lane="next"``), settled as delivered to it.
@@ -1942,7 +1943,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             else:
                 content = event.output
             status_code = event.status.code
-            denied = status_code == "blocked" or (status_code == "cancelled" and event.status.reason == "approval_denied")
+            denied = status_code == "blocked" or (
+                status_code == "cancelled" and event.status.reason == "approval_denied"
+            )
             consecutive_denials = consecutive_denials + 1 if denied else 0
             # Pin the result when the originating tool opted in (e.g. read_skill), so memory
             # compaction never strips this durable context. The tool name is the final path
@@ -2053,7 +2056,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             await _append_memory(
                                 Message(
                                     role="user",
-                                    content=[TextContent(text=DEFAULT_STEER_BLOCKED_NOTICE.format(rail=outcome.rail.name))],
+                                    content=[
+                                        TextContent(text=DEFAULT_STEER_BLOCKED_NOTICE.format(rail=outcome.rail.name))
+                                    ],
                                     metadata={"source": "runtime", "kind": "steer_blocked"},
                                 )
                             )
@@ -2349,11 +2354,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             await _append_memory(
                                 Message(
                                     role="user",
-                                    content=[TextContent(text=(
-                                        "Your previous response ended before the tool call was issued "
-                                        "(the call was emitted as text, without arguments, and nothing ran). "
-                                        "Issue the tool call now as a proper function call."
-                                    ))],
+                                    content=[
+                                        TextContent(
+                                            text=(
+                                                "Your previous response ended before the tool call was issued "
+                                                "(the call was emitted as text, without arguments, and nothing ran). "
+                                                "Issue the tool call now as a proper function call."
+                                            )
+                                        )
+                                    ],
                                     metadata={"source": "runtime", "kind": "leaked_tool_call_retry"},
                                 )
                             )

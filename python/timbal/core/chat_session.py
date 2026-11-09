@@ -176,11 +176,11 @@ class ChatSession:
         self.busy_mode: SendMode = busy_mode
         self.collect_window = collect_window
         self._turn_failures = 0
+        self._attempted: set[Any] = set()
         self.allow_silence = allow_silence
         self.log = BackgroundEventLog(max_events=max_log_events, max_bytes=max_log_bytes)
         self.closed = False
-        self.parked = False
-        """The last turn ended waiting on an approval or ``ask_user``: :meth:`resume` answers it."""
+        self._parked = False
         self.turns = 0
         self.last_status: dict[str, Any] | None = None
         self.last_activity = time.monotonic()
@@ -303,6 +303,15 @@ class ChatSession:
             return True
         return False
 
+    @property
+    def parked(self) -> bool:
+        """The last turn ended waiting on an approval or ``ask_user``: :meth:`resume` answers it.
+
+        False again once another client's run of the session answers it or goes past it (the head moved).
+        """
+        context = self._last_context
+        return self._parked and context is not None and self._scheduler.head == context.id
+
     def resume(self, values: dict[str, Any]) -> None:
         """Answer the parked turn: ``{approval_id: ...}`` / ``{interaction_id: value}``, as for ``resume=``."""
         if self.closed:
@@ -393,10 +402,12 @@ class ChatSession:
             self._work.clear()
             if self._turn_failures >= _MAX_TURN_FAILURES:
                 # The same work failed before it started, time after time (a broken model setup, a store
-                # that is down): try again when new work arrives, not in a loop.
-                await self._work.wait()
+                # that is down): try again when new work arrives, not in a loop. The failed attempt handing
+                # its work back sets _work too, so what counts is work it did not have.
+                if self._resume is None and self._pending_work() <= self._attempted:
+                    await self._work.wait()
+                    continue
                 self._turn_failures = _MAX_TURN_FAILURES - 1
-                continue
             if self._turn_failures:
                 await asyncio.sleep(_TURN_RETRY_DELAY_S * 2 ** (self._turn_failures - 1))
             if self._resume is not None:
@@ -404,8 +415,13 @@ class ChatSession:
                 scheduler.turn_started()
                 await self._run_turn(resume=values)
                 continue
-            if self.parked:
-                await self._work.wait()
+            if self._parked:
+                if not self.parked:
+                    # Another client's run answered the parked turn or went past it: go on from that run.
+                    self._parked = False
+                    self._record("unparked", run_id=self._last_context.id, head=scheduler.head)
+                    continue
+                await self._until_scheduler_or_work()
                 continue
             if scheduler.head_parked:
                 # Another client's run of this session waits for its caller (an approval, a question): a
@@ -426,6 +442,16 @@ class ChatSession:
                 continue
             scheduler.turn_started()
             await self._run_turn(followup=followup)
+
+    def _pending_work(self, followup: Followup | None = None, wake: _Wake | None = None) -> set[Any]:
+        """Ids of the work waiting for a turn, plus what ``followup`` and ``wake`` took of it."""
+        store = self._store
+        events = store.pending_events() + (followup.events if followup is not None else [])
+        completions = store.pending_completions() + (followup.completions if followup is not None else [])
+        work: set[Any] = {event.id for event in events}
+        work.update(("task", completion.get("task_id")) for completion in completions)
+        work.update(("wake", item.id) for item in (self._wakes if wake is None else [*self._wakes, wake]))
+        return work
 
     async def _until_scheduler_or_work(self) -> None:
         loop = asyncio.get_running_loop()
@@ -530,6 +556,7 @@ class ChatSession:
             adopt_background_store(context, self._store)
             scheduler.mark_own(context)
             self._last_prompt, self._last_options = kwargs["prompt"], options
+            self._attempted = self._pending_work(followup, wake)
             turn = asyncio.get_running_loop().create_task(self._pump(context, kwargs, followup, trigger))
             self._turn, self._turn_context = turn, context
             try:
@@ -564,7 +591,7 @@ class ChatSession:
             scheduler.unmark(self._last_context)
         self._last_context = context
         status = output.status
-        self.parked = is_parked(status)
+        self._parked = is_parked(status)
         self.last_status = {"code": status.code, "reason": status.reason, "message": status.message}
         self.last_activity = time.monotonic()
         self._record(

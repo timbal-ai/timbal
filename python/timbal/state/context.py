@@ -218,8 +218,9 @@ class RunContext(BaseModel):
     #   _foreign_turn_of: SessionScheduler | None — the scheduler that admitted this
     #       root run into a session it owns, told when the run ends (strong until
     #       then: a release it defers completes there)
-    #   _steering: bool — the channel that started this run asks its root agent to
-    #       take ``lane="next"`` session events between steps (``Agent.steering=None``)
+    #   _steering: bool | None — the channel that started this run asks its root agent to
+    #       take ``lane="next"`` session events between steps (``Agent.steering=None``),
+    #       or, False, forbids it for this turn whatever the agent says (a wake)
     #   _tool_policy: "read_only" | Collection[str] | Callable | None — narrows the
     #       tools every agent in this run offers its model (``Agent._tool_allowed``)
     #   _silence_token: str | None — a root agent whose final answer is exactly this
@@ -338,7 +339,7 @@ class RunContext(BaseModel):
             _trace=Trace(),
             _continuation_owner=None,
             _foreign_turn_of=None,
-            _steering=False,
+            _steering=None,
             _tool_policy=None,
             _silence_token=None,
         )
