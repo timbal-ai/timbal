@@ -1,0 +1,43 @@
+name: Perf gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "python/timbal/**"
+      - "benchmarks/instructions/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/perf.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  instructions:
+    name: Instructions per run vs base
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      # Counts bytecode instructions per run (not wall time), so the result does not depend on the runner's
+      # load: both revisions run under this interpreter with these dependencies, only PYTHONPATH differs.
+      - name: Compare against the base branch
+        run: uv run python benchmarks/instructions/gate.py --base origin/${{ github.base_ref }}
