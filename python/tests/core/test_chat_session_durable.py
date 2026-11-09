@@ -239,7 +239,7 @@ class TestRootRunId:
         session = ChatSession(make_agent(provider, Gate(released=True)), session_id="conv-7", session_store=store)
         root = await one_turn(session, "one")
         await session.close(keep=True)
-        restored = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, "conv-7")
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, "conv-7")
         assert restored.root_run_id == root
         await one_turn(restored, "two")
         assert restored._last_context._session_id == root
@@ -248,7 +248,7 @@ class TestRootRunId:
         snapshot = await store.load("conv-7")
         snapshot.root_run_id = None  # written before snapshots recorded the root
         await store.save(snapshot, expect_version=snapshot.version)
-        older = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, "conv-7")
+        older = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, "conv-7")
         assert older.root_run_id is None
         await one_turn(older, "three")
         assert older._last_context._session_id is None
@@ -266,7 +266,7 @@ class TestEdges:
         await crash(session)
         provider.crashed = False
 
-        restored = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, session.id)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
         started = await records(restored, "turn_started", 2, after=after_restore(restored))
         await records(restored, "turn_finished", 2, after=after_restore(restored))
         assert [s["trigger"]["kind"] for s in started] == ["recovery", "user_message"]
@@ -282,7 +282,7 @@ class TestEdges:
         await store.save(snapshot, expect_version=snapshot.version)
 
         charge = Charge(released=True)
-        restored = await ChatSession.restore(gated_agent(provider, charge), store, session.id)
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
         (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
         assert finished["status"]["code"] == "success" and not restored.parked
         assert charge.gate.calls == 1
@@ -298,7 +298,7 @@ class TestEdges:
         provider.crashed = False
 
         again = Charge(released=True)
-        restored = await ChatSession.restore(gated_agent(provider, again), store, session.id)
+        restored = await ChatSession.from_store(gated_agent(provider, again), store, session.id)
         started = await records(restored, "turn_started", 2, after=after_restore(restored))
         await records(restored, "turn_finished", 2, after=after_restore(restored))
         # The stored answers go again, but the approval stays claimed by the dead run: no second charge.
@@ -325,7 +325,7 @@ class TestEdges:
         provider.crashed = False
 
         again = Charge(released=True)
-        restored = await ChatSession.restore(gated_agent(provider, again), store, session.id)
+        restored = await ChatSession.from_store(gated_agent(provider, again), store, session.id)
         await asyncio.sleep(0.1)
         assert restored.parked and restored._resume is None and again.gate.calls == 0
         assert restored.state()["pending_approvals"][0]["approval_id"] == approval.approval_id
@@ -359,13 +359,13 @@ class TestEdges:
         await crash(session)
         provider.crashed = False
 
-        second = await ChatSession.restore(agent(Gate(), checking), store, session.id)
+        second = await ChatSession.from_store(agent(Gate(), checking), store, session.id)
         await asyncio.wait_for(checking.entered.wait(), 3)  # the recovery turn is checking: crash again
         recovery_run = second.run_id
         await crash(second)
         provider.crashed = False
 
-        third = await ChatSession.restore(agent(Gate(), Gate(released=True)), store, session.id)
+        third = await ChatSession.from_store(agent(Gate(), Gate(released=True)), store, session.id)
         (started,) = await records(third, "turn_started", 1, after=after_restore(third))
         await records(third, "turn_finished", 1, after=after_restore(third))
         assert started["trigger"]["dead_run_id"] == recovery_run
@@ -385,7 +385,7 @@ class TestEdges:
         await crash(session)
         provider.crashed = False
 
-        restored = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, session.id)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
         wakes = [(w.kind, w.key, w.tool_policy) for w in restored._wakes]
         assert wakes == [
             ("recovery", "recovery", "read_only"),
@@ -401,7 +401,7 @@ class TestEdges:
         session, _ = await parked(provider, store, charge)
         await session.close(keep=True)
 
-        restored = await ChatSession.restore(gated_agent(provider, charge), store, session.id)
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
         restored.send("never mind", mode="interrupt")
         finished = await records(restored, "turn_finished", 2, after=after_restore(restored))
         assert finished[0]["status"]["code"] == "cancelled"
@@ -560,7 +560,7 @@ class TestRestore:
         old_cursor = session.log.cursor_end
         await session.close(keep=True)
 
-        restored = await ChatSession.restore(make_agent(provider, Gate(), charged), store, session.id)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(), charged), store, session.id)
         state = restored.state()
         assert state["parked"] and [p["event_id"] for p in state["pending"]] == [waiting.id]
         assert state["pending_approvals"][0]["approval_id"] == approval.approval_id
@@ -582,7 +582,7 @@ class TestRestore:
         provider.crashed = False
 
         again = Gate(released=True)
-        restored = await ChatSession.restore(make_agent(provider, again), store, session.id)
+        restored = await ChatSession.from_store(make_agent(provider, again), store, session.id)
         (started,) = await records(restored, "turn_started", 1, after=restored.log.forgotten_through)
         (finished,) = await records(restored, "turn_finished", 1, after=restored.log.forgotten_through)
         assert started["trigger"] == {"kind": "recovery", "dead_run_id": dead_run, "cut": "crash"}
@@ -613,7 +613,7 @@ class TestRestore:
         await crash(session)
         provider.crashed = False
 
-        restored = await ChatSession.restore(agent(), store, session.id)
+        restored = await ChatSession.from_store(agent(), store, session.id)
         notice = restored._wakes[0].text
         assert "Completed before the restart: lookup({}) → 2 unread." in notice
         assert "Started but not confirmed (each may or may not have run): work({})." in notice
@@ -629,7 +629,7 @@ class TestRestore:
         await crash(session)
         provider.crashed = False
 
-        restored = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, session.id)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
         assert [p["event_id"] for p in restored.state()["pending"]] == [sent.id]
         (finished,) = await records(restored, "turn_finished", 1, after=restored.log.forgotten_through)
         assert finished["status"]["code"] == "success"
@@ -644,7 +644,7 @@ class TestRestore:
         await asyncio.wait_for(gate.entered.wait(), 3)
         await session.close(keep=True)
 
-        restored = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, session.id)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
         (started,) = await records(restored, "turn_started", 1, after=restored.log.forgotten_through)
         assert started["trigger"]["kind"] == "recovery" and started["trigger"]["cut"] == "shutdown"
         await records(restored, "turn_finished", 1, after=restored.log.forgotten_through)
@@ -660,7 +660,7 @@ class TestRestore:
         await crash(session)
         provider.crashed = False
 
-        restored = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, session.id)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
         await asyncio.sleep(0.1)
         assert restored.turns == 1 and not restored.busy  # no turn of its own
         notices = [e for e in restored.store.pending_events() if e.key == "recovery"]
@@ -679,7 +679,7 @@ class TestRestore:
         session._lost = True
         await session.close()
 
-        restored = await ChatSession.restore(make_agent(provider, Gate()), store, session.id)
+        restored = await ChatSession.from_store(make_agent(provider, Gate()), store, session.id)
         await asyncio.sleep(0.05)
         assert restored.head == session.head and not restored.busy and restored.last_status["code"] == "success"
         await restored.close()
@@ -693,21 +693,21 @@ class TestRestore:
         await store.release_lease(session.id, PROCESS_OWNER)
         await store.acquire_lease(session.id, "another-process")
         with pytest.raises(SessionLeased):
-            await ChatSession.restore(make_agent(provider, Gate()), store, session.id)
+            await ChatSession.from_store(make_agent(provider, Gate()), store, session.id)
         session._lost = True
         await session.close()
 
     async def test_unknown_and_foreign_sessions(self, db):
         provider, store = db
         with pytest.raises(LookupError):
-            await ChatSession.restore(make_agent(provider, Gate()), store, "nope")
+            await ChatSession.from_store(make_agent(provider, Gate()), store, "nope")
         session = ChatSession(make_agent(provider, Gate()), session_store=store)
         session.send("hi")
         await records(session, "turn_finished", 1)
         await session.close(keep=True)
         other = Agent(name="other", model=TestModel(responses=["x"]), tracing_provider=provider)
         with pytest.raises(ValueError, match="belongs to agent"):
-            await ChatSession.restore(other, store, session.id)
+            await ChatSession.from_store(other, store, session.id)
 
     async def test_an_old_cursor_gets_a_gap_then_the_new_events(self, db):
         provider, store = db
@@ -716,7 +716,7 @@ class TestRestore:
         await records(session, "turn_finished", 1)
         old = session.log.cursor_end
         await session.close(keep=True)
-        restored = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, session.id)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
         events, _, gapped = restored.log.read(old)
         assert gapped and events == []
         restored.send("again")

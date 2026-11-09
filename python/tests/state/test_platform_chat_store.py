@@ -338,7 +338,7 @@ class TestInbox:
             store._inbox[session.id] = [{"id": item, "kind": "message", "body": {"text": "once"}, "posted_at": 0.0}]
         else:
             pytest.skip("re-queues the item through the in-memory store's internals; the others via inbox_seen below")
-        restored = await ChatSession.restore(make_agent(), store, session.id)
+        restored = await ChatSession.from_store(make_agent(), store, session.id)
         try:
             await asyncio.sleep(0.3)
             assert item in restored._inbox_seen
