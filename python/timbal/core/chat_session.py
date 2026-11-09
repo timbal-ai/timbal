@@ -202,6 +202,8 @@ class ChatSession:
         self._turn: asyncio.Task | None = None
         self._turn_context: RunContext | None = None
         self._last_context: RunContext | None = None
+        self._restore_from = parent_id
+        self._restoring: asyncio.Task | None = None
 
     # -- Public API -------------------------------------------------------------
 
@@ -370,7 +372,30 @@ class ChatSession:
         self.log.close()
 
     async def __aenter__(self) -> "ChatSession":
+        await self.restore()
         return self
+
+    async def restore(self) -> None:
+        """Pick up the state of the run the session continues (``parent_id``): one parked on an approval or
+        ``ask_user`` leaves the session parked, so messages wait and :meth:`resume` answers it (a turn chained
+        onto it would resume it and drop its prompt). Once; ``async with`` and the first turn call it."""
+        if self._restoring is None:
+            self._restoring = asyncio.get_running_loop().create_task(self._restore_parked())
+        await asyncio.shield(self._restoring)
+
+    async def _restore_parked(self) -> None:
+        run_id, self._restore_from = self._restore_from, None
+        if run_id is None or self._last_context is not None:
+            return
+        provider = self._agent.tracing_provider
+        trace = await RunContext(parent_id=run_id, tracing_provider=provider)._get_parent_trace()
+        root = next((span for span in trace.values() if span.parent_call_id is None), None) if trace else None
+        if root is None or not is_parked(root.status) or self._last_context is not None:
+            return
+        context = RunContext(id=run_id, tracing_provider=provider)
+        context.__dict__["_trace"] = trace
+        self._last_context, self._parked = context, True
+        self._last_prompt = (root.input or {}).get("prompt") or ""
 
     async def __aexit__(self, *_exc: Any) -> None:
         await self.close()
@@ -397,6 +422,7 @@ class ChatSession:
             raise
 
     async def _serve_turns(self) -> None:
+        await self.restore()
         scheduler = self._scheduler
         while not self.closed:
             self._work.clear()

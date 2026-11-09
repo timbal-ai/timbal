@@ -838,6 +838,41 @@ class TestRobustness:
             memory = await stored_memory(root_outputs(session)[-1])
             assert [m.collect_text() for m in memory if m.role == "user"] == ["pay", "next"]
 
+    @pytest.mark.parametrize("enter", [True, False])
+    async def test_a_session_continuing_a_parked_run_starts_parked(self, enter):
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "tool":
+                return "paid"
+            return tool_call("charge") if last_user_text(messages) == "pay" else f"echo: {last_user_text(messages)}"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: "charged", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        initial = await agent(prompt="pay").collect()
+        assert initial.status.reason == "approval_required"
+        session = ChatSession(agent, parent_id=initial.run_id)
+        try:
+            if enter:
+                await session.__aenter__()
+                assert session.parked
+                assert session.state()["pending_approvals"]
+            waiting = session.send("new question")
+            await asyncio.sleep(0.2)
+            assert waiting.state == "pending" and session.turns == 0 and session.parked
+            (approval,) = session.state()["pending_approvals"]
+            session.resume({approval["approval_id"]: True})
+            (finished,) = await records(session, "turn_finished", 1)  # the resumed turn takes it (steer)
+            assert finished["status"]["code"] == "success"
+            assert root_outputs(session)[-1].output.collect_text() == "echo: new question"
+            memory = await stored_memory(root_outputs(session)[-1])
+            assert [m.collect_text() for m in memory if m.role == "user"] == ["pay", "new question"]
+        finally:
+            await session.close()
+
     async def test_interrupting_a_tool_runs_its_cleanup_and_the_next_turn_has_a_result_for_it(self):
         cleaned = asyncio.Event()
 
