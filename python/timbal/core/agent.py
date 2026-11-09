@@ -2102,9 +2102,27 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if tool_policy is not None:
                 tools = [tool for tool in tools if self._tool_allowed(tool, tool_policy)]
                 commands = {key: tool for key, tool in commands.items() if tool in tools}
-                if callable(tool_policy):
-                    self._record_allowed_tools(tools)
+                self._record_allowed_tools(tools, tool_policy)
         return tools, commands
+
+    @staticmethod
+    def _record_allowed_tools(tools: list[Any], policy: Any) -> None:
+        """Note on this agent's span the run's tool policy and what it let through at its latest tool resolution
+        (``metadata.tool_policy`` / ``tool_policy_allowed``): proof after the fact that it was enforced, and how a
+        session continuing a parked run restores a callable policy, which is not stored with the run."""
+        run_context = get_run_context()
+        if run_context is None:
+            return
+        try:
+            span = run_context.current_span()
+        except Exception:
+            return
+        if policy == READ_ONLY_POLICY:
+            span.metadata["tool_policy"] = READ_ONLY_POLICY
+        else:
+            span.metadata["tool_policy"] = "custom" if callable(policy) else sorted(policy)
+        # The latest decision only: a callable may take a permission back between steps.
+        span.metadata["tool_policy_allowed"] = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
 
     async def _plan_tool_search(
         self, tools: list[Tool], model: Any
@@ -2370,20 +2388,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         current_span.metadata["delivery"] = {"mode": "tool", "messages": len(sent)}
         reply = Message(role="assistant", content=[TextContent(text="\n\n".join(sent))], stop_reason="end_turn")
         return self._synthetic_event("delivery", RunStatus(code="success", reason="end_turn"), output=reply)
-
-    @staticmethod
-    def _record_allowed_tools(tools: list[Any]) -> None:
-        """Note on this agent's span what a callable tool policy let through at its latest tool resolution: a
-        callable is not stored with the run, and a session continuing it parked restores the policy from it."""
-        run_context = get_run_context()
-        if run_context is None:
-            return
-        try:
-            span = run_context.current_span()
-        except Exception:
-            return
-        # The latest decision only: a callable may take a permission back between steps.
-        span.metadata["tool_policy_allowed"] = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
 
     @staticmethod
     def _tool_allowed(tool: Any, policy: Any) -> bool:

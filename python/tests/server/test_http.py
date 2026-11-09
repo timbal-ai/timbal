@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -531,6 +532,7 @@ class TestServerLifecycle:
                 del os.environ["TIMBAL_ENABLE_NGROK"]
 
 
+
 class TestContextToolPolicy:
     """``context.tool_policy`` on ``/run`` and ``/stream``: the tools the run's agents offer their models."""
 
@@ -543,7 +545,8 @@ class TestContextToolPolicy:
         app = create_app()
         app.state.runnable = import_spec.load()
         app.state.job_store = JobStore()
-        writes().clear()
+        fixture().WRITES.clear()
+        fixture().DONE.clear()
         return app
 
     @pytest.mark.parametrize(
@@ -554,24 +557,65 @@ class TestContextToolPolicy:
             ({"tool_policy": "read_only"}, []),
             ({"tool_policy": ["peek"]}, []),
             ({"tool_policy": ["write"]}, ["write"]),
+            ({"tool_policy": []}, []),  # no tools at all: think and answer only
         ],
     )
     def test_run_applies_the_policy(self, app, context, ran):
         response = TestClient(app).post("/run", json={"prompt": "go", "context": context})
         assert response.status_code == 200, response.text
         assert response.json()["status"]["code"] == "success"
-        assert writes() == ran
+        assert fixture().WRITES == ran
 
     def test_stream_applies_the_policy(self, app):
         response = TestClient(app).post("/stream", json={"prompt": "go", "context": {"tool_policy": "read_only"}})
         assert response.status_code == 200
-        assert writes() == []
+        assert fixture().WRITES == []
+
+    @pytest.mark.parametrize(("context", "ran"), [({}, ["write"]), ({"tool_policy": "read_only"}, [])])
+    def test_an_agent_started_inside_an_allowed_tool_keeps_the_policy(self, app, context, ran):
+        response = TestClient(app).post("/run", json={"prompt": "deep", "context": context})
+        assert response.status_code == 200, response.text
+        assert fixture().DONE == ["peek_deep"]
+        assert fixture().WRITES == ran
+
+    @pytest.mark.parametrize(("context", "ran"), [({}, ["write"]), ({"tool_policy": "read_only"}, [])])
+    def test_a_background_task_keeps_the_policy(self, app, context, ran):
+        with TestClient(app) as client:
+            response = client.post("/run", json={"prompt": "spawn", "context": context})
+            assert response.status_code == 200, response.text
+            deadline = time.monotonic() + 5
+            while "spawn" not in fixture().DONE and time.monotonic() < deadline:
+                time.sleep(0.02)
+        assert fixture().DONE == ["spawn"]
+        assert fixture().WRITES == ran
+
+    @pytest.mark.parametrize(("policy", "recorded"), [("read_only", "read_only"), (["peek"], ["peek"])])
+    def test_the_enforced_policy_is_recorded_on_the_agent_span(self, app, policy, recorded):
+        import asyncio
+
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        body = TestClient(app).post("/run", json={"prompt": "peek", "context": {"tool_policy": policy}}).json()
+        trace = asyncio.run(RunContext(tracing_provider=InMemoryTracingProvider)._get_parent_trace(body["run_id"]))
+        root = next(span for span in trace.values() if span.parent_call_id is None)
+        assert root.metadata["tool_policy"] == recorded
+        allowed = set(root.metadata["tool_policy_allowed"])
+        assert "policy_agent.peek" in allowed and "policy_agent.write" not in allowed
 
     def test_healthcheck_advertises_the_capability(self, app):
         response = TestClient(app).get("/healthcheck")
         assert response.status_code == 204
-        assert "tool_policy" in response.headers["x-timbal-capabilities"].split(",")
+        assert "context.tool_policy" in response.headers["x-timbal-capabilities"].split(",")
         assert response.headers["x-timbal-version"] == __version__
+
+    def test_meta_lists_the_capabilities(self, app):
+        response = TestClient(app).get("/meta")
+        assert response.status_code == 200
+        assert response.json() == {
+            "version": __version__,
+            "capabilities": ["context.tool_policy", "context.require_new", "context.trigger"],
+        }
 
     @pytest.mark.parametrize(
         ("context", "header"),
@@ -594,10 +638,42 @@ class TestContextToolPolicy:
         response = TestClient(app).post(route, json={"prompt": "go", "context": {"tool_policy": policy}})
         assert response.status_code == 400
         assert "tool_policy" in response.json()["detail"]
-        assert writes() == []
+        assert fixture().WRITES == []
 
 
-def writes() -> list[str]:
-    """``WRITES`` of the fixture module ``ImportSpec`` loaded (under a name of its own)."""
-    module = next(m for name, m in list(sys.modules.items()) if name.endswith("policy_agent_fixture"))
-    return module.WRITES
+class TestRequireNew:
+    """``context.require_new``: a caller-chosen id is refused once this server knows it, finished or not."""
+
+    @pytest.fixture
+    def client(self, monkeypatch):
+        import_spec = ImportSpec(
+            path=Path(__file__).parent / "fixtures" / "policy_agent_fixture.py", target="policy_agent"
+        )
+        monkeypatch.setenv("TIMBAL_RUNNABLE", f"{import_spec.path}::{import_spec.target}")
+        app = create_app()
+        app.state.runnable = import_spec.load()
+        app.state.job_store = JobStore()
+        return TestClient(app)
+
+    @pytest.mark.parametrize("route", ["/run", "/stream"])
+    def test_a_finished_run_id_is_refused(self, client, route):
+        context = {"id": f"fire{route.replace('/', '-')}", "require_new": True, "tool_policy": "read_only"}
+        assert client.post(route, json={"prompt": "peek", "context": context}).status_code == 200
+        again = client.post(route, json={"prompt": "peek", "context": context})
+        assert again.status_code == 409
+        assert "finished" in again.json()["detail"]
+
+    def test_without_it_a_finished_id_runs_again_as_before(self, client):
+        context = {"id": "reused", "tool_policy": "read_only"}
+        assert client.post("/run", json={"prompt": "peek", "context": context}).status_code == 200
+        assert client.post("/run", json={"prompt": "peek", "context": context}).status_code == 200
+
+    def test_it_must_be_a_boolean(self, client):
+        response = client.post("/run", json={"prompt": "peek", "context": {"id": "x", "require_new": "yes"}})
+        assert response.status_code == 400
+        assert "require_new" in response.json()["detail"]
+
+
+def fixture():
+    """The fixture module ``ImportSpec`` loaded (under a name of its own)."""
+    return next(m for name, m in list(sys.modules.items()) if name.endswith("policy_agent_fixture"))
