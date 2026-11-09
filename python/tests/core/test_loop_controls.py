@@ -1,6 +1,7 @@
 """Loop controls: per-run tool policy, silent turns, the denial circuit breaker, the stream idle watchdog."""
 
 import asyncio
+import time
 
 import pytest
 from timbal import Agent, Tool
@@ -372,8 +373,14 @@ class TestIdleWatchdog:
         assert got == ["chunk0"] and record == ["start", "closed"]
 
     async def test_slow_but_steady_streams_pass(self):
-        factory, _ = scripted_stream([0.03, 0.03, 0.03, 0.03])
-        assert len(await collect(_retry_on_error(factory, 0, 0.0, "test", idle_timeout=0.05))) == 4
+        """The timeout is per gap between chunks, not for the whole stream: 5 gaps of 0.1 s pass a 0.4 s
+        timeout though the stream takes longer than it. 4x apart, so a coarse clock (15.6 ms ticks on
+        Windows before 3.13) or a loaded runner cannot turn a gap into a stall."""
+        factory, _ = scripted_stream([0.1] * 5)
+        started = time.monotonic()
+        chunks = await collect(_retry_on_error(factory, 0, 0.0, "test", idle_timeout=0.4))
+        assert len(chunks) == 5
+        assert time.monotonic() - started > 0.4
 
     async def test_no_timeout_waits(self):
         factory, _ = scripted_stream([0.1])
