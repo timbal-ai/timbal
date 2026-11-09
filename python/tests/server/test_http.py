@@ -671,6 +671,19 @@ class TestContextToolPolicy:
         assert response.status_code == 200
         assert response.headers.get("x-timbal-tool-policy") == header
 
+    @pytest.mark.parametrize(
+        ("method", "route", "body"),
+        [
+            ("GET", "/healthcheck", None),
+            ("POST", "/run", {"prompt": "go", "context": {"tool_policy": "read_only"}}),
+            ("POST", "/stream", {"prompt": "go", "context": {"tool_policy": "read_only"}}),
+        ],
+    )
+    def test_a_browser_on_another_origin_can_read_the_headers(self, app, method, route, body):
+        response = TestClient(app).request(method, route, json=body, headers={"Origin": "https://app.example"})
+        exposed = {name.strip().lower() for name in response.headers["access-control-expose-headers"].split(",")}
+        assert {"x-timbal-tool-policy", "x-timbal-version", "x-timbal-capabilities"} <= exposed
+
     @pytest.mark.parametrize("policy", ["everything", 3, [1, 2], {"names": ["peek"]}])
     @pytest.mark.parametrize("route", ["/run", "/stream"])
     def test_an_invalid_policy_is_a_400(self, app, route, policy):
