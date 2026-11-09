@@ -8,6 +8,7 @@ import httpx
 import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
+from timbal.errors import PlatformError
 from timbal.state.context import RunContext
 from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
 from timbal.state.tracing.providers.base import TracingProvider
@@ -79,21 +80,69 @@ class TestSqlite:
 
 
 class TestPlatform:
-    @pytest.mark.parametrize("status", [404, 500])
-    async def test_a_404_is_no_run_and_other_errors_raise(self, monkeypatch, status):
-        request = httpx.Request("GET", "https://platform.test/runs/x")
-        response = httpx.Response(status, request=request)
+    """Through the real ``get`` and ``_request``: only the transport is fake."""
 
-        async def failing_get(_cls, _run_context):
-            raise httpx.HTTPStatusError("error", request=request, response=response)
+    @pytest.fixture
+    def transport(self, monkeypatch):
+        import contextlib
 
-        monkeypatch.setattr(PlatformTracingProvider, "get", classmethod(failing_get))
-        context = lookup(InMemoryTracingProvider, "x")
-        if status == 404:
-            assert await PlatformTracingProvider.get_strict(context) is None
-        else:
-            with pytest.raises(httpx.HTTPStatusError):
-                await PlatformTracingProvider.get_strict(context)
+        import timbal.platform.utils as platform_utils
+
+        replies = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            reply = replies["reply"]
+            if isinstance(reply, Exception):
+                raise reply
+            status, body = reply
+            return httpx.Response(status, json=body, request=request)
+
+        @contextlib.asynccontextmanager
+        async def client(_timeout):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as fake:
+                yield fake
+
+        monkeypatch.setattr(platform_utils, "request_client", client)
+        return replies
+
+    @staticmethod
+    def context(parent_id: str):
+        from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+
+        config = PlatformConfig(
+            host="api.example.test",
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t2_test"),
+            subject=PlatformSubject(org_id="1", app_id="2"),
+        )
+        provider = PlatformTracingProvider.configured(platform_config=config)
+        context = RunContext(tracing_provider=provider)
+        object.__setattr__(context, "parent_id", parent_id)
+        context.platform_config = config
+        return provider, context
+
+    async def test_a_404_is_no_run(self, transport):
+        transport["reply"] = (404, {"detail": "not found"})
+        provider, context = self.context("missing-run")
+        assert await provider.get_strict(context) is None
+
+    async def test_a_stored_run_is_found(self, transport):
+        record = {"call_id": "c1", "parent_call_id": None, "path": "agent", "t0": 0}
+        transport["reply"] = (200, {"parent_id": None, "trace": [record]})
+        provider, context = self.context("stored-run")
+        assert await provider.get_strict(context) is not None
+
+    async def test_a_server_error_raises(self, transport):
+        transport["reply"] = (500, {"detail": "boom"})
+        provider, context = self.context("flaky-run")
+        with pytest.raises(PlatformError) as raised:
+            await provider.get_strict(context)
+        assert raised.value.status_code == 500
+
+    async def test_a_connection_error_raises(self, transport):
+        transport["reply"] = httpx.ConnectError("unreachable")
+        provider, context = self.context("unreachable-run")
+        with pytest.raises(Exception):  # noqa: B017 - whatever _request surfaces, it is not "no run"
+            await provider.get_strict(context)
 
 
 class TestCustomProviders:
