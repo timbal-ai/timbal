@@ -14,6 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Line length**: 120 chars (configured in `pyproject.toml`)
 
 ### Benchmarks
+- **Perf gate**: `uv run python benchmarks/instructions/gate.py --base origin/main` counts bytecode instructions per run (`sys.monitoring`, Python 3.12+) for agent, workflow and tool cases on both revisions and fails on any case over +1%. Counts repeat to ~0.01% and do not depend on machine load, unlike wall time (±5–8% here). CI runs it on every PR (`.github/workflows/perf.yml`). `count.py` alone prints this checkout's counts.
 - **LangGraph benchmarks**: `uv pip install -r benchmarks/langchain/requirements.txt`, then `uv run --no-sync python benchmarks/langchain/bench_agent.py` (or the other standalone `bench_*.py` scripts). JavaScript dependencies: `npm ci --prefix benchmarks/langgraph_js`.
 - **Quick mode**: pass `--quick`; full mode is the default. `bench_revision.py` emits repeated-comparison samples as JSON.
 - **Current agent API**: `bench_agent.py --agent-api current` benchmarks `langchain.agents.create_agent`; the default retains legacy `create_react_agent` for historical comparisons. Keep the same environment/harness and switch only `PYTHONPATH` when comparing Timbal revisions.

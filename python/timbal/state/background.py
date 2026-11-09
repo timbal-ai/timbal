@@ -162,10 +162,7 @@ class BackgroundHandoff:
         if call_id is not None:
             if call_id not in self._active:
                 names = ", ".join(sorted(self._active.values())) or "none"
-                raise RuntimeError(
-                    f"No active foreground runnable with call_id {call_id!r}. "
-                    f"Eligible: {names}."
-                )
+                raise RuntimeError(f"No active foreground runnable with call_id {call_id!r}. Eligible: {names}.")
             self.target_call_id = call_id
         else:
             if len(self._active) != 1:
@@ -1508,7 +1505,7 @@ def bind_background_store(run_context: Any) -> BackgroundTaskStore | None:
         if store is not None:
             # Keep the chain alive: the next turn parented on this run finds it.
             _STORES_BY_RUN_ID[run_context.id] = store
-    run_context._bg_store = store
+    run_context.__dict__["_bg_store"] = store
     return store
 
 
@@ -1522,16 +1519,18 @@ def apply_background_limits(
     task_retention_secs: float | object = _UNSET,
 ) -> None:
     """Stash session caps on the RunContext and update an existing store."""
+    # Plain attributes (see RunContext's NOTE), set once per agent turn: skip BaseModel.__setattr__.
+    caps = run_context.__dict__
     if max_concurrent is not _UNSET:
-        run_context._bg_max_concurrent = max_concurrent
+        caps["_bg_max_concurrent"] = max_concurrent
     if max_depth is not _UNSET:
-        run_context._bg_max_depth = max_depth
+        caps["_bg_max_depth"] = max_depth
     if max_log_events is not _UNSET:
-        run_context._bg_max_log_events = max_log_events
+        caps["_bg_max_log_events"] = max_log_events
     if max_log_bytes is not _UNSET:
-        run_context._bg_max_log_bytes = max_log_bytes
+        caps["_bg_max_log_bytes"] = max_log_bytes
     if task_retention_secs is not _UNSET:
-        run_context._bg_task_retention_secs = task_retention_secs
+        caps["_bg_task_retention_secs"] = task_retention_secs
     store = getattr(run_context, "_bg_store", None)
     if store is None:
         return
