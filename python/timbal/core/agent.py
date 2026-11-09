@@ -3,6 +3,7 @@ import contextvars
 import difflib
 import inspect
 import json
+import math
 import time
 import traceback
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
@@ -1982,6 +1983,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span._memory_dump.append(tool_result_dump)
 
         steering = self._steers(run_context, current_span)
+        # Fixed for the turn; checked after every tool batch.
+        denial_limit = self.max_consecutive_denials if self.max_consecutive_denials is not None else math.inf
         # Set by _steer: whether it added messages, and whether the user wrote one of them.
         steered = steered_user = False
 
@@ -2197,7 +2200,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if first_pending is not None:
                         raise PauseRequired(first_pending)
                     i += 1
-                    await _check_denials()
+                    if consecutive_denials >= denial_limit:
+                        await _check_denials()
                     if steering:
                         async for steer_event in _steer():
                             yield steer_event
@@ -2564,7 +2568,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if first_pending is not None:
                     raise PauseRequired(first_pending)
                 i += 1
-                await _check_denials()
+                if consecutive_denials >= denial_limit:
+                    await _check_denials()
                 if steering:
                     async for steer_event in _steer():
                         yield steer_event
