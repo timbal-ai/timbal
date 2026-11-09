@@ -54,6 +54,8 @@ _WAKE_HEADER = "Scheduled wake-up (the user did not write this):"
 # A turn that fails before it starts: retried after 0.5 s, then 1 s; past that, only when new work arrives.
 _MAX_TURN_FAILURES = 3
 _TURN_RETRY_DELAY_S = 0.5
+# Between attempts to learn whether the run a session continues is parked (its trace store is down).
+_RESTORE_RETRY_MAX_S = 30.0
 _READ_ONLY_NOTE = (
     "This turn can only read: tools that send, write, delete or buy are not available. If the task needs "
     "one, do not retry or look for a way around it; say what you would do and that it needs the user."
@@ -92,14 +94,19 @@ def _check_tool_policy(policy: Any) -> Any:
     return names
 
 
-def _offered_tools(trace: Any, root: Any) -> list[str]:
-    """The tool names the root agent's last model call in ``trace`` offered (live ``Tool``s or their dumps)."""
-    calls = [span for span in trace.values() if span.path == f"{root.path}.llm"]
-    if not calls:
-        return []
-    tools = (max(calls, key=lambda span: span.t0 or 0).input or {}).get("tools") or []
-    names = (tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", None) for tool in tools)
-    return [name for name in names if isinstance(name, str)]
+def _allowed_tool_paths(trace: Any) -> frozenset[str]:
+    """What a callable tool policy let through in ``trace``: each agent notes its own (``tool_policy_allowed``)."""
+    return frozenset(path for span in trace.values() for path in (span.metadata or {}).get("tool_policy_allowed") or ())
+
+
+@dataclass(frozen=True)
+class _ToolPaths:
+    """A tool policy restored from a trace: the tools with these paths (agent-scoped, unlike names)."""
+
+    paths: frozenset[str]
+
+    def __call__(self, tool: Any) -> bool:
+        return getattr(tool, "_path", None) in self.paths
 
 
 def _describe_policy(policy: Any) -> Any:
@@ -398,7 +405,7 @@ class ChatSession:
         """Pick up the state of the run the session continues (``parent_id``): one parked on an approval or
         ``ask_user`` leaves the session parked, so messages wait and :meth:`resume` answers it (a turn chained
         onto it would resume it and drop its prompt). Once; ``async with`` and the first turn call it."""
-        if self._restoring is None:
+        if self._restoring is None or (self._restoring.done() and self._restore_from is not None):
             self._restoring = asyncio.get_running_loop().create_task(self._restore_parked())
         await asyncio.shield(self._restoring)
 
@@ -406,7 +413,7 @@ class ChatSession:
         try:
             await self._load_parked()
         finally:
-            if self._interrupt_on_restore:
+            if self._interrupt_on_restore and self._restore_from is None:
                 # interrupt() came before the session knew whether it was parked.
                 self._interrupt_on_restore = False
                 self._interrupt_now()
@@ -416,7 +423,16 @@ class ChatSession:
         if run_id is None or self._last_context is not None:
             return
         provider = self._agent.tracing_provider
-        trace = await RunContext(parent_id=run_id, tracing_provider=provider)._get_parent_trace()
+        if provider is None:
+            return
+        try:
+            # Not _get_parent_trace: it reads a failed lookup as "no parent", and an unparked session would
+            # resume the parked run with the next message's turn and drop that message.
+            trace = await provider.get(RunContext(parent_id=run_id, tracing_provider=provider))
+        except Exception as error:
+            self._restore_from = run_id
+            self._record("restore_failed", run_id=run_id, error=str(error))
+            raise
         root = next((span for span in trace.values() if span.parent_call_id is None), None) if trace else None
         if root is None or not is_parked(root.status) or self._last_context is not None:
             return
@@ -426,18 +442,18 @@ class ChatSession:
         self._last_context, self._parked, self._last_prompt = context, True, prompt
         meta = prompt.get("metadata") if isinstance(prompt, dict) else getattr(prompt, "metadata", None)
         if meta and meta.get("kind") == WAKE_KIND:
-            self._last_options = self._wake_options(meta, trace, root)
+            self._last_options = self._wake_options(meta, trace)
 
-    def _wake_options(self, meta: dict[str, Any], trace: Any, root: Any) -> _TurnOptions:
+    def _wake_options(self, meta: dict[str, Any], trace: Any) -> _TurnOptions:
         """The options of a parked wake, from its prompt; a wake never resumes with more than it had.
 
-        A callable policy is not stored: the run's last model call shows what it let through, and those
-        names become the policy (none found: no tools). Wakes from before the policy was stored resume
-        read-only.
+        A callable policy is not stored: the agents of the run noted, by path, what it let through, and
+        that becomes the policy (an agent that never resolved its tools in the run gets none). Wakes from
+        before the policy was stored resume read-only.
         """
         policy = meta.get("tool_policy", "read_only")
         if policy == "custom":
-            policy = frozenset(_offered_tools(trace, root))
+            policy = _ToolPaths(_allowed_tool_paths(trace))
         elif isinstance(policy, list):
             policy = frozenset(policy)
         return _TurnOptions(tool_policy=policy, silence=self.allow_silence and bool(meta.get("silent")), steer=False)
@@ -467,7 +483,16 @@ class ChatSession:
             raise
 
     async def _serve_turns(self) -> None:
-        await self.restore()
+        delay = _TURN_RETRY_DELAY_S
+        while not self.closed:
+            # No message is admitted until the state of the run the session continues is known.
+            try:
+                await self.restore()
+                break
+            except Exception as error:
+                logger.warning("chat_session_restore_failed", session_id=self.id, error=str(error))
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, _RESTORE_RETRY_MAX_S)
         scheduler = self._scheduler
         while not self.closed:
             self._work.clear()

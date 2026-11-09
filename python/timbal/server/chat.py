@@ -149,7 +149,11 @@ async def create_session(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    await session.restore()
+    try:
+        await session.restore()
+    except Exception as e:
+        await session.close()
+        raise HTTPException(status_code=503, detail=f"Could not load the run the session continues: {e}") from e
     sessions[session.id] = session
     return _json(session.state(), status_code=201)
 

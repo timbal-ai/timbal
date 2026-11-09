@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 from timbal import Agent, Tool
-from timbal.core.chat_session import ChatSession, _TurnOptions
+from timbal.core.chat_session import ChatSession, _ToolPaths, _TurnOptions
 from timbal.core.session_scheduler import take_followup, user_batch
 from timbal.core.test_model import TestModel
 from timbal.guardrails import Verdict, guardrail
@@ -944,12 +944,119 @@ class TestRobustness:
             assert finished["parked"]
             parked_run = first.head
         async with ChatSession(build(), parent_id=parked_run) as session:
-            assert session._last_options.tool_policy == frozenset({"peek"})
+            assert session._last_options.tool_policy == _ToolPaths(frozenset({"agent.peek"}))
             (approval,) = session.state()["pending_approvals"]
             session.resume({approval["approval_id"]: True})
             (finished,) = await records(session, "turn_finished", 1)
             assert finished["status"]["code"] == "success"
         assert secrets_read == []
+
+    async def test_a_restored_callable_policy_keeps_each_agents_own_tools(self):
+        writes = []
+
+        def root_handler(messages):
+            results = sum(1 for m in messages if m.role == "tool")
+            if results == 0:
+                return tool_call("lookup")
+            if results == 1:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="call-child", name="child", input={"prompt": "go"})],
+                    stop_reason="tool_use",
+                )
+            return "NO_REPLY"
+
+        def child_handler(messages):
+            return "done" if messages[-1].role == "tool" else tool_call("lookup", call_id="call-private")
+
+        def build():
+            child = Agent(
+                name="child",
+                model=TestModel(handler=child_handler),
+                tools=[Tool(name="lookup", handler=lambda: writes.append("private lookup executed") or "private")],
+            )
+            return Agent(
+                name="agent",
+                model=TestModel(handler=root_handler),
+                tools=[
+                    Tool(name="lookup", handler=lambda: writes.append("root lookup") or "root", requires_approval=True),
+                    child,
+                ],
+                tracing_provider=InMemoryTracingProvider,
+            )
+
+        allowed = {"agent.lookup", "agent.child"}
+        async with ChatSession(build()) as first:
+            first.wake("Look it up.", tool_policy=lambda tool: tool._path in allowed)
+            (finished,) = await records(first, "turn_finished", 1)
+            assert finished["parked"]
+            parked_run = first.head
+        trace = await RunContext(tracing_provider=InMemoryTracingProvider)._get_parent_trace(parked_run)
+        # Stored on agent spans, which every provider returns (the platform's resume read skips LLM spans).
+        noted = {
+            p
+            for span in trace.values()
+            if span.metadata.get("type") != "LLM"
+            for p in span.metadata.get("tool_policy_allowed", ())
+        }
+        assert noted == allowed
+        async with ChatSession(build(), parent_id=parked_run) as session:
+            assert session._last_options.tool_policy == _ToolPaths(frozenset(allowed))
+            (approval,) = session.state()["pending_approvals"]
+            session.resume({approval["approval_id"]: True})
+            (finished,) = await records(session, "turn_finished", 1)
+            assert finished["status"]["code"] == "success"
+        assert writes == ["root lookup"]
+
+    @pytest.mark.parametrize("enter", [True, False])
+    async def test_a_failed_parent_lookup_leaves_the_session_unresolved(self, enter, monkeypatch):
+        import timbal.core.chat_session as chat_session_module
+
+        monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.01)
+        failures = {"left": 0}
+
+        class FlakyProvider(InMemoryTracingProvider):
+            @classmethod
+            async def get(cls, run_context):
+                if failures["left"]:
+                    failures["left"] -= 1
+                    raise ConnectionError("trace store down")
+                return await super().get(run_context)
+
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "tool":
+                return "paid"
+            return tool_call("charge") if last_user_text(messages) == "pay" else f"echo: {last_user_text(messages)}"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: "charged", requires_approval=True)],
+            tracing_provider=FlakyProvider,
+        )
+        initial = await agent(prompt="pay").collect()
+        failures["left"] = 1
+        session = ChatSession(agent, parent_id=initial.run_id)
+        try:
+            if enter:
+                with pytest.raises(ConnectionError):
+                    await session.__aenter__()
+                assert not session.parked
+                await session.restore()  # the next call tries again
+                assert session.parked
+            waiting = session.send("new question")
+            await asyncio.sleep(0.2)
+            assert waiting.state == "pending" and session.parked and session.turns == 0
+            (failed,) = await records(session, "restore_failed", 1)
+            assert failed["run_id"] == initial.run_id
+            (approval,) = session.state()["pending_approvals"]
+            session.resume({approval["approval_id"]: True})
+            await records(session, "turn_finished", 1)
+            memory = await stored_memory(root_outputs(session)[-1])
+            assert [m.collect_text() for m in memory if m.role == "user"] == ["pay", "new question"]
+        finally:
+            await session.close()
 
     async def test_an_interrupt_sent_before_restore_cancels_the_parked_run(self):
         def handler(messages):
