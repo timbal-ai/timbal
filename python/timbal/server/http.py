@@ -117,6 +117,9 @@ async def lifespan(
 CAPABILITIES = ("context.tool_policy", "context.require_new")
 """Request features this server enforces: ``GET /meta``, and ``X-Timbal-Capabilities`` on ``/healthcheck``."""
 
+EXPOSED_HEADERS = ("X-Timbal-Tool-Policy", "X-Timbal-Version", "X-Timbal-Capabilities")
+"""Response headers a browser client on another origin may read (CORS hides custom headers unless exposed)."""
+
 
 def _policy_headers(run_context: RunContext | None) -> dict[str, str] | None:
     """``X-Timbal-Tool-Policy`` on a run that has one: the confirmation that it is enforced."""
@@ -159,6 +162,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=list(EXPOSED_HEADERS),
     )
 
     from .chat import router as chat_router
