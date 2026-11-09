@@ -199,10 +199,14 @@ async def test_unscoped_requests_preserve_short_lived_clients(http):
 
 
 @pytest.mark.parametrize("runner", ["codegen", "server"])
-async def test_runners_reuse_connection_for_both_trace_writes(http, runner, capsys):
+async def test_runners_reuse_connection_for_both_trace_writes(http, runner, capsys, monkeypatch):
     from timbal import Agent
     from timbal.core.test_model import TestModel
+    from timbal.state.tracing import uploads
     from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+    # Two writes to share a connection: the mid-run save awaited (the platform's default buffers it into the end).
+    monkeypatch.setenv(uploads.DURABILITY_ENV, "sync")
 
     run_context = RunContext(platform_config=context().platform_config, tracing_provider=PlatformTracingProvider)
     agent = Agent(name="router", model=TestModel(responses=["ok"]), tracing_provider=PlatformTracingProvider)

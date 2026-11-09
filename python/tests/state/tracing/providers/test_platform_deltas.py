@@ -20,6 +20,7 @@ from timbal.errors import PlatformError
 from timbal.state import get_run_context, set_call_id, set_parent_call_id, set_run_context
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.context import RunContext
+from timbal.state.tracing import uploads
 from timbal.state.tracing.providers import platform as platform_module
 from timbal.state.tracing.providers.platform import DELTA_MEDIA_TYPE, PlatformTracingProvider
 from timbal.types.content import ToolUseContent
@@ -30,6 +31,12 @@ CONFIG = PlatformConfig(
     auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t2_test"),
     subject=PlatformSubject(org_id="1", app_id="2"),
 )
+
+
+@pytest.fixture(autouse=True)
+def awaited_saves(monkeypatch):
+    """These tests check what each save puts on the wire; the platform's default buffers saves mid-run."""
+    monkeypatch.setenv(uploads.DURABILITY_ENV, "sync")
 
 
 @pytest.fixture(autouse=True)

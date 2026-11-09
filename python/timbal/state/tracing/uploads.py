@@ -62,10 +62,19 @@ def _env_float(name: str, scale: float = 1.0) -> float | None:
         return None
 
 
-def durability(provider: type[TracingProvider]) -> str:
-    """``sync`` (the default, and any value it does not know), ``buffered`` or ``end``."""
-    mode = (getattr(provider, "durability", None) or os.environ.get(DURABILITY_ENV) or "sync").strip().lower()
+def _explicit_durability(provider: type[TracingProvider]) -> str | None:
+    return getattr(provider, "durability", None) or os.environ.get(DURABILITY_ENV) or None
+
+
+def _mode(raw: str) -> str:
+    mode = raw.strip().lower()
     return mode if mode in ("buffered", "end") else "sync"
+
+
+def durability(provider: type[TracingProvider]) -> str:
+    """``sync``, ``buffered`` or ``end`` (any value it does not know reads as ``sync``): the provider's
+    ``durability``, else ``TIMBAL_TRACE_DURABILITY``, else the provider's ``default_durability``."""
+    return _mode(_explicit_durability(provider) or getattr(provider, "default_durability", None) or "sync")
 
 
 def buffered(provider: type[TracingProvider]) -> bool:
@@ -73,8 +82,12 @@ def buffered(provider: type[TracingProvider]) -> bool:
 
 
 def metrics_on(provider: type[TracingProvider]) -> bool:
-    """Counters go into usage only when asked: they are new usage keys for every run."""
-    return durability(provider) != "sync" or os.environ.get(METRICS_ENV, "").strip().lower() in ("1", "true", "yes")
+    """Counters go into usage only when asked: they are new usage keys for every run, so a provider's
+    default mode does not turn them on."""
+    explicit = _explicit_durability(provider)
+    if explicit is not None and _mode(explicit) != "sync":
+        return True
+    return os.environ.get(METRICS_ENV, "").strip().lower() in ("1", "true", "yes")
 
 
 def _flush_interval(provider: type[TracingProvider]) -> float:
