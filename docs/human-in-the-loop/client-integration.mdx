@@ -13,6 +13,8 @@ This is the full contract for a frontend talking to the Timbal HTTP server (`pyt
 { "prompt": "set up my database" }
 ```
 
+The body may also carry a `context` object (a run id, a tool policy, `require_new`). See [Request context](/deployment/self-hosted#request-context).
+
 The response is an SSE stream (`text/event-stream`), one `data:` line per event. When the agent calls `ask_user`, the client receives an **`INTERACTION`** event:
 
 ```json

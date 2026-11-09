@@ -121,7 +121,7 @@ MCP tool results are converted so the LLM always receives something useful:
 
 ## Approval from Annotations
 
-MCP tools carry [`ToolAnnotations`](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations) such as `readOnlyHint` and `destructiveHint`. `approval=` turns them into a client-side gate that runs through Timbal's normal approval flow — a server cannot skip it:
+MCP tools carry [`ToolAnnotations`](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations) such as `readOnlyHint` and `destructiveHint`. `readOnlyHint: true` marks the tool [`read_only`](/agents/tools#read-only-tools), so a [`tool_policy="read_only"`](/deployment/self-hosted#request-context) run offers it. `approval=` turns the annotations into a client-side gate that runs through Timbal's normal approval flow — a server cannot skip it:
 
 ```python
 MCPServer(

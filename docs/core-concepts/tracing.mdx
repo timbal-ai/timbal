@@ -58,6 +58,8 @@ Every Run is composed of a collection of spans:
 - **Simple execution**: Running a single tool generates one span — the tool's input, output, timing, and metadata
 - **Complex execution**: Running an agent generates multiple spans as it decides which tools to use, calls LLMs for reasoning, executes tools, and processes results
 
+When a run sets a tool policy, each agent span records `metadata.tool_policy` (`"read_only"`, `"custom"`, or the sorted names) and `metadata.tool_policy_allowed` (the tool paths its latest resolution offered). See [Request context](/deployment/self-hosted#request-context).
+
 All spans within a run share the same `run_id` (via `RunContext.id`), creating a complete execution history that you can analyze, debug, or replay.
 
 ### The Run Context
