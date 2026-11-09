@@ -42,6 +42,7 @@ async def _llm_router(
     retry_delay: float = 1.0,
     fail_fast_rate_limit: bool = False,
     provider_params: dict[str, Any] | None = None,
+    stream_idle_timeout: float | None = None,
 ) -> Message:  # type: ignore[misc]  # Declared as Message for framework schema generation; runtime is an async generator of provider-specific chunks.
     """
     Internal LLM router function.
@@ -66,6 +67,7 @@ async def _llm_router(
             max_retries=max_retries,
             retry_delay=retry_delay,
             provider_params=provider_params,
+            stream_idle_timeout=stream_idle_timeout,
         ):
             yield chunk  # type: ignore[return-type]
         return
@@ -164,6 +166,11 @@ async def _llm_router(
         )
 
     async for res_chunk in _retry_on_error(
-        create_stream, max_retries, retry_delay, context, fail_fast_rate_limit=fail_fast_rate_limit,
+        create_stream,
+        max_retries,
+        retry_delay,
+        context,
+        fail_fast_rate_limit=fail_fast_rate_limit,
+        idle_timeout=stream_idle_timeout,
     ):
         yield res_chunk  # type: ignore[return-type]

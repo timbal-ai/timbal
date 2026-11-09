@@ -92,6 +92,9 @@ async def lifespan(
     try:
         yield
     finally:
+        from .chat import close_chat_sessions
+
+        await close_chat_sessions(app)
         # Buffered trace saves still pending are stored before the process goes.
         from ..state.tracing.uploads import flush_all
 
@@ -134,10 +137,12 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    from .chat import router as chat_router
     from .rtc import router as rtc_router
     from .telephony import router as telephony_router
     from .voice import router as voice_router
 
+    app.include_router(chat_router)
     app.include_router(voice_router)
     app.include_router(rtc_router)
     app.include_router(telephony_router)

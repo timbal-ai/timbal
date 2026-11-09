@@ -51,6 +51,15 @@ class Tool(Runnable):
         ),
     )
 
+    read_only: bool = Field(
+        default=False,
+        description=(
+            "Declares that the tool only reads: it sends, writes, deletes and buys nothing. "
+            "Turns run with tool_policy='read_only' (e.g. ChatSession.wake) offer only these. "
+            "MCP tools take it from the server's readOnlyHint."
+        ),
+    )
+
     result_limit: ToolResultLimit | int | None | Literal["inherit"] = Field(
         default="inherit",
         description=(

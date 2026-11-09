@@ -3,6 +3,7 @@ import contextvars
 import difflib
 import inspect
 import json
+import math
 import time
 import traceback
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
@@ -53,6 +54,7 @@ from ..state.background import (
     READ_BACKGROUND_TRANSCRIPT_DESCRIPTION,
     current_background_store,
     format_session_notice,
+    format_user_message,
 )
 from ..types.content import (
     CustomContent,
@@ -98,9 +100,30 @@ DEFAULT_MAX_ITER_NOTICE = (
 )
 """User message injected before the final tool-less LLM call (``on_max_iter="final_answer"``)."""
 
+# Session data: per agent path, the denial streak a paused run left, for the run that resumes it.
+_DENIAL_STREAK_KEY = "denial_streak"
+
+DEFAULT_DENIAL_NOTICE = (
+    "[System notice] Your last {count} tool calls were denied or blocked, so no tools are available "
+    "for this reply. Do not look for another way to do the same thing. Tell the user what you were "
+    "trying to do, what was refused, and what you need from them."
+)
+"""User message injected once ``max_consecutive_denials`` is reached, before a tool-less LLM call."""
+
+DEFAULT_STEER_BLOCKED_NOTICE = (
+    "[System notice] A message the user sent during this turn was blocked by the '{rail}' guardrail and is "
+    "not shown. Do not guess what it said. Carry on, and mention briefly that one message could not be accepted."
+)
+"""Runtime message that stands in for a steered user message an input guardrail blocked."""
+
+READ_ONLY_POLICY = "read_only"
+# Agent-provided tools that only read (their constructors do not take ``read_only``).
+_READ_ONLY_BUILTINS = frozenset(
+    {"read_skill", "read_offloaded", "get_background_task", "list_background_tasks", "read_background_transcript"}
+)
+
 DEFAULT_MAX_ITER_STOP_MESSAGE = (
-    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final "
-    "answer was produced.]"
+    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final answer was produced.]"
 )
 """Assistant reply returned without an LLM call (``on_max_iter="stop"``)."""
 
@@ -232,6 +255,9 @@ def _extract_fallbacks(model: Any) -> list[dict[str, Any]]:
     return out
 
 
+_UNSET_POLICY: Any = object()
+
+
 class AgentParams(BaseModel):
     """Input parameters for Agent execution. Use either 'prompt' or 'messages', not both."""
 
@@ -337,6 +363,25 @@ class Agent(Runnable):
     """When True, register ``read_background_transcript`` for the LLM once this
     session has background tasks. Default off — summaries via
     ``get_background_task`` are enough for most agents."""
+    steering: bool | None = None
+    """Let what is posted to the session while a turn runs join that turn after its current
+    tool batch, instead of waiting for the next one: session events on ``lane="next"`` and user
+    messages sent with ``mode="steer"`` (``ChatSession.send``). A user message joins as a user
+    message (input guardrails screen it, and it restores the ``max_iter`` budget); an event as a
+    runtime notice. The turn does not end while one is waiting: it calls the model once more.
+    ``None`` (default): on for runs a ``ChatSession`` starts, off otherwise. Never for a turn its
+    channel keeps closed (a ``ChatSession`` wake), even when ``True``. Root agents only."""
+    stream_idle_timeout: float | None = 300.0
+    """Seconds a model stream may send nothing before the call is given up
+    (:class:`timbal.errors.ModelStreamStalled`). Before the first chunk the attempt is
+    retried like a timeout (``max_retries``); after it, the call fails, since another
+    attempt would repeat what was already sent. ``None`` waits forever. Raise it for
+    models that think for minutes without streaming anything."""
+    max_consecutive_denials: int | None = 3
+    """Tool calls in a row that may be denied (approval) or blocked (``tool_args``
+    guardrail) before the agent stops trying: it is told not to route around the
+    refusals, and its next model call gets no tools, so it answers the user. A tool call
+    that succeeds resets the count. ``None`` turns the breaker off."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
     memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
@@ -454,6 +499,7 @@ class Agent(Runnable):
                 ("temperature", self.temperature),
                 ("base_url", self.base_url),
                 ("api_key", self.api_key),
+                ("stream_idle_timeout", self.stream_idle_timeout),
             ]
             if v is not None
         }
@@ -1072,10 +1118,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     def _inject_background_completions(self, current_span: Any) -> None:
         """Drain finished-task notices and posted session events into memory at turn start.
 
-        Delivered between turns only — never mid-loop — so the parent is not
-        interrupted while talking. Skipped for subagents and approval/suspend
-        resumes (must not insert a user message between tool_use and tool_result).
-        Peek APIs are unchanged; notices are one-shot after drain.
+        Delivered between turns only so the parent is not interrupted while
+        talking; a turn that steers also takes ``lane="next"`` events after a
+        tool batch (:meth:`_take_steering`). User messages stay pending: they
+        start turns of their own (``take_followup``) or steer one. Skipped for
+        subagents and approval/suspend resumes (must not insert a user message
+        between tool_use and tool_result). Peek APIs are unchanged; notices are
+        one-shot after drain.
         """
         if current_span.parent_call_id is not None:
             return
@@ -1085,7 +1134,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if store is None:
             return
         notifications = store.drain_completions()
-        events = store.drain_events(settle=False)
+        events = store.drain_events(settle=False, where=lambda event: event.source != "user")
         if not notifications and not events:
             return
         notice = format_session_notice(notifications, events)
@@ -1099,6 +1148,36 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             memory.insert(-1, notice)
         else:
             memory.append(notice)
+
+    def _steers(self, run_context: Any, current_span: Any) -> bool:
+        """Whether this turn takes ``lane="next"`` events between steps (see ``steering``)."""
+        if current_span.parent_call_id is not None:
+            return False
+        if self.steering is None:
+            return run_context._steering is True
+        # A channel's False (a wake: its tool policy and silence are not a user's) beats the agent's True.
+        return self.steering and run_context._steering is not False
+
+    def _take_steering(self, run_context: Any, current_span: Any) -> list[Any]:
+        """The messages posted for the running turn (``lane="next"``), settled as delivered to it.
+
+        A runtime notice for events, then one user message per message the user
+        sent (screened one by one, so blocking one keeps the others).
+        """
+        store = current_background_store()
+        if store is None:
+            return []
+        events = store.drain_events(settle=False, where=lambda event: event.lane == "next")
+        if not events:
+            return []
+        current_span.metadata.setdefault("steered_events", []).extend(event.id for event in events)
+        record_delivery(run_context, current_span, events)
+        messages = []
+        others = [event for event in events if event.source != "user"]
+        if others:
+            messages.append(format_session_notice([], others))
+        messages.extend(format_user_message([event], steered=True) for event in events if event.source == "user")
+        return messages
 
     def _apply_background_limits(self, run_context: Any) -> None:
         """Push Agent concurrent/depth caps onto the session BG store."""
@@ -1285,7 +1364,35 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             "passes": passes,
         }
 
-    async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
+    async def _resumed_denials(self, run_context: Any) -> int:
+        """The denial streak of the paused run this turn resumes; 0 when it resumes another run, or none."""
+        session = await run_context.get_session()
+        streak = session.get(_DENIAL_STREAK_KEY, {}).get(self._path)
+        if streak and streak.get("run_id") == run_context.parent_id:
+            return streak["count"]
+        return 0
+
+    async def _save_denials(self, run_context: Any, denials: int) -> None:
+        """At a pause: the streak the run that resumes this one continues (a denied approval counts on top)."""
+        if not denials:
+            return  # a resume of this run reads 0: the entry it finds names another run
+        session = await run_context.get_session()
+        session.setdefault(_DENIAL_STREAK_KEY, {})[self._path] = {"run_id": run_context.id, "count": denials}
+
+    async def _stop_after_denials(self, current_span: Any, denials: int, append_memory: Any) -> None:
+        """After a tool batch past the denial limit: tell the model to stop routing around refusals (the caller
+        takes its tools away for the next call)."""
+        logger.warning("Agent reached max_consecutive_denials.", path=self._path, denials=denials)
+        current_span.metadata.setdefault("denial_limit", []).append({"denials": denials})
+        await append_memory(
+            Message(
+                role="user",
+                content=[TextContent(text=DEFAULT_DENIAL_NOTICE.format(count=denials))],
+                metadata={"source": "runtime", "kind": "denial_limit"},
+            )
+        )
+
+    async def _resolve_tools(self, i: int, tool_policy: Any = _UNSET_POLICY) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
         if i >= self.max_iter:
             return [], {}
@@ -1338,7 +1445,43 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 bg_tool.nest(self._path)
                 _register(bg_tool)
 
+        if tool_policy is not None:
+            if tool_policy is _UNSET_POLICY:
+                run_context = get_run_context()
+                tool_policy = run_context._tool_policy if run_context is not None else None
+            if tool_policy is not None:
+                tools = [tool for tool in tools if self._tool_allowed(tool, tool_policy)]
+                commands = {key: tool for key, tool in commands.items() if tool in tools}
+                if callable(tool_policy):
+                    self._record_allowed_tools(tools)
         return tools, commands
+
+    @staticmethod
+    def _record_allowed_tools(tools: list[Any]) -> None:
+        """Note on this agent's span what a callable tool policy let through at its latest tool resolution: a
+        callable is not stored with the run, and a session continuing it parked restores the policy from it."""
+        run_context = get_run_context()
+        if run_context is None:
+            return
+        try:
+            span = run_context.current_span()
+        except Exception:
+            return
+        # The latest decision only: a callable may take a permission back between steps.
+        span.metadata["tool_policy_allowed"] = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
+
+    @staticmethod
+    def _tool_allowed(tool: Any, policy: Any) -> bool:
+        """Whether a run's tool policy (``RunContext._tool_policy``) lets the model see ``tool``.
+
+        ``"read_only"``: tools declared ``read_only`` (MCP: ``readOnlyHint``) and the agent's
+        own readers. A collection of names: those tools. A callable: ``policy(tool)``.
+        """
+        if policy == READ_ONLY_POLICY:
+            return bool(getattr(tool, "read_only", False)) or tool.name in _READ_ONLY_BUILTINS
+        if callable(policy):
+            return bool(policy(tool))
+        return tool.name in policy
 
     def _synthetic_event(
         self,
@@ -1769,9 +1912,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # GuardrailEvents produced inside _process_tool_event (not a generator) — drained
         # and yielded by the loop right after each call.
         pending_guardrail_events: list[BaseEvent] = []
+        # Denied / blocked tool results in a row (max_consecutive_denials); any other result resets it. A
+        # resumed turn continues the streak its paused run left (an approval denial ends a run each time).
+        consecutive_denials = 0
+        denials_resumed = False
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
+            nonlocal consecutive_denials
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
                 return
             # Native-event handlers (coding harness) forward their own OutputEvent
@@ -1780,36 +1928,46 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # we double-append and break the next LLM call.
             if event.run_id != run_context.id:
                 return
-            if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
-                # Gated (approval) or suspended (input_required) tool: leave the
-                # tool_use unresolved so it re-fires on resume. Do not synthesize
-                # a tool_result.
-                return
-            if event.status.code == "cancelled" and event.status.reason == "early_exit":
-                bail(event.status.message)
-            if event.status.code == "cancelled" and event.status.reason == "cancelled":
-                # A human cancelled via Cancel() on the resume channel. Terminal:
-                # leave the tool_use unresolved (no tool_result) and let the caller
-                # yield the event before raising RunCancelled to stop the run.
-                return
+            status = event.status
+            status_code, reason = status.code, status.reason
+            if status_code == "cancelled":
+                if reason in _PAUSE_REASONS:
+                    # Gated (approval) or suspended (input_required) tool: leave the
+                    # tool_use unresolved so it re-fires on resume. Do not synthesize
+                    # a tool_result.
+                    return
+                if reason == "early_exit":
+                    bail(status.message)
+                if reason == "cancelled":
+                    # A human cancelled via Cancel() on the resume channel. Terminal:
+                    # leave the tool_use unresolved (no tool_result) and let the caller
+                    # yield the event before raising RunCancelled to stop the run.
+                    return
             content = None
-            if event.status.code == "cancelled" and event.status.reason == "approval_denied":
-                msg = event.status.message or "The tool call was denied."
+            denied = False
+            if status_code == "cancelled" and reason == "approval_denied":
+                msg = status.message or "The tool call was denied."
                 content = f"[Approval denied] {msg}"
-            elif event.status.code == "cancelled" and event.status.reason == "early_exit_local":
-                msg = event.status.message or "The tool exited early."
+                denied = True
+            elif status_code == "cancelled" and reason == "early_exit_local":
+                msg = status.message or "The tool exited early."
                 content = f"[Cancelled] {msg}"
-            elif event.status.code == "blocked":
+            elif status_code == "blocked":
                 # A tool_args guardrail blocked the call. Feed the block back so the LLM
                 # can self-correct (bounded by max_iter), mirroring tool_not_found.
-                msg = event.status.message or "The tool call was blocked by a guardrail."
+                msg = status.message or "The tool call was blocked by a guardrail."
                 content = f"[Blocked by guardrail] {msg}"
+                denied = True
             elif event.error is not None:
                 content = event.error
             elif isinstance(event.output, Message):
                 content = [c for c in event.output.content if isinstance(c, TextContent | FileContent)]
             else:
                 content = event.output
+            if denied:
+                consecutive_denials += 1
+            elif consecutive_denials:
+                consecutive_denials = 0
             # Pin the result when the originating tool opted in (e.g. read_skill), so memory
             # compaction never strips this durable context. The tool name is the final path
             # segment of its OutputEvent.
@@ -1835,7 +1993,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if (
                 guardrail_runner is not None
                 and guardrail_runner.has_stage(GuardrailStage.TOOL_RESULT)
-                and event.status.code == "success"
+                and status_code == "success"
             ):
                 for c in tool_result.content:
                     if not isinstance(c, ToolResultContent):
@@ -1867,7 +2025,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # the reduction persists into traces. Errors are never reduced — the model needs
             # the full error to recover.
             result_limit = tool_result_limits.get(tool_name)
-            if result_limit is not None and not pinned and event.status.code == "success":
+            if result_limit is not None and not pinned and status_code == "success":
                 for c in tool_result.content:
                     if isinstance(c, ToolResultContent):
                         offload_record = await apply_tool_result_limit(
@@ -1884,6 +2042,57 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 current_span.memory.append(tool_result)
             tool_result_dump = await dump(tool_result)
             current_span._memory_dump.append(tool_result_dump)
+
+        steering = self._steers(run_context, current_span)
+        # Fixed for the turn; checked after every tool batch.
+        denial_limit = self.max_consecutive_denials
+        if denial_limit is None:
+            denial_limit = math.inf
+        tool_policy = run_context._tool_policy
+
+        if steering:
+            # Set by _steer: whether it added messages, and whether the user wrote one of them.
+            steered = steered_user = False
+
+            async def _steer() -> AsyncGenerator[BaseEvent, None]:
+                """Bring in what was posted for the running turn, screening user text like a prompt.
+
+                A blocked message is dropped for a notice; the turn and its work go on.
+                """
+                nonlocal steered, steered_user
+                messages = self._take_steering(run_context, current_span)
+                steered = bool(messages)
+                steered_user = False
+                runner = self._guardrail_runner
+                screen = runner is not None and runner.has_stage(GuardrailStage.INPUT)
+                for message in messages:
+                    if not message.is_runtime() and screen:
+                        text = message_text(message)
+                        ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._path, payload=message)
+                        outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
+                        record_guardrails_metadata(current_span, outcome.triggered, run_context=run_context)
+                        for guardrail_event in build_guardrail_events(
+                            outcome.triggered, run_context=run_context, span=current_span
+                        ):
+                            yield guardrail_event
+                        if outcome.verdict is not None:
+                            await _append_memory(
+                                Message(
+                                    role="user",
+                                    content=[
+                                        TextContent(text=DEFAULT_STEER_BLOCKED_NOTICE.format(rail=outcome.rail.name))
+                                    ],
+                                    metadata={"source": "runtime", "kind": "steer_blocked"},
+                                )
+                            )
+                            continue
+                        if outcome.replaced and outcome.text != text:
+                            replace_message_text(message, outcome.text)
+                    await _append_memory(message)
+                    steered_user = steered_user or not message.is_runtime()
+
+        # Set once max_consecutive_denials is reached: the next model call gets no tools.
+        withhold_tools = False
 
         i = 0
         need_retry = False
@@ -1904,7 +2113,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 need_retry = False
                 _llm_memory_saved = False
                 # ? We could resolve the system prompt at each iteration
-                tools, commands = await self._resolve_tools(i)
+                tools, commands = await self._resolve_tools(i, tool_policy)
+                if withhold_tools:
+                    tools, commands, withhold_tools = [], {}, False
                 if i >= self.max_iter and not max_iter_handled:
                     # Budget spent: _resolve_tools withheld tools for this call. Apply on_max_iter.
                     max_iter_handled = True
@@ -2013,6 +2224,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 pending_tool_uses = self._find_pending_tool_uses(current_span.memory)
                 if pending_tool_uses:
                     _llm_memory_saved = True  # nothing to salvage; we never called the LLM
+                    if not denials_resumed:
+                        denials_resumed = True
+                        consecutive_denials = await self._resumed_denials(run_context)
                     tool_calls = pending_tool_uses
                     first_pending: OutputEvent | None = None
                     active_events = self._multiplex_tools(tools, tool_calls)
@@ -2037,8 +2251,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             first_pending = event
                     active_events = None
                     if first_pending is not None:
+                        await self._save_denials(run_context, consecutive_denials)
                         raise PauseRequired(first_pending)
                     i += 1
+                    if consecutive_denials >= denial_limit:
+                        await self._stop_after_denials(current_span, consecutive_denials, _append_memory)
+                        consecutive_denials, withhold_tools = 0, True
+                    if steering:
+                        async for steer_event in _steer():
+                            yield steer_event
+                        if steered_user:
+                            i, max_iter_handled, withhold_tools = 0, False, False
                     continue
 
                 # Mid-loop compaction: a single turn that makes many (or large) tool calls
@@ -2154,11 +2377,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             await _append_memory(
                                 Message(
                                     role="user",
-                                    content=[TextContent(text=(
-                                        "Your previous response ended before the tool call was issued "
-                                        "(the call was emitted as text, without arguments, and nothing ran). "
-                                        "Issue the tool call now as a proper function call."
-                                    ))],
+                                    content=[
+                                        TextContent(
+                                            text=(
+                                                "Your previous response ended before the tool call was issued "
+                                                "(the call was emitted as text, without arguments, and nothing ran). "
+                                                "Issue the tool call now as a proper function call."
+                                            )
+                                        )
+                                    ],
                                     metadata={"source": "runtime", "kind": "leaked_tool_call_retry"},
                                 )
                             )
@@ -2359,6 +2586,22 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 ]
 
                 if not tool_calls:
+                    if steering:
+                        async for steer_event in _steer():
+                            yield steer_event
+                        if steered:
+                            # Something arrived for this turn before it ended: answer it too.
+                            i, max_iter_handled = (0, False) if steered_user else (i + 1, max_iter_handled)
+                            if steered_user:
+                                withhold_tools = False
+                            continue
+                    token = run_context._silence_token
+                    if (
+                        token is not None
+                        and current_span.parent_call_id is None
+                        and message_text(current_span.memory[-1]).strip() == token
+                    ):
+                        current_span.metadata["silent"] = True
                     break
 
                 first_pending: OutputEvent | None = None
@@ -2384,8 +2627,19 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         first_pending = event
                 active_events = None
                 if first_pending is not None:
+                    await self._save_denials(run_context, consecutive_denials)
                     raise PauseRequired(first_pending)
                 i += 1
+                if consecutive_denials >= denial_limit:
+                    await self._stop_after_denials(current_span, consecutive_denials, _append_memory)
+                    consecutive_denials, withhold_tools = 0, True
+                if steering:
+                    async for steer_event in _steer():
+                        yield steer_event
+                    if steered_user:
+                        # A user message is a new request: it gets the full tool budget, and its tools back
+                        # even when the denial breaker took them away for this step.
+                        i, max_iter_handled, withhold_tools = 0, False, False
         finally:
             try:
                 if active_events is not None:
