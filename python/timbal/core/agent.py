@@ -99,8 +99,7 @@ DEFAULT_MAX_ITER_NOTICE = (
 """User message injected before the final tool-less LLM call (``on_max_iter="final_answer"``)."""
 
 DEFAULT_MAX_ITER_STOP_MESSAGE = (
-    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final "
-    "answer was produced.]"
+    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final answer was produced.]"
 )
 """Assistant reply returned without an LLM call (``on_max_iter="stop"``)."""
 
@@ -230,6 +229,94 @@ def _extract_fallbacks(model: Any) -> list[dict[str, Any]]:
             item[key] = val
         out.append(item)
     return out
+
+
+_OUTPUT_STAGES = (GuardrailStage.MODEL_OUTPUT, GuardrailStage.MODEL_STEP)
+
+
+class _Turn:
+    """One call of :meth:`Agent.handler`: the state its steps share.
+
+    Slots instead of the handler's locals and closures, so a step can be a method. The fields from
+    ``delta_scrubbers`` on belong to the model call in progress and are reset by :meth:`Agent._begin_llm_call`.
+    """
+
+    __slots__ = (
+        "run_context",
+        "span",
+        "model",
+        "system_prompt",
+        "kwargs",
+        # Dots in this agent's tool paths: their OutputEvents are the ones that become tool results.
+        "tool_depth",
+        # Steps taken this turn (tool batches and retries); compared with max_iter.
+        "i",
+        # Whether the last LLM output is in memory; the handler's finally salvages it otherwise.
+        "llm_memory_saved",
+        # on_max_iter applied once per turn.
+        "max_iter_handled",
+        # Guardrail "retry" verdicts consumed this turn (bounded by max_guardrail_retries).
+        "guardrail_retry_count",
+        # Re-requests after a leaked, unrecoverable tool call (max_leaked_tool_call_retries).
+        "leaked_call_retry_count",
+        # Token usage reported by the previous LLM call this turn. None until the first LLM call completes;
+        # mid-loop compaction waits for one.
+        "last_llm_usage",
+        # Names of tools (resolved for the current step) whose results must be pinned against compaction.
+        "pinned_tool_names",
+        # Per-tool result limits resolved for the current step (None = exempt).
+        "tool_result_limits",
+        # Per-tool guardrail runners (agent-level + tool-local rails) for tool_result checks.
+        "tool_guardrail_runners",
+        # GuardrailEvents produced by _process_tool_event (not a generator), yielded right after each call.
+        "pending_guardrail_events",
+        "guard_output",
+        "guard_step",
+        "buffer_stream",
+        "stream_scrub",
+        # One scrubber per content block id: text and thinking deltas interleave, so a shared holdback
+        # buffer would stitch unrelated content together.
+        "delta_scrubbers",
+        "last_delta_events",
+        "buffered_events",
+        # Messages in memory when the call was made (the context measurement's baseline).
+        "sent",
+        # The call ends early to ask the model again (output validation, guardrail retry, leaked call).
+        "retry",
+        # Events _on_llm_output lets out before the call's OutputEvent (scrubbed tails, rails, held deltas).
+        "released",
+    )
+
+    def __init__(self, run_context: Any, span: Any, model: Any, system_prompt: Any, kwargs: dict[str, Any]) -> None:
+        self.run_context = run_context
+        self.span = span
+        self.model = model
+        self.system_prompt = system_prompt
+        self.kwargs = kwargs
+        self.tool_depth = 0
+        self.i = 0
+        self.llm_memory_saved = False
+        self.max_iter_handled = False
+        self.guardrail_retry_count = 0
+        self.leaked_call_retry_count = 0
+        self.last_llm_usage: dict | None = None
+        self.pinned_tool_names: set[str] = set()
+        self.tool_result_limits: dict[str, ToolResultLimit | None] = {}
+        self.tool_guardrail_runners: dict[str, Any] = {}
+        self.pending_guardrail_events: list[BaseEvent] = []
+        self.delta_scrubbers: dict[str, Any] = {}
+        self.last_delta_events: dict[str, DeltaEvent] = {}
+        self.buffered_events: list[BaseEvent] = []
+        self.released: list[BaseEvent] = []
+        self.retry = False
+
+    async def append_memory(self, message: Message) -> None:
+        """Append a message to both memory and its serialized dump in lockstep."""
+        message = message.without_empty_text_blocks()
+        if message is None:
+            return
+        self.span.memory.append(message)
+        self.span._memory_dump.append(await dump(message))
 
 
 class AgentParams(BaseModel):
@@ -1711,8 +1798,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         record_guardrails_metadata(current_span, outcome.triggered, run_context=run_context)
         return outcome
 
-    async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
-        """Execute the autonomous agent loop."""
+    async def _start_turn(self, kwargs: dict[str, Any]) -> _Turn:
+        """Resolve the model, system prompt and memory for this call, and serialize the memory."""
         run_context = get_run_context()
         assert run_context is not None, "Run context is not initialized"
         current_span = run_context.current_span()
@@ -1744,265 +1831,527 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Remove these so the llm runnable doesn't try to use/validate them again
         kwargs.pop("prompt", None)
         kwargs.pop("messages", None)
+        turn = _Turn(run_context, current_span, model, system_prompt, kwargs)
+        turn.tool_depth = self._path.count(".") + 1
+        self._output_rails(turn)
+        return turn
 
-        async def _append_memory(message: Message) -> None:
-            """Append a message to both memory and its serialized dump in lockstep."""
-            message = message.without_empty_text_blocks()
-            if message is None:
-                return
-            current_span.memory.append(message)
-            current_span._memory_dump.append(await dump(message))
+    async def _apply_max_iter(self, turn: _Turn) -> Message | None:
+        """Budget spent: _resolve_tools withheld tools for this call. Apply ``on_max_iter``; returns the
+        assistant reply that ends the turn, if it gives one."""
+        current_span = turn.span
+        turn.max_iter_handled = True
+        behavior = self.on_max_iter if isinstance(self.on_max_iter, str) else "custom"
+        current_span.metadata["max_iter_reached"] = {"max_iter": self.max_iter, "behavior": behavior}
+        logger.warning("Agent reached max_iter.", path=self._path, max_iter=self.max_iter, behavior=behavior)
+        # The last LLM output is already in memory — nothing to salvage if we leave here.
+        turn.llm_memory_saved = True
+        reply = await self._resolve_max_iter(current_span.memory)
+        if reply is not None:
+            await turn.append_memory(reply)
+            if reply.role == "assistant":
+                return reply
+        turn.llm_memory_saved = False  # a final tool-less LLM call follows
+        return None
+
+    def _prepare_step_tools(self, turn: _Turn, tools: list[Tool]) -> None:
+        """Pinned names, result limits and tool_result rails for the tools this step offers."""
+        turn.pinned_tool_names = {t.name for t in tools if getattr(t, "pin_result", False)}
+        tool_result_limits: dict[str, ToolResultLimit | None] = {}
+        tool_guardrail_runners: dict[str, Any] = {}
+        for t in tools:
+            resolved_limit = getattr(t, "result_limit", "inherit")
+            if resolved_limit == "inherit":
+                resolved_limit = self.tool_result_limit
+            elif isinstance(resolved_limit, int):
+                # Dynamic (ToolSet-resolved) tools may still carry the int shorthand.
+                resolved_limit = ToolResultLimit(threshold=resolved_limit)
+            tool_result_limits[t.name] = resolved_limit
+            if not getattr(t, "_guardrails_exempt", False):
+                tool_guardrail_runners[t.name] = t._resolve_guardrail_runner(self._guardrail_runner)
+        turn.tool_result_limits = tool_result_limits
+        turn.tool_guardrail_runners = tool_guardrail_runners
+
+    @staticmethod
+    def _command_call(turn: _Turn, commands: dict[str, Tool]) -> tuple[Tool, dict[str, Any]] | None:
+        """The command the last user message invokes (``/name args``), with its input; None when it is not one."""
+        # Commands will only be user messages with a single text content
+        if len(turn.span.memory[-1].content) != 1:
+            return None
+        content = turn.span.memory[-1].content[0]
+        if not isinstance(content, TextContent) or not content.text.startswith("/"):
+            return None
+        import shlex
+
+        args = shlex.split(content.text)
+        command = args[0].strip("/")
+        args = args[1:]
+        # If no command is found, we'll simply let the message pass through the LLM
+        if command not in commands:
+            return None
+        tool = commands[command]
+        tool_input = {}
+        for arg_idx, field_name in enumerate(tool.params_model.model_fields.keys()):
+            # Params model preserves the ordering of the fields as they appear in the signature
+            # We grab as many arguments as we can. If there are too few arguments, we'll let the tool params model validator give a better error
+            if arg_idx >= len(args):
+                break
+            tool_input[field_name] = args[arg_idx]
+        return tool, tool_input
+
+    async def _run_command(self, turn: _Turn, tool: Tool, tool_input: dict[str, Any]) -> AsyncGenerator[Any, None]:
+        """Run a command's tool directly, keeping the call and its output in memory."""
+        current_span = turn.span
+        # Craft a fake tool_use so we can keep this interaction in the agent memory
+        tool_use_id = uuid7(as_type="hex")
+        current_span._memory_dump.append(
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": tool_use_id, "name": tool.name, "input": tool_input}],
+            }
+        )
+        # Run the tool (raw stream — see _multiplex_tools; same pending-cancel detection as the fast path)
+        _cmd_task = asyncio.current_task()
+        events = tool._stream(**tool_input)
+        try:
+            async for event in events:
+                if _cmd_task is not None and _cmd_task.cancelling():
+                    raise asyncio.CancelledError
+                await self._process_tool_event(turn, event, tool_use_id, append_to_messages=False)
+                if turn.pending_guardrail_events:
+                    for pending_event in turn.pending_guardrail_events:
+                        yield pending_event
+                    turn.pending_guardrail_events.clear()
+                if isinstance(event, OutputEvent) and event.output is not None:
+                    if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
+                        yield event
+                        raise PauseRequired(event)
+                    if event.status.code == "cancelled" and event.status.reason == "cancelled":
+                        yield event
+                        raise RunCancelled(event.status.message or "Run cancelled by user.")
+                    current_span.memory.append(
+                        Message.validate({"role": "assistant", "content": [TextContent(text=str(event.output))]})
+                    )
+                yield event
+        finally:
+            await events.aclose()
+
+    async def _process_tool_event(
+        self, turn: _Turn, event: BaseEvent, tool_call_id: str, append_to_messages: bool = True
+    ) -> None:
+        """Turn a tool's OutputEvent into its tool_result in memory (rails, offload, pinning)."""
+        if not isinstance(event, OutputEvent) or event.path.count(".") != turn.tool_depth:
+            return
+        run_context, current_span = turn.run_context, turn.span
+        # Native-event handlers (coding harness) forward their own OutputEvent
+        # under the tool path. Only the Runnable-emitted completion (same
+        # run_id as this agent turn) should become a tool_result — otherwise
+        # we double-append and break the next LLM call.
+        if event.run_id != run_context.id:
+            return
+        if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
+            # Gated (approval) or suspended (input_required) tool: leave the
+            # tool_use unresolved so it re-fires on resume. Do not synthesize
+            # a tool_result.
+            return
+        if event.status.code == "cancelled" and event.status.reason == "early_exit":
+            bail(event.status.message)
+        if event.status.code == "cancelled" and event.status.reason == "cancelled":
+            # A human cancelled via Cancel() on the resume channel. Terminal:
+            # leave the tool_use unresolved (no tool_result) and let the caller
+            # yield the event before raising RunCancelled to stop the run.
+            return
+        content = None
+        if event.status.code == "cancelled" and event.status.reason == "approval_denied":
+            msg = event.status.message or "The tool call was denied."
+            content = f"[Approval denied] {msg}"
+        elif event.status.code == "cancelled" and event.status.reason == "early_exit_local":
+            msg = event.status.message or "The tool exited early."
+            content = f"[Cancelled] {msg}"
+        elif event.status.code == "blocked":
+            # A tool_args guardrail blocked the call. Feed the block back so the LLM
+            # can self-correct (bounded by max_iter), mirroring tool_not_found.
+            msg = event.status.message or "The tool call was blocked by a guardrail."
+            content = f"[Blocked by guardrail] {msg}"
+        elif event.error is not None:
+            content = event.error
+        elif isinstance(event.output, Message):
+            content = [c for c in event.output.content if isinstance(c, TextContent | FileContent)]
+        else:
+            content = event.output
+        # Pin the result when the originating tool opted in (e.g. read_skill), so memory
+        # compaction never strips this durable context. The tool name is the final path
+        # segment of its OutputEvent.
+        tool_name = event.path.rsplit(".", 1)[-1]
+        pinned = tool_name in turn.pinned_tool_names
+        tool_result = Message.validate(
+            {
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "id": tool_call_id,
+                        "content": content,
+                        "pinned": pinned,
+                    }
+                ],
+            }
+        )
+        # tool_result guardrails run BEFORE offload so rails see the full text and the
+        # (possibly redacted) result is what gets spilled/persisted. Errors are exempt
+        # (the model needs the full error), matching the offload contract below.
+        guardrail_runner = turn.tool_guardrail_runners.get(tool_name)
+        if (
+            guardrail_runner is not None
+            and guardrail_runner.has_stage(GuardrailStage.TOOL_RESULT)
+            and event.status.code == "success"
+        ):
+            for c in tool_result.content:
+                if not isinstance(c, ToolResultContent):
+                    continue
+                text = tool_result_text(c)
+                if not text:
+                    continue
+                ctx = GuardrailContext(
+                    stage=GuardrailStage.TOOL_RESULT,
+                    agent_path=self._path,
+                    tool_name=tool_name,
+                    payload=c,
+                )
+                outcome = await guardrail_runner.run_stage(GuardrailStage.TOOL_RESULT, text, ctx)
+                record_guardrails_metadata(current_span, outcome.triggered, run_context=run_context)
+                turn.pending_guardrail_events.extend(
+                    build_guardrail_events(outcome.triggered, run_context=run_context, span=current_span)
+                )
+                if outcome.verdict is not None:
+                    # block (and retry/escalate, which have no meaning post-execution)
+                    # replace the result with a notice — the tool_use must still get a
+                    # paired result, and the model should know why it can't see it.
+                    reason = outcome.verdict.reason or "content policy"
+                    replace_tool_result_text(c, f"[Blocked by guardrail '{outcome.rail.name}'] {reason}")
+                elif outcome.replaced:
+                    replace_tool_result_text(c, outcome.text)
+        # Production-time offload: reduce an oversized result once, before it enters
+        # memory or the dump, so history stays append-only (prompt-cache friendly) and
+        # the reduction persists into traces. Errors are never reduced — the model needs
+        # the full error to recover.
+        result_limit = turn.tool_result_limits.get(tool_name)
+        if result_limit is not None and not pinned and event.status.code == "success":
+            for c in tool_result.content:
+                if isinstance(c, ToolResultContent):
+                    offload_record = await apply_tool_result_limit(
+                        c,
+                        limit=result_limit,
+                        tool_name=tool_name,
+                        store=self._offload_store,
+                        run_id=run_context.id,
+                    )
+                    if offload_record is not None:
+                        current_span.metadata.setdefault("offload", []).append(offload_record)
+                        logger.info("Reduced oversized tool result.", **offload_record)
+        if append_to_messages:
+            current_span.memory.append(tool_result)
+        tool_result_dump = await dump(tool_result)
+        current_span._memory_dump.append(tool_result_dump)
+
+    async def _compact_mid_turn(self, turn: _Turn) -> None:
+        """Mid-loop compaction: a single turn that makes many (or large) tool calls
+        grows memory unbounded between iterations. resolve_memory only compacts at
+        turn start (and not at all on a turn with no parent), so without this a long
+        tool-calling turn can overflow the context window mid-run. The trailing
+        assistant batch + its tool_results are *unconsumed* — the next LLM call must
+        read them — so we protect that tail and compact only the history before it
+        (dropping the unconsumed batch would loop the model back to re-plan the same
+        step). The context measurement is the size signal: the last call that reported
+        context tokens, plus an estimate of the messages appended after it."""
+        current_span = turn.span
+        mem_before = current_span.memory
+        await self._compact_preserving_last_assistant(
+            current_span, measurement=current_span.metadata.get("context_measurement")
+        )
+        if current_span.memory is not mem_before:
+            # Compaction rewrote memory out of lockstep with the dump; rebuild it.
+            current_span._memory_dump = await dump(current_span.memory)
+            measured = current_span.metadata.get("context_measurement")
+            if measured is not None:
+                removed = len(mem_before) - len(current_span.memory)
+                measured["messages"] = max(0, measured["messages"] - removed)
+
+    def _output_rails(self, turn: _Turn) -> None:
+        """Output-side guardrails for the turn's model calls.
+
+        model_output rails run on the final assistant message; model_step rails run on EVERY assistant
+        message (including intermediate tool-calling steps). Rails that need a full-text verdict force
+        buffer-until-verdict — no chunk escapes before they allow it. Deterministic redact-only rails
+        transform the stream in flight instead (holdback window catches patterns spanning chunk boundaries).
+        """
+        runner = self._guardrail_runner
+        turn.guard_output = runner is not None and runner.has_stage(GuardrailStage.MODEL_OUTPUT)
+        turn.guard_step = runner is not None and runner.has_stage(GuardrailStage.MODEL_STEP)
+        turn.buffer_stream = (turn.guard_output or turn.guard_step) and runner.needs_buffering(*_OUTPUT_STAGES)
+        turn.stream_scrub = not turn.buffer_stream and runner is not None and bool(runner.scrub_rails(*_OUTPUT_STAGES))
+
+    @staticmethod
+    def _begin_llm_call(turn: _Turn) -> None:
+        turn.retry = False
+        turn.sent = len(turn.span.memory)
+        # Left over when the previous call ended in a retry.
+        if turn.buffered_events:
+            turn.buffered_events.clear()
+        if turn.delta_scrubbers:
+            turn.delta_scrubbers.clear()
+            turn.last_delta_events.clear()
+
+    async def _on_llm_output(self, turn: _Turn, event: OutputEvent) -> None:
+        """The model call's OutputEvent: rails, retries and memory. Puts the events that go out before it in
+        ``turn.released`` (also when it raises); sets ``turn.retry`` when the call should be made again."""
+        run_context, current_span = turn.run_context, turn.span
+        _runner = self._guardrail_runner
+        # If the LLM call fails, we want to propagate the error upwards
+        if event.error is not None:
+            raise RuntimeError(event.error)
+
+        interrupted = event.status.code == "cancelled" and event.status.reason == "interrupted"
+
+        # Handle case where LLM was interrupted before any output was received
+        if event.output is None and interrupted:
+            raise InterruptError(event.call_id, output=None)
+
+        assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
+
+        # Release each scrubber's holdback tail as one last delta so
+        # streaming consumers receive the complete (scrubbed) content.
+        for _block_id, _block_scrubber in turn.delta_scrubbers.items():
+            _tail = _block_scrubber.flush()
+            _last = turn.last_delta_events.get(_block_id)
+            if _tail and _last is not None:
+                _kind = _last.item.type  # text_delta | thinking_delta
+                turn.released.append(
+                    DeltaEvent(
+                        run_id=_last.run_id,
+                        parent_run_id=_last.parent_run_id,
+                        path=_last.path,
+                        call_id=_last.call_id,
+                        parent_call_id=_last.parent_call_id,
+                        item={"type": _kind, "id": _block_id, _kind: _tail},
+                    )
+                )
+        turn.delta_scrubbers.clear()
+        turn.last_delta_events.clear()
+
+        # A tool call leaked as text whose arguments never arrived: the
+        # collector could neither run nor show anything. Re-request the
+        # step. The empty message is not kept (a reasoning item with no
+        # following item is rejected on replay); a runtime nudge tells the
+        # model why it is being asked again.
+        if (
+            not interrupted
+            and event.output.metadata.get("kind") == LEAKED_TOOL_CALL_UNRECOVERED
+            and turn.leaked_call_retry_count < self.max_leaked_tool_call_retries
+            and turn.i < self.max_iter - 1
+        ):
+            turn.leaked_call_retry_count += 1
+            logger.warning(
+                "Re-requesting step after a leaked tool call with no arguments",
+                agent_path=self._path,
+                attempt=turn.leaked_call_retry_count,
+            )
+            await turn.append_memory(
+                Message(
+                    role="user",
+                    content=[
+                        TextContent(
+                            text=(
+                                "Your previous response ended before the tool call was issued "
+                                "(the call was emitted as text, without arguments, and nothing ran). "
+                                "Issue the tool call now as a proper function call."
+                            )
+                        )
+                    ],
+                    metadata={"source": "runtime", "kind": "leaked_tool_call_retry"},
+                )
+            )
+            turn.llm_memory_saved = True
+            turn.last_llm_usage = event.usage
+            self._record_context_measurement(current_span, event.usage, turn.sent)
+            turn.buffered_events.clear()
+            turn.i += 1
+            turn.retry = True
+            return
+
+        # model_step rails run on every assistant message; model_output
+        # rails on the final one (no tool calls). Both run BEFORE the
+        # message enters memory, so replace/redact verdicts persist and a
+        # blocked response never poisons history.
+        guard_output, guard_step = turn.guard_output, turn.guard_step
+        is_final = not interrupted and not any(
+            isinstance(c, ToolUseContent) and not c.is_server_tool_use for c in event.output.content
+        )
+        stages_to_run: list[GuardrailStage] = []
+        if guard_step and not interrupted:
+            stages_to_run.append(GuardrailStage.MODEL_STEP)
+        if guard_output and is_final:
+            stages_to_run.append(GuardrailStage.MODEL_OUTPUT)
+        if stages_to_run:
+            current_text = message_text(event.output)
+            replaced_any = False
+            g_verdict, g_rail, g_stage = None, None, None
+            for out_stage in stages_to_run:
+                outcome = await self._run_output_guardrails(
+                    event.output, current_text, run_context, current_span, out_stage
+                )
+                for g_event in build_guardrail_events(outcome.triggered, run_context=run_context, span=current_span):
+                    turn.released.append(g_event)
+                if outcome.replaced:
+                    current_text = outcome.text
+                    replaced_any = True
+                if outcome.verdict is not None and g_verdict is None:
+                    g_verdict, g_rail, g_stage = outcome.verdict, outcome.rail, out_stage
+            if g_verdict is not None and g_verdict.action == "retry":
+                # retry means "regenerate the response" — only meaningful on
+                # the final message. Mid-plan (tool-calling) steps coerce to
+                # block below rather than corrupting the tool loop.
+                if is_final and turn.guardrail_retry_count < self.max_guardrail_retries and turn.i < self.max_iter - 1:
+                    turn.guardrail_retry_count += 1
+                    # Keep the rejected output + critique in memory so the
+                    # model can correct itself (Guardrails-AI reask).
+                    await turn.append_memory(event.output)
+                    turn.llm_memory_saved = True
+                    turn.last_llm_usage = event.usage
+                    self._record_context_measurement(current_span, event.usage, turn.sent + 1)
+                    feedback = g_verdict.feedback or (
+                        f"Your response was rejected by guardrail '{g_rail.name}'. Rewrite it to comply."
+                    )
+                    await turn.append_memory(
+                        Message.validate({"role": "user", "content": [{"type": "text", "text": feedback}]})
+                    )
+                    turn.buffered_events.clear()
+                    turn.i += 1
+                    turn.retry = True
+                    return
+                # Retry budget exhausted (or mid-plan) — block with the reason.
+                g_verdict = Verdict.block(
+                    g_verdict.reason,
+                    blocked_message=g_verdict.blocked_message or g_rail.blocked_message_for(g_stage),
+                )
+            if g_verdict is not None and g_verdict.action in ("block", "escalate"):
+                # escalate has no human gate at the output edge — block.
+                blocked_text = g_verdict.blocked_message or g_rail.blocked_message_for(g_stage)
+                blocked_msg = Message(role="assistant", content=[TextContent(text=blocked_text)])
+                await turn.append_memory(blocked_msg)
+                turn.llm_memory_saved = True
+                turn.buffered_events.clear()
+                raise GuardrailBlocked(g_rail.name, g_stage.value, reason=g_verdict.reason, output=blocked_msg)
+            if replaced_any:
+                replace_message_text(event.output, current_text)
+        elif turn.stream_scrub:
+            # Unchecked message (intermediate without step rails, or
+            # interrupted) in transform mode: keep memory consistent with
+            # the scrubbed deltas that already went out.
+            for c in event.output.content:
+                if isinstance(c, TextContent) and c.text:
+                    c.text = _runner.scrub_text(c.text, *_OUTPUT_STAGES)
+            invalidate_message_dump_caches(event.output)
+        # Thinking blocks are not part of the checked text — scrub them
+        # directly with the redact rails so reasoning never carries PII
+        # into memory (they were scrubbed/withheld on the wire already).
+        if (guard_output or guard_step) and isinstance(event.output, Message):
+            for c in event.output.content:
+                if isinstance(c, ThinkingContent) and c.thinking:
+                    c.thinking = _runner.scrub_text(c.thinking, *_OUTPUT_STAGES)
+            # The LLM span's output dump cached the unscrubbed blocks.
+            invalidate_message_dump_caches(event.output)
+
+        # Add LLM response to conversation for next iteration
+        await turn.append_memory(event.output)
+        turn.llm_memory_saved = True
+        turn.last_llm_usage = event.usage
+        self._record_context_measurement(current_span, event.usage, turn.sent + 1)
+
+        if self.output_model is not None:
+            validation_error_msg = None
+            validation_context = self.output_model_context
+            for content in event.output.content:
+                # TODO Refactor this. If the llm should return a fixed output model, we should error if it doesn't return it
+                if isinstance(content, TextContent):
+                    try:
+                        output = coerce_to_dict(content.text)
+                        validated_output = self.output_model.model_validate(output, context=validation_context)
+                        event.output = validated_output
+                        break
+                    except (json.JSONDecodeError, ValueError, ValidationError) as e:
+                        validation_error_msg = str(e)
+                        logger.warning(f"Output validation failed: {validation_error_msg}")
+                        continue
+
+            if validation_error_msg:
+                if turn.i < self.max_iter - 1:
+                    # Feed the error back to the LLM so it can correct itself
+                    error_feedback = Message.validate(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (f"Your output failed validation:\n{validation_error_msg}\n\nTry again."),
+                                }
+                            ],
+                        }
+                    )
+                    await turn.append_memory(error_feedback)
+                    turn.i += 1
+                    turn.retry = True
+                    return
+                else:
+                    raise RuntimeError(
+                        f"Output model validation failed after {self.max_iter} attempts: {validation_error_msg}"
+                    )
+
+        # Propagate the interruption with the processed output
+        if interrupted:
+            raise InterruptError(event.call_id, output=event.output)
+
+        # Buffer-until-verdict: the rails allowed the message — release
+        # the withheld deltas before the OutputEvent.
+        if turn.buffered_events:
+            turn.released.extend(turn.buffered_events)
+            turn.buffered_events.clear()
+
+    async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
+        """Execute the autonomous agent loop."""
+        turn = await self._start_turn(kwargs)
+        run_context, current_span = turn.run_context, turn.span
 
         # Input guardrails run blocking, before the first LLM call — a blocked input
         # spends zero tokens and executes zero tools.
         if self._guardrail_runner is not None and self._guardrail_runner.has_stage(GuardrailStage.INPUT):
-            async for guardrail_event in self._run_input_guardrails(run_context, current_span, _append_memory):
+            async for guardrail_event in self._run_input_guardrails(run_context, current_span, turn.append_memory):
                 yield guardrail_event
 
-        # Names of tools (resolved for the current iteration) whose results must be pinned
-        # against memory compaction. Updated each iteration from the resolved tool list.
-        pinned_tool_names: set[str] = set()
-        # Per-tool result limits resolved for the current iteration (None = exempt).
-        tool_result_limits: dict[str, ToolResultLimit | None] = {}
-        # Per-tool guardrail runners (agent-level + tool-local rails) for tool_result checks.
-        tool_guardrail_runners: dict[str, Any] = {}
-        # GuardrailEvents produced inside _process_tool_event (not a generator) — drained
-        # and yielded by the loop right after each call.
-        pending_guardrail_events: list[BaseEvent] = []
-
-        async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
-            """Helper to process tool output events and create tool results."""
-            if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
-                return
-            # Native-event handlers (coding harness) forward their own OutputEvent
-            # under the tool path. Only the Runnable-emitted completion (same
-            # run_id as this agent turn) should become a tool_result — otherwise
-            # we double-append and break the next LLM call.
-            if event.run_id != run_context.id:
-                return
-            if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
-                # Gated (approval) or suspended (input_required) tool: leave the
-                # tool_use unresolved so it re-fires on resume. Do not synthesize
-                # a tool_result.
-                return
-            if event.status.code == "cancelled" and event.status.reason == "early_exit":
-                bail(event.status.message)
-            if event.status.code == "cancelled" and event.status.reason == "cancelled":
-                # A human cancelled via Cancel() on the resume channel. Terminal:
-                # leave the tool_use unresolved (no tool_result) and let the caller
-                # yield the event before raising RunCancelled to stop the run.
-                return
-            content = None
-            if event.status.code == "cancelled" and event.status.reason == "approval_denied":
-                msg = event.status.message or "The tool call was denied."
-                content = f"[Approval denied] {msg}"
-            elif event.status.code == "cancelled" and event.status.reason == "early_exit_local":
-                msg = event.status.message or "The tool exited early."
-                content = f"[Cancelled] {msg}"
-            elif event.status.code == "blocked":
-                # A tool_args guardrail blocked the call. Feed the block back so the LLM
-                # can self-correct (bounded by max_iter), mirroring tool_not_found.
-                msg = event.status.message or "The tool call was blocked by a guardrail."
-                content = f"[Blocked by guardrail] {msg}"
-            elif event.error is not None:
-                content = event.error
-            elif isinstance(event.output, Message):
-                content = [c for c in event.output.content if isinstance(c, TextContent | FileContent)]
-            else:
-                content = event.output
-            # Pin the result when the originating tool opted in (e.g. read_skill), so memory
-            # compaction never strips this durable context. The tool name is the final path
-            # segment of its OutputEvent.
-            tool_name = event.path.rsplit(".", 1)[-1]
-            pinned = tool_name in pinned_tool_names
-            tool_result = Message.validate(
-                {
-                    "role": "tool",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "id": tool_call_id,
-                            "content": content,
-                            "pinned": pinned,
-                        }
-                    ],
-                }
-            )
-            # tool_result guardrails run BEFORE offload so rails see the full text and the
-            # (possibly redacted) result is what gets spilled/persisted. Errors are exempt
-            # (the model needs the full error), matching the offload contract below.
-            guardrail_runner = tool_guardrail_runners.get(tool_name)
-            if (
-                guardrail_runner is not None
-                and guardrail_runner.has_stage(GuardrailStage.TOOL_RESULT)
-                and event.status.code == "success"
-            ):
-                for c in tool_result.content:
-                    if not isinstance(c, ToolResultContent):
-                        continue
-                    text = tool_result_text(c)
-                    if not text:
-                        continue
-                    ctx = GuardrailContext(
-                        stage=GuardrailStage.TOOL_RESULT,
-                        agent_path=self._path,
-                        tool_name=tool_name,
-                        payload=c,
-                    )
-                    outcome = await guardrail_runner.run_stage(GuardrailStage.TOOL_RESULT, text, ctx)
-                    record_guardrails_metadata(current_span, outcome.triggered, run_context=run_context)
-                    pending_guardrail_events.extend(
-                        build_guardrail_events(outcome.triggered, run_context=run_context, span=current_span)
-                    )
-                    if outcome.verdict is not None:
-                        # block (and retry/escalate, which have no meaning post-execution)
-                        # replace the result with a notice — the tool_use must still get a
-                        # paired result, and the model should know why it can't see it.
-                        reason = outcome.verdict.reason or "content policy"
-                        replace_tool_result_text(c, f"[Blocked by guardrail '{outcome.rail.name}'] {reason}")
-                    elif outcome.replaced:
-                        replace_tool_result_text(c, outcome.text)
-            # Production-time offload: reduce an oversized result once, before it enters
-            # memory or the dump, so history stays append-only (prompt-cache friendly) and
-            # the reduction persists into traces. Errors are never reduced — the model needs
-            # the full error to recover.
-            result_limit = tool_result_limits.get(tool_name)
-            if result_limit is not None and not pinned and event.status.code == "success":
-                for c in tool_result.content:
-                    if isinstance(c, ToolResultContent):
-                        offload_record = await apply_tool_result_limit(
-                            c,
-                            limit=result_limit,
-                            tool_name=tool_name,
-                            store=self._offload_store,
-                            run_id=run_context.id,
-                        )
-                        if offload_record is not None:
-                            current_span.metadata.setdefault("offload", []).append(offload_record)
-                            logger.info("Reduced oversized tool result.", **offload_record)
-            if append_to_messages:
-                current_span.memory.append(tool_result)
-            tool_result_dump = await dump(tool_result)
-            current_span._memory_dump.append(tool_result_dump)
-
-        i = 0
-        need_retry = False
-        _llm_memory_saved = False
-        max_iter_handled = False  # on_max_iter applied once per turn
-        # Guardrail "retry" verdicts consumed this turn (bounded by max_guardrail_retries).
-        guardrail_retry_count = 0
-        # Re-requests after a leaked, unrecoverable tool call (max_leaked_tool_call_retries).
-        leaked_call_retry_count = 0
-        # Token usage reported by the previous LLM call this turn. None until the first LLM
-        # call completes; mid-loop compaction waits for one.
-        last_llm_usage: dict | None = None
         # Own the active nested iterator explicitly: closing this handler while
         # it is suspended at a yield must finish child cleanup before returning.
         active_events: AsyncGenerator | None = None
         try:
             while True:
-                need_retry = False
-                _llm_memory_saved = False
+                turn.llm_memory_saved = False
                 # ? We could resolve the system prompt at each iteration
-                tools, commands = await self._resolve_tools(i)
-                if i >= self.max_iter and not max_iter_handled:
-                    # Budget spent: _resolve_tools withheld tools for this call. Apply on_max_iter.
-                    max_iter_handled = True
-                    behavior = self.on_max_iter if isinstance(self.on_max_iter, str) else "custom"
-                    current_span.metadata["max_iter_reached"] = {"max_iter": self.max_iter, "behavior": behavior}
-                    logger.warning(
-                        "Agent reached max_iter.", path=self._path, max_iter=self.max_iter, behavior=behavior
-                    )
-                    # The last LLM output is already in memory — nothing to salvage if we leave here.
-                    _llm_memory_saved = True
-                    reply = await self._resolve_max_iter(current_span.memory)
+                tools, commands = await self._resolve_tools(turn.i)
+                if turn.i >= self.max_iter and not turn.max_iter_handled:
+                    reply = await self._apply_max_iter(turn)
                     if reply is not None:
-                        await _append_memory(reply)
-                        if reply.role == "assistant":
-                            yield self._synthetic_event(
-                                "max_iter", RunStatus(code="success", reason="max_iter"), output=reply
-                            )
-                            break
-                    _llm_memory_saved = False  # a final tool-less LLM call follows
-                pinned_tool_names = {t.name for t in tools if getattr(t, "pin_result", False)}
-                tool_result_limits = {}
-                tool_guardrail_runners = {}
-                for t in tools:
-                    resolved_limit = getattr(t, "result_limit", "inherit")
-                    if resolved_limit == "inherit":
-                        resolved_limit = self.tool_result_limit
-                    elif isinstance(resolved_limit, int):
-                        # Dynamic (ToolSet-resolved) tools may still carry the int shorthand.
-                        resolved_limit = ToolResultLimit(threshold=resolved_limit)
-                    tool_result_limits[t.name] = resolved_limit
-                    if not getattr(t, "_guardrails_exempt", False):
-                        tool_guardrail_runners[t.name] = t._resolve_guardrail_runner(self._guardrail_runner)
+                        yield self._synthetic_event(
+                            "max_iter", RunStatus(code="success", reason="max_iter"), output=reply
+                        )
+                        break
+                self._prepare_step_tools(turn, tools)
                 if commands:
-                    # Commands will only be user messages with a single text content
-                    if len(current_span.memory[-1].content) == 1:
-                        content = current_span.memory[-1].content[0]
-                        if isinstance(content, TextContent) and content.text.startswith("/"):
-                            import shlex
-
-                            args = shlex.split(content.text)
-                            command = args[0].strip("/")
-                            args = args[1:]
-                            # If no command is found, we'll simply let the message pass through the LLM
-                            if command in commands:
-                                tool = commands[command]
-                                tool_input = {}
-                                # NOTE: do not name this loop variable `i` — it would shadow
-                                # the agent-loop iteration counter in the enclosing scope.
-                                for arg_idx, field_name in enumerate(tool.params_model.model_fields.keys()):
-                                    # Params model preserves the ordering of the fields as they appear in the signature
-                                    # We grab as many arguments as we can. If there are too few arguments, we'll let the tool params model validator give a better error
-                                    if arg_idx >= len(args):
-                                        break
-                                    tool_input[field_name] = args[arg_idx]
-                                # Craft a fake tool_use so we can keep this interaction in the agent memory
-                                tool_use_id = uuid7(as_type="hex")
-                                current_span._memory_dump.append(
-                                    {
-                                        "role": "assistant",
-                                        "content": [
-                                            {
-                                                "type": "tool_use",
-                                                "id": tool_use_id,
-                                                "name": tool.name,
-                                                "input": tool_input,
-                                            }
-                                        ],
-                                    }
-                                )
-                                # Run the tool (raw stream — see _multiplex_tools;
-                                # same pending-cancel detection as the fast path)
-                                _cmd_task = asyncio.current_task()
-                                active_events = tool._stream(**tool_input)
-                                async for event in active_events:
-                                    if _cmd_task is not None and _cmd_task.cancelling():
-                                        raise asyncio.CancelledError
-                                    await _process_tool_event(event, tool_use_id, append_to_messages=False)
-                                    for pending_event in pending_guardrail_events:
-                                        yield pending_event
-                                    pending_guardrail_events.clear()
-                                    if isinstance(event, OutputEvent) and event.output is not None:
-                                        if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
-                                            yield event
-                                            raise PauseRequired(event)
-                                        if event.status.code == "cancelled" and event.status.reason == "cancelled":
-                                            yield event
-                                            raise RunCancelled(event.status.message or "Run cancelled by user.")
-                                        current_span.memory.append(
-                                            Message.validate(
-                                                {
-                                                    "role": "assistant",
-                                                    "content": [TextContent(text=str(event.output))],
-                                                }
-                                            )
-                                        )
-                                    yield event
-                                active_events = None
-                                return
+                    command = self._command_call(turn, commands)
+                    if command is not None:
+                        active_events = self._run_command(turn, *command)
+                        async for event in active_events:
+                            yield event
+                        active_events = None
+                        return
 
                 # Resume path: if the trailing assistant message has tool_uses
                 # that were left unresolved by an earlier approval gate, run
@@ -2010,386 +2359,105 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # most providers reject a request whose conversation ends in
                 # an assistant message whose tool_uses have no matching
                 # tool_results.
-                pending_tool_uses = self._find_pending_tool_uses(current_span.memory)
-                if pending_tool_uses:
-                    _llm_memory_saved = True  # nothing to salvage; we never called the LLM
-                    tool_calls = pending_tool_uses
-                    first_pending: OutputEvent | None = None
-                    active_events = self._multiplex_tools(tools, tool_calls)
-                    async for tool_call, event in active_events:
-                        await _process_tool_event(event, tool_call.id, append_to_messages=True)
-                        for pending_event in pending_guardrail_events:
-                            yield pending_event
-                        pending_guardrail_events.clear()
+                tool_calls = self._find_pending_tool_uses(current_span.memory)
+                if tool_calls:
+                    turn.llm_memory_saved = True  # nothing to salvage; we never called the LLM
+                else:
+                    if self.memory_compaction is not None and turn.last_llm_usage is not None:
+                        await self._compact_mid_turn(turn)
+
+                    self._begin_llm_call(turn)
+                    llm_messages = current_span.memory
+                    if self.attachment_limit is not None:
+                        # Same length and order as memory; only oversized attachments differ.
+                        llm_messages = await apply_attachment_limit(
+                            llm_messages,
+                            limit=self.attachment_limit,
+                            store=self._offload_store,
+                            spills=self._attachment_spills,
+                        )
+                    active_events = self._llm._stream(
+                        model=turn.model,
+                        messages=llm_messages,
+                        system_prompt=turn.system_prompt,
+                        tools=tools,
+                        output_model=self.output_model,
+                        **turn.kwargs,
+                    )
+                    buffer_stream, stream_scrub = turn.buffer_stream, turn.stream_scrub
+                    async for event in active_events:
+                        if isinstance(event, OutputEvent):
+                            try:
+                                await self._on_llm_output(turn, event)
+                            except Exception:
+                                # A blocked or failed output still lets out what its rails reported.
+                                released, turn.released = turn.released, []
+                                for released_event in released:
+                                    yield released_event
+                                raise
+                            if turn.released:
+                                released, turn.released = turn.released, []
+                                for released_event in released:
+                                    yield released_event
+                            if turn.retry:
+                                break
+                        elif buffer_stream and isinstance(event, DeltaEvent):
+                            turn.buffered_events.append(event)
+                            continue
+                        elif stream_scrub and isinstance(event, DeltaEvent):
+                            if isinstance(event.item, TextDelta | ThinkingDelta):
+                                block_id = event.item.id
+                                block_scrubber = turn.delta_scrubbers.get(block_id)
+                                if block_scrubber is None:
+                                    block_scrubber = self._guardrail_runner.stream_scrubber(*_OUTPUT_STAGES)
+                                    turn.delta_scrubbers[block_id] = block_scrubber
+                                turn.last_delta_events[block_id] = event
+                                attr = "text_delta" if isinstance(event.item, TextDelta) else "thinking_delta"
+                                stable = block_scrubber.feed(getattr(event.item, attr))
+                                if not stable:
+                                    continue  # withheld inside the holdback window
+                                setattr(event.item, attr, stable)
                         yield event
-                        if (
-                            isinstance(event, OutputEvent)
-                            and event.status.code == "cancelled"
-                            and event.status.reason == "cancelled"
-                        ):
-                            raise RunCancelled(event.status.message or "Run cancelled by user.")
-                        if (
-                            isinstance(event, OutputEvent)
-                            and event.status.code == "cancelled"
-                            and event.status.reason in _PAUSE_REASONS
-                            and first_pending is None
-                        ):
-                            first_pending = event
+
+                    # Output validation/guardrails can break the loop early too.
+                    await active_events.aclose()
                     active_events = None
-                    if first_pending is not None:
-                        raise PauseRequired(first_pending)
-                    i += 1
-                    continue
+                    if turn.retry:
+                        continue  # re-generate with the validation error or guardrail critique appended
 
-                # Mid-loop compaction: a single turn that makes many (or large) tool calls
-                # grows memory unbounded between iterations. resolve_memory only compacts at
-                # turn start (and not at all on a turn with no parent), so without this a long
-                # tool-calling turn can overflow the context window mid-run. The trailing
-                # assistant batch + its tool_results are *unconsumed* — the next LLM call must
-                # read them — so we protect that tail and compact only the history before it
-                # (dropping the unconsumed batch would loop the model back to re-plan the same
-                # step). The context measurement is the size signal: the last call that reported
-                # context tokens, plus an estimate of the messages appended after it.
-                if self.memory_compaction is not None and last_llm_usage is not None:
-                    mem_before = current_span.memory
-                    await self._compact_preserving_last_assistant(
-                        current_span, measurement=current_span.metadata.get("context_measurement")
-                    )
-                    if current_span.memory is not mem_before:
-                        # Compaction rewrote memory out of lockstep with the dump; rebuild it.
-                        current_span._memory_dump = await dump(current_span.memory)
-                        measured = current_span.metadata.get("context_measurement")
-                        if measured is not None:
-                            removed = len(mem_before) - len(current_span.memory)
-                            measured["messages"] = max(0, measured["messages"] - removed)
+                    if self.output_model is not None:
+                        break
 
-                # Output-side guardrails: model_output rails run on the final assistant
-                # message; model_step rails run on EVERY assistant message (including
-                # intermediate tool-calling steps). Rails that need a full-text verdict
-                # force buffer-until-verdict — no chunk escapes before they allow it.
-                # Deterministic redact-only rails transform the stream in flight instead
-                # (holdback window catches patterns spanning chunk boundaries).
-                _runner = self._guardrail_runner
-                guard_output = _runner is not None and _runner.has_stage(GuardrailStage.MODEL_OUTPUT)
-                guard_step = _runner is not None and _runner.has_stage(GuardrailStage.MODEL_STEP)
-                _out_stages = (GuardrailStage.MODEL_OUTPUT, GuardrailStage.MODEL_STEP)
-                buffer_stream = (guard_output or guard_step) and _runner.needs_buffering(*_out_stages)
-                stream_scrub = not buffer_stream and _runner is not None and bool(_runner.scrub_rails(*_out_stages))
-                # One scrubber per content block id: text and thinking deltas interleave,
-                # so a shared holdback buffer would stitch unrelated content together.
-                delta_scrubbers: dict[str, Any] = {}
-                last_delta_events: dict[str, DeltaEvent] = {}
-                buffered_events: list[BaseEvent] = []
-                guardrail_retry = False
-
-                sent = len(current_span.memory)
-                llm_messages = current_span.memory
-                if self.attachment_limit is not None:
-                    # Same length and order as memory; only oversized attachments differ.
-                    llm_messages = await apply_attachment_limit(
-                        llm_messages,
-                        limit=self.attachment_limit,
-                        store=self._offload_store,
-                        spills=self._attachment_spills,
-                    )
-                active_events = self._llm._stream(
-                    model=model,
-                    messages=llm_messages,
-                    system_prompt=system_prompt,
-                    tools=tools,
-                    output_model=self.output_model,
-                    **kwargs,
-                )
-                async for event in active_events:
-                    if isinstance(event, OutputEvent):
-                        # If the LLM call fails, we want to propagate the error upwards
-                        if event.error is not None:
-                            raise RuntimeError(event.error)
-
-                        interrupted = event.status.code == "cancelled" and event.status.reason == "interrupted"
-
-                        # Handle case where LLM was interrupted before any output was received
-                        if event.output is None and interrupted:
-                            raise InterruptError(event.call_id, output=None)
-
-                        assert isinstance(event.output, Message), (
-                            f"Expected event.output to be a Message, got {type(event.output)}"
-                        )
-
-                        # Release each scrubber's holdback tail as one last delta so
-                        # streaming consumers receive the complete (scrubbed) content.
-                        for _block_id, _block_scrubber in delta_scrubbers.items():
-                            _tail = _block_scrubber.flush()
-                            _last = last_delta_events.get(_block_id)
-                            if _tail and _last is not None:
-                                _kind = _last.item.type  # text_delta | thinking_delta
-                                yield DeltaEvent(
-                                    run_id=_last.run_id,
-                                    parent_run_id=_last.parent_run_id,
-                                    path=_last.path,
-                                    call_id=_last.call_id,
-                                    parent_call_id=_last.parent_call_id,
-                                    item={"type": _kind, "id": _block_id, _kind: _tail},
-                                )
-                        delta_scrubbers.clear()
-                        last_delta_events.clear()
-
-                        # A tool call leaked as text whose arguments never arrived: the
-                        # collector could neither run nor show anything. Re-request the
-                        # step. The empty message is not kept (a reasoning item with no
-                        # following item is rejected on replay); a runtime nudge tells the
-                        # model why it is being asked again.
-                        if (
-                            not interrupted
-                            and event.output.metadata.get("kind") == LEAKED_TOOL_CALL_UNRECOVERED
-                            and leaked_call_retry_count < self.max_leaked_tool_call_retries
-                            and i < self.max_iter - 1
-                        ):
-                            leaked_call_retry_count += 1
-                            logger.warning(
-                                "Re-requesting step after a leaked tool call with no arguments",
-                                agent_path=self._path,
-                                attempt=leaked_call_retry_count,
-                            )
-                            await _append_memory(
-                                Message(
-                                    role="user",
-                                    content=[TextContent(text=(
-                                        "Your previous response ended before the tool call was issued "
-                                        "(the call was emitted as text, without arguments, and nothing ran). "
-                                        "Issue the tool call now as a proper function call."
-                                    ))],
-                                    metadata={"source": "runtime", "kind": "leaked_tool_call_retry"},
-                                )
-                            )
-                            _llm_memory_saved = True
-                            last_llm_usage = event.usage
-                            self._record_context_measurement(current_span, event.usage, sent)
-                            buffered_events.clear()
-                            i += 1
-                            need_retry = True
-                            break
-
-                        # model_step rails run on every assistant message; model_output
-                        # rails on the final one (no tool calls). Both run BEFORE the
-                        # message enters memory, so replace/redact verdicts persist and a
-                        # blocked response never poisons history.
-                        is_final = not interrupted and not any(
-                            isinstance(c, ToolUseContent) and not c.is_server_tool_use for c in event.output.content
-                        )
-                        stages_to_run: list[GuardrailStage] = []
-                        if guard_step and not interrupted:
-                            stages_to_run.append(GuardrailStage.MODEL_STEP)
-                        if guard_output and is_final:
-                            stages_to_run.append(GuardrailStage.MODEL_OUTPUT)
-                        if stages_to_run:
-                            current_text = message_text(event.output)
-                            replaced_any = False
-                            g_verdict, g_rail, g_stage = None, None, None
-                            for out_stage in stages_to_run:
-                                outcome = await self._run_output_guardrails(
-                                    event.output, current_text, run_context, current_span, out_stage
-                                )
-                                for g_event in build_guardrail_events(
-                                    outcome.triggered, run_context=run_context, span=current_span
-                                ):
-                                    yield g_event
-                                if outcome.replaced:
-                                    current_text = outcome.text
-                                    replaced_any = True
-                                if outcome.verdict is not None and g_verdict is None:
-                                    g_verdict, g_rail, g_stage = outcome.verdict, outcome.rail, out_stage
-                            if g_verdict is not None and g_verdict.action == "retry":
-                                # retry means "regenerate the response" — only meaningful on
-                                # the final message. Mid-plan (tool-calling) steps coerce to
-                                # block below rather than corrupting the tool loop.
-                                if (
-                                    is_final
-                                    and guardrail_retry_count < self.max_guardrail_retries
-                                    and i < self.max_iter - 1
-                                ):
-                                    guardrail_retry_count += 1
-                                    # Keep the rejected output + critique in memory so the
-                                    # model can correct itself (Guardrails-AI reask).
-                                    await _append_memory(event.output)
-                                    _llm_memory_saved = True
-                                    last_llm_usage = event.usage
-                                    self._record_context_measurement(current_span, event.usage, sent + 1)
-                                    feedback = g_verdict.feedback or (
-                                        f"Your response was rejected by guardrail '{g_rail.name}'. "
-                                        "Rewrite it to comply."
-                                    )
-                                    await _append_memory(
-                                        Message.validate(
-                                            {"role": "user", "content": [{"type": "text", "text": feedback}]}
-                                        )
-                                    )
-                                    buffered_events.clear()
-                                    guardrail_retry = True
-                                    i += 1
-                                    break
-                                # Retry budget exhausted (or mid-plan) — block with the reason.
-                                g_verdict = Verdict.block(
-                                    g_verdict.reason,
-                                    blocked_message=g_verdict.blocked_message or g_rail.blocked_message_for(g_stage),
-                                )
-                            if g_verdict is not None and g_verdict.action in ("block", "escalate"):
-                                # escalate has no human gate at the output edge — block.
-                                blocked_text = g_verdict.blocked_message or g_rail.blocked_message_for(g_stage)
-                                blocked_msg = Message(role="assistant", content=[TextContent(text=blocked_text)])
-                                await _append_memory(blocked_msg)
-                                _llm_memory_saved = True
-                                buffered_events.clear()
-                                raise GuardrailBlocked(
-                                    g_rail.name, g_stage.value, reason=g_verdict.reason, output=blocked_msg
-                                )
-                            if replaced_any:
-                                replace_message_text(event.output, current_text)
-                        elif stream_scrub:
-                            # Unchecked message (intermediate without step rails, or
-                            # interrupted) in transform mode: keep memory consistent with
-                            # the scrubbed deltas that already went out.
-                            for c in event.output.content:
-                                if isinstance(c, TextContent) and c.text:
-                                    c.text = _runner.scrub_text(c.text, *_out_stages)
-                            invalidate_message_dump_caches(event.output)
-                        # Thinking blocks are not part of the checked text — scrub them
-                        # directly with the redact rails so reasoning never carries PII
-                        # into memory (they were scrubbed/withheld on the wire already).
-                        if (guard_output or guard_step) and isinstance(event.output, Message):
-                            for c in event.output.content:
-                                if isinstance(c, ThinkingContent) and c.thinking:
-                                    c.thinking = _runner.scrub_text(c.thinking, *_out_stages)
-                            # The LLM span's output dump cached the unscrubbed blocks.
-                            invalidate_message_dump_caches(event.output)
-
-                        # Add LLM response to conversation for next iteration
-                        await _append_memory(event.output)
-                        _llm_memory_saved = True
-                        last_llm_usage = event.usage
-                        self._record_context_measurement(current_span, event.usage, sent + 1)
-
-                        if self.output_model is not None:
-                            validation_error_msg = None
-                            validation_context = self.output_model_context
-                            for content in event.output.content:
-                                # TODO Refactor this. If the llm should return a fixed output model, we should error if it doesn't return it
-                                if isinstance(content, TextContent):
-                                    try:
-                                        output = coerce_to_dict(content.text)
-                                        validated_output = self.output_model.model_validate(
-                                            output, context=validation_context
-                                        )
-                                        event.output = validated_output
-                                        break
-                                    except (json.JSONDecodeError, ValueError, ValidationError) as e:
-                                        validation_error_msg = str(e)
-                                        logger.warning(f"Output validation failed: {validation_error_msg}")
-                                        continue
-
-                            if validation_error_msg:
-                                if i < self.max_iter - 1:
-                                    # Feed the error back to the LLM so it can correct itself
-                                    error_feedback = Message.validate(
-                                        {
-                                            "role": "user",
-                                            "content": [
-                                                {
-                                                    "type": "text",
-                                                    "text": (
-                                                        f"Your output failed validation:\n{validation_error_msg}\n\nTry again."
-                                                    ),
-                                                }
-                                            ],
-                                        }
-                                    )
-                                    await _append_memory(error_feedback)
-                                    i += 1
-                                    need_retry = True
-                                    break  # Break out of async for to retry in while loop
-                                else:
-                                    raise RuntimeError(
-                                        f"Output model validation failed after {self.max_iter} attempts: {validation_error_msg}"
-                                    )
-
-                        # Propagate the interruption with the processed output
-                        if interrupted:
-                            raise InterruptError(event.call_id, output=event.output)
-
-                        # Buffer-until-verdict: the rails allowed the message — release
-                        # the withheld deltas before the OutputEvent.
-                        if buffered_events:
-                            for buffered_event in buffered_events:
-                                yield buffered_event
-                            buffered_events.clear()
-                    elif buffer_stream and isinstance(event, DeltaEvent):
-                        buffered_events.append(event)
-                        continue
-                    elif stream_scrub and isinstance(event, DeltaEvent):
-                        if isinstance(event.item, TextDelta | ThinkingDelta):
-                            block_id = event.item.id
-                            block_scrubber = delta_scrubbers.get(block_id)
-                            if block_scrubber is None:
-                                block_scrubber = _runner.stream_scrubber(*_out_stages)
-                                delta_scrubbers[block_id] = block_scrubber
-                            last_delta_events[block_id] = event
-                            attr = "text_delta" if isinstance(event.item, TextDelta) else "thinking_delta"
-                            stable = block_scrubber.feed(getattr(event.item, attr))
-                            if not stable:
-                                continue  # withheld inside the holdback window
-                            setattr(event.item, attr, stable)
-                    yield event
-
-                # Output validation/guardrails can break the loop early too.
-                await active_events.aclose()
-                active_events = None
-                if guardrail_retry:
-                    continue  # re-generate with the guardrail critique appended
-
-                if need_retry:
-                    continue  # output_model validation failed — retry with error feedback
-
-                if self.output_model is not None:
-                    break
-
-                tool_calls = [
-                    content
-                    for content in current_span.memory[-1].content
-                    if isinstance(content, ToolUseContent) and not content.is_server_tool_use
-                ]
-
-                if not tool_calls:
-                    break
+                    tool_calls = [
+                        content
+                        for content in current_span.memory[-1].content
+                        if isinstance(content, ToolUseContent) and not content.is_server_tool_use
+                    ]
+                    if not tool_calls:
+                        break
 
                 first_pending: OutputEvent | None = None
                 active_events = self._multiplex_tools(tools, tool_calls)
                 async for tool_call, event in active_events:
-                    await _process_tool_event(event, tool_call.id, append_to_messages=True)
-                    for pending_event in pending_guardrail_events:
-                        yield pending_event
-                    pending_guardrail_events.clear()
+                    await self._process_tool_event(turn, event, tool_call.id)
+                    if turn.pending_guardrail_events:
+                        for pending_event in turn.pending_guardrail_events:
+                            yield pending_event
+                        turn.pending_guardrail_events.clear()
                     yield event
-                    if (
-                        isinstance(event, OutputEvent)
-                        and event.status.code == "cancelled"
-                        and event.status.reason == "cancelled"
-                    ):
-                        raise RunCancelled(event.status.message or "Run cancelled by user.")
-                    if (
-                        isinstance(event, OutputEvent)
-                        and event.status.code == "cancelled"
-                        and event.status.reason in _PAUSE_REASONS
-                        and first_pending is None
-                    ):
-                        first_pending = event
+                    if isinstance(event, OutputEvent) and event.status.code == "cancelled":
+                        if event.status.reason == "cancelled":
+                            raise RunCancelled(event.status.message or "Run cancelled by user.")
+                        if event.status.reason in _PAUSE_REASONS and first_pending is None:
+                            first_pending = event
                 active_events = None
                 if first_pending is not None:
                     raise PauseRequired(first_pending)
-                i += 1
+                turn.i += 1
         finally:
             try:
                 if active_events is not None:
                     await active_events.aclose()
             finally:
-                if not _llm_memory_saved:
+                if not turn.llm_memory_saved:
                     self._salvage_interrupted_llm_output(run_context, current_span)
