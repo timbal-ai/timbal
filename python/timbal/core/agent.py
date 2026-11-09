@@ -1445,13 +1445,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 bg_tool.nest(self._path)
                 _register(bg_tool)
 
-        if tool_policy is _UNSET_POLICY:
-            run_context = get_run_context()
-            tool_policy = run_context._tool_policy if run_context is not None else None
-        policy = tool_policy
-        if policy is not None:
-            tools = [tool for tool in tools if self._tool_allowed(tool, policy)]
-            commands = {key: tool for key, tool in commands.items() if tool in tools}
+        if tool_policy is not None:
+            if tool_policy is _UNSET_POLICY:
+                run_context = get_run_context()
+                tool_policy = run_context._tool_policy if run_context is not None else None
+            if tool_policy is not None:
+                tools = [tool for tool in tools if self._tool_allowed(tool, tool_policy)]
+                commands = {key: tool for key, tool in commands.items() if tool in tools}
         return tools, commands
 
     @staticmethod
@@ -1912,41 +1912,46 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # we double-append and break the next LLM call.
             if event.run_id != run_context.id:
                 return
-            if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
-                # Gated (approval) or suspended (input_required) tool: leave the
-                # tool_use unresolved so it re-fires on resume. Do not synthesize
-                # a tool_result.
-                return
-            if event.status.code == "cancelled" and event.status.reason == "early_exit":
-                bail(event.status.message)
-            if event.status.code == "cancelled" and event.status.reason == "cancelled":
-                # A human cancelled via Cancel() on the resume channel. Terminal:
-                # leave the tool_use unresolved (no tool_result) and let the caller
-                # yield the event before raising RunCancelled to stop the run.
-                return
+            status = event.status
+            status_code, reason = status.code, status.reason
+            if status_code == "cancelled":
+                if reason in _PAUSE_REASONS:
+                    # Gated (approval) or suspended (input_required) tool: leave the
+                    # tool_use unresolved so it re-fires on resume. Do not synthesize
+                    # a tool_result.
+                    return
+                if reason == "early_exit":
+                    bail(status.message)
+                if reason == "cancelled":
+                    # A human cancelled via Cancel() on the resume channel. Terminal:
+                    # leave the tool_use unresolved (no tool_result) and let the caller
+                    # yield the event before raising RunCancelled to stop the run.
+                    return
             content = None
-            if event.status.code == "cancelled" and event.status.reason == "approval_denied":
-                msg = event.status.message or "The tool call was denied."
+            denied = False
+            if status_code == "cancelled" and reason == "approval_denied":
+                msg = status.message or "The tool call was denied."
                 content = f"[Approval denied] {msg}"
-            elif event.status.code == "cancelled" and event.status.reason == "early_exit_local":
-                msg = event.status.message or "The tool exited early."
+                denied = True
+            elif status_code == "cancelled" and reason == "early_exit_local":
+                msg = status.message or "The tool exited early."
                 content = f"[Cancelled] {msg}"
-            elif event.status.code == "blocked":
+            elif status_code == "blocked":
                 # A tool_args guardrail blocked the call. Feed the block back so the LLM
                 # can self-correct (bounded by max_iter), mirroring tool_not_found.
-                msg = event.status.message or "The tool call was blocked by a guardrail."
+                msg = status.message or "The tool call was blocked by a guardrail."
                 content = f"[Blocked by guardrail] {msg}"
+                denied = True
             elif event.error is not None:
                 content = event.error
             elif isinstance(event.output, Message):
                 content = [c for c in event.output.content if isinstance(c, TextContent | FileContent)]
             else:
                 content = event.output
-            status_code = event.status.code
-            denied = status_code == "blocked" or (
-                status_code == "cancelled" and event.status.reason == "approval_denied"
-            )
-            consecutive_denials = consecutive_denials + 1 if denied else 0
+            if denied:
+                consecutive_denials += 1
+            elif consecutive_denials:
+                consecutive_denials = 0
             # Pin the result when the originating tool opted in (e.g. read_skill), so memory
             # compaction never strips this durable context. The tool name is the final path
             # segment of its OutputEvent.
@@ -1972,7 +1977,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if (
                 guardrail_runner is not None
                 and guardrail_runner.has_stage(GuardrailStage.TOOL_RESULT)
-                and event.status.code == "success"
+                and status_code == "success"
             ):
                 for c in tool_result.content:
                     if not isinstance(c, ToolResultContent):
@@ -2004,7 +2009,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # the reduction persists into traces. Errors are never reduced — the model needs
             # the full error to recover.
             result_limit = tool_result_limits.get(tool_name)
-            if result_limit is not None and not pinned and event.status.code == "success":
+            if result_limit is not None and not pinned and status_code == "success":
                 for c in tool_result.content:
                     if isinstance(c, ToolResultContent):
                         offload_record = await apply_tool_result_limit(
@@ -2024,12 +2029,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         steering = self._steers(run_context, current_span)
         # Fixed for the turn; checked after every tool batch.
-        denial_limit = self.max_consecutive_denials if self.max_consecutive_denials is not None else math.inf
+        denial_limit = self.max_consecutive_denials
+        if denial_limit is None:
+            denial_limit = math.inf
         tool_policy = run_context._tool_policy
-        # Set by _steer: whether it added messages, and whether the user wrote one of them.
-        steered = steered_user = False
 
         if steering:
+            # Set by _steer: whether it added messages, and whether the user wrote one of them.
+            steered = steered_user = False
 
             async def _steer() -> AsyncGenerator[BaseEvent, None]:
                 """Bring in what was posted for the running turn, screening user text like a prompt.
