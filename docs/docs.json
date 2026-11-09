@@ -42,6 +42,7 @@
               "agents/skills",
               "agents/dynamic",
               "agents/background-tasks",
+              "agents/chat-sessions",
               "agents/commands"
             ]
           },

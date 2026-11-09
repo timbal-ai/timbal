@@ -33,6 +33,7 @@ The sidebar follows a **basics → platform → production** path. You can jump 
 4. **[Skills](/agents/skills)** — domain packages (knowledge + tools) once the agent loop makes sense
 5. **[Dynamic agents](/agents/dynamic)** — runtime prompts and tool sets
 6. **[Background tasks](/agents/background-tasks)** · **[Commands](/agents/commands)** — utilities (async tools, slash shortcuts)
+7. **[Chat sessions](/agents/chat-sessions)** — a conversation that stays open while its turns run
 
 After **[Workflows](/workflows)**, see **[Human in the loop](/human-in-the-loop)** for approvals, `suspend()`, and durable resume (agents, workflow steps, and tools).
 
@@ -222,6 +223,16 @@ When the deadline passes, the in-flight LLM or tool call is cancelled and the tu
 A `TimeoutError` raised inside a handler, such as a slow HTTP call, is still reported as a regular `error`. Only the runnable's own deadline produces `timeout`.
 
 **Performance.** An unset timeout has negligible overhead: the per-call check remains, but the stream relay and timers are bypassed. Enabling a timeout adds timer and relay work per streamed event. The `benchmarks/timeout/bench_streaming.py` benchmark measures this cost separately from network and LLM latency.
+
+### Stream idle timeout
+
+`stream_idle_timeout` and `max_consecutive_denials` are both on by default. Set either to `None` to turn it off.
+
+`stream_idle_timeout` (default `300`) is how long, in seconds, a model stream may send nothing. `None` waits forever. A stall before the first chunk is retried like a timeout, under that call's `max_retries`. The LLM router's default is `0`, so a plain agent raises on the first stall; a [`FallbackModel`](/agents#fallback-models) entry retries twice by default. Once the stream has produced output, the call raises `timbal.errors.ModelStreamStalled` (a `TimeoutError`) instead of retrying, because another attempt would repeat what was already sent. `is_retryable_provider_error` — the predicate for a `FallbackModel` that falls back only on transient provider errors — counts a stall before the first chunk, and never one after it. Raise the timeout for models that think for minutes without streaming anything.
+
+### Consecutive denials
+
+`max_consecutive_denials` (default `3`) is how many tool calls in a row may be denied at an approval gate, or blocked by a `tool_args` guardrail, before the agent stops routing around the refusals. It then appends a runtime notice (`kind="denial_limit"`) and its next model call gets no tools. The agent span records `metadata.denial_limit` (a list of `{"denials": N}`). Any other tool result resets the count. The count carries across approval resumes of that same run, stored in the run's session data under the agent's path; a new turn starts at `0`. A [steered](/agents/chat-sessions#steering) user message gives the tools back.
 
 ### Approval-Required Tools
 

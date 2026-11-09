@@ -1,0 +1,85 @@
+---
+title: "Chat sessions"
+description: "One open conversation: steer a running turn, park on approval, and wake the agent."
+---
+
+A `ChatSession` (`from timbal.core import ChatSession`) is one conversation with an agent. Messages can arrive while a turn runs, turns run one at a time, and every event goes to one log.
+
+```python
+from timbal import Agent
+from timbal.core import ChatSession
+from timbal.state.tracing.providers import InMemoryTracingProvider
+
+agent = Agent(
+    name="assistant",
+    model="openai/gpt-5-mini",
+    tracing_provider=InMemoryTracingProvider,
+)
+
+async with ChatSession(agent, busy_mode="steer", collect_window=1.0) as session:
+    session.send("refactor the parser")
+    session.send("also keep the old API", mode="steer")
+    session.send("then update the docs", mode="followup")
+```
+
+The agent has to be a foreground, top-level agent, and it needs a tracing provider: every turn reads the history of the last. The session is process-local. Call it on the loop it runs on. `async with` calls `restore()` on the way in and `close()` on the way out.
+
+## Sending
+
+`send(text, mode=)` posts a user message and returns its receipt at once. `mode` defaults to `busy_mode` (`"steer"`). With nothing running, any mode starts a turn.
+
+- `"steer"` — the running turn takes it after its current tool batch, as a user message, and does not end before answering it. Messages a turn ends without taking start the next turn together.
+- `"followup"` — a turn of its own once the running one ends.
+- `"collect"` — one later turn for every message collected, once none has arrived for `collect_window` seconds (default `1`).
+- `"interrupt"` — cancels the running turn (it ends `cancelled` / `interrupted`, keeping what it produced) and runs this message ahead of the queue.
+
+Finished background tasks and [posted session events](/agents/background-tasks#posting-events-to-a-session) start turns too, when their announce policy asks for one.
+
+`events(after=)` replays the log from that cursor, then follows it until `close`. Next to each turn's events it carries session records `{"type": "SESSION", "kind": ...}`: `message`, `message_settled`, `turn_started` (with `trigger`), `turn_finished` (`status`, `parked`, `silent`), `turn_failed`, `unparked`, `resume_dropped`, `restore_failed`, `interrupt`, `wake`, `wake_superseded`, `closed`.
+
+## Steering
+
+`Agent.steering` (`None` by default) is on for runs a session starts and off otherwise, and only on the root agent. A wake never steers, even with `steering=True`: a message sent during it waits for a turn of its own, with the full tool list and no silence token.
+
+At each step boundary — after a tool batch, and before a final answer would end the turn — the root agent drains `lane="next"` events. Each user message is screened by the input guardrails: a redact rewrites it, a block drops just that message for a runtime notice (`kind="steer_blocked"`), and the turn goes on. A steered user message also restores the `max_iter` budget and any tools [`max_consecutive_denials`](/agents#consecutive-denials) had taken away for that step.
+
+## Parked turns
+
+A turn that ends on an approval or `ask_user` parks the session (`turn_finished` with `parked: true`). New messages wait. `resume({approval_id: ..., interaction_id: ...})` answers it, the same values as `resume=` on a runnable. Answers sent before the worker takes them are merged. The same id answered differently raises `ValueError`, and the HTTP route answers `409`. `resume()` while a turn is running raises `RuntimeError` (`409` as well).
+
+`interrupt()` — or a message sent with `mode="interrupt"` — cancels the running turn. When the session is parked it cancels only the pending approvals and questions that have not been answered yet (`Cancel`: those tools never run; answers already given stand). The log records `interrupt`.
+
+`parked` stays true only while that run is still the session's head. Another client answering it, or a newer run moving the head on, records `unparked`, and answers still queued for the old run are dropped (`resume_dropped`).
+
+## Continuing a run
+
+`ChatSession(agent, parent_id=...)` then `await session.restore()` reads that run with `TracingProvider.get_strict` (`None` only when it is not stored; the agent's tracing setting is resolved first). `async with`, the worker's first step, and `POST /chat/sessions` all call it. If the parent is waiting on an approval or a question, the session starts parked, and `resume()` answers that run. A failed read raises (`restore_failed`): the worker retries after 0.5 s, doubling up to 30 s, and admits no message until it knows. `POST /chat/sessions` answers `503`.
+
+## Wakes
+
+`wake(text, key=, tool_policy="read_only", silent_ok=True)` starts a turn for the application (a routine, a heartbeat) and returns the wake id. It runs only when nothing the user sent, and no event turn, is waiting — never inside a user's turn — and it does not steer. A pending wake with the same `key` is replaced (`wake_superseded`).
+
+`tool_policy` narrows what the agents in that run offer their models: `"read_only"` (the default: tools declared [`read_only`](/agents/tools#read-only-tools), MCP tools whose server sets `readOnlyHint`, and the agent's own readers), a collection of tool names (an empty one offers nothing), a callable, or `None` for every tool. The wake text is trusted, so input guardrails skip it. Over HTTP a callable cannot be sent. `tool_policy` there is `"read_only"`, a list of names, or `null`; anything else is `400`.
+
+With `silent_ok` (and `allow_silence`, default `True`) the prompt asks the model to answer exactly `NO_REPLY` when nothing needs the user. A root agent that does sets `metadata.silent`, and `turn_finished.silent` is true. User turns never get that token. Other turns the runtime starts (session events, finished background tasks) may stay silent the same way when `allow_silence` is on.
+
+## When a turn fails to start
+
+A turn that fails before it produces an output puts its work back. The session retries it after 0.5 s, then after 1 s. After three failures in a row, only new work — something that attempt did not already have — retries it. The log records `turn_failed` with `error` and `attempt`.
+
+## HTTP
+
+`python -m timbal.server` serves the session when the runnable is an Agent (`400` otherwise; a nested or background agent is `409`). See [Self-hosted](/deployment/self-hosted) for where it sits. A session another process holds is `404`. There is no authorization on these routes.
+
+| Route | |
+|---|---|
+| `GET /chat` | Playground. |
+| `POST /chat/sessions` | `{"parent_id"?, "busy_mode"?, "collect_window"?}` → `201`, or `503` when `parent_id` cannot be read. |
+| `POST /chat/sessions/{id}/messages` | `{"text", "mode"?}` → `202`. |
+| `POST /chat/sessions/{id}/interrupt` | Cut the running turn, or cancel what a parked turn is waiting on. |
+| `POST /chat/sessions/{id}/resume` | `{"resume": {...}}`. `409` when a turn is running, nothing is waiting, or an id was already answered differently. |
+| `POST /chat/sessions/{id}/wake` | `{"text", "key"?, "tool_policy"?, "silent_ok"?}` → `202` with `wake_id`. |
+| `GET /chat/sessions/{id}/events?after=` | The log as SSE. `Last-Event-ID` is honored; each frame's `id` is that event's cursor. |
+| `GET /chat/sessions/{id}/log?after=&wait_ms=` | The same log as JSON, long-polled. |
+
+`GET /chat/sessions/{id}` is the session state (`busy`, `parked`, `head`, pending messages, and the pending approvals while parked). `DELETE` closes it. Idle sessions are closed after `TIMBAL_CHAT_SESSION_TTL_S` seconds (default `3600`) when the next one opens.

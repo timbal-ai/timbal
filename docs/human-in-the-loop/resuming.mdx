@@ -149,6 +149,8 @@ asyncio.run(resume_if_unclaimed())
 
 This protection is implemented by `JsonlTracingProvider` and `SqliteTracingProvider` out of the box. **Custom providers must override `claim_approval(parent_id, approval_id, run_id)`** to get the same durable-lock behavior; the base class default is a no-op.
 
+A [chat session](/agents/chat-sessions#continuing-a-run) that continues a run looks it up with `get_strict`, not `get`: `None` means the run is not stored, and a failed read raises instead of coming back as nothing. JSONL and SQLite treat only a missing file as not found. The base `get_strict` calls `get`, so a custom provider whose `get` returns `None` on a read error has to override `get_strict` too.
+
 ## Enumerating what's pending
 
 When a run cancels and the runnable had multiple concurrent calls, each pause emits its own event. There are two ergonomic ways to enumerate them, and the same shape applies to both approvals and interactions.

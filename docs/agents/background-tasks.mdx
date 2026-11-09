@@ -270,6 +270,13 @@ with the same `key` is superseded. The returned `SessionEvent` is a receipt:
 or `"superseded"`; `await event.settled()` waits for that. Turns that receive
 events count them in their usage as `session_events:delivered`.
 
+`lane` is `"later"` (default) or `"next"`. A running turn that steers takes a
+`lane="next"` event after its current tool batch; `"later"` waits for a
+following turn. The drain at the start of a turn takes pending events and
+completion notices, and does not take user messages. `source="user"` is a
+prompt: pass `mode=` (`"steer"`, `"followup"`, or `"collect"`; default
+`"followup"`) instead of `lane`. See [Chat sessions](/agents/chat-sessions).
+
 Any run id of a session that has started a background task (or received an
 event) reaches it. For a session with neither, `post_session_event` raises
 `LookupError`; pass `create=True` with the session's **latest** run id, since
