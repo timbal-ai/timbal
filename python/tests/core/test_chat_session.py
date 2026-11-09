@@ -1058,6 +1058,27 @@ class TestRobustness:
         finally:
             await session.close()
 
+    @pytest.mark.parametrize("parked", [True, False])
+    async def test_restore_works_with_the_default_tracing_setting(self, parked):
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "tool":
+                return "paid"
+            return tool_call("charge") if last_user_text(messages) == "pay" else f"echo: {last_user_text(messages)}"
+
+        agent = Agent(  # no tracing_provider: TRACING_UNSET, resolved by the run context
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: "charged", requires_approval=True)],
+        )
+        initial = await agent(prompt="pay" if parked else "hi").collect()
+        async with ChatSession(agent, parent_id=initial.run_id) as session:
+            assert session.parked is parked
+            if not parked:
+                session.send("again")
+                (finished,) = await records(session, "turn_finished", 1)
+                assert finished["status"]["code"] == "success"
+
     async def test_an_interrupt_sent_before_restore_cancels_the_parked_run(self):
         def handler(messages):
             last = messages[-1]

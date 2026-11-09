@@ -422,13 +422,15 @@ class ChatSession:
         run_id, self._restore_from = self._restore_from, None
         if run_id is None or self._last_context is not None:
             return
-        provider = self._agent.tracing_provider
+        # The context resolves the agent's setting (TRACING_UNSET: auto-detected) into the provider runs use.
+        lookup = RunContext(parent_id=run_id, tracing_provider=self._agent.tracing_provider)
+        provider = lookup._tracing_provider
         if provider is None:
             return
         try:
             # Not _get_parent_trace: it reads a failed lookup as "no parent", and an unparked session would
             # resume the parked run with the next message's turn and drop that message.
-            trace = await provider.get(RunContext(parent_id=run_id, tracing_provider=provider))
+            trace = await provider.get(lookup)
         except Exception as error:
             self._restore_from = run_id
             self._record("restore_failed", run_id=run_id, error=str(error))
@@ -436,7 +438,7 @@ class ChatSession:
         root = next((span for span in trace.values() if span.parent_call_id is None), None) if trace else None
         if root is None or not is_parked(root.status) or self._last_context is not None:
             return
-        context = RunContext(id=run_id, tracing_provider=provider)
+        context = RunContext(id=run_id, tracing_provider=self._agent.tracing_provider)
         context.__dict__["_trace"] = trace
         prompt = (root.input or {}).get("prompt") or ""
         self._last_context, self._parked, self._last_prompt = context, True, prompt
