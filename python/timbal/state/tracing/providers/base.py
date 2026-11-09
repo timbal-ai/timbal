@@ -264,6 +264,17 @@ class TracingProvider(ABC):
         pass
 
     @classmethod
+    async def get_strict(cls, run_context: "RunContext") -> Trace | None:
+        """:meth:`get`, except that a failed read raises: ``None`` means the run is not stored.
+
+        For callers that must not take an unreadable run for a missing one (a
+        chat session continuing a run that may be waiting for an approval).
+        The built-in providers implement it; the default calls :meth:`get`,
+        so a provider whose ``get`` returns ``None`` on errors cannot tell.
+        """
+        return await cls.get(run_context)
+
+    @classmethod
     async def put(cls, run_context: "RunContext") -> None:
         """Persist the completed run's trace and fire all attached exporters.
 

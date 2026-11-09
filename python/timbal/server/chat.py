@@ -240,7 +240,8 @@ async def resume_session(request: Request, session_id: str) -> JSONResponse:
         raise HTTPException(status_code=400, detail="'resume' must be a non-empty object.")
     try:
         session.resume(values)
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
+        # Not waiting for an answer (yet), or an id already answered differently.
         raise HTTPException(status_code=409, detail=str(e)) from e
     return _json({"resumed": True}, status_code=202)
 
@@ -290,8 +291,7 @@ async def session_events(request: Request, session_id: str, after: int = 0) -> S
         after = max(after, int(last_event_id))
 
     async def stream() -> AsyncGenerator[str, None]:
-        seq = after
-        items = session.events(after).__aiter__()
+        items = session.events(after, numbered=True).__aiter__()
         pending: asyncio.Task | None = None
         try:
             while True:
@@ -303,14 +303,12 @@ async def session_events(request: Request, session_id: str, after: int = 0) -> S
                     continue
                 task, pending = pending, None
                 try:
-                    item = task.result()
+                    seq, item = task.result()
                 except StopAsyncIteration:
                     return
                 if item is BACKGROUND_LOG_GAPPED:
-                    seq = session.log.forgotten_through
                     yield f"event: gapped\ndata: {json.dumps({'next_cursor': seq})}\n\n"
                     continue
-                seq += 1
                 yield f"id: {seq}\ndata: {json.dumps(_jsonable(item), default=str)}\n\n"
         finally:
             if pending is not None:

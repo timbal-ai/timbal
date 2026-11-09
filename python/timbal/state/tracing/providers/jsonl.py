@@ -164,6 +164,33 @@ class JsonlTracingProvider(TracingProvider):
 
     @classmethod
     @override
+    async def get_strict(cls, run_context: "RunContext") -> Trace | None:
+        """See base class. A read error raises; so does a line that does not decode when the run is not
+        found elsewhere (it may be that run's record, being written)."""
+        if cls._path is None or not cls._path.exists():
+            return None
+        parent_id = run_context.parent_id
+        if parent_id is None:
+            return None
+        undecodable: json.JSONDecodeError | None = None
+        with cls._path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    undecodable = error
+                    continue
+                if record.get("run_id") == str(parent_id):
+                    return Trace(record["spans"], parent_id=record.get("parent_id"))
+        if undecodable is not None:
+            raise undecodable
+        return None
+
+    @classmethod
+    @override
     async def claim_approval(cls, parent_id: str | None, approval_id: str, run_id: str) -> bool:
         """Claim ``(parent_id, approval_id)`` using a sidecar JSON file.
 

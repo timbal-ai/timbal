@@ -147,6 +147,15 @@ class SqliteTracingProvider(TracingProvider):
 
         Returns None if the database does not exist or no matching record is found.
         """
+        try:
+            return await cls.get_strict(run_context)
+        except (OSError, sqlite3.Error, json.JSONDecodeError, ValueError):
+            return None
+
+    @classmethod
+    @override
+    async def get_strict(cls, run_context: "RunContext") -> Trace | None:
+        """See base class: database and decoding errors raise."""
         if cls._path is None or not Path(cls._path).exists():
             return None
         parent_id = run_context.parent_id
@@ -169,19 +178,13 @@ class SqliteTracingProvider(TracingProvider):
                 ]
             return spans, row[0], row[1]
 
-        try:
-            found = await asyncio.to_thread(_query)
-        except (OSError, sqlite3.Error):
-            return None
+        found = await asyncio.to_thread(_query)
         if found is None:
             return None
         spans, legacy, grandparent = found
-        try:
-            if spans:
-                return Trace([json.loads(span) for span in spans], parent_id=grandparent)
-            return Trace(json.loads(legacy), parent_id=grandparent) if legacy else None
-        except (json.JSONDecodeError, ValueError):
-            return None
+        if spans:
+            return Trace([json.loads(span) for span in spans], parent_id=grandparent)
+        return Trace(json.loads(legacy), parent_id=grandparent) if legacy else None
 
     @classmethod
     @override

@@ -637,6 +637,19 @@ class PlatformTracingProvider(TracingProvider):
 
     @classmethod
     @override
+    async def get_strict(cls, run_context: RunContext) -> Trace | None:
+        """See base class: a 404 is a run the platform does not have; other failures raise."""
+        import httpx
+
+        try:
+            return await cls.get(run_context)
+        except httpx.HTTPStatusError as error:
+            if error.response is not None and error.response.status_code == 404:
+                return None
+            raise
+
+    @classmethod
+    @override
     async def get(cls, run_context: RunContext) -> Trace | None:
         """See base class."""
         from ....platform.utils import _request

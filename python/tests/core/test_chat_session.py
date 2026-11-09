@@ -1079,6 +1079,228 @@ class TestRobustness:
                 (finished,) = await records(session, "turn_finished", 1)
                 assert finished["status"]["code"] == "success"
 
+    async def test_a_restored_callable_policy_does_not_bring_back_a_revoked_tool(self):
+        state = {"revoked": False}
+        secrets_read = []
+
+        def revoke() -> str:
+            state["revoked"] = True
+            return "revoked"
+
+        def secret() -> str:
+            secrets_read.append("payroll")
+            return "payroll"
+
+        def policy(tool):
+            return tool.name in {"revoke", "peek"} or (tool.name == "secret" and not state["revoked"])
+
+        def handler(messages):
+            results = sum(1 for m in messages if m.role == "tool")
+            return (
+                [tool_call("revoke"), tool_call("peek", call_id="c2"), tool_call("secret", call_id="c3")][results]
+                if results < 3
+                else "NO_REPLY"
+            )
+
+        def build():
+            return Agent(
+                name="agent",
+                model=TestModel(handler=handler),
+                tools=[
+                    Tool(name="revoke", handler=revoke),
+                    Tool(name="peek", handler=lambda: "inbox", requires_approval=True),
+                    Tool(name="secret", handler=secret),
+                ],
+                tracing_provider=InMemoryTracingProvider,
+            )
+
+        async with ChatSession(build()) as first:
+            first.wake("Check.", tool_policy=policy)
+            (finished,) = await records(first, "turn_finished", 1)
+            assert finished["parked"]
+            parked_run = first.head
+        async with ChatSession(build(), parent_id=parked_run) as session:
+            assert session._last_options.tool_policy == _ToolPaths(frozenset({"agent.revoke", "agent.peek"}))
+            (approval,) = session.state()["pending_approvals"]
+            session.resume({approval["approval_id"]: True})
+            await records(session, "turn_finished", 1)
+        assert secrets_read == []
+
+    def test_restored_paths_take_each_agents_latest_span(self):
+        from types import SimpleNamespace
+
+        from timbal.core.chat_session import _allowed_tool_paths
+
+        def span(path, t0, allowed):
+            return SimpleNamespace(path=path, t0=t0, metadata={"tool_policy_allowed": allowed})
+
+        trace = {
+            "1": span("agent", 1, ["agent.child"]),
+            "2": span("agent.child", 2, ["agent.child.lookup", "agent.child.secret"]),
+            "3": span("agent.child", 3, ["agent.child.lookup"]),  # a later call took "secret" back
+            "4": SimpleNamespace(path="agent.child.lookup", t0=4, metadata={}),
+        }
+        assert _allowed_tool_paths(trace) == {"agent.child", "agent.child.lookup"}
+
+    async def test_answers_sent_before_the_worker_takes_them_go_together(self):
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "both done"
+            return Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id="call-a", name="first", input={}),
+                    ToolUseContent(id="call-b", name="second", input={}),
+                ],
+                stop_reason="tool_use",
+            )
+
+        ran = []
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[
+                Tool(name="first", handler=lambda: ran.append("first") or "1", requires_approval=True),
+                Tool(name="second", handler=lambda: ran.append("second") or "2", requires_approval=True),
+            ],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent) as session:
+            session.send("go")
+            await records(session, "turn_finished", 1)
+            approvals = {a["path"].rsplit(".", 1)[-1]: a["approval_id"] for a in session.state()["pending_approvals"]}
+            assert set(approvals) == {"first", "second"}
+            session.resume({approvals["first"]: True})
+            with pytest.raises(ValueError, match="Already answered differently"):
+                session.resume({approvals["first"]: False})
+            session.resume({approvals["first"]: True, approvals["second"]: True})  # the same answer again is fine
+            finished = await records(session, "turn_finished", 2)
+            assert finished[1]["status"]["code"] == "success" and not finished[1]["parked"]
+            assert sorted(ran) == ["first", "second"]
+
+    async def test_an_answer_while_a_turn_runs_is_refused(self):
+        gate = Gate()
+        async with ChatSession(make_agent(gate)) as session:
+            session.send("start")
+            await asyncio.wait_for(gate.entered.wait(), 2)
+            with pytest.raises(RuntimeError, match="running"):
+                session.resume({"any": True})
+            gate.release.set()
+            await records(session, "turn_finished", 1)
+
+    async def test_a_jsonl_read_error_does_not_unpark_a_restored_session(self, tmp_path, monkeypatch):
+        import pathlib
+
+        import timbal.core.chat_session as chat_session_module
+        from timbal.state.tracing.providers import JsonlTracingProvider
+
+        monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.01)
+        provider = JsonlTracingProvider.configured(path=tmp_path / "traces.jsonl")
+
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "tool":
+                return "paid"
+            return tool_call("charge") if last_user_text(messages) == "pay" else f"echo: {last_user_text(messages)}"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: "charged", requires_approval=True)],
+            tracing_provider=provider,
+        )
+        initial = await agent(prompt="pay").collect()
+        real_open, failures = pathlib.Path.open, {"left": 1}
+
+        def flaky_open(self, *args, **kwargs):
+            if self == provider._path and failures["left"]:
+                failures["left"] -= 1
+                raise OSError("transient read error")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "open", flaky_open)
+        session = ChatSession(agent, parent_id=initial.run_id)
+        try:
+            waiting = session.send("new question")
+            await asyncio.sleep(0.3)
+            assert session.parked and waiting.state == "pending" and session.turns == 0
+            (approval,) = session.state()["pending_approvals"]
+            session.resume({approval["approval_id"]: True})
+            await records(session, "turn_finished", 1)
+            output = root_outputs(session)[-1]
+            trace = await RunContext(tracing_provider=provider)._get_parent_trace(output.run_id)
+            memory = [Message.validate(message) for message in trace[output.call_id].memory]
+            assert [m.collect_text() for m in memory if m.role == "user"] == ["pay", "new question"]
+        finally:
+            await session.close()
+
+    @pytest.mark.parametrize("parked", [True, False])
+    async def test_an_answer_sent_before_restore_waits_for_it(self, parked):
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "tool":
+                return "paid"
+            return tool_call("charge") if last_user_text(messages) == "pay" else f"echo: {last_user_text(messages)}"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: "charged", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        events = [e async for e in agent(prompt="pay" if parked else "hi")]
+        initial = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == "agent")
+        approval_id = next((e.approval_id for e in events if isinstance(e, ApprovalEvent)), "stale")
+        session = ChatSession(agent, parent_id=initial.run_id)
+        try:
+            session.resume({approval_id: True})  # no restore() yet
+            if parked:
+                (finished,) = await records(session, "turn_finished", 1)
+                assert finished["status"]["code"] == "success"
+                assert root_outputs(session)[-1].output.collect_text() == "paid"
+            else:
+                (dropped,) = await records(session, "resume_dropped", 1)
+                await asyncio.sleep(0.1)
+                assert session.turns == 0  # the old prompt was not re-sent as a new turn
+        finally:
+            await session.close()
+
+    async def test_an_interrupt_keeps_the_answers_already_given(self):
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "over"
+            if last_user_text(messages) != "go":
+                return f"echo: {last_user_text(messages)}"
+            return Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id="call-a", name="first", input={}),
+                    ToolUseContent(id="call-b", name="second", input={}),
+                ],
+                stop_reason="tool_use",
+            )
+
+        ran = []
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[
+                Tool(name="first", handler=lambda: ran.append("first") or "1", requires_approval=True),
+                Tool(name="second", handler=lambda: ran.append("second") or "2", requires_approval=True),
+            ],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent) as session:
+            session.send("go")
+            await records(session, "turn_finished", 1)
+            approvals = {a["path"].rsplit(".", 1)[-1]: a["approval_id"] for a in session.state()["pending_approvals"]}
+            session.resume({approvals["first"]: True})
+            assert session.interrupt() is True
+            (interrupt,) = await records(session, "interrupt", 1)
+            assert interrupt["abandoned"] == [approvals["second"]]
+            await records(session, "turn_finished", 2)
+            assert ran == ["first"]
+
     async def test_an_interrupt_sent_before_restore_cancels_the_parked_run(self):
         def handler(messages):
             last = messages[-1]
@@ -1318,3 +1540,30 @@ class TestSessionLifecycle:
         assert events[-1]["kind"] == "closed"
         with pytest.raises(RuntimeError, match="closed"):
             session.send("x")
+
+
+class TestLogCursors:
+    async def test_numbered_events_keep_their_own_cursors_across_a_trim(self):
+        from timbal.state.background import BACKGROUND_LOG_GAPPED, BackgroundEventLog
+
+        log = BackgroundEventLog(max_events=2)
+        for item in "abc":
+            log.put_nowait(item)
+        stream = log.subscribe(0, numbered=True)
+        assert await stream.__anext__() == (1, BACKGROUND_LOG_GAPPED)  # "a" was dropped; the replay is b, c
+        log.put_nowait("d")
+        log.put_nowait("e")  # trims b and c meanwhile
+        got = [await stream.__anext__() for _ in range(4)]
+        assert got == [(2, "b"), (3, "c"), (4, "d"), (5, "e")]
+        assert log.cursor_end == 5
+        await stream.aclose()
+
+    async def test_unnumbered_subscribe_is_unchanged(self):
+        from timbal.state.background import BACKGROUND_LOG_GAPPED, BackgroundEventLog
+
+        log = BackgroundEventLog(max_events=2)
+        for item in "abc":
+            log.put_nowait(item)
+        stream = log.subscribe(0)
+        assert [await stream.__anext__() for _ in range(3)] == [BACKGROUND_LOG_GAPPED, "b", "c"]
+        await stream.aclose()

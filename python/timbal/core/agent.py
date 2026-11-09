@@ -1458,8 +1458,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
     @staticmethod
     def _record_allowed_tools(tools: list[Any]) -> None:
-        """Note on this agent's span what a callable tool policy let through: a callable is not stored with
-        the run, and a session continuing it parked restores the policy from these paths."""
+        """Note on this agent's span what a callable tool policy let through at its latest tool resolution: a
+        callable is not stored with the run, and a session continuing it parked restores the policy from it."""
         run_context = get_run_context()
         if run_context is None:
             return
@@ -1467,9 +1467,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             span = run_context.current_span()
         except Exception:
             return
-        allowed = set(span.metadata.get("tool_policy_allowed") or ())
-        allowed.update(path for tool in tools if (path := getattr(tool, "_path", None)))
-        span.metadata["tool_policy_allowed"] = sorted(allowed)
+        # The latest decision only: a callable may take a permission back between steps.
+        span.metadata["tool_policy_allowed"] = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
 
     @staticmethod
     def _tool_allowed(tool: Any, policy: Any) -> bool:

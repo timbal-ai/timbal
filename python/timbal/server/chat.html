@@ -292,6 +292,7 @@
     toolQueue: {},    // `${run_id}:${name}` -> [cards waiting for their START]
     toolByCall: {},   // tool call_id -> card
     asks: {},         // approval/interaction id -> card
+    queuedAnswers: {}, // id -> answer sent before the turn waited for it (409): re-sent when it parks
     logRows: 0,
   };
 
@@ -446,11 +447,25 @@
       field.placeholder = "Answer (JSON or plain text)";
       card.appendChild(field);
     }
-    const done = () => { card.classList.add("done"); actions.querySelectorAll("button").forEach((b) => (b.disabled = true)); };
+    const controls = () => card.querySelectorAll("button, textarea");
+    const lock = (locked) => controls().forEach((c) => (c.disabled = locked));
     const answer = async (value) => {
-      done();
-      await post(`/${S.sessionId}/resume`, { resume: { [id]: value } }).catch((e) => note(`resume failed: ${e.message}`, "warn"));
+      lock(true);
+      try {
+        await post(`/${S.sessionId}/resume`, { resume: { [id]: value } });
+        card.classList.add("done");
+      } catch (e) {
+        if (e.status === 409 && !S.parked) {
+          // The turn has not paused yet (a sibling tool still runs): send it once it does.
+          S.queuedAnswers[id] = value;
+          note("answer queued: it is sent when the turn waits for it", "warn");
+          return;
+        }
+        lock(false);
+        note(`resume failed: ${e.message} (try again)`, "warn");
+      }
     };
+    card.retryAnswer = answer;
     if (kind === "approval") {
       const yes = el("button", "btn primary small", "Approve");
       yes.onclick = () => answer(true);
@@ -516,6 +531,8 @@
         });
         divider(`end of turn ${turn ? turn.n : "?"}`, text, cls);
         refreshState();
+        if (d.parked) sendQueuedAnswers();
+        else dropQueuedAnswers();
         break;
       }
       case "interrupt":
@@ -523,7 +540,8 @@
           note("✂ cancelled the pending question");
           d.abandoned.forEach((id) => {
             const card = S.asks[id];
-            if (card) { card.classList.add("done"); card.querySelectorAll("button").forEach((b) => (b.disabled = true)); }
+            delete S.queuedAnswers[id];
+            if (card) { card.classList.add("done"); card.querySelectorAll("button, textarea").forEach((b) => (b.disabled = true)); }
           });
         } else {
           note("✂ interrupted");
@@ -660,8 +678,30 @@
       body: JSON.stringify(body || {}),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || res.statusText);
+    if (!res.ok) {
+      const error = new Error(data.detail || res.statusText);
+      error.status = res.status;
+      throw error;
+    }
     return data;
+  }
+
+  function sendQueuedAnswers() {
+    const queued = S.queuedAnswers;
+    S.queuedAnswers = {};
+    Object.entries(queued).forEach(([id, value]) => {
+      const card = S.asks[id];
+      if (card && card.retryAnswer) card.retryAnswer(value);
+    });
+  }
+
+  function dropQueuedAnswers() {
+    // The turn ended without waiting: what they answered is gone (cut, or answered elsewhere).
+    Object.keys(S.queuedAnswers).forEach((id) => {
+      const card = S.asks[id];
+      if (card) { card.classList.add("done"); card.querySelectorAll("button, textarea").forEach((c) => (c.disabled = true)); }
+    });
+    S.queuedAnswers = {};
   }
 
   async function refreshState() {
@@ -681,7 +721,7 @@
     if (S.es) S.es.close();
     Object.assign(S, {
       busy: false, parked: false, runId: null, turnNo: 0, turns: {}, messages: {}, segs: {}, llmDeltas: {}, llmTools: {},
-      tools: {}, toolQueue: {}, toolByCall: {}, asks: {}, logRows: 0,
+      tools: {}, toolQueue: {}, toolByCall: {}, asks: {}, queuedAnswers: {}, logRows: 0,
     });
     $("timeline").innerHTML = "";
     $("log").innerHTML = "";

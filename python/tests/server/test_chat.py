@@ -149,6 +149,30 @@ def test_errors(client):
     assert client.get(f"/chat/sessions/{session_id}").status_code == 404
 
 
+def test_a_conflicting_answer_is_a_409(client, monkeypatch):
+    from timbal.core.chat_session import ChatSession
+
+    def conflicting(_self, _values):
+        raise ValueError("Already answered differently: a.")
+
+    session_id = open_session(client)
+    monkeypatch.setattr(ChatSession, "resume", conflicting)
+    response = client.post(f"/chat/sessions/{session_id}/resume", json={"resume": {"a": False}})
+    assert response.status_code == 409 and "answered differently" in response.json()["detail"]
+
+
+def test_an_unreadable_parent_is_a_503(client, monkeypatch):
+    from timbal.core.chat_session import ChatSession
+
+    async def unreadable(_self):
+        raise ConnectionError("trace store down")
+
+    monkeypatch.setattr(ChatSession, "restore", unreadable)
+    response = client.post("/chat/sessions", json={"parent_id": "some-run"})
+    assert response.status_code == 503 and "trace store down" in response.json()["detail"]
+    assert client.get("/chat/sessions").json() == []
+
+
 def test_a_runnable_that_is_not_an_agent(monkeypatch):
     monkeypatch.setenv("TIMBAL_RUNNABLE", f"{FIXTURES / 'tool_fixture.py'}::tool_fixture")
     with TestClient(create_app()) as client:

@@ -95,8 +95,17 @@ def _check_tool_policy(policy: Any) -> Any:
 
 
 def _allowed_tool_paths(trace: Any) -> frozenset[str]:
-    """What a callable tool policy let through in ``trace``: each agent notes its own (``tool_policy_allowed``)."""
-    return frozenset(path for span in trace.values() for path in (span.metadata or {}).get("tool_policy_allowed") or ())
+    """What a callable tool policy let through in ``trace``, as last decided: each agent notes on its span what
+    its latest tool resolution allowed (``tool_policy_allowed``), and an agent run more than once in the trace
+    counts by its latest span, so a later decision (a permission taken back) wins over an earlier one."""
+    latest: dict[str, Any] = {}
+    for span in trace.values():
+        if "tool_policy_allowed" not in (span.metadata or {}):
+            continue
+        seen = latest.get(span.path)
+        if seen is None or (span.t0 or 0) >= (seen.t0 or 0):
+            latest[span.path] = span
+    return frozenset(path for span in latest.values() for path in span.metadata["tool_policy_allowed"])
 
 
 @dataclass(frozen=True)
@@ -304,15 +313,20 @@ class ChatSession:
         """Cut what the session is doing; queued messages then start the next turn.
 
         Cancels the running turn, or, when the session is parked, every pending
-        approval and question (``Cancel``: the gated tools never run, the run
-        ends ``cancelled``). False when there is neither.
+        approval and question not answered yet (``Cancel``: the gated tools never
+        run, the run ends ``cancelled``; answers already given stand). False when
+        there is neither. Before :meth:`restore` has learned whether the session is
+        parked, it is applied once it has (True).
         """
-        if self._restore_from is not None or (self._restoring is not None and not self._restoring.done()):
+        if self._restore_pending():
             # Whether the session is parked is not known yet: restore() applies the interrupt.
             self._interrupt_on_restore = True
             self._ensure_worker()
             return True
         return self._interrupt_now()
+
+    def _restore_pending(self) -> bool:
+        return self._restore_from is not None or (self._restoring is not None and not self._restoring.done())
 
     def _interrupt_now(self) -> bool:
         turn = self._turn
@@ -320,10 +334,12 @@ class ChatSession:
             self._record("interrupt", run_id=self.run_id)
             turn.cancel()
             return True
-        if self.parked and self._resume is None and self._last_context is not None:
+        if self.parked and self._last_context is not None:
             reason = "The user moved on before answering."
+            answered = self._resume or {}
             pending = [a["approval_id"] for a in self._last_context.pending_approvals()]
             pending += [i["interaction_id"] for i in self._last_context.pending_interactions()]
+            pending = [pending_id for pending_id in pending if pending_id not in answered]
             if not pending:
                 return False
             self._record("interrupt", run_id=self._last_context.id, abandoned=pending)
@@ -344,16 +360,29 @@ class ChatSession:
         """Answer the parked turn: ``{approval_id: ...}`` / ``{interaction_id: value}``, as for ``resume=``."""
         if self.closed:
             raise RuntimeError("The chat session is closed.")
-        if not self.parked:
+        turn = self._turn
+        if turn is not None and not turn.done():
+            # Its answers, if it ends waiting for some, are taken once it does.
+            raise RuntimeError("A turn of this session is running; answer once it waits for an answer.")
+        if not self.parked and not self._restore_pending():
+            # Before restore() has finished, the answers wait for it: dropped if the run is not parked after all.
             raise RuntimeError("No turn of this session is waiting for an answer.")
-        self._resume = dict(values)
+        queued = self._resume or {}
+        conflicts = sorted(key for key, value in values.items() if key in queued and queued[key] != value)
+        if conflicts:
+            raise ValueError(f"Already answered differently: {', '.join(conflicts)}.")
+        # Answers sent before the worker takes them go together (two approvals of one parked turn).
+        self._resume = {**queued, **values}
         self.last_activity = time.monotonic()
         self._work.set()
         self._ensure_worker()
 
-    def events(self, after: int = 0) -> AsyncIterator[Any]:
-        """Replay the log from cursor ``after``, then follow it until :meth:`close`."""
-        return self.log.subscribe(after)
+    def events(self, after: int = 0, *, numbered: bool = False) -> AsyncIterator[Any]:
+        """Replay the log from cursor ``after``, then follow it until :meth:`close`.
+
+        ``numbered``: ``(cursor, item)`` pairs instead, see :meth:`BackgroundEventLog.subscribe`.
+        """
+        return self.log.subscribe(after, numbered=numbered)
 
     def pending_messages(self) -> list[dict[str, Any]]:
         """Receipts of the user messages no turn has taken yet, oldest first."""
@@ -428,9 +457,9 @@ class ChatSession:
         if provider is None:
             return
         try:
-            # Not _get_parent_trace: it reads a failed lookup as "no parent", and an unparked session would
-            # resume the parked run with the next message's turn and drop that message.
-            trace = await provider.get(lookup)
+            # Not get() / _get_parent_trace: they read a failed lookup as "no parent", and an unparked session
+            # would resume the parked run with the next message's turn and drop that message.
+            trace = await provider.get_strict(lookup)
         except Exception as error:
             self._restore_from = run_id
             self._record("restore_failed", run_id=run_id, error=str(error))
@@ -510,6 +539,11 @@ class ChatSession:
                 await asyncio.sleep(_TURN_RETRY_DELAY_S * 2 ** (self._turn_failures - 1))
             if self._resume is not None:
                 values, self._resume = self._resume, None
+                if not self.parked:
+                    # Another client's run answered or went past the parked turn first: these answers are for
+                    # a run that no longer waits, and a resume now would re-send its prompt as a new message.
+                    self._record("resume_dropped", run_id=self._last_context.id if self._last_context else None)
+                    continue
                 scheduler.turn_started()
                 await self._run_turn(resume=values)
                 continue

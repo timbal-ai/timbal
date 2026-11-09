@@ -872,12 +872,18 @@ class BackgroundEventLog:
     def empty(self) -> bool:
         return not self._events
 
-    async def subscribe(self, after: int = 0) -> AsyncIterator[Any]:
+    async def subscribe(self, after: int = 0, *, numbered: bool = False) -> AsyncIterator[Any]:
         """Replay from logical ``after``, then yield live events until :meth:`close`.
 
         When ``after < forgotten_through``, yields :data:`BACKGROUND_LOG_GAPPED` once
         (matching ``gapped=True`` on :meth:`read`/``peek``), replays from the ring
         head, then continues with live events — never returns an empty iterator.
+
+        ``numbered``: yield ``(cursor, event)``, ``cursor`` being the event's own
+        position (resume with ``subscribe(cursor)``), and the gap marker as
+        ``(cursor the replay starts after, BACKGROUND_LOG_GAPPED)``. Taken from the
+        snapshot this subscription replays, so appends and trims meanwhile cannot
+        shift them.
         """
         gapped = after < self.forgotten_through
         replay_from = self.forgotten_through if gapped else after
@@ -890,16 +896,20 @@ class BackgroundEventLog:
         # BACKGROUND_LOG_GAPPED, which would make a post-yield offset negative.
         offset = replay_from - self.forgotten_through
         replay = list(self._events[offset:])
+        # Past the tip (a cursor from the future): live events still number from the tip.
+        cursor = self.forgotten_through + min(offset, len(self._events))
         try:
             if gapped:
-                yield _GAPPED
+                yield (cursor, _GAPPED) if numbered else _GAPPED
             for event in replay:
-                yield event
+                cursor += 1
+                yield (cursor, event) if numbered else event
             while True:
                 event = await queue.get()
                 if event is _DONE:
                     return
-                yield event
+                cursor += 1
+                yield (cursor, event) if numbered else event
         finally:
             if queue in self._subscribers:
                 self._subscribers.remove(queue)

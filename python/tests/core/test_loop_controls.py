@@ -386,6 +386,38 @@ class TestIdleWatchdog:
         factory, _ = scripted_stream([0.1])
         assert await collect(_retry_on_error(factory, 0, 0.0, "test", idle_timeout=None)) == ["chunk0"]
 
+    def test_a_stall_before_output_is_transient_for_fallback(self):
+        from timbal.core.fallback_model import is_retryable_provider_error
+
+        assert is_retryable_provider_error(ModelStreamStalled(1.0)) is True
+        assert is_retryable_provider_error(ModelStreamStalled(1.0, after_output=True)) is False
+
+    @pytest.mark.parametrize("after_output", [False, True])
+    async def test_transient_only_fallback_moves_on_after_a_stall_before_output(self, after_output):
+        from timbal.core.fallback_model import FallbackModel, is_retryable_provider_error
+
+        model = FallbackModel("openai/primary", "openai/backup", fallback_on=is_retryable_provider_error)
+        seen = []
+
+        async def router(**kwargs):
+            seen.append(kwargs["model"])
+            if kwargs["model"] == "openai/primary":
+                factory, _ = scripted_stream([0.0, 1.0] if after_output else [1.0])
+                async for chunk in _retry_on_error(factory, 0, 0.0, "test", idle_timeout=0.05):
+                    yield chunk
+            else:
+                yield "backup"
+
+        if after_output:
+            got = []
+            with pytest.raises(ModelStreamStalled):
+                async for chunk in model.route(router):
+                    got.append(chunk)
+            assert seen == ["openai/primary"] and got == ["chunk0"]
+        else:
+            assert [chunk async for chunk in model.route(router)] == ["backup"]
+            assert seen == ["openai/primary", "openai/backup"]
+
     async def test_router_passes_it_through(self, monkeypatch):
         factory, _ = scripted_stream([1.0])
         monkeypatch.setattr(router_module, "prepare_messages_request", lambda **_: (factory, "fake"))
