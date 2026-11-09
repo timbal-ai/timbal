@@ -66,9 +66,21 @@ Traces are stored in the RunContext - a central hub that manages all run data. Y
 
 More on this in the [Context](./context) section.
 
+### Save durability
+
+A finished span asks the provider to save. What the run waits for is that provider's durability.
+
+`sync` awaits every save. `buffered` stores a save while the run is going in the background and coalesces saves that pile up in between. The run waits at its end, including a pause for approval, and at other barriers: handing a task to the background, the end of that task, and shutdown. A crash can lose at most `max_lag_s` of mid-run progress (default 30 seconds). Past that lag, saves are awaited again until one succeeds. `end` skips saves while the run is going and stores only at those same barriers, so a crash loses everything since the last one.
+
+The mode is `configured(durability=...)`, then `TIMBAL_TRACE_DURABILITY`, then the provider default: `buffered` for `PlatformTracingProvider`, `sync` for the others. Any other value is read as `sync`. `PlatformTracingProvider.configured(durability="sync")` or `TIMBAL_TRACE_DURABILITY=sync` awaits every platform save again. `configured(flush_interval_s=...)`, in seconds, and `configured(max_lag_s=...)` override the two timing variables.
+
+- `TIMBAL_TRACE_FLUSH_INTERVAL_MS`: minimum milliseconds between background saves of one run. Default: `500`.
+- `TIMBAL_TRACE_MAX_LAG_S`: how old the oldest unsaved change may get, in seconds, before saves are awaited again. Default: `30`.
+- `TIMBAL_TRACE_METRICS`: set to `1`, `true`, or `yes` to add `tracing:*` usage keys. Setting durability explicitly to `buffered` or `end` adds them as well. The platform default does not.
+
 ### When a save fails
 
-The trace is saved as each span completes. If the provider fails to store a snapshot, for example the platform rejecting a run whose parent it has no record of, or an outage that outlasts the retries, the run still completes and returns its output. The failure is logged as an error and counted as `tracing:save_failed` in the run's usage. Cancellation is not caught.
+Each finished span requests a save. With the platform default that mid-run save is not awaited: it is stored in the background and coalesced, and the run waits at its end and at other barriers. A crash can lose up to 30 seconds of that progress; past that, the save is awaited. If the provider fails to store a snapshot, for example the platform rejecting a run whose parent it has no record of, or an outage that outlasts the retries, the run still completes and returns its output. The failure is logged as an error. An awaited save is counted as `tracing:save_failed` in the run's usage. A background save counts that failure only when tracing metrics are on. Cancellation is not caught.
 
 ## Platform trace cache
 
@@ -86,8 +98,12 @@ export TIMBAL_TRACE_CACHE_TTL_SECS=60
 
 Setting either value to `0` disables caching and clears existing entries on the next cache access. Invalid values produce one warning per distinct value and fall back to the corresponding default. Settings are read on each cache access.
 
+- `TIMBAL_TRACE_KEEPALIVE_SECS`: while a run is in flight, save it again after this many seconds without a save, so the platform does not treat it as dead. Default: `300`. `0` disables it. `PlatformTracingProvider.configured(keepalive_s=...)` overrides the variable. The timer starts from a save and is dropped once the run has ended, so a run that does not save until its end is not kept alive.
+- `TIMBAL_TRACE_KEEPALIVE_MAX_SECS`: stop those keep-alives after this many seconds without a save the run made for itself. A keep-alive does not reset the clock. Default: `14400` (4 hours).
+- `TIMBAL_TRACE_FLUSH_TIMEOUT_SECS`: one bound, in seconds, for the shutdown flush of buffered uploads and for `PlatformTracingProvider.flush()`. Default: `5`.
+
 Cache reads and writes remove expired entries, including entries for other runs. Cleanup is lazy: an idle process retains entries until the next cache access. When either limit is exceeded, the least recently saved runs are evicted; a single trace larger than the byte limit is not cached. Eviction only removes the local copy; traces remain stored on the platform, and cache misses fetch them there. Traces fetched from the platform are not added to this cache.
 
-A read of a run this process is still saving waits up to 2 seconds for the saves already in flight, with or without the cache: until a PATCH lands, the platform may answer 404 or an older snapshot. This covers a voice turn whose save is still on the wire when the next turn starts.
+A read of a run this process is still saving waits up to 2 seconds for saves already asked for, with or without the cache: a save on the wire, and one queued behind it. A buffered save is included once the provider has been asked to store it, not while it is still waiting out its flush interval. When the wait ends, the platform may still answer 404 or an older snapshot. This covers a voice turn whose save is still on the wire when the next turn starts.
 
 Entries are scoped by host, organization, app, token, and run ID, and each read returns an independent copy. Updates made by another process can remain invisible until the cached entry expires or is evicted; lower the TTL or disable caching when those updates must be visible immediately.
