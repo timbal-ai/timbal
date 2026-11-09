@@ -221,6 +221,120 @@ class TestProvenance:
         assert meta[PROVENANCE_PARENT_KEY] == "run-parent" and meta[PROVENANCE_RUN_KEY] == ctx.id
         assert "secret-credential" not in str(meta)
 
+    @staticmethod
+    def _platform_run(subject_kwargs, *, path="agent.memory_update", tool_call_id="toolu_01abc"):
+        from timbal.state import set_call_id, set_run_context
+        from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.span import Span
+
+        ctx = RunContext()
+        ctx.platform_config = PlatformConfig(
+            host="api.example.test",
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t2_secret"),
+            subject=PlatformSubject(**subject_kwargs),
+        )
+        span = Span(path=path, call_id="call-1", parent_call_id="root", t0=0)
+        span.metadata["tool_call_id"] = tool_call_id
+        ctx._trace["call-1"] = span
+        set_run_context(ctx)
+        set_call_id("call-1")
+        return ctx
+
+    def test_the_platform_gets_the_app_revision_path_and_tool_call_id(self):
+        from timbal.core.mcp import (
+            PROVENANCE_APP_KEY,
+            PROVENANCE_PATH_KEY,
+            PROVENANCE_REV_KEY,
+            PROVENANCE_TOOL_CALL_KEY,
+        )
+        from timbal.state import set_call_id, set_run_context
+
+        self._platform_run({"org_id": "1", "app_id": "2", "rev": "feat-memory"})
+        try:
+            meta = platform_server()._provenance_meta()
+            third = MCPServer(transport="http", url="https://tools.example.com/mcp", provenance=True)._provenance_meta()
+        finally:
+            set_run_context(None)
+            set_call_id(None)
+        assert meta[PROVENANCE_APP_KEY] == 2  # a JSON integer
+        assert meta[PROVENANCE_REV_KEY] == "feat-memory"
+        assert meta[PROVENANCE_PATH_KEY] == "agent.memory_update"
+        assert meta[PROVENANCE_TOOL_CALL_KEY] == "toolu_01abc"
+        assert not {PROVENANCE_APP_KEY, PROVENANCE_REV_KEY, PROVENANCE_PATH_KEY, PROVENANCE_TOOL_CALL_KEY} & set(third)
+        assert "t2_secret" not in str(meta)
+
+    @pytest.mark.parametrize(
+        ("subject", "path", "tool_call_id"),
+        [
+            ({"org_id": "1", "app_id": "abc", "rev": "has space"}, "agent.with space", "toolu 1"),
+            ({"org_id": "1", "app_id": "0", "rev": "r" * 256}, "a." + "p" * 511, "t" * 256),
+            ({"org_id": "1", "app_id": None, "rev": "ünïcode"}, "agent.tab\there", ""),
+        ],
+    )
+    def test_values_the_platform_would_refuse_are_left_out(self, subject, path, tool_call_id):
+        from timbal.core.mcp import (
+            PROVENANCE_APP_KEY,
+            PROVENANCE_PATH_KEY,
+            PROVENANCE_REV_KEY,
+            PROVENANCE_TOOL_CALL_KEY,
+        )
+        from timbal.state import set_call_id, set_run_context
+
+        ctx = self._platform_run(subject, path=path, tool_call_id=tool_call_id)
+        try:
+            meta = platform_server()._provenance_meta()
+        finally:
+            set_run_context(None)
+            set_call_id(None)
+        assert not {PROVENANCE_APP_KEY, PROVENANCE_REV_KEY, PROVENANCE_PATH_KEY, PROVENANCE_TOOL_CALL_KEY} & set(meta)
+        assert meta[PROVENANCE_RUN_KEY] == ctx.id  # the call is still linked by run and span
+
+    @pytest.mark.asyncio
+    async def test_a_resumed_call_keeps_its_tool_call_id_and_gets_a_new_call_id(self, tmp_path):
+        import json
+
+        from timbal.core.mcp import PROVENANCE_CALL_KEY, PROVENANCE_PATH_KEY, PROVENANCE_TOOL_CALL_KEY
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+        from timbal.types.events import ApprovalEvent
+
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        script = tmp_path / "meta_server.py"
+        script.write_text(META_SERVER_SCRIPT)
+        server = MCPServer(
+            transport="stdio", command=sys.executable, args=[str(script)], approval="all", provenance=True
+        )
+        server._first_party = True  # the platform server: plain ids and the platform-only claims
+        call = Message(
+            role="assistant",
+            content=[ToolUseContent(id="toolu_resumed", name="echo_meta", input={})],
+            stop_reason="tool_use",
+        )
+        agent = Agent(name="agent", model=TestModel(responses=[call, "done"]), tools=[server])
+        try:
+            first = [event async for event in agent(prompt="go")]
+            approval = next(e for e in first if isinstance(e, ApprovalEvent))
+            paused = next(e for e in reversed(first) if getattr(e, "type", "") == "OUTPUT" and e.path == "agent")
+            set_run_context(None)
+            set_call_id(None)
+            set_parent_call_id(None)
+            resumed = [
+                event
+                async for event in agent(prompt="go", parent_id=paused.run_id, resume={approval.approval_id: True})
+            ]
+        finally:
+            await server.close()
+        tool_out = next(e for e in resumed if getattr(e, "type", "") == "OUTPUT" and e.path == "agent.echo_meta")
+        meta = json.loads(tool_out.output)
+        # The resume is a new run: a new span (call_id), but the model's id for the call is the one it paused on.
+        assert meta[PROVENANCE_TOOL_CALL_KEY] == "toolu_resumed"
+        assert meta[PROVENANCE_CALL_KEY] == tool_out.call_id != approval.call_id
+        assert meta[PROVENANCE_RUN_KEY] == tool_out.run_id != paused.run_id
+        assert meta[PROVENANCE_PATH_KEY] == "agent.echo_meta"
+
     def test_on_by_default_only_for_the_platform_server(self):
         assert MCPServer(transport="http", service="api")._sends_provenance()
         assert not MCPServer(transport="http", url="https://example.com/mcp")._sends_provenance()
