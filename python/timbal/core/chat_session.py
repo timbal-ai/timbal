@@ -92,6 +92,16 @@ def _check_tool_policy(policy: Any) -> Any:
     return names
 
 
+def _offered_tools(trace: Any, root: Any) -> list[str]:
+    """The tool names the root agent's last model call in ``trace`` offered (live ``Tool``s or their dumps)."""
+    calls = [span for span in trace.values() if span.path == f"{root.path}.llm"]
+    if not calls:
+        return []
+    tools = (max(calls, key=lambda span: span.t0 or 0).input or {}).get("tools") or []
+    names = (tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", None) for tool in tools)
+    return [name for name in names if isinstance(name, str)]
+
+
 def _describe_policy(policy: Any) -> Any:
     if policy is None or policy == "read_only":
         return policy
@@ -416,14 +426,18 @@ class ChatSession:
         self._last_context, self._parked, self._last_prompt = context, True, prompt
         meta = prompt.get("metadata") if isinstance(prompt, dict) else getattr(prompt, "metadata", None)
         if meta and meta.get("kind") == WAKE_KIND:
-            self._last_options = self._wake_options(meta)
+            self._last_options = self._wake_options(meta, trace, root)
 
-    def _wake_options(self, meta: dict[str, Any]) -> _TurnOptions:
-        """The options of a parked wake, from its prompt. A callable policy is not stored, and wakes from
-        before it was stored carry none: both resume read-only (a wake never gets more than it had)."""
+    def _wake_options(self, meta: dict[str, Any], trace: Any, root: Any) -> _TurnOptions:
+        """The options of a parked wake, from its prompt; a wake never resumes with more than it had.
+
+        A callable policy is not stored: the run's last model call shows what it let through, and those
+        names become the policy (none found: no tools). Wakes from before the policy was stored resume
+        read-only.
+        """
         policy = meta.get("tool_policy", "read_only")
         if policy == "custom":
-            policy = "read_only"
+            policy = frozenset(_offered_tools(trace, root))
         elif isinstance(policy, list):
             policy = frozenset(policy)
         return _TurnOptions(tool_policy=policy, silence=self.allow_silence and bool(meta.get("silent")), steer=False)

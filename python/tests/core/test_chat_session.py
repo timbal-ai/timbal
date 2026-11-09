@@ -911,6 +911,46 @@ class TestRobustness:
             assert "hello" not in [m.collect_text() for m in wake_memory if m.role == "user"]
             assert root_outputs(session)[1].output.collect_text() == "echo: hello"
 
+    async def test_a_restored_wake_with_a_callable_policy_gets_no_tool_it_did_not_have(self):
+        secrets_read = []
+
+        def secret() -> str:
+            secrets_read.append("payroll")
+            return "payroll"
+
+        def handler(messages):
+            last = messages[-1]
+            prompt = next(m for m in reversed(messages) if m.role == "user")
+            if last.role == "tool":
+                return "NO_REPLY" if len(messages) > 4 else tool_call("secret", call_id="call-2")
+            if prompt.is_runtime() and prompt.metadata.get("kind") == "wake":
+                return tool_call("peek")
+            return f"echo: {last_user_text(messages)}"
+
+        def build():
+            return Agent(
+                name="agent",
+                model=TestModel(handler=handler),
+                tools=[
+                    Tool(name="peek", handler=lambda: "inbox", read_only=True, requires_approval=True),
+                    Tool(name="secret", handler=secret, read_only=True),
+                ],
+                tracing_provider=InMemoryTracingProvider,
+            )
+
+        async with ChatSession(build()) as first:
+            first.wake("Check the inbox.", tool_policy=lambda tool: tool.name == "peek")
+            (finished,) = await records(first, "turn_finished", 1)
+            assert finished["parked"]
+            parked_run = first.head
+        async with ChatSession(build(), parent_id=parked_run) as session:
+            assert session._last_options.tool_policy == frozenset({"peek"})
+            (approval,) = session.state()["pending_approvals"]
+            session.resume({approval["approval_id"]: True})
+            (finished,) = await records(session, "turn_finished", 1)
+            assert finished["status"]["code"] == "success"
+        assert secrets_read == []
+
     async def test_an_interrupt_sent_before_restore_cancels_the_parked_run(self):
         def handler(messages):
             last = messages[-1]
