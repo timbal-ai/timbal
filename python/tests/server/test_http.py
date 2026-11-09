@@ -612,7 +612,7 @@ class TestContextToolPolicy:
     def test_meta_lists_the_capabilities(self, app):
         response = TestClient(app).get("/meta")
         assert response.status_code == 200
-        assert response.json() == {"version": __version__, "capabilities": ["context.tool_policy", "context.require_new"]}
+        assert response.json() == {"version": __version__, "capabilities": ["context.tool_policy", "context.require_new", "context.trigger"]}
 
     @pytest.mark.parametrize(
         ("context", "header"),
@@ -645,8 +645,16 @@ class TestContextToolPolicy:
     def test_healthcheck_advertises_the_capability(self, app):
         response = TestClient(app).get("/healthcheck")
         assert response.status_code == 204
-        assert "tool_policy" in response.headers["x-timbal-capabilities"].split(",")
+        assert "context.tool_policy" in response.headers["x-timbal-capabilities"].split(",")
         assert response.headers["x-timbal-version"] == __version__
+
+    def test_meta_lists_the_capabilities(self, app):
+        response = TestClient(app).get("/meta")
+        assert response.status_code == 200
+        assert response.json() == {
+            "version": __version__,
+            "capabilities": ["context.tool_policy", "context.require_new", "context.trigger"],
+        }
 
     @pytest.mark.parametrize(
         ("context", "header"),

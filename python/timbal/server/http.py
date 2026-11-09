@@ -119,7 +119,7 @@ async def lifespan(
             app.state.single_session_guard.shutdown()
 
 
-CAPABILITIES = ("context.tool_policy", "context.require_new")
+CAPABILITIES = ("context.tool_policy", "context.require_new", "context.trigger")
 """Request features this server enforces: ``GET /meta``, and ``X-Timbal-Capabilities`` on ``/healthcheck``."""
 
 EXPOSED_HEADERS = ("X-Timbal-Tool-Policy", "X-Timbal-Version", "X-Timbal-Capabilities")
