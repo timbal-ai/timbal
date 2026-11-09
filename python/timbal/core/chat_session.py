@@ -204,6 +204,7 @@ class ChatSession:
         self._last_context: RunContext | None = None
         self._restore_from = parent_id
         self._restoring: asyncio.Task | None = None
+        self._interrupt_on_restore = False
 
     # -- Public API -------------------------------------------------------------
 
@@ -289,6 +290,14 @@ class ChatSession:
         approval and question (``Cancel``: the gated tools never run, the run
         ends ``cancelled``). False when there is neither.
         """
+        if self._restore_from is not None or (self._restoring is not None and not self._restoring.done()):
+            # Whether the session is parked is not known yet: restore() applies the interrupt.
+            self._interrupt_on_restore = True
+            self._ensure_worker()
+            return True
+        return self._interrupt_now()
+
+    def _interrupt_now(self) -> bool:
         turn = self._turn
         if turn is not None and not turn.done():
             self._record("interrupt", run_id=self.run_id)
@@ -384,6 +393,15 @@ class ChatSession:
         await asyncio.shield(self._restoring)
 
     async def _restore_parked(self) -> None:
+        try:
+            await self._load_parked()
+        finally:
+            if self._interrupt_on_restore:
+                # interrupt() came before the session knew whether it was parked.
+                self._interrupt_on_restore = False
+                self._interrupt_now()
+
+    async def _load_parked(self) -> None:
         run_id, self._restore_from = self._restore_from, None
         if run_id is None or self._last_context is not None:
             return
@@ -394,8 +412,21 @@ class ChatSession:
             return
         context = RunContext(id=run_id, tracing_provider=provider)
         context.__dict__["_trace"] = trace
-        self._last_context, self._parked = context, True
-        self._last_prompt = (root.input or {}).get("prompt") or ""
+        prompt = (root.input or {}).get("prompt") or ""
+        self._last_context, self._parked, self._last_prompt = context, True, prompt
+        meta = prompt.get("metadata") if isinstance(prompt, dict) else getattr(prompt, "metadata", None)
+        if meta and meta.get("kind") == WAKE_KIND:
+            self._last_options = self._wake_options(meta)
+
+    def _wake_options(self, meta: dict[str, Any]) -> _TurnOptions:
+        """The options of a parked wake, from its prompt. A callable policy is not stored, and wakes from
+        before it was stored carry none: both resume read-only (a wake never gets more than it had)."""
+        policy = meta.get("tool_policy", "read_only")
+        if policy == "custom":
+            policy = "read_only"
+        elif isinstance(policy, list):
+            policy = frozenset(policy)
+        return _TurnOptions(tool_policy=policy, silence=self.allow_silence and bool(meta.get("silent")), steer=False)
 
     async def __aexit__(self, *_exc: Any) -> None:
         await self.close()
@@ -545,7 +576,14 @@ class ChatSession:
             prompt = Message(
                 role="user",
                 content=[TextContent(text=text)],
-                metadata={"source": RUNTIME_SOURCE, "kind": WAKE_KIND, "wake_id": wake.id},
+                metadata={
+                    "source": RUNTIME_SOURCE,
+                    "kind": WAKE_KIND,
+                    "wake_id": wake.id,
+                    # Read back by restore(): a session continuing this run parked resumes it under the same.
+                    "tool_policy": _describe_policy(wake.tool_policy),
+                    "silent": options.silence,
+                },
             )
             trigger = {
                 "kind": WAKE_KIND,

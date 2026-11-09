@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 from timbal import Agent, Tool
-from timbal.core.chat_session import ChatSession
+from timbal.core.chat_session import ChatSession, _TurnOptions
 from timbal.core.session_scheduler import take_followup, user_batch
 from timbal.core.test_model import TestModel
 from timbal.guardrails import Verdict, guardrail
@@ -870,6 +870,69 @@ class TestRobustness:
             assert root_outputs(session)[-1].output.collect_text() == "echo: new question"
             memory = await stored_memory(root_outputs(session)[-1])
             assert [m.collect_text() for m in memory if m.role == "user"] == ["pay", "new question"]
+        finally:
+            await session.close()
+
+    async def test_a_restored_parked_wake_resumes_under_its_own_options(self):
+        def handler(messages):
+            last = messages[-1]
+            prompt = next(m for m in reversed(messages) if m.role == "user")
+            if last.role == "tool":
+                return "NO_REPLY"
+            if prompt.is_runtime() and prompt.metadata.get("kind") == "wake":
+                return tool_call("peek")
+            return f"echo: {last_user_text(messages)}"
+
+        def build():
+            return Agent(
+                name="agent",
+                model=TestModel(handler=handler),
+                tools=[
+                    Tool(name="peek", handler=lambda: "inbox", read_only=True, requires_approval=True),
+                    Tool(name="send_email", handler=lambda: "sent"),
+                ],
+                tracing_provider=InMemoryTracingProvider,
+            )
+
+        async with ChatSession(build()) as first:
+            first.wake("Check the inbox.")
+            (finished,) = await records(first, "turn_finished", 1)
+            assert finished["parked"]
+            parked_run = first.head
+        async with ChatSession(build(), parent_id=parked_run) as session:
+            assert session.parked
+            assert session._last_options == _TurnOptions(tool_policy="read_only", silence=True, steer=False)
+            session.send("hello")
+            (approval,) = session.state()["pending_approvals"]
+            session.resume({approval["approval_id"]: True})
+            finished = await records(session, "turn_finished", 2)
+            assert finished[0]["silent"] is True and finished[1]["silent"] is False
+            wake_memory = await stored_memory(root_outputs(session)[0])
+            assert "hello" not in [m.collect_text() for m in wake_memory if m.role == "user"]
+            assert root_outputs(session)[1].output.collect_text() == "echo: hello"
+
+    async def test_an_interrupt_sent_before_restore_cancels_the_parked_run(self):
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "tool":
+                return "paid"
+            return tool_call("charge") if last_user_text(messages) == "pay" else f"echo: {last_user_text(messages)}"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: "charged", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        initial = await agent(prompt="pay").collect()
+        session = ChatSession(agent, parent_id=initial.run_id)
+        try:
+            session.send("forget it", mode="interrupt")  # no restore() yet
+            finished = await records(session, "turn_finished", 2)
+            assert finished[0]["status"]["code"] == "cancelled"
+            (interrupt,) = await records(session, "interrupt", 1)
+            assert interrupt["run_id"] == initial.run_id and interrupt["abandoned"]
+            assert root_outputs(session)[-1].output.collect_text() == "echo: forget it"
         finally:
             await session.close()
 
