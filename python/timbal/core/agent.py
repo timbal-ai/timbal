@@ -253,6 +253,9 @@ def _extract_fallbacks(model: Any) -> list[dict[str, Any]]:
     return out
 
 
+_UNSET_POLICY: Any = object()
+
+
 class AgentParams(BaseModel):
     """Input parameters for Agent execution. Use either 'prompt' or 'messages', not both."""
 
@@ -1357,7 +1360,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             "passes": passes,
         }
 
-    async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
+    async def _stop_after_denials(self, current_span: Any, denials: int, append_memory: Any) -> None:
+        """After a tool batch past the denial limit: tell the model to stop routing around refusals (the caller
+        takes its tools away for the next call)."""
+        logger.warning("Agent reached max_consecutive_denials.", path=self._path, denials=denials)
+        current_span.metadata.setdefault("denial_limit", []).append({"denials": denials})
+        await append_memory(
+            Message(
+                role="user",
+                content=[TextContent(text=DEFAULT_DENIAL_NOTICE.format(count=denials))],
+                metadata={"source": "runtime", "kind": "denial_limit"},
+            )
+        )
+
+    async def _resolve_tools(self, i: int, tool_policy: Any = _UNSET_POLICY) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
         if i >= self.max_iter:
             return [], {}
@@ -1410,8 +1426,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 bg_tool.nest(self._path)
                 _register(bg_tool)
 
-        run_context = get_run_context()
-        policy = run_context._tool_policy if run_context is not None else None
+        if tool_policy is _UNSET_POLICY:
+            run_context = get_run_context()
+            tool_policy = run_context._tool_policy if run_context is not None else None
+        policy = tool_policy
         if policy is not None:
             tools = [tool for tool in tools if self._tool_allowed(tool, policy)]
             commands = {key: tool for key, tool in commands.items() if tool in tools}
@@ -1903,9 +1921,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 content = [c for c in event.output.content if isinstance(c, TextContent | FileContent)]
             else:
                 content = event.output
-            denied = event.status.code == "blocked" or (
-                event.status.code == "cancelled" and event.status.reason == "approval_denied"
-            )
+            status_code = event.status.code
+            denied = status_code == "blocked" or (status_code == "cancelled" and event.status.reason == "approval_denied")
             consecutive_denials = consecutive_denials + 1 if denied else 0
             # Pin the result when the originating tool opted in (e.g. read_skill), so memory
             # compaction never strips this durable context. The tool name is the final path
@@ -1985,64 +2002,49 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         steering = self._steers(run_context, current_span)
         # Fixed for the turn; checked after every tool batch.
         denial_limit = self.max_consecutive_denials if self.max_consecutive_denials is not None else math.inf
+        tool_policy = run_context._tool_policy
         # Set by _steer: whether it added messages, and whether the user wrote one of them.
         steered = steered_user = False
 
-        async def _steer() -> AsyncGenerator[BaseEvent, None]:
-            """Bring in what was posted for the running turn, screening user text like a prompt.
+        if steering:
 
-            A blocked message is dropped for a notice; the turn and its work go on.
-            """
-            nonlocal steered, steered_user
-            messages = self._take_steering(run_context, current_span)
-            steered = bool(messages)
-            steered_user = False
-            runner = self._guardrail_runner
-            screen = runner is not None and runner.has_stage(GuardrailStage.INPUT)
-            for message in messages:
-                if not message.is_runtime() and screen:
-                    text = message_text(message)
-                    ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._path, payload=message)
-                    outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
-                    record_guardrails_metadata(current_span, outcome.triggered, run_context=run_context)
-                    for guardrail_event in build_guardrail_events(
-                        outcome.triggered, run_context=run_context, span=current_span
-                    ):
-                        yield guardrail_event
-                    if outcome.verdict is not None:
-                        await _append_memory(
-                            Message(
-                                role="user",
-                                content=[TextContent(text=DEFAULT_STEER_BLOCKED_NOTICE.format(rail=outcome.rail.name))],
-                                metadata={"source": "runtime", "kind": "steer_blocked"},
+            async def _steer() -> AsyncGenerator[BaseEvent, None]:
+                """Bring in what was posted for the running turn, screening user text like a prompt.
+
+                A blocked message is dropped for a notice; the turn and its work go on.
+                """
+                nonlocal steered, steered_user
+                messages = self._take_steering(run_context, current_span)
+                steered = bool(messages)
+                steered_user = False
+                runner = self._guardrail_runner
+                screen = runner is not None and runner.has_stage(GuardrailStage.INPUT)
+                for message in messages:
+                    if not message.is_runtime() and screen:
+                        text = message_text(message)
+                        ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._path, payload=message)
+                        outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
+                        record_guardrails_metadata(current_span, outcome.triggered, run_context=run_context)
+                        for guardrail_event in build_guardrail_events(
+                            outcome.triggered, run_context=run_context, span=current_span
+                        ):
+                            yield guardrail_event
+                        if outcome.verdict is not None:
+                            await _append_memory(
+                                Message(
+                                    role="user",
+                                    content=[TextContent(text=DEFAULT_STEER_BLOCKED_NOTICE.format(rail=outcome.rail.name))],
+                                    metadata={"source": "runtime", "kind": "steer_blocked"},
+                                )
                             )
-                        )
-                        continue
-                    if outcome.replaced and outcome.text != text:
-                        replace_message_text(message, outcome.text)
-                await _append_memory(message)
-                steered_user = steered_user or not message.is_runtime()
+                            continue
+                        if outcome.replaced and outcome.text != text:
+                            replace_message_text(message, outcome.text)
+                    await _append_memory(message)
+                    steered_user = steered_user or not message.is_runtime()
 
         # Set once max_consecutive_denials is reached: the next model call gets no tools.
         withhold_tools = False
-
-        async def _check_denials() -> None:
-            """After a tool batch: past the denial limit, tell the model to stop and take its tools away."""
-            nonlocal consecutive_denials, withhold_tools
-            limit = self.max_consecutive_denials
-            if limit is None or consecutive_denials < limit:
-                return
-            logger.warning("Agent reached max_consecutive_denials.", path=self._path, denials=consecutive_denials)
-            current_span.metadata.setdefault("denial_limit", []).append({"denials": consecutive_denials})
-            await _append_memory(
-                Message(
-                    role="user",
-                    content=[TextContent(text=DEFAULT_DENIAL_NOTICE.format(count=consecutive_denials))],
-                    metadata={"source": "runtime", "kind": "denial_limit"},
-                )
-            )
-            consecutive_denials = 0
-            withhold_tools = True
 
         i = 0
         need_retry = False
@@ -2063,7 +2065,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 need_retry = False
                 _llm_memory_saved = False
                 # ? We could resolve the system prompt at each iteration
-                tools, commands = await self._resolve_tools(i)
+                tools, commands = await self._resolve_tools(i, tool_policy)
                 if withhold_tools:
                     tools, commands, withhold_tools = [], {}, False
                 if i >= self.max_iter and not max_iter_handled:
@@ -2201,7 +2203,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         raise PauseRequired(first_pending)
                     i += 1
                     if consecutive_denials >= denial_limit:
-                        await _check_denials()
+                        await self._stop_after_denials(current_span, consecutive_denials, _append_memory)
+                        consecutive_denials, withhold_tools = 0, True
                     if steering:
                         async for steer_event in _steer():
                             yield steer_event
@@ -2569,7 +2572,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     raise PauseRequired(first_pending)
                 i += 1
                 if consecutive_denials >= denial_limit:
-                    await _check_denials()
+                    await self._stop_after_denials(current_span, consecutive_denials, _append_memory)
+                    consecutive_denials, withhold_tools = 0, True
                 if steering:
                     async for steer_event in _steer():
                         yield steer_event
