@@ -167,13 +167,18 @@ class JsonlTracingProvider(TracingProvider):
     async def get_strict(cls, run_context: "RunContext") -> Trace | None:
         """See base class. A read error raises; so does a line that does not decode when the run is not
         found elsewhere (it may be that run's record, being written)."""
-        if cls._path is None or not cls._path.exists():
+        if cls._path is None:
             return None
         parent_id = run_context.parent_id
         if parent_id is None:
             return None
         undecodable: json.JSONDecodeError | None = None
-        with cls._path.open("r", encoding="utf-8") as f:
+        try:
+            # Not Path.exists(): it reads a failed stat (a permission error) as "no file".
+            f = cls._path.open("r", encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        with f:
             for line in f:
                 line = line.strip()
                 if not line:

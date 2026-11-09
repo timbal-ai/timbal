@@ -156,7 +156,13 @@ class SqliteTracingProvider(TracingProvider):
     @override
     async def get_strict(cls, run_context: "RunContext") -> Trace | None:
         """See base class: database and decoding errors raise."""
-        if cls._path is None or not Path(cls._path).exists():
+        if cls._path is None:
+            return None
+        try:
+            # Not Path.exists(): it reads a failed stat (a permission error) as "no database". Checked at all
+            # because connecting would create one.
+            Path(cls._path).stat()
+        except FileNotFoundError:
             return None
         parent_id = run_context.parent_id
         if parent_id is None:

@@ -1,6 +1,7 @@
 """``TracingProvider.get_strict``: ``None`` only for a run that is not stored; a failed read raises."""
 
 import json
+import os
 import pathlib
 import sqlite3
 
@@ -23,6 +24,18 @@ async def stored_run(provider) -> str:
 
 def lookup(provider, run_id: str) -> RunContext:
     return RunContext(parent_id=run_id, tracing_provider=provider)
+
+
+def failing_stat(monkeypatch, path) -> None:
+    """``os.stat`` of ``path`` fails with a permission error (``Path.exists()`` reads that as "no file" on 3.14)."""
+    real_stat = os.stat
+
+    def stat(target, *args, **kwargs):
+        if os.fspath(target) == os.fspath(path):
+            raise PermissionError(13, "Permission denied", os.fspath(path))
+        return real_stat(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat)
 
 
 class TestJsonl:
@@ -48,6 +61,13 @@ class TestJsonl:
         with pytest.raises(OSError):
             await provider.get_strict(lookup(provider, run_id))
 
+    async def test_a_failed_stat_is_not_absence(self, tmp_path, monkeypatch):
+        path = tmp_path / "traces.jsonl"
+        provider = JsonlTracingProvider.configured(path=path)
+        run_id = await stored_run(provider)
+        failing_stat(monkeypatch, path)
+        assert await provider.get_strict(lookup(provider, run_id)) is not None
+
     async def test_an_undecodable_line_raises_only_when_the_run_is_not_found(self, tmp_path):
         path = tmp_path / "traces.jsonl"
         provider = JsonlTracingProvider.configured(path=path)
@@ -65,6 +85,14 @@ class TestSqlite:
         run_id = await stored_run(provider)
         assert await provider.get_strict(lookup(provider, run_id)) is not None
         assert await provider.get_strict(lookup(provider, "missing")) is None
+
+    async def test_a_failed_stat_raises(self, tmp_path, monkeypatch):
+        path = tmp_path / "traces.db"
+        provider = SqliteTracingProvider.configured(path=path)
+        run_id = await stored_run(provider)
+        failing_stat(monkeypatch, path)
+        with pytest.raises(PermissionError):
+            await provider.get_strict(lookup(provider, run_id))
 
     async def test_a_database_error_raises_where_get_returns_none(self, tmp_path, monkeypatch):
         provider = SqliteTracingProvider.configured(path=tmp_path / "traces.db")

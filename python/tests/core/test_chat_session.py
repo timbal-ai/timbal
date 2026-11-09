@@ -1188,7 +1188,9 @@ class TestRobustness:
             gate.release.set()
             await records(session, "turn_finished", 1)
 
-    async def test_a_jsonl_read_error_does_not_unpark_a_restored_session(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("failure", ["open", "stat"])
+    async def test_a_jsonl_read_error_does_not_unpark_a_restored_session(self, tmp_path, monkeypatch, failure):
+        import os
         import pathlib
 
         import timbal.core.chat_session as chat_session_module
@@ -1210,17 +1212,31 @@ class TestRobustness:
             tracing_provider=provider,
         )
         initial = await agent(prompt="pay").collect()
-        real_open, failures = pathlib.Path.open, {"left": 1}
+        real_open, real_stat, failing = (
+            pathlib.Path.open,
+            os.stat,
+            {"open": failure == "open", "stat": failure == "stat"},
+        )
 
         def flaky_open(self, *args, **kwargs):
-            if self == provider._path and failures["left"]:
-                failures["left"] -= 1
+            if self == provider._path and failing["open"]:
+                failing["open"] = False
                 raise OSError("transient read error")
             return real_open(self, *args, **kwargs)
 
+        def flaky_stat(target, *args, **kwargs):
+            # A permission error on the trace file's metadata (Path.exists() reads it as "no file" on 3.14).
+            if os.fspath(target) == os.fspath(provider._path) and failing["stat"]:
+                raise PermissionError(13, "Permission denied", os.fspath(target))
+            return real_stat(target, *args, **kwargs)
+
         monkeypatch.setattr(pathlib.Path, "open", flaky_open)
+        monkeypatch.setattr(os, "stat", flaky_stat)
         session = ChatSession(agent, parent_id=initial.run_id)
         try:
+            if failure == "stat":
+                await session.restore()
+                failing["stat"] = False  # the agent's own tolerant get() of the resume is not what is tested
             waiting = session.send("new question")
             await asyncio.sleep(0.3)
             assert session.parked and waiting.state == "pending" and session.turns == 0
