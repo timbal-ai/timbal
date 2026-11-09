@@ -114,6 +114,18 @@ async def lifespan(
             app.state.single_session_guard.shutdown()
 
 
+CAPABILITIES = ("tool_policy",)
+"""Request features this server enforces, advertised on ``/healthcheck`` (``X-Timbal-Capabilities``)."""
+
+
+def _policy_headers(run_context: RunContext | None) -> dict[str, str] | None:
+    """``X-Timbal-Tool-Policy`` on a run that has one: the confirmation that it is enforced."""
+    policy = run_context.__dict__.get("_tool_policy") if run_context is not None else None
+    if policy is None:
+        return None
+    return {"X-Timbal-Tool-Policy": "read_only" if policy == "read_only" else "names"}
+
+
 def _tool_policy(value: Any) -> Any:
     """A JSON tool policy: ``"read_only"``, a list of tool names, or ``None``."""
     if value is None or value == "read_only":
@@ -161,7 +173,12 @@ def create_app() -> FastAPI:
 
     @app.get("/healthcheck")
     async def healthcheck() -> Response:
-        return Response(status_code=204)
+        # What this server can enforce, so a caller can check before relying on it (an older SDK
+        # ignores ``context.tool_policy`` instead of refusing it).
+        return Response(
+            status_code=204,
+            headers={"X-Timbal-Version": __version__, "X-Timbal-Capabilities": ",".join(CAPABILITIES)},
+        )
 
     @app.get("/voice_config")
     async def voice_config() -> Response:
@@ -266,6 +283,7 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=200,
             content=output_event.model_dump() if output_event else None,
+            headers=_policy_headers(run_context),
         )
 
     @app.post("/stream")
@@ -306,7 +324,9 @@ def create_app() -> FastAPI:
                 )
                 yield f"event: expired\ndata: {notice}\n\n"
 
-        return StreamingResponse(event_streamer(), media_type="text/event-stream")
+        return StreamingResponse(
+            event_streamer(), media_type="text/event-stream", headers=_policy_headers(run_context)
+        )
 
     @app.get("/runs/{run_id}/events")
     async def run_events(
