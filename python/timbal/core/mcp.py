@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import secrets
+import unicodedata
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -331,23 +332,31 @@ def _ambient_trace_context() -> dict[str, str]:
 def _platform_claims(run_context: Any, call_id: str | None) -> dict[str, Any]:
     """The platform-only ``_meta`` claims: app, revision, tool span path, the model's tool call id.
 
-    A value the platform would refuse (``app_id`` not a positive integer; the others not printable ASCII
-    without whitespace, or too long) is left out: the call goes through unlinked rather than failing.
+    A value the platform would refuse is left out, so the call goes through unlinked rather than failing:
+    ``app_id`` not a positive integer; ``rev`` / ``path`` with a control character or over 255 / 512
+    characters (spaces and Unicode are fine: agent names are free text); ``tool_call_id`` not an id
+    (printable ASCII without whitespace, up to 255).
     """
     claims: dict[str, Any] = {}
     subject = getattr(run_context.platform_config, "subject", None)
     app_id = str(getattr(subject, "app_id", None) or "")
     if app_id.isdigit() and int(app_id) > 0:
         claims[PROVENANCE_APP_KEY] = int(app_id)
-    if _wire_token(rev := getattr(subject, "rev", None), 255):
+    if _wire_text(rev := getattr(subject, "rev", None), 255):
         claims[PROVENANCE_REV_KEY] = rev
     span = run_context._trace.get(call_id) if call_id else None
     if span is not None:
-        if _wire_token(span.path, 512):
+        if _wire_text(span.path, 512):
             claims[PROVENANCE_PATH_KEY] = span.path
         if _wire_token(tool_call_id := (span.metadata or {}).get("tool_call_id"), 255):
             claims[PROVENANCE_TOOL_CALL_KEY] = tool_call_id
     return claims
+
+
+def _wire_text(value: Any, limit: int) -> bool:
+    return (
+        isinstance(value, str) and 0 < len(value) <= limit and not any(unicodedata.category(c) == "Cc" for c in value)
+    )
 
 
 def _wire_token(value: Any, limit: int) -> bool:
@@ -541,8 +550,9 @@ class MCPServer(ToolSet):
 
     Also ``timbal.ai/parent_run_id`` / ``session_id`` when known; for the platform only,
     ``timbal.ai/app_id`` (an integer), ``rev`` (``platform_config.subject``), ``path`` (the tool
-    span's) and ``tool_call_id`` (the model's id for the call, kept when a resume re-issues it),
-    each left out when the platform would refuse its value; and W3C ``traceparent`` /
+    span's; free text, so ``Asistente Médico`` is sent) and ``tool_call_id`` (the model's id for the
+    call, kept when a resume re-issues it), each left out when the platform would refuse its value
+    (see ``_platform_claims``); and W3C ``traceparent`` /
     ``tracestate``: the caller's active OpenTelemetry span when there is one; for the platform,
     otherwise the tool's span as ``OTelExporter`` exports it. A third-party server that opts in
     (``True``) gets per-origin pseudonyms (HMAC, keyed by ``TIMBAL_PROVENANCE_SECRET`` or a

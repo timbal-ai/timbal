@@ -567,6 +567,27 @@ class TestContextToolPolicy:
         assert response.status_code == 200
         assert writes() == []
 
+    def test_healthcheck_advertises_the_capability(self, app):
+        response = TestClient(app).get("/healthcheck")
+        assert response.status_code == 204
+        assert "tool_policy" in response.headers["x-timbal-capabilities"].split(",")
+        assert response.headers["x-timbal-version"] == __version__
+
+    @pytest.mark.parametrize(
+        ("context", "header"),
+        [
+            ({}, None),
+            ({"tool_policy": None}, None),
+            ({"tool_policy": "read_only"}, "read_only"),
+            ({"tool_policy": ["peek"]}, "names"),
+        ],
+    )
+    @pytest.mark.parametrize("route", ["/run", "/stream"])
+    def test_an_applied_policy_is_confirmed_on_the_response(self, app, route, context, header):
+        response = TestClient(app).post(route, json={"prompt": "go", "context": context})
+        assert response.status_code == 200
+        assert response.headers.get("x-timbal-tool-policy") == header
+
     @pytest.mark.parametrize("policy", ["everything", 3, [1, 2], {"names": ["peek"]}])
     @pytest.mark.parametrize("route", ["/run", "/stream"])
     def test_an_invalid_policy_is_a_400(self, app, route, policy):
