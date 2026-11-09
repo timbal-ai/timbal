@@ -182,8 +182,15 @@ async def main() -> None:
         raise SystemExit("sys.monitoring needs Python 3.12+")
     import timbal
 
-    results = {name: await _count(build, kwargs) for name, (build, kwargs) in CASES.items()}
-    print(json.dumps({"timbal": timbal.__file__, "python": sys.version.split()[0], "instructions": results}))
+    results: dict[str, float] = {}
+    errors: dict[str, str] = {}
+    for name, (build, kwargs) in CASES.items():
+        try:
+            results[name] = await _count(build, kwargs)
+        except Exception as e:  # a revision this case's API is newer than; the gate decides what that means
+            errors[name] = f"{type(e).__name__}: {e}"
+    report = {"timbal": timbal.__file__, "python": sys.version.split()[0], "instructions": results, "errors": errors}
+    print(json.dumps(report))
 
 
 if __name__ == "__main__":
