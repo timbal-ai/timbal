@@ -493,6 +493,41 @@ class TestEmptyAtLimit:
         assert out.error["type"] == "ModelOutputTruncated"
         assert "max_tokens=4000" in out.error["message"]
 
+    async def test_structured_output_is_retried_too(self):
+        from pydantic import BaseModel
+
+        class Answer(BaseModel):
+            value: int
+
+        agent = Agent(
+            name="agent",
+            model=in_order(thinking_only(), '{"value": 42}'),
+            max_tokens=1000,
+            output_model=Answer,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out = await agent(prompt="q").collect()
+        assert out.status.code == "success", out.error
+        assert out.output == Answer(value=42)
+        assert out.metadata["max_tokens_retry"] == {"from": 1000, "to": 4000}
+
+    async def test_structured_output_still_empty_fails_clearly(self):
+        from pydantic import BaseModel
+
+        class Answer(BaseModel):
+            value: int
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(responses=[thinking_only(), thinking_only()]),
+            max_tokens=1000,
+            output_model=Answer,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out = await agent(prompt="q").collect()
+        assert out.status.code == "error"
+        assert out.error["type"] == "ModelOutputTruncated"
+
     async def test_truncated_text_is_kept(self):
         partial = Message(role="assistant", content=[TextContent(text="Half an ans")], stop_reason="max_tokens")
         agent = Agent(
