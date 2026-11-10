@@ -17,6 +17,20 @@ Two things are documented here: [running a runnable over HTTP](#runs-run-stream-
 
 Set `context.id` on the request to choose the run id; otherwise one is generated and you can read it off the first event. Naming an id that a *running* run already holds is a `409` — the alternative is silently orphaning that run, leaving it executing with nothing able to read or cancel it.
 
+Set `context.tool_policy` to narrow the tools the run's agents offer their models, as a chat wake does:
+
+- `"read_only"`: tools declared `read_only`, MCP tools whose server says `readOnlyHint`, and the agent's own readers;
+- a list of tool names: those tools. Names match in every agent of the run (`["send_email"]` allows a subagent's `send_email` too), and `[]` allows none (the model can only think and answer);
+- `null`: all tools (the default).
+
+A call to a hidden tool gets the usual `tool_not_found` result, and any other value is a `400`. The policy covers every agent in the run: subagents, agents a tool or step body starts, and those started by background tools, also after the run that spawned them has ended. Each agent records it on its span (`metadata.tool_policy`, plus `tool_policy_allowed`, the paths of the tools it was offered at its latest step), so a trace shows after the fact what was enforced. A resume (`resume` with `context.parent_id`) that leaves `tool_policy` out keeps the paused run's policy, recorded on its root span (`metadata.tool_policy`); naming one, `null` included, replaces it. A failed read of the paused run is a `503` (`Retry-After`) before any run starts, never "all tools".
+
+The policy applies to agents only: it filters what each agent offers its model. Workflow steps are not filtered, so on a workflow app `read_only` covers the agents inside it (agent steps, agents a step starts) but not a plain step that sends an email. Check enforcement on the agent spans' `metadata.tool_policy`; a workflow app's root span is the workflow's.
+
+An SDK without this support ignores `context.tool_policy` instead of refusing it, so check before relying on it: `GET /meta` answers `{"version", "capabilities"}` (`"context.tool_policy"`, `"context.require_new"`), `/healthcheck` sends the same as `X-Timbal-Version` / `X-Timbal-Capabilities`, and a run that applied a policy confirms it on its response (`X-Timbal-Tool-Policy: read_only`, `names`, or `custom` when a resume kept a paused run's policy that is neither).
+
+Set `context.require_new: true` to refuse (`409`) an `id` this server still knows, a finished run's included (within the retention window; a restart forgets, and so does another worker: each process has its own job store, see [Limits](#limits), so with several workers or replicas a retry can start a second run). Without it, an id whose run has finished starts a new run under it, as before: for a caller that retries after a lost response, that is a second run whose trace collides with the first.
+
 Reusing the id of a run that has *finished* but is still inside its retention window is allowed, and rebinds the id: anything still polling `/runs/{run_id}/events` for the old run starts receiving the new one's events, with seqs counting from 1 again. Use fresh ids per run unless you mean that.
 
 ### A dropped connection does not stop the run

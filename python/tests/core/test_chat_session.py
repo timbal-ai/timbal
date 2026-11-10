@@ -1008,6 +1008,60 @@ class TestRobustness:
             assert finished["status"]["code"] == "success"
         assert writes == ["root lookup"]
 
+    async def test_a_restored_callable_policy_keeps_the_tools_of_agents_started_inside_a_tool(self):
+        """An agent a tool body starts is a run of its own, with its own trace: what the policy let it use is noted
+        on the tool's span as well, so the parked wake's trace is enough to give it the same tools on resume."""
+        writes = []
+
+        def inner_handler(messages):
+            return "inner done" if messages[-1].role == "tool" else tool_call("write", call_id="call-write")
+
+        inner = Agent(
+            name="inner",
+            model=TestModel(handler=inner_handler),
+            tools=[Tool(name="write", handler=lambda: writes.append("write") or "written")],
+            tracing_provider=InMemoryTracingProvider,
+        )
+
+        async def deep() -> str:
+            await inner(prompt="write it").collect()
+            return "deep done"
+
+        def root_handler(messages):
+            results = sum(1 for m in messages if m.role == "tool")
+            if results in (0, 2):
+                return tool_call("deep", call_id=f"call-deep-{results}")
+            if results == 1:
+                return tool_call("lookup")
+            return "NO_REPLY"
+
+        def build():
+            return Agent(
+                name="agent",
+                model=TestModel(handler=root_handler),
+                tools=[
+                    Tool(name="deep", handler=deep, read_only=True),
+                    Tool(name="lookup", handler=lambda: "found", read_only=True, requires_approval=True),
+                ],
+                tracing_provider=InMemoryTracingProvider,
+            )
+
+        async with ChatSession(build()) as first:
+            first.wake("Do it.", tool_policy=lambda tool: tool.name in {"deep", "lookup", "write"})
+            (finished,) = await records(first, "turn_finished", 1)
+            assert finished["parked"]
+            parked_run = first.head
+        assert writes == ["write"]
+        async with ChatSession(build(), parent_id=parked_run) as session:
+            assert session._last_options.tool_policy == _ToolPaths(
+                frozenset({"agent.deep", "agent.lookup", "inner.write"})
+            )
+            (approval,) = session.state()["pending_approvals"]
+            session.resume({approval["approval_id"]: True})
+            (finished,) = await records(session, "turn_finished", 1)
+            assert finished["status"]["code"] == "success"
+        assert writes == ["write", "write"]
+
     @pytest.mark.parametrize("enter", [True, False])
     async def test_a_failed_parent_lookup_leaves_the_session_unresolved(self, enter, monkeypatch):
         import timbal.core.chat_session as chat_session_module

@@ -28,6 +28,10 @@ from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.message import RUNTIME_SOURCE, Message
 from .session_scheduler import Followup, SessionScheduler, is_parked, user_batch
+from .tool_policy import ToolPaths as _ToolPaths  # noqa: F401 — re-exported for callers and tests
+from .tool_policy import allowed_tool_paths as _allowed_tool_paths  # noqa: F401
+from .tool_policy import describe_tool_policy as _describe_policy
+from .tool_policy import restore_tool_policy
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -92,38 +96,6 @@ def _check_tool_policy(policy: Any) -> Any:
     if not all(isinstance(name, str) for name in names):
         raise ValueError("tool_policy names must be strings.")
     return names
-
-
-def _allowed_tool_paths(trace: Any) -> frozenset[str]:
-    """What a callable tool policy let through in ``trace``, as last decided: each agent notes on its span what
-    its latest tool resolution allowed (``tool_policy_allowed``), and an agent run more than once in the trace
-    counts by its latest span, so a later decision (a permission taken back) wins over an earlier one."""
-    latest: dict[str, Any] = {}
-    for span in trace.values():
-        if "tool_policy_allowed" not in (span.metadata or {}):
-            continue
-        seen = latest.get(span.path)
-        if seen is None or (span.t0 or 0) >= (seen.t0 or 0):
-            latest[span.path] = span
-    return frozenset(path for span in latest.values() for path in span.metadata["tool_policy_allowed"])
-
-
-@dataclass(frozen=True)
-class _ToolPaths:
-    """A tool policy restored from a trace: the tools with these paths (agent-scoped, unlike names)."""
-
-    paths: frozenset[str]
-
-    def __call__(self, tool: Any) -> bool:
-        return getattr(tool, "_path", None) in self.paths
-
-
-def _describe_policy(policy: Any) -> Any:
-    if policy is None or policy == "read_only":
-        return policy
-    if callable(policy):
-        return "custom"
-    return sorted(policy)
 
 
 def _with_note(prompt: Message, note: str) -> Message:
@@ -482,11 +454,7 @@ class ChatSession:
         that becomes the policy (an agent that never resolved its tools in the run gets none). Wakes from
         before the policy was stored resume read-only.
         """
-        policy = meta.get("tool_policy", "read_only")
-        if policy == "custom":
-            policy = _ToolPaths(_allowed_tool_paths(trace))
-        elif isinstance(policy, list):
-            policy = frozenset(policy)
+        policy = restore_tool_policy(meta.get("tool_policy", "read_only"), trace)
         return _TurnOptions(tool_policy=policy, silence=self.allow_silence and bool(meta.get("silent")), steer=False)
 
     async def __aexit__(self, *_exc: Any) -> None:

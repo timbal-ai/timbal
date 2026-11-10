@@ -77,6 +77,7 @@ from .runnable import Runnable, RunnableLike
 from .session_scheduler import record_delivery
 from .skill import ReadSkill, Skill
 from .tool import Tool
+from .tool_policy import READ_ONLY_POLICY, describe_tool_policy
 from .tool_result_offload import (
     LEGACY_READ_OFFLOADED_NAMES,
     LocalOffloadStore,
@@ -116,7 +117,6 @@ DEFAULT_STEER_BLOCKED_NOTICE = (
 )
 """Runtime message that stands in for a steered user message an input guardrail blocked."""
 
-READ_ONLY_POLICY = "read_only"
 # Agent-provided tools that only read (their constructors do not take ``read_only``).
 _READ_ONLY_BUILTINS = frozenset(
     {"read_skill", "read_offloaded", "get_background_task", "list_background_tasks", "read_background_transcript"}
@@ -1452,14 +1452,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if tool_policy is not None:
                 tools = [tool for tool in tools if self._tool_allowed(tool, tool_policy)]
                 commands = {key: tool for key, tool in commands.items() if tool in tools}
-                if callable(tool_policy):
-                    self._record_allowed_tools(tools)
+                self._record_allowed_tools(tools, tool_policy)
         return tools, commands
 
     @staticmethod
-    def _record_allowed_tools(tools: list[Any]) -> None:
-        """Note on this agent's span what a callable tool policy let through at its latest tool resolution: a
-        callable is not stored with the run, and a session continuing it parked restores the policy from it."""
+    def _record_allowed_tools(tools: list[Any], policy: Any) -> None:
+        """Note on this agent's span the run's tool policy and what it let through at its latest tool resolution
+        (``metadata.tool_policy`` / ``tool_policy_allowed``): proof after the fact that it was enforced, and how a
+        session continuing a parked run restores a callable policy, which is not stored with the run."""
         run_context = get_run_context()
         if run_context is None:
             return
@@ -1467,8 +1467,25 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             span = run_context.current_span()
         except Exception:
             return
+        span.metadata["tool_policy"] = describe_tool_policy(policy)
         # The latest decision only: a callable may take a permission back between steps.
-        span.metadata["tool_policy_allowed"] = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
+        # Ordered by when it was made, not by when its span started: concurrent spans of one agent decide out
+        # of start order, and the restore must not bring back a permission a later decision took away.
+        allowed = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
+        decided_at = time.time_ns()
+        span.metadata["tool_policy_allowed"] = allowed
+        span.metadata["tool_policy_decided_at"] = decided_at
+        # A run started inside a call of the run the policy came from keeps its spans in a trace of its own: note
+        # the decision on that call's span too, where a session continuing the parked run restores it from.
+        origin = run_context.__dict__.get("_tool_policy_origin")
+        if origin is not None:
+            origin_context, origin_call_id = origin
+            origin_span = origin_context._trace.get(origin_call_id)
+            if origin_span is not None:
+                nested = origin_span.metadata.setdefault("nested_tool_policy_allowed", {})
+                seen = nested.get(span.path)
+                if seen is None or decided_at >= seen["at"]:
+                    nested[span.path] = {"allowed": allowed, "at": decided_at}
 
     @staticmethod
     def _tool_allowed(tool: Any, policy: Any) -> bool:

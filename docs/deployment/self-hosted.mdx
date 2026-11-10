@@ -34,7 +34,38 @@ uv run -m timbal.server.http --port <port> --import_spec <fqn>
 POST http://localhost:<port>/run      # collect (returns final OutputEvent)
 POST http://localhost:<port>/stream   # SSE event stream
 GET  http://localhost:<port>/healthcheck
+GET  http://localhost:<port>/meta
 ```
+
+`GET /meta` returns `{"version", "capabilities"}`. `capabilities` is `["context.tool_policy", "context.require_new"]`. `GET /healthcheck` is still `204`, with the same facts in `X-Timbal-Version` and `X-Timbal-Capabilities` (`context.tool_policy,context.require_new`).
+
+### Request context
+
+`POST /run` and `POST /stream` take an optional `context` object (`run_context` is the same key):
+
+```json
+{
+  "prompt": "Summarize my open tickets",
+  "context": {"id": "routine-1", "tool_policy": "read_only", "require_new": true}
+}
+```
+
+`context.id` chooses the run id. One a running run already holds is `409`.
+
+`context.tool_policy` narrows the tools every agent in the run offers its model. That includes subagents, an agent a tool or step starts, and one a background tool starts after the spawning run has ended.
+
+- `"read_only"` — tools declared [`read_only`](/agents/tools#read-only-tools), MCP tools whose server sets `readOnlyHint`, and the agent's own readers.
+- A list of tool names. The name matches in every agent of the run, and `[]` offers none.
+- `null` — every tool. This is the default, and so is leaving the key off.
+- Anything else is `400`.
+
+A call to a tool the policy hid comes back as `tool_not_found`. A run that applied a policy confirms it with `X-Timbal-Tool-Policy: read_only`, `names` (`names` is any list, including an empty one), or `custom` (a resume that kept a paused run's policy that was not one of those, such as a chat session's). `null` sends no such header.
+
+A resume (`resume` with `context.parent_id`) that leaves `tool_policy` out keeps the policy of the paused run it continues, so an approval cannot widen a read-only routine. Name one on the resume to change it: `null` gives every tool. If the paused run cannot be read (a tracing provider error), the resume is a `503` with `Retry-After`, and no run starts: retry it, or name `tool_policy`.
+
+The policy filters what **agents** offer their models, and nothing else. A Workflow's steps run whatever the policy is: on a workflow app, `read_only` narrows the agents inside it (agent steps, agents a step starts) but does not stop a plain step that sends an email. To confirm enforcement, check `metadata.tool_policy` on the agent spans, not the root span: on a workflow app the root span is the workflow's.
+
+`context.require_new` must be a boolean (`400` otherwise). `true` refuses with `409` an id this process still remembers, finished runs included, for the job retention window (default 5 minutes; a restart forgets them). Each worker process has its own job store, so with more than one worker or replica a retry can land on a process that never saw the id and start a second run: treat `require_new` as a cheap extra check, not a global guarantee, and keep your own record of the runs you started. That is the safe retry after a lost response. Without it, reusing a finished id starts another run under that id, and a client still reading `GET /runs/{run_id}/events` for the old run follows the new one.
 
 An Agent also exposes `/voice`, `/voice/ws`, and `/voice/rtc`. Install `timbal[server,voice]` for browser voice and WebRTC, or add `voice-livekit` for LiveKit rooms. Voice connections are long-lived: configure WebSocket upgrades, connection timeouts, and the appropriate media networking in your reverse proxy. See [Voice transports](/voice/transports) for carrier routes and ICE/TURN configuration.
 
@@ -83,7 +114,7 @@ Run each component under a supervisor that restarts on crash:
 - One for API
 - One for UI (if used)
 
-Use health checks against `/healthcheck` on workforce HTTP servers.
+Use health checks against `/healthcheck` on workforce HTTP servers. The response stays `204` and carries `X-Timbal-Version` and `X-Timbal-Capabilities`. Check those before an unattended run: an older server ignores `context.tool_policy` instead of refusing it.
 
 ### Logging
 

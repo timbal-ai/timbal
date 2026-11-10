@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -529,3 +530,223 @@ class TestServerLifecycle:
                 os.environ["TIMBAL_ENABLE_NGROK"] = original_value
             elif "TIMBAL_ENABLE_NGROK" in os.environ:
                 del os.environ["TIMBAL_ENABLE_NGROK"]
+
+
+
+class TestContextToolPolicy:
+    """``context.tool_policy`` on ``/run`` and ``/stream``: the tools the run's agents offer their models."""
+
+    @pytest.fixture
+    def app(self, monkeypatch):
+        import_spec = ImportSpec(
+            path=Path(__file__).parent / "fixtures" / "policy_agent_fixture.py", target="policy_agent"
+        )
+        monkeypatch.setenv("TIMBAL_RUNNABLE", f"{import_spec.path}::{import_spec.target}")
+        app = create_app()
+        app.state.runnable = import_spec.load()
+        app.state.job_store = JobStore()
+        fixture().WRITES.clear()
+        fixture().DONE.clear()
+        return app
+
+    @pytest.mark.parametrize(
+        ("context", "ran"),
+        [
+            ({}, ["write"]),
+            ({"tool_policy": None}, ["write"]),
+            ({"tool_policy": "read_only"}, []),
+            ({"tool_policy": ["peek"]}, []),
+            ({"tool_policy": ["write"]}, ["write"]),
+            ({"tool_policy": []}, []),  # no tools at all: think and answer only
+        ],
+    )
+    def test_run_applies_the_policy(self, app, context, ran):
+        response = TestClient(app).post("/run", json={"prompt": "go", "context": context})
+        assert response.status_code == 200, response.text
+        assert response.json()["status"]["code"] == "success"
+        assert fixture().WRITES == ran
+
+    def test_stream_applies_the_policy(self, app):
+        response = TestClient(app).post("/stream", json={"prompt": "go", "context": {"tool_policy": "read_only"}})
+        assert response.status_code == 200
+        assert fixture().WRITES == []
+
+    @pytest.mark.parametrize(("context", "ran"), [({}, ["write"]), ({"tool_policy": "read_only"}, [])])
+    def test_an_agent_started_inside_an_allowed_tool_keeps_the_policy(self, app, context, ran):
+        response = TestClient(app).post("/run", json={"prompt": "deep", "context": context})
+        assert response.status_code == 200, response.text
+        assert fixture().DONE == ["peek_deep"]
+        assert fixture().WRITES == ran
+
+    @pytest.mark.parametrize(("context", "ran"), [({}, ["write"]), ({"tool_policy": "read_only"}, [])])
+    def test_a_background_task_keeps_the_policy(self, app, context, ran):
+        with TestClient(app) as client:
+            response = client.post("/run", json={"prompt": "spawn", "context": context})
+            assert response.status_code == 200, response.text
+            deadline = time.monotonic() + 5
+            while "spawn" not in fixture().DONE and time.monotonic() < deadline:
+                time.sleep(0.02)
+        assert fixture().DONE == ["spawn"]
+        assert fixture().WRITES == ran
+
+    @pytest.mark.parametrize(("policy", "recorded"), [("read_only", "read_only"), (["peek"], ["peek"])])
+    def test_the_enforced_policy_is_recorded_on_the_agent_span(self, app, policy, recorded):
+        import asyncio
+
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        body = TestClient(app).post("/run", json={"prompt": "peek", "context": {"tool_policy": policy}}).json()
+        trace = asyncio.run(RunContext(tracing_provider=InMemoryTracingProvider)._get_parent_trace(body["run_id"]))
+        root = next(span for span in trace.values() if span.parent_call_id is None)
+        assert root.metadata["tool_policy"] == recorded
+        allowed = set(root.metadata["tool_policy_allowed"])
+        assert "policy_agent.peek" in allowed and "policy_agent.write" not in allowed
+
+    def test_healthcheck_advertises_the_capability(self, app):
+        response = TestClient(app).get("/healthcheck")
+        assert response.status_code == 204
+        assert "context.tool_policy" in response.headers["x-timbal-capabilities"].split(",")
+        assert response.headers["x-timbal-version"] == __version__
+
+    def test_meta_lists_the_capabilities(self, app):
+        response = TestClient(app).get("/meta")
+        assert response.status_code == 200
+        assert response.json() == {"version": __version__, "capabilities": ["context.tool_policy", "context.require_new"]}
+
+    @pytest.mark.parametrize(
+        ("context", "header"),
+        [
+            ({}, None),
+            ({"tool_policy": None}, None),
+            ({"tool_policy": "read_only"}, "read_only"),
+            ({"tool_policy": ["peek"]}, "names"),
+        ],
+    )
+    @pytest.mark.parametrize("route", ["/run", "/stream"])
+    def test_an_applied_policy_is_confirmed_on_the_response(self, app, route, context, header):
+        response = TestClient(app).post(route, json={"prompt": "go", "context": context})
+        assert response.status_code == 200
+        assert response.headers.get("x-timbal-tool-policy") == header
+
+    @pytest.mark.parametrize(
+        ("method", "route", "body"),
+        [
+            ("GET", "/healthcheck", None),
+            ("POST", "/run", {"prompt": "go", "context": {"tool_policy": "read_only"}}),
+            ("POST", "/stream", {"prompt": "go", "context": {"tool_policy": "read_only"}}),
+        ],
+    )
+    def test_a_browser_on_another_origin_can_read_the_headers(self, app, method, route, body):
+        response = TestClient(app).request(method, route, json=body, headers={"Origin": "https://app.example"})
+        exposed = {name.strip().lower() for name in response.headers["access-control-expose-headers"].split(",")}
+        assert {"x-timbal-tool-policy", "x-timbal-version", "x-timbal-capabilities"} <= exposed
+
+    @pytest.mark.parametrize("policy", ["everything", 3, [1, 2], {"names": ["peek"]}])
+    @pytest.mark.parametrize("route", ["/run", "/stream"])
+    def test_an_invalid_policy_is_a_400(self, app, route, policy):
+        response = TestClient(app).post(route, json={"prompt": "go", "context": {"tool_policy": policy}})
+        assert response.status_code == 400
+        assert "tool_policy" in response.json()["detail"]
+        assert fixture().WRITES == []
+
+    @pytest.mark.parametrize(
+        ("resume_context", "ran", "header"),
+        [
+            ({}, [], "read_only"),  # left out: the paused run's policy
+            ({"tool_policy": None}, ["write"], None),  # named: the caller's
+            ({"tool_policy": ["write"]}, ["write"], "names"),
+        ],
+    )
+    @pytest.mark.parametrize("route", ["/run", "/stream"])
+    def test_a_resume_that_leaves_the_policy_out_keeps_the_paused_runs(
+        self, app, route, resume_context, ran, header
+    ):
+        client = TestClient(app)
+        run_id, approval_id = _pause_read_only_gate(client)
+
+        response = client.post(
+            route,
+            json={"prompt": "gate", "resume": {approval_id: True}, "context": {"parent_id": run_id, **resume_context}},
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers.get("X-Timbal-Tool-Policy") == header
+        assert fixture().WRITES == ran
+
+    @pytest.mark.parametrize("route", ["/run", "/stream"])
+    def test_a_resume_whose_paused_run_cannot_be_read_is_a_retryable_503(self, app, route, monkeypatch):
+        """A failed read must not turn into "all tools": the resume is refused before any job starts."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        client = TestClient(app)
+        run_id, approval_id = _pause_read_only_gate(client)
+        original = InMemoryTracingProvider.get_strict.__func__
+        failures = [OSError("tracing blip")]
+
+        async def flaky(cls, run_context):
+            if failures:
+                raise failures.pop()
+            return await original(cls, run_context)
+
+        monkeypatch.setattr(InMemoryTracingProvider, "get_strict", classmethod(flaky))
+        body = {"prompt": "gate", "resume": {approval_id: True}, "context": {"parent_id": run_id}}
+
+        jobs_before = len(app.state.job_store._jobs)
+        refused = client.post(route, json=body)
+        assert refused.status_code == 503, refused.text
+        assert refused.headers["Retry-After"] == "1"
+        assert "tool_policy" in refused.json()["detail"]
+        assert len(app.state.job_store._jobs) == jobs_before  # refused before any job started
+
+        retried = client.post(route, json=body)
+        assert retried.status_code == 200, retried.text
+        assert retried.headers.get("X-Timbal-Tool-Policy") == "read_only"
+        assert fixture().WRITES == []
+
+
+def _pause_read_only_gate(client) -> tuple[str, str]:
+    """Run the fixture's ``gate`` prompt read-only until it pauses for approval: ``(run_id, approval_id)``."""
+    import json
+
+    paused = client.post("/stream", json={"prompt": "gate", "context": {"tool_policy": "read_only"}})
+    events = [json.loads(line[len("data: ") :]) for line in paused.text.splitlines() if line.startswith("data: ")]
+    assert events[-1]["status"]["reason"] == "approval_required"
+    return events[0]["run_id"], next(e["approval_id"] for e in events if e.get("approval_id"))
+
+
+class TestRequireNew:
+    """``context.require_new``: a caller-chosen id is refused once this server knows it, finished or not."""
+
+    @pytest.fixture
+    def client(self, monkeypatch):
+        import_spec = ImportSpec(
+            path=Path(__file__).parent / "fixtures" / "policy_agent_fixture.py", target="policy_agent"
+        )
+        monkeypatch.setenv("TIMBAL_RUNNABLE", f"{import_spec.path}::{import_spec.target}")
+        app = create_app()
+        app.state.runnable = import_spec.load()
+        app.state.job_store = JobStore()
+        return TestClient(app)
+
+    @pytest.mark.parametrize("route", ["/run", "/stream"])
+    def test_a_finished_run_id_is_refused(self, client, route):
+        context = {"id": f"fire{route.replace('/', '-')}", "require_new": True, "tool_policy": "read_only"}
+        assert client.post(route, json={"prompt": "peek", "context": context}).status_code == 200
+        again = client.post(route, json={"prompt": "peek", "context": context})
+        assert again.status_code == 409
+        assert "finished" in again.json()["detail"]
+
+    def test_without_it_a_finished_id_runs_again_as_before(self, client):
+        context = {"id": "reused", "tool_policy": "read_only"}
+        assert client.post("/run", json={"prompt": "peek", "context": context}).status_code == 200
+        assert client.post("/run", json={"prompt": "peek", "context": context}).status_code == 200
+
+    def test_it_must_be_a_boolean(self, client):
+        response = client.post("/run", json={"prompt": "peek", "context": {"id": "x", "require_new": "yes"}})
+        assert response.status_code == 400
+        assert "require_new" in response.json()["detail"]
+
+
+def fixture():
+    """The fixture module ``ImportSpec`` loaded (under a name of its own)."""
+    return next(m for name, m in list(sys.modules.items()) if name.endswith("policy_agent_fixture"))

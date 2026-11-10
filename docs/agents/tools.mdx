@@ -35,6 +35,10 @@ agent = Agent(
 )
 ```
 
+### Read-only tools
+
+`Tool(read_only=True)` declares that the tool only reads: it sends, writes, deletes, and buys nothing. A run with `tool_policy="read_only"` — [`context.tool_policy`](/deployment/self-hosted#request-context) on `/run` and `/stream`, and `ChatSession.wake` by default — offers only those tools, plus the agent's own readers (`read_skill`, `read_offloaded`, `get_background_task`, `list_background_tasks`, `read_background_transcript`). A call to anything else comes back as `tool_not_found`. An MCP tool takes `read_only` from the server's `readOnlyHint`.
+
 ### Custom Description
 
 If the function name or docstring doesn't clearly describe what the tool does, add a custom `description`. This is the description the LLM sees about the tool:

@@ -7,6 +7,7 @@ import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -22,6 +23,7 @@ except ImportError as e:
 from dotenv import load_dotenv
 
 from .. import __version__
+from ..core.tool_policy import READ_ONLY_POLICY
 from ..logs import setup_logging
 from ..state import RunContext, set_run_context
 from ..utils import ImportSpec, is_port_in_use
@@ -113,6 +115,63 @@ async def lifespan(
             app.state.single_session_guard.shutdown()
 
 
+CAPABILITIES = ("context.tool_policy", "context.require_new")
+"""Request features this server enforces: ``GET /meta``, and ``X-Timbal-Capabilities`` on ``/healthcheck``."""
+
+EXPOSED_HEADERS = ("X-Timbal-Tool-Policy", "X-Timbal-Version", "X-Timbal-Capabilities")
+"""Response headers a browser client on another origin may read (CORS hides custom headers unless exposed)."""
+
+
+def _policy_headers(run_context: RunContext | None) -> dict[str, str] | None:
+    """``X-Timbal-Tool-Policy`` on a run that has one: the confirmation that it is enforced."""
+    policy = run_context.__dict__.get("_tool_policy") if run_context is not None else None
+    if policy is None:
+        return None
+    if policy == READ_ONLY_POLICY:
+        return {"X-Timbal-Tool-Policy": READ_ONLY_POLICY}
+    return {"X-Timbal-Tool-Policy": "custom" if callable(policy) else "names"}
+
+
+def _tool_policy(value: Any) -> Any:
+    """A JSON tool policy: ``"read_only"``, a list of tool names, or ``None``."""
+    if value is None or value == READ_ONLY_POLICY:
+        return value
+    if isinstance(value, list) and all(isinstance(name, str) for name in value):
+        return frozenset(value)
+    raise HTTPException(
+        status_code=400, detail="'context.tool_policy' must be 'read_only', a list of tool names, or null."
+    )
+
+
+async def _paused_run_policy(run_context: RunContext) -> Any:
+    """The tool policy of the paused run ``run_context`` resumes (its root span's ``metadata.tool_policy``).
+
+    A resume that does not name a policy must not run with more tools than the run it continues had, so a
+    failed read is a retryable ``503`` before any job starts, never "all tools". ``None`` only when there is
+    no paused run to keep it from: the parent is not stored (or tracing is off), or did not end paused.
+    """
+    from ..core.agent import _is_pause
+    from ..core.tool_policy import restore_tool_policy
+
+    provider = run_context._tracing_provider
+    if provider is None:
+        return None
+    try:
+        trace = await provider.get_strict(run_context)
+    except Exception as e:
+        logger.warning("Paused run lookup failed", parent_id=run_context.parent_id, error=str(e))
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read the run being resumed to keep its tool policy; retry, "
+            "or name 'context.tool_policy' explicitly.",
+            headers={"Retry-After": "1"},
+        ) from e
+    root = trace.get(trace._root_call_id) if trace is not None and trace._root_call_id is not None else None
+    if root is None or not _is_pause(root.status):
+        return None
+    return restore_tool_policy((root.metadata or {}).get("tool_policy"), trace)
+
+
 def create_app() -> FastAPI:
     """Factory for the FastAPI app. Called by uvicorn in each worker process.
 
@@ -135,6 +194,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=list(EXPOSED_HEADERS),
     )
 
     from .chat import router as chat_router
@@ -147,9 +207,19 @@ def create_app() -> FastAPI:
     app.include_router(rtc_router)
     app.include_router(telephony_router)
 
+    @app.get("/meta")
+    async def meta() -> Response:
+        """This server's version and the request features it enforces (``CAPABILITIES``), so a caller can
+        check before relying on one: an older SDK ignores what it does not know instead of refusing it."""
+        return JSONResponse(status_code=200, content={"version": __version__, "capabilities": list(CAPABILITIES)})
+
     @app.get("/healthcheck")
     async def healthcheck() -> Response:
-        return Response(status_code=204)
+        # The same as /meta, for a caller that only probes the health check.
+        return Response(
+            status_code=204,
+            headers={"X-Timbal-Version": __version__, "X-Timbal-Capabilities": ",".join(CAPABILITIES)},
+        )
 
     @app.get("/voice_config")
     async def voice_config() -> Response:
@@ -183,7 +253,7 @@ def create_app() -> FastAPI:
             content=return_model_schema,
         )
 
-    def _create_job(run_id: str | None, req_data: dict, replayable: bool = True):
+    def _create_job(run_id: str | None, req_data: dict, replayable: bool = True, require_new: bool = False):
         """Start a job, turning a colliding client-supplied run id into a 409.
 
         `context.id` is client-controlled, so two requests can name the same
@@ -193,30 +263,52 @@ def create_app() -> FastAPI:
         """
         try:
             return app.state.job_store.create_job(
-                app.state.runnable, req_data, job_id=run_id, replayable=replayable
+                app.state.runnable, req_data, job_id=run_id, replayable=replayable, require_new=require_new
             )
         except RunIdInUse as e:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Run id '{e.job_id}' is already in use by a running run.",
-            ) from e
+            state = "a finished run (context.require_new)" if e.finished else "a running run"
+            raise HTTPException(status_code=409, detail=f"Run id '{e.job_id}' is already in use by {state}.") from e
+
+    async def _request_context(req_data: dict) -> tuple[RunContext | None, bool]:
+        """The request's ``context`` (or ``run_context``) as the run's context, and ``require_new``.
+
+        ``tool_policy`` narrows the tools every agent in the run offers its model, as for a chat
+        session's wake: ``"read_only"``, a list of tool names, or ``null`` (all tools). A resume
+        (``resume`` with a ``parent_id``) that leaves it out keeps the policy of the run it resumes.
+        ``require_new: true`` refuses (409) an ``id`` this server still knows, finished runs included.
+        """
+        raw = req_data.pop("context", None)
+        if raw is None:
+            raw = req_data.pop("run_context", None)
+        if raw is None:
+            return None, False
+        policy, policy_given, require_new = None, False, False
+        if isinstance(raw, dict) and ("tool_policy" in raw or "require_new" in raw):
+            raw = dict(raw)
+            if "tool_policy" in raw:
+                policy, policy_given = _tool_policy(raw.pop("tool_policy")), True
+            if "require_new" in raw:
+                require_new = raw.pop("require_new")
+                if not isinstance(require_new, bool):
+                    raise HTTPException(status_code=400, detail="'context.require_new' must be a boolean.")
+        run_context = RunContext.model_validate(raw)
+        if not policy_given and "resume" in req_data and run_context.parent_id:
+            policy = await _paused_run_policy(run_context)
+        run_context.__dict__["_tool_policy"] = policy
+        return run_context, require_new
 
     @app.post("/run")
     async def run(req: Request) -> Response:
         req_data = await req.json()
-        run_context = req_data.pop("context", None)
-        if run_context is None:
-            run_context = req_data.pop("run_context", None)
-
+        run_context, require_new = await _request_context(req_data)
         run_id = None
         if run_context is not None:
-            run_context = RunContext.model_validate(run_context)
             set_run_context(run_context)
             run_id = run_context.id
 
         # Nothing can reconnect to a `/run`, so its events are dropped as they
         # are consumed instead of being kept for the retention window.
-        _, job = _create_job(run_id, req_data, replayable=False)
+        _, job = _create_job(run_id, req_data, replayable=False, require_new=require_new)
 
         output_event = None
         last_seen = 0
@@ -239,22 +331,19 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=200,
             content=output_event.model_dump() if output_event else None,
+            headers=_policy_headers(run_context),
         )
 
     @app.post("/stream")
     async def stream(req: Request) -> Response:
         req_data = await req.json()
-        run_context = req_data.pop("context", None)
-        if run_context is None:
-            run_context = req_data.pop("run_context", None)
-
+        run_context, require_new = await _request_context(req_data)
         run_id = None
         if run_context is not None:
-            run_context = RunContext.model_validate(run_context)
             set_run_context(run_context)
             run_id = run_context.id
 
-        job_id, job = _create_job(run_id, req_data)
+        job_id, job = _create_job(run_id, req_data, require_new=require_new)
 
         async def event_streamer() -> AsyncGenerator[str, None]:
             # `id:` carries the seq so a client reading the stream always knows
@@ -283,7 +372,9 @@ def create_app() -> FastAPI:
                 )
                 yield f"event: expired\ndata: {notice}\n\n"
 
-        return StreamingResponse(event_streamer(), media_type="text/event-stream")
+        return StreamingResponse(
+            event_streamer(), media_type="text/event-stream", headers=_policy_headers(run_context)
+        )
 
     @app.get("/runs/{run_id}/events")
     async def run_events(
