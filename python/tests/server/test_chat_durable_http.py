@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from timbal.core.chat_session import ChatSession
 from timbal.server.chat import session_store_for
 from timbal.server.http import create_app
-from timbal.state.chat_store import SqliteChatSessionStore
+from timbal.state.chat_store import PROCESS_OWNER, SqliteChatSessionStore
 
 AGENT = textwrap.dedent(
     """
@@ -110,6 +110,26 @@ def test_a_session_another_process_serves_is_a_409(client):
     client.portal.call(store.acquire_lease, session_id, "elsewhere:1:x")
     response = client.get(f"/chat/sessions/{session_id}")
     assert response.status_code == 409 and "another process" in response.json()["detail"]
+
+
+def test_a_session_this_process_lost_answers_409_then_comes_back(client):
+    """Losing the lease closes the session here: requests must not keep finding the closed object (404)."""
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    store = client.app.state.chat_store
+    session = client.app.state.chat_sessions[session_id]
+    client.portal.call(store.release_lease, session_id, PROCESS_OWNER)  # lapsed
+    client.portal.call(store.acquire_lease, session_id, "elsewhere:1:x")
+
+    async def lose():
+        session._lose("taken")
+
+    client.portal.call(lose)
+    response = client.get(f"/chat/sessions/{session_id}")
+    assert response.status_code == 409, response.text
+    assert client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi"}).status_code == 409
+    client.portal.call(store.release_lease, session_id, "elsewhere:1:x")  # the other process let it go
+    assert client.get(f"/chat/sessions/{session_id}").status_code == 200
+    assert client.app.state.chat_sessions[session_id] is not session
 
 
 def test_delete_removes_it_for_good(client):

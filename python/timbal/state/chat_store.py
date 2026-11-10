@@ -5,7 +5,8 @@ the messages and wakes no turn has taken yet, a turn that was running, whether t
 mutable row per session, written ahead of every change (a message is durable before its receipt goes out).
 
 A lease (owner + expiry, renewed while the session is open) keeps two processes from serving one session,
-and every save is a compare-and-swap on ``version``: an owner that lost its lease cannot overwrite the new one.
+and every save is a compare-and-swap on ``version`` that also checks the lease: an owner whose lease another
+process took (it expired, or renewing it failed) cannot write, so the new owner is never the one to give up.
 """
 
 from __future__ import annotations
@@ -110,8 +111,9 @@ class ChatSessionStore(ABC):
     async def load(self, session_id: str) -> SessionSnapshot | None: ...
 
     @abstractmethod
-    async def save(self, snapshot: SessionSnapshot, *, expect_version: int | None) -> int:
-        """Write ``snapshot`` if the stored version is ``expect_version`` (None: the row must not exist).
+    async def save(self, snapshot: SessionSnapshot, *, expect_version: int | None, owner: str | None = None) -> int:
+        """Write ``snapshot`` if the stored version is ``expect_version`` (None: the row must not exist) and, with
+        ``owner``, no other owner holds the lease (expired or not: one that took it may not have written yet).
         Returns the new version; raises :class:`SnapshotConflict` otherwise."""
 
     @abstractmethod
@@ -139,13 +141,15 @@ class InMemoryChatSessionStore(ChatSessionStore):
         row = self._rows.get(session_id)
         return SessionSnapshot.from_json(row[0].to_json()) if row is not None else None
 
-    async def save(self, snapshot: SessionSnapshot, *, expect_version: int | None) -> int:
+    async def save(self, snapshot: SessionSnapshot, *, expect_version: int | None, owner: str | None = None) -> int:
         row = self._rows.get(snapshot.session_id)
         current = row[0].version if row is not None else None
         if current != expect_version:
             raise SnapshotConflict(
                 f"session {snapshot.session_id}: stored version {current}, expected {expect_version}"
             )
+        if owner is not None and row is not None and row[1] not in (None, owner):
+            raise SnapshotConflict(f"session {snapshot.session_id}: leased by {row[1]}")
         stored = SessionSnapshot.from_json(snapshot.to_json())
         stored.version = (current or 0) + 1
         owner, until = (row[1], row[2]) if row is not None else (None, 0.0)
@@ -210,7 +214,7 @@ class SqliteChatSessionStore(ChatSessionStore):
         snapshot.version = row[1]
         return snapshot
 
-    async def save(self, snapshot: SessionSnapshot, *, expect_version: int | None) -> int:
+    async def save(self, snapshot: SessionSnapshot, *, expect_version: int | None, owner: str | None = None) -> int:
         new_version = (expect_version or 0) + 1
         body = SessionSnapshot.from_json(snapshot.to_json())
         body.version = new_version
@@ -223,17 +227,26 @@ class SqliteChatSessionStore(ChatSessionStore):
                     "VALUES (?, ?, ?, ?, ?)",
                     (snapshot.session_id, snapshot.agent, raw, new_version, now),
                 )
-            else:
+            elif owner is None:
                 cursor = conn.execute(
                     "UPDATE chat_sessions SET snapshot = ?, version = ?, updated_at = ? "
                     "WHERE session_id = ? AND version = ?",
                     (raw, new_version, now, snapshot.session_id, expect_version),
                 )
+            else:
+                cursor = conn.execute(
+                    "UPDATE chat_sessions SET snapshot = ?, version = ?, updated_at = ? "
+                    "WHERE session_id = ? AND version = ? AND (lease_owner IS NULL OR lease_owner = ?)",
+                    (raw, new_version, now, snapshot.session_id, expect_version, owner),
+                )
             conn.commit()
             return cursor.rowcount
 
         if await self._run(write) != 1:
-            raise SnapshotConflict(f"session {snapshot.session_id}: not at version {expect_version}")
+            raise SnapshotConflict(
+                f"session {snapshot.session_id}: not at version {expect_version}"
+                + (f", or leased by another owner than {owner}" if owner is not None else "")
+            )
         return new_version
 
     async def delete(self, session_id: str) -> None:

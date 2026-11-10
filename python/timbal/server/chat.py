@@ -83,6 +83,11 @@ def _store(request: Request) -> ChatSessionStore | None:
 async def _session(request: Request, session_id: str, *, allow_closed: bool = False) -> ChatSession:
     sessions = _sessions(request)
     session = sessions.get(session_id)
+    if session is not None and session.handed_off:
+        # Lost its lease (another process serves it: 409) or let go with keep: the store says where it is now.
+        if sessions.get(session_id) is session:
+            sessions.pop(session_id)
+        session = None
     if session is None:
         session = await _restore(request, session_id)
     if session is None or (session.closed and not allow_closed):

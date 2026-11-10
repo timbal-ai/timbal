@@ -573,6 +573,12 @@ class ChatSession:
             state["pending_interactions"] = self._last_context.pending_interactions()
         return state
 
+    @property
+    def handed_off(self) -> bool:
+        """This process no longer serves the session, but its store still holds it: another process took it,
+        or it was closed with ``keep``. A server drops such an object and restores the session from the store."""
+        return self._session_store is not None and (self._lost or (self.closed and self._keep))
+
     async def close(self, *, keep: bool = False) -> None:
         """Stop the session: the running turn is cancelled, the store let go. Detached children keep running.
 
@@ -635,6 +641,8 @@ class ChatSession:
         session._last_options = _TurnOptions(
             tool_policy=_load_policy(snapshot.last_options.get("tool_policy")),
             silence=bool(snapshot.last_options.get("silence")),
+            # A parked wake or recovery turn is resumed without steering, as it ran.
+            steer=snapshot.last_options.get("steer", True) is not False,
         )
         session.log.restart_at(snapshot.log_cursor + _LOG_RESTART_GAP)
         session._restore_events(snapshot.pending)
@@ -1084,6 +1092,7 @@ class ChatSession:
             last_options={
                 "tool_policy": _store_policy(self._last_options.tool_policy),
                 "silence": self._last_options.silence,
+                "steer": self._last_options.steer,
             },
             in_flight=self._in_flight,
             # Progress of a background task dies with the task (process-local): not worth restoring.
@@ -1117,7 +1126,7 @@ class ChatSession:
             self._dirty = False
             snapshot = self._snapshot()
             try:
-                self._version = await store.save(snapshot, expect_version=self._version)
+                self._version = await store.save(snapshot, expect_version=self._version, owner=PROCESS_OWNER)
             except SnapshotConflict as e:
                 self._lose(str(e))
                 return

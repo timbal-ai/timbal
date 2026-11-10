@@ -364,6 +364,55 @@ class TestEdges:
         assert session.closed and session.state()["durable"] is False
         assert (await store.load(session.id)).version == version  # not written over
 
+    async def test_an_owner_whose_lease_was_taken_cannot_write_before_the_new_owner_does(self, db):
+        """Split brain: the lease lapsed (or renewing it failed) and another process took it, but has not
+        written yet. The old owner's next save must fail, not the new owner's."""
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hi")
+        await records(session, "turn_finished", 1)
+        await session.flush()
+        session._lease_task.cancel()  # renewals stopped: nothing notices the takeover but the save
+        await store.release_lease(session.id, PROCESS_OWNER)  # as good as lapsed
+        await store.acquire_lease(session.id, "elsewhere:1:x")
+        version = (await store.load(session.id)).version
+        session.wake("ping", key="p")
+        for _ in range(50):
+            if session.closed:
+                break
+            await asyncio.sleep(0.02)
+        assert session.closed and session.handed_off
+        assert (await store.load(session.id)).version == version  # the new owner's version still stands
+
+    async def test_a_restored_parked_wake_still_does_not_take_steered_messages(self, db):
+        provider, store = db
+
+        def pays(messages):
+            if messages[-1].role == "tool":
+                return "paid"
+            text = last_user_text(messages)
+            return tool_call("charge", "call-pay") if "pay" in text else f"echo: {text}"
+
+        session = ChatSession(gated_agent(provider, Charge(), model_handler=pays), session_store=store)
+        session.wake("pay the invoice", key="pay", tool_policy=None)
+        await records(session, "turn_finished", 1)
+        approval = next(e for e in session.log.peek()[0] if isinstance(e, ApprovalEvent))
+        session.send("hello", mode="steer")  # parked: waits
+        await session.flush()
+        await session.close(keep=True)
+        assert (await store.load(session.id)).last_options["steer"] is False
+
+        restored = await ChatSession.from_store(
+            gated_agent(provider, Charge(released=True), model_handler=pays), store, session.id
+        )
+        restored.resume({approval.approval_id: True})
+        started = await records(restored, "turn_started", 2, after=after_restore(restored))
+        await records(restored, "turn_finished", 2, after=after_restore(restored))
+        # The wake's turn finishes alone; the user's message gets a turn of its own, with every tool.
+        assert [s["trigger"]["kind"] for s in started] == ["resume", "user_message"]
+        assert [o.output.collect_text() for o in root_outputs(restored)] == ["paid", "echo: hello"]
+        await restored.close()
+
     async def test_a_newer_snapshot_from_another_owner_stops_the_session(self, db):
         provider, store = db
         session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
@@ -385,11 +434,11 @@ class TestEdges:
         provider, store = db
         real_save, failures = store.save, []
 
-        async def flaky(snapshot, *, expect_version):
+        async def flaky(snapshot, *, expect_version, owner=None):
             if not failures:
                 failures.append(1)
                 raise OSError("disk full")
-            return await real_save(snapshot, expect_version=expect_version)
+            return await real_save(snapshot, expect_version=expect_version, owner=owner)
 
         monkeypatch.setattr(store, "save", flaky)
         async with ChatSession(make_agent(provider, Gate(released=True)), session_store=store) as session:
@@ -417,6 +466,22 @@ class TestStores:
             await store.save(snapshot, expect_version=version)
         loaded = await store.load("s1")
         assert loaded.head == "r2" and loaded.version == version + 1
+
+    async def test_a_save_with_an_owner_needs_the_lease(self, store):
+        version = await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
+        version = await store.save(await store.load("s1"), expect_version=version, owner="a")  # no lease yet
+        await store.acquire_lease("s1", "a")
+        with pytest.raises(SnapshotConflict):
+            await store.save(await store.load("s1"), expect_version=version, owner="b")
+        version = await store.save(await store.load("s1"), expect_version=version, owner="a")
+        store.lease_ttl_s = -1.0
+        await store.acquire_lease("s1", "a")  # a's lease has lapsed, but nobody took it...
+        with pytest.raises(SnapshotConflict):  # ...so it is still a's: b must take it before writing
+            await store.save(await store.load("s1"), expect_version=version, owner="b")
+        await store.acquire_lease("s1", "b")
+        with pytest.raises(SnapshotConflict):
+            await store.save(await store.load("s1"), expect_version=version, owner="a")
+        assert await store.save(await store.load("s1"), expect_version=version, owner="b") == version + 1
 
     async def test_a_lease_holds_until_it_expires_or_is_released(self, store):
         await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
