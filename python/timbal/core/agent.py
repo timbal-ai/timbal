@@ -2016,6 +2016,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 tasks.append(task)
 
             remaining = len(tool_calls)
+            if cut is None:
+                while remaining > 0:
+                    tool_call, event = await queue.get()
+                    if event is None:
+                        remaining -= 1
+                    else:
+                        yield tool_call, event
+                return
             spans: dict[str, tuple[str, str | None]] = {}  # tool_call id -> its span (call_id, parent)
             finished: set[str] = set()
             dropped: set[str] = set()
