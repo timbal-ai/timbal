@@ -57,7 +57,7 @@ WAKE_KIND = "wake"
 RECOVERY_KIND = "recovery"
 
 OnDeadTurn = Literal["continue", "notify", "drop"]
-"""What a restored session does with a turn that died with its process (see :meth:`ChatSession.restore`)."""
+"""What a restored session does with a turn that died with its process (see :meth:`ChatSession.from_store`)."""
 
 _SILENCE_NOTE = f"If nothing here needs the user's attention, reply with exactly {SILENT_REPLY} and nothing else."
 _WAKE_HEADER = "Scheduled wake-up (the user did not write this):"
@@ -577,7 +577,7 @@ class ChatSession:
         """Stop the session: the running turn is cancelled, the store let go. Detached children keep running.
 
         A durable session's snapshot is deleted, unless ``keep``: this process is going away (shutdown, an idle
-        session let go), and :meth:`restore` brings the session back. A turn this cuts is then recovered there
+        session let go), and :meth:`from_store` brings the session back. A turn this cuts is then recovered there
         like one that died with its process.
         """
         if self.closed:
@@ -601,7 +601,7 @@ class ChatSession:
         await self._settle_store()
 
     @classmethod
-    async def restore(
+    async def from_store(
         cls, agent: "Agent", session_store: ChatSessionStore, session_id: str, **kwargs: Any
     ) -> "ChatSession":
         """Bring back a durable session another process (or an earlier life of this one) left in ``session_store``.
@@ -630,7 +630,7 @@ class ChatSession:
         config = {**snapshot.config, **kwargs}
         session = cls(agent, parent_id=snapshot.head, session_id=session_id, session_store=session_store, **config)
         session._version, session._leased = snapshot.version, True
-        session.turns, session.last_status, session.parked = snapshot.turns, snapshot.last_status, snapshot.parked
+        session.turns, session.last_status, session._parked = snapshot.turns, snapshot.last_status, snapshot.parked
         session._last_prompt = _load_prompt(snapshot.last_prompt)
         session._last_options = _TurnOptions(
             tool_policy=_load_policy(snapshot.last_options.get("tool_policy")),
@@ -643,7 +643,7 @@ class ChatSession:
         recovered = None
         if snapshot.in_flight is not None:
             recovered = await session._recover(snapshot.in_flight)
-        if session.parked and session._last_context is None:
+        if session._parked and session._last_context is None:
             session._last_context = await session._load_run(session.head)
         session._record("restored", head=session.head, recovered=recovered, pending=len(snapshot.pending))
         session._persist()
@@ -1008,7 +1008,7 @@ class ChatSession:
                         started = True
                         self._scheduler.note_run(context.id)
                         self.turns += 1
-                        self.parked = False  # a resume took the answers: what is stored now is this turn
+                        self._parked = False  # a resume took the answers: what is stored now is this turn
                         self._in_flight = in_flight
                         self._record("turn_started", run_id=context.id, parent_id=context.parent_id, trigger=trigger)
                         if followup is not None:
@@ -1202,7 +1202,7 @@ class ChatSession:
         claims = isinstance(provider, type) and provider.claim_approval.__func__ is not (
             TracingProvider.claim_approval.__func__
         )
-        self.parked = True
+        self._parked = True
         if not claims:
             logger.warning("chat_session_resume_reparked", session_id=self.id, dead_run_id=run_id)
             return "reparked"
@@ -1246,7 +1246,7 @@ class ChatSession:
         return loaded
 
     async def _recover(self, in_flight: dict[str, Any]) -> str:
-        """Settle the turn that was running when the session was last stored (see :meth:`restore`)."""
+        """Settle the turn that was running when the session was last stored (see :meth:`from_store`)."""
         run_id = in_flight["run_id"]
         self._in_flight = None
         context = await self._load_run(run_id)
@@ -1255,9 +1255,9 @@ class ChatSession:
         if root is not None and root.t1 is not None and cut is None:
             # It finished; the process died before the session stored that.
             self._scheduler.head = run_id
-            self.parked = is_parked(root.status)
+            self._parked = is_parked(root.status)
             self.last_status = _status_dict(root.status)
-            self._last_context = context if self.parked else None
+            self._last_context = context if self._parked else None
             return "finished"
         if root is None:
             # Died before its first save: nothing it did is known. Its input goes back in the queue.
@@ -1269,7 +1269,7 @@ class ChatSession:
                 return self._recover_resume(in_flight, run_id)
             return "requeued"
         self._scheduler.head = run_id
-        self.parked = False
+        self._parked = False
         if self.on_dead_turn == "drop":
             return "dropped"
         completed, unconfirmed = _tool_calls(context)

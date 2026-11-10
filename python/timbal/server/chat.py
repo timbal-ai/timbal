@@ -100,7 +100,7 @@ async def _restore(request: Request, session_id: str) -> ChatSession | None:
     state.chat_restoring = restoring
     task = restoring.get(session_id)
     if task is None:
-        task = restoring[session_id] = asyncio.ensure_future(ChatSession.restore(_agent(request), store, session_id))
+        task = restoring[session_id] = asyncio.ensure_future(ChatSession.from_store(_agent(request), store, session_id))
         task.add_done_callback(lambda _: restoring.pop(session_id, None))
     try:
         session = await asyncio.shield(task)
@@ -133,7 +133,7 @@ async def restore_chat_sessions(app: Any) -> list[str]:
         if session_id in sessions:
             continue
         try:
-            sessions[session_id] = await ChatSession.restore(runnable, store, session_id)
+            sessions[session_id] = await ChatSession.from_store(runnable, store, session_id)
             restored.append(session_id)
         except SessionLeased:
             continue  # another live worker serves it
