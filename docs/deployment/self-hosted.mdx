@@ -61,6 +61,8 @@ GET  http://localhost:<port>/meta
 
 A call to a tool the policy hid comes back as `tool_not_found`. A run that applied a policy confirms it with `X-Timbal-Tool-Policy: read_only` or `names` (`names` is any list, including an empty one). `null` sends no such header.
 
+A resume (`resume` with `context.parent_id`) that leaves `tool_policy` out keeps the policy of the paused run it continues, so an approval cannot widen a read-only routine. Name one on the resume to change it: `null` gives every tool.
+
 `context.require_new` must be a boolean (`400` otherwise). `true` refuses with `409` an id this process still remembers, finished runs included, for the job retention window (default 5 minutes; a restart forgets them). That is the safe retry after a lost response. Without it, reusing a finished id starts another run under that id, and a client still reading `GET /runs/{run_id}/events` for the old run follows the new one.
 
 An Agent also exposes `/voice`, `/voice/ws`, and `/voice/rtc`. Install `timbal[server,voice]` for browser voice and WebRTC, or add `voice-livekit` for LiveKit rooms. Voice connections are long-lived: configure WebSocket upgrades, connection timeouts, and the appropriate media networking in your reverse proxy. See [Voice transports](/voice/transports) for carrier routes and ICE/TURN configuration.

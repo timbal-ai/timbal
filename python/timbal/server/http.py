@@ -23,6 +23,7 @@ except ImportError as e:
 from dotenv import load_dotenv
 
 from .. import __version__
+from ..core.tool_policy import READ_ONLY_POLICY
 from ..logs import setup_logging
 from ..state import RunContext, set_run_context
 from ..utils import ImportSpec, is_port_in_use
@@ -126,18 +127,33 @@ def _policy_headers(run_context: RunContext | None) -> dict[str, str] | None:
     policy = run_context.__dict__.get("_tool_policy") if run_context is not None else None
     if policy is None:
         return None
-    return {"X-Timbal-Tool-Policy": "read_only" if policy == "read_only" else "names"}
+    if policy == READ_ONLY_POLICY:
+        return {"X-Timbal-Tool-Policy": READ_ONLY_POLICY}
+    return {"X-Timbal-Tool-Policy": "custom" if callable(policy) else "names"}
 
 
 def _tool_policy(value: Any) -> Any:
     """A JSON tool policy: ``"read_only"``, a list of tool names, or ``None``."""
-    if value is None or value == "read_only":
+    if value is None or value == READ_ONLY_POLICY:
         return value
     if isinstance(value, list) and all(isinstance(name, str) for name in value):
         return frozenset(value)
     raise HTTPException(
         status_code=400, detail="'context.tool_policy' must be 'read_only', a list of tool names, or null."
     )
+
+
+async def _paused_run_policy(run_context: RunContext) -> Any:
+    """The tool policy of the paused run ``run_context`` resumes (its root span's ``metadata.tool_policy``), or
+    ``None``. A resume that does not name a policy must not run with more tools than the run it continues had."""
+    from ..core.agent import _is_pause
+    from ..core.tool_policy import restore_tool_policy
+
+    trace = await run_context._get_parent_trace()
+    root = trace.get(trace._root_call_id) if trace is not None and trace._root_call_id is not None else None
+    if root is None or not _is_pause(root.status):
+        return None
+    return restore_tool_policy((root.metadata or {}).get("tool_policy"), trace)
 
 
 def create_app() -> FastAPI:
@@ -237,11 +253,12 @@ def create_app() -> FastAPI:
             state = "a finished run (context.require_new)" if e.finished else "a running run"
             raise HTTPException(status_code=409, detail=f"Run id '{e.job_id}' is already in use by {state}.") from e
 
-    def _request_context(req_data: dict) -> tuple[RunContext | None, bool]:
+    async def _request_context(req_data: dict) -> tuple[RunContext | None, bool]:
         """The request's ``context`` (or ``run_context``) as the run's context, and ``require_new``.
 
         ``tool_policy`` narrows the tools every agent in the run offers its model, as for a chat
-        session's wake: ``"read_only"``, a list of tool names, or ``null`` (all tools).
+        session's wake: ``"read_only"``, a list of tool names, or ``null`` (all tools). A resume
+        (``resume`` with a ``parent_id``) that leaves it out keeps the policy of the run it resumes.
         ``require_new: true`` refuses (409) an ``id`` this server still knows, finished runs included.
         """
         raw = req_data.pop("context", None)
@@ -249,23 +266,25 @@ def create_app() -> FastAPI:
             raw = req_data.pop("run_context", None)
         if raw is None:
             return None, False
-        policy, require_new = None, False
+        policy, policy_given, require_new = None, False, False
         if isinstance(raw, dict) and ("tool_policy" in raw or "require_new" in raw):
             raw = dict(raw)
             if "tool_policy" in raw:
-                policy = _tool_policy(raw.pop("tool_policy"))
+                policy, policy_given = _tool_policy(raw.pop("tool_policy")), True
             if "require_new" in raw:
                 require_new = raw.pop("require_new")
                 if not isinstance(require_new, bool):
                     raise HTTPException(status_code=400, detail="'context.require_new' must be a boolean.")
         run_context = RunContext.model_validate(raw)
+        if not policy_given and "resume" in req_data and run_context.parent_id:
+            policy = await _paused_run_policy(run_context)
         run_context.__dict__["_tool_policy"] = policy
         return run_context, require_new
 
     @app.post("/run")
     async def run(req: Request) -> Response:
         req_data = await req.json()
-        run_context, require_new = _request_context(req_data)
+        run_context, require_new = await _request_context(req_data)
         run_id = None
         if run_context is not None:
             set_run_context(run_context)
@@ -302,7 +321,7 @@ def create_app() -> FastAPI:
     @app.post("/stream")
     async def stream(req: Request) -> Response:
         req_data = await req.json()
-        run_context, require_new = _request_context(req_data)
+        run_context, require_new = await _request_context(req_data)
         run_id = None
         if run_context is not None:
             set_run_context(run_context)

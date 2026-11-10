@@ -67,6 +67,7 @@ from ..types.events.delta import Custom, DeltaEvent, DeltaItem
 from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import dump, invalidate_message_dump_caches, sync_to_async_gen
+from .tool_policy import describe_tool_policy
 
 
 def _get_logger():
@@ -217,6 +218,20 @@ on any sync handler; raise it (or set very high) to silence."""
 ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, Any]]
 ApprovalPrompt = str | Callable[..., str | None] | None
 ApprovalUi = dict[str, Any] | BaseModel | Callable[..., dict[str, Any] | BaseModel | None] | None
+
+
+def _inherit_tool_policy(run_context: RunContext, entry_run_context: RunContext, entry_call_id: str) -> None:
+    """Give a run started inside a call (``entry_call_id`` of ``entry_run_context``) that run's tool policy.
+
+    A callable policy also gets an origin: the outermost call it came through, on whose span the new run's
+    agents note what they were offered (``Agent._record_allowed_tools``), since a session continuing the
+    parked outer run rebuilds the callable from that trace alone.
+    """
+    policy = entry_run_context._tool_policy
+    run_context.__dict__["_tool_policy"] = policy
+    if callable(policy):
+        origin = entry_run_context.__dict__.get("_tool_policy_origin") or (entry_run_context, entry_call_id)
+        run_context.__dict__["_tool_policy_origin"] = origin
 
 
 def _normalize_resume_values(raw: Any) -> dict[str, Any]:
@@ -2056,7 +2071,7 @@ class Runnable(ABC, BaseModel):
                     if _entry_call_id is not None:
                         # Started by a call that outlived its run (a background tool): its tools are still
                         # that run's, so a read-only tool cannot run an agent with write tools.
-                        run_context.__dict__["_tool_policy"] = _entry_run_context._tool_policy
+                        _inherit_tool_policy(run_context, _entry_run_context, _entry_call_id)
                 else:
                     run_context = RunContext(
                         parent_id=explicit_parent_id,
@@ -2068,7 +2083,7 @@ class Runnable(ABC, BaseModel):
                         # body): link the two runs both ways so a trace viewer can follow it.
                         run_context._invoked_by = {"run_id": _entry_run_context.id, "call_id": _entry_call_id}
                         # Its tools are the caller's run's: a read-only tool cannot run an agent with write tools.
-                        run_context.__dict__["_tool_policy"] = _entry_run_context._tool_policy
+                        _inherit_tool_policy(run_context, _entry_run_context, _entry_call_id)
                         caller_span = _entry_run_context._trace.get(_entry_call_id)
                         if caller_span is not None:
                             caller_span.metadata.setdefault("invoked_runs", []).append(run_context.id)
@@ -2117,8 +2132,12 @@ class Runnable(ABC, BaseModel):
 
         assert _new_call_id not in run_context._trace, f"Call ID {_new_call_id} already exists in trace."
         metadata = {**self.metadata}  # Shallow copy
-        if _new_parent_call_id is None and run_context._invoked_by is not None:
-            metadata["invoked_by"] = run_context._invoked_by
+        if _new_parent_call_id is None:
+            if run_context._invoked_by is not None:
+                metadata["invoked_by"] = run_context._invoked_by
+            if run_context._tool_policy is not None:
+                # What a run resuming this one restores when it does not say (see server/http.py).
+                metadata["tool_policy"] = describe_tool_policy(run_context._tool_policy)
         span = Span(
             path=self._path,
             call_id=_new_call_id,

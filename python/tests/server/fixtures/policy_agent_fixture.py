@@ -4,6 +4,7 @@
 - ``"deep"``: ``peek_deep`` (read-only), which runs ``inner``, an agent whose model calls ``write``.
 - ``"spawn"``: ``spawn`` (read-only, ``background_mode="always"``), which does the same in the background.
 - ``"peek"``: ``peek`` (read-only).
+- ``"gate"``: ``gated_peek`` (read-only, needs approval), then ``write``.
 
 ``DONE`` records which of ``peek_deep`` / ``spawn`` finished, so a test knows the background one has run.
 """
@@ -18,7 +19,7 @@ from timbal.types.message import Message
 
 WRITES: list[str] = []
 DONE: list[str] = []
-TOOL_FOR_PROMPT = {"go": "write", "deep": "peek_deep", "spawn": "spawn", "peek": "peek"}
+TOOL_FOR_PROMPT = {"go": "write", "deep": "peek_deep", "spawn": "spawn", "peek": "peek", "gate": "gated_peek"}
 
 
 def _write() -> str:
@@ -60,9 +61,11 @@ async def _spawn() -> str:
 
 
 def _handler(messages):
-    if messages[-1].role == "tool":
-        return "done"
     prompt = next(m for m in messages if m.role == "user").collect_text()
+    if messages[-1].role == "tool":
+        if prompt == "gate" and sum(m.role == "tool" for m in messages) == 1:
+            return _call("write")
+        return "done"
     return _call(TOOL_FOR_PROMPT.get(prompt, "write"))
 
 
@@ -72,6 +75,7 @@ policy_agent = Agent(
     tools=[
         Tool(name="write", handler=_write),
         Tool(name="peek", handler=lambda: "peeked", read_only=True),
+        Tool(name="gated_peek", handler=lambda: "peeked", read_only=True, requires_approval=True),
         Tool(name="peek_deep", handler=_peek_deep, read_only=True),
         Tool(name="spawn", handler=_spawn, read_only=True, background_mode="always"),
     ],

@@ -77,6 +77,7 @@ from .runnable import Runnable, RunnableLike
 from .session_scheduler import record_delivery
 from .skill import ReadSkill, Skill
 from .tool import Tool
+from .tool_policy import READ_ONLY_POLICY, describe_tool_policy
 from .tool_result_offload import (
     LEGACY_READ_OFFLOADED_NAMES,
     LocalOffloadStore,
@@ -116,7 +117,6 @@ DEFAULT_STEER_BLOCKED_NOTICE = (
 )
 """Runtime message that stands in for a steered user message an input guardrail blocked."""
 
-READ_ONLY_POLICY = "read_only"
 # Agent-provided tools that only read (their constructors do not take ``read_only``).
 _READ_ONLY_BUILTINS = frozenset(
     {"read_skill", "read_offloaded", "get_background_task", "list_background_tasks", "read_background_transcript"}
@@ -1467,12 +1467,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             span = run_context.current_span()
         except Exception:
             return
-        if policy == READ_ONLY_POLICY:
-            span.metadata["tool_policy"] = READ_ONLY_POLICY
-        else:
-            span.metadata["tool_policy"] = "custom" if callable(policy) else sorted(policy)
+        span.metadata["tool_policy"] = describe_tool_policy(policy)
         # The latest decision only: a callable may take a permission back between steps.
-        span.metadata["tool_policy_allowed"] = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
+        allowed = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
+        span.metadata["tool_policy_allowed"] = allowed
+        # A run started inside a call of the run the policy came from keeps its spans in a trace of its own: note
+        # the decision on that call's span too, where a session continuing the parked run restores it from.
+        origin = run_context.__dict__.get("_tool_policy_origin")
+        if origin is not None:
+            origin_context, origin_call_id = origin
+            origin_span = origin_context._trace.get(origin_call_id)
+            if origin_span is not None:
+                origin_span.metadata.setdefault("nested_tool_policy_allowed", {})[span.path] = allowed
 
     @staticmethod
     def _tool_allowed(tool: Any, policy: Any) -> bool:

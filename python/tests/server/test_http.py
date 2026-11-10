@@ -650,6 +650,35 @@ class TestContextToolPolicy:
         assert "tool_policy" in response.json()["detail"]
         assert fixture().WRITES == []
 
+    @pytest.mark.parametrize(
+        ("resume_context", "ran", "header"),
+        [
+            ({}, [], "read_only"),  # left out: the paused run's policy
+            ({"tool_policy": None}, ["write"], None),  # named: the caller's
+            ({"tool_policy": ["write"]}, ["write"], "names"),
+        ],
+    )
+    @pytest.mark.parametrize("route", ["/run", "/stream"])
+    def test_a_resume_that_leaves_the_policy_out_keeps_the_paused_runs(
+        self, app, route, resume_context, ran, header
+    ):
+        import json
+
+        client = TestClient(app)
+        paused = client.post("/stream", json={"prompt": "gate", "context": {"tool_policy": "read_only"}})
+        events = [json.loads(line[len("data: ") :]) for line in paused.text.splitlines() if line.startswith("data: ")]
+        run_id = events[0]["run_id"]
+        approval_id = next(e["approval_id"] for e in events if e.get("approval_id"))
+        assert events[-1]["status"]["reason"] == "approval_required"
+
+        response = client.post(
+            route,
+            json={"prompt": "gate", "resume": {approval_id: True}, "context": {"parent_id": run_id, **resume_context}},
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers.get("X-Timbal-Tool-Policy") == header
+        assert fixture().WRITES == ran
+
 
 class TestRequireNew:
     """``context.require_new``: a caller-chosen id is refused once this server knows it, finished or not."""
