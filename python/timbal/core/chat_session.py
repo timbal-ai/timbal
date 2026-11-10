@@ -388,6 +388,8 @@ class ChatSession:
         self._leased = False
         self._lease_task: asyncio.Task | None = None
         self._lost = False
+        # Set once close() has finished: turn cancelled, scheduler and task store let go, the store settled.
+        self._close_done = asyncio.Event()
         self._keep = False
         self._in_flight: dict[str, Any] | None = None
 
@@ -591,20 +593,28 @@ class ChatSession:
         cut = self._in_flight if keep and self.busy else None
         self.closed = True
         self._keep = keep
-        worker, self._worker = self._worker, None
-        if worker is not None and not worker.done():
-            worker.cancel()
-            with contextlib.suppress(BaseException):
-                await worker
-        if cut is not None:
-            self._in_flight = {**cut, "cut": "shutdown"}
-        if self._last_context is not None:
-            self._scheduler.unmark(self._last_context)
-        self._scheduler.release(self._store)
-        forget_idle_background_store(self._store)
-        self._record("closed", kept=keep)
-        self.log.close()
-        await self._settle_store()
+        try:
+            worker, self._worker = self._worker, None
+            if worker is not None and not worker.done():
+                worker.cancel()
+                with contextlib.suppress(BaseException):
+                    await worker
+            if cut is not None:
+                self._in_flight = {**cut, "cut": "shutdown"}
+            if self._last_context is not None:
+                self._scheduler.unmark(self._last_context)
+            self._scheduler.release(self._store)
+            forget_idle_background_store(self._store)
+            self._record("closed", kept=keep)
+            self.log.close()
+            await self._settle_store()
+        finally:
+            self._close_done.set()
+
+    async def wait_closed(self) -> None:
+        """Until :meth:`close` has finished (one already called, or the one losing ownership starts). Restore a
+        :attr:`handed_off` session only after it: before, its turn may still run and its task store be bound."""
+        await self._close_done.wait()
 
     @classmethod
     async def from_store(

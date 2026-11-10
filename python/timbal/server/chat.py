@@ -84,7 +84,9 @@ async def _session(request: Request, session_id: str, *, allow_closed: bool = Fa
     sessions = _sessions(request)
     session = sessions.get(session_id)
     if session is not None and session.handed_off:
-        # Lost its lease (another process serves it: 409) or let go with keep: the store says where it is now.
+        # Lost its lease (another process serves it: 409) or let go with keep: the store says where it is now,
+        # once this copy is done closing (until then its turn may run, its task store still be bound).
+        await session.wait_closed()
         if sessions.get(session_id) is session:
             sessions.pop(session_id)
         session = None
@@ -167,8 +169,12 @@ async def _reap(sessions: dict[str, ChatSession]) -> None:
     now = time.monotonic()
     for session_id, session in list(sessions.items()):
         if session.closed or (not session.busy and now - session.last_activity > ttl):
-            sessions.pop(session_id, None)
+            # Closed before it leaves the map: a request meanwhile finds it handed off and waits, instead of
+            # restoring a second copy while this one still holds the session's task store.
             await session.close(keep=True)
+            await session.wait_closed()
+            if sessions.get(session_id) is session:
+                sessions.pop(session_id)
 
 
 async def close_chat_sessions(app: Any) -> None:

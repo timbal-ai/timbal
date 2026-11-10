@@ -132,6 +132,39 @@ def test_a_session_this_process_lost_answers_409_then_comes_back(client):
     assert client.app.state.chat_sessions[session_id] is not session
 
 
+def test_a_session_still_closing_is_restored_only_once_its_close_is_done(client, monkeypatch):
+    """Until close() ends, the old copy may run its turn and holds the session's task store: a restore started
+    before that would bind a second worker to it."""
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    session = client.app.state.chat_sessions[session_id]
+    order = []
+    real_settle = session._settle_store
+
+    async def slow_settle():
+        await asyncio.sleep(0.3)
+        await real_settle()
+        order.append("closed")
+
+    session._settle_store = slow_settle
+    real_restore = ChatSession.from_store.__func__
+
+    async def restore(cls, *args, **kwargs):
+        order.append("restore")
+        return await real_restore(cls, *args, **kwargs)
+
+    monkeypatch.setattr(ChatSession, "from_store", classmethod(restore))
+
+    async def close_later():
+        await session.close(keep=True)
+
+    client.portal.start_task_soon(close_later)
+    client.portal.call(asyncio.sleep, 0.05)  # close() has started: handed off, still settling
+    assert session.handed_off and session_id in client.app.state.chat_sessions
+    assert client.get(f"/chat/sessions/{session_id}").status_code == 200
+    assert order == ["closed", "restore"]
+    assert client.app.state.chat_sessions[session_id] is not session
+
+
 def test_delete_removes_it_for_good(client):
     session_id = client.post("/chat/sessions", json={}).json()["session_id"]
     assert client.delete(f"/chat/sessions/{session_id}").json() == {"closed": True}
