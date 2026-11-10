@@ -62,6 +62,45 @@ def _with_tool_search(
     return schemas
 
 
+def _offered_names(tools: list[dict[str, Any]]) -> set[str]:
+    names = set()
+    for tool in tools:
+        inner = tool.get("tools") if tool.get("type") == "namespace" else [tool]
+        names.update(t.get("name") for t in inner or [] if t.get("name"))
+    return names
+
+
+def _drop_stale_loaded_tools(input_items: list[dict[str, Any]], offered: set[str]) -> None:
+    """Drop past ``tool_search_output`` definitions of tools this request doesn't offer.
+
+    Tools a hosted search loaded stay callable in later requests through the replayed output
+    item, whatever ``tools`` says; removing them from it is how OpenAI says to disable them.
+    A tool can be gone since: a narrower ``tool_policy``, a forced tool-less final call, the
+    denial breaker. Items are the stored memory's own dicts, so a changed one is replaced by a
+    copy; an output whose tools are all still offered is sent as stored (prompt-cache friendly).
+    """
+    for index, item in enumerate(input_items):
+        if item.get("type") != "tool_search_output" or not item.get("tools"):
+            continue
+        kept, changed = [], False
+        for tool in item["tools"]:
+            if tool.get("type") != "namespace":
+                if tool.get("name") in offered:
+                    kept.append(tool)
+                else:
+                    changed = True
+                continue
+            inner = [t for t in tool.get("tools") or [] if t.get("name") in offered]
+            if len(inner) == len(tool.get("tools") or []):
+                kept.append(tool)
+                continue
+            changed = True
+            if inner:
+                kept.append({**tool, "tools": inner})
+        if changed:
+            input_items[index] = {**item, "tools": kept}
+
+
 def normalize_responses_params(provider_params: dict[str, Any]) -> dict[str, Any]:
     """Translate the Chat Completions effort alias without losing user intent.
 
@@ -185,6 +224,7 @@ def prepare_responses_request(
     responses_kwargs.update(provider_params)
     if extra_tools:
         responses_kwargs["tools"] = [*responses_kwargs.get("tools", []), *extra_tools]
+    _drop_stale_loaded_tools(responses_kwargs["input"], _offered_names(responses_kwargs.get("tools") or []))
 
     async def _create_stream():
         res = await client.responses.create(extra_headers=request_headers, **responses_kwargs)

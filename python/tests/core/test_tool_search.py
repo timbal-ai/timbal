@@ -966,6 +966,85 @@ class TestNativeOpenAI:
         chat = message.to_openai_chat_completions_input()
         assert "tool_search" not in json.dumps(chat)
 
+    @pytest.mark.parametrize(
+        ("offered", "loaded"),
+        [
+            ([], []),  # no tools at all
+            (["get_customer"], [("crm", ["get_customer"])]),  # delete_customer and get_weather withdrawn
+            (["get_customer", "delete_customer", "get_weather"], None),  # all still offered: sent as stored
+        ],
+    )
+    async def test_a_later_request_drops_loaded_tools_it_no_longer_offers(self, offered, loaded):
+        """Loaded tools stay callable through the replayed tool_search_output, whatever `tools` says."""
+        from timbal.core.llm.responses import prepare_responses_request
+        from timbal.types.content import CustomContent
+
+        def handler(id: str) -> str:  # noqa: A002
+            return id
+
+        catalog_tools = {
+            "get_customer": Tool(name="get_customer", handler=handler, defer_loading=True, search_group="crm"),
+            "delete_customer": Tool(name="delete_customer", handler=handler, defer_loading=True, search_group="crm"),
+            "get_weather": Tool(name="get_weather", handler=handler, defer_loading=True),
+        }
+        function = {"type": "function", "defer_loading": True, "parameters": {"type": "object"}}
+        stored = {
+            "id": "tso_1",
+            "type": "tool_search_output",
+            "execution": "server",
+            "status": "completed",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "crm",
+                    "description": "crm tools (2): get_customer, delete_customer.",
+                    "tools": [{**function, "name": "get_customer"}, {**function, "name": "delete_customer"}],
+                },
+                {**function, "name": "get_weather"},
+            ],
+        }
+        snapshot = json.loads(json.dumps(stored))
+        captured = {}
+
+        async def nothing():
+            return
+            yield
+
+        class Responses:
+            async def create(self, **request):
+                captured.update(request)
+                return nothing()
+
+        create_stream, _ = prepare_responses_request(
+            provider="openai",
+            client=SimpleNamespace(responses=Responses()),
+            model_name="gpt-6-luna",
+            request_headers={},
+            system_prompt=None,
+            messages=[
+                Message.validate({"role": "user", "content": "find crm tools"}),
+                Message(role="assistant", content=[CustomContent(value=OPENAI_SEARCH_CALL), CustomContent(value=stored)]),
+                Message.validate({"role": "user", "content": "now answer"}),
+            ],
+            tools=[catalog_tools[name] for name in offered],
+            max_tokens=100,
+            temperature=None,
+            output_model=None,
+            provider_params={},
+            deferred_tools=offered,
+        )
+        async for _ in create_stream():
+            pass
+        replayed = next(i for i in captured["input"] if i.get("type") == "tool_search_output")
+        if loaded is None:
+            assert replayed == snapshot
+        else:
+            assert [
+                (t["name"], [f["name"] for f in t["tools"]]) if t["type"] == "namespace" else t["name"]
+                for t in replayed["tools"]
+            ] == loaded
+        assert stored == snapshot  # memory keeps the verbatim item
+
     def test_native_finds_read_functions_and_namespaces(self):
         from timbal.core.agent import _native_search_finds
         from timbal.types.content import CustomContent
