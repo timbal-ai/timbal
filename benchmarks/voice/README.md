@@ -1444,6 +1444,72 @@ earned its marker table only after a first run showed which failures recurred, a
 inventing one here before knowing whether a scenario fails at 15 dB, at 5 dB, or
 only in parallel would be bookkeeping ahead of evidence.
 
+### Scribe v3 Live scores the turn, and its own use of the score is the wrong one
+
+Scribe v3 Live (`--stt-param model=scribe_v3_live`; the ElevenLabs cells stay on
+`scribe_v2_realtime`, the model every baseline was measured on) puts a
+`turn_probability` on each partial and offers `commit_strategy=turn_prediction`.
+Measured on the raw socket, 16 synthetic clips:
+
+- Scribe commits when the score reaches about 0.9. The value is fixed: a dozen
+  plausible parameter names changed nothing.
+- `vad_silence_threshold_secs` (0.192 to 3.0) still commits at that much silence,
+  so it is a ceiling, not an alternative.
+- The score climbs slowly after a short answer. "No." needs 2.2 to 2.6 seconds of
+  silence to reach 0.9, "Okay." 3.1, a bare number never gets there.
+
+So at the shipped 1.2 second ceiling `turn_prediction` is `vad` with questions
+committing half a second sooner, and at a higher ceiling it holds mid-sentence
+pauses and makes every short answer slow. It also collides with our endpointer:
+Scribe closes the session on a commit with under 0.3 seconds of uncommitted audio
+(`commit_throttled`), and with both sides committing at the same boundary that
+ended 5 of 156 calls at a 3 second ceiling and 1 of 78 at 2 seconds.
+
+`turn_commit_threshold` (adapter-side, `stt_extra`) reads the same score and
+commits at a lower value, leaving Scribe on `vad`. All rows are Scribe v3 Live,
+78 or 74 runs per batch (`--repeat 2 --jobs 3`), dead air is speech end to turn
+accepted:
+
+| detector | Scribe setting | batches | passed | throttled | dead air p50 / mean / p95 |
+|---|---|---|---|---|---|
+| `local` | `vad`, ceiling 1.2 (shipped) | 2 | 149/156 | 0 | 1.36 / 1.49 / 2.88 s |
+| `local` | `turn_prediction`, ceiling 1.2 | 1 | 75/78 | 0 | 1.30 / 1.49 / 2.81 s |
+| `local` | `turn_prediction`, ceiling 3.0 | 2 | 132/156 | 5 | 1.52 / 1.76 / 4.16 s |
+| `local` | `vad`, ceiling 3.0 | 1 | 67/78 | 0 | 1.60 / 1.86 / 4.21 s |
+| `local` | threshold 0.75, ceiling 1.2 | 2 | **156/156** | 0 | **1.02 / 1.31 / 2.73 s** |
+| `local` | threshold 0.75, ceiling 2.0 | 2 | 152/156 | 1 | 1.10 / 1.46 / 3.44 s |
+| `local` | threshold 0.75, ceiling 3.0 | 2 | 154/156 | 0 | 1.02 / 1.47 / 3.55 s |
+| `provider` | `vad`, ceiling 1.2 | 1 | 48/74 | 0 | 1.46 / 1.49 / 1.72 s |
+| `provider` | `turn_prediction`, ceiling 3.0 | 1 | 72/74 | 0 | 3.00 / 2.63 / 3.30 s |
+| `provider` | threshold 0.75, ceiling 2.0 | 1 | 73/74 | 0 | 1.17 / 1.37 / 2.36 s |
+| `provider` | threshold 0.75, ceiling 3.0 | 1 | 74/74 | 0 | 1.17 / 1.47 / 3.13 s |
+
+With the `local` detector the threshold belongs at the shipped ceiling: a third
+of a second less median dead air, a better tail, and the seven runs the shipped
+setting loses all pass. The `vad`, ceiling 3.0 row is the control that says the
+gain is the score and not the longer ceiling. Under `provider`, where nothing of
+ours can merge a pause, the threshold with a 3 second ceiling passes every
+scenario, including the pause splits that are known failures for that detector,
+and pays for it at p95.
+
+The adapter-only numbers are less flattering and worth keeping in view: forcing a
+commit costs about 0.35 seconds of round trip, and on finished utterances alone a
+threshold of 0.75 with a 3 second ceiling has a median of 1.41 seconds against
+1.62 for `vad` at 1.2, with a worst case of 3.4. At 0.6 the commit landed while
+the caller was still talking in 7 of 32 runs, against 2 at 0.75.
+
+Not settled: two batches is not a baseline, `--jobs 3` shares the Smart Turn
+model across sessions, and the audio is studio-clean TTS. The collision is
+narrowed, not closed: the adapter now refuses a commit within 0.4 seconds of the
+previous one, which took plain `turn_prediction` at a 3 second ceiling from 4
+throttled calls in a batch to 1. A commit that crosses Scribe's on the wire is
+still throttled. The threshold stays opt-in.
+
+```bash
+uv run python benchmarks/voice/cli.py --stt elevenlabs --detector local --repeat 2 \
+    --stt-param model=scribe_v3_live --stt-param turn_commit_threshold=0.75
+```
+
 ## Running
 
 ```bash

@@ -45,6 +45,19 @@ def test_scribe_keyterm_limits_fail_an_elevenlabs_agent_at_config_time() -> None
     assert VoiceConfig(keyterms=hundred).keyterms == hundred
 
 
+def test_scribe_turn_commit_threshold_is_checked_at_config_time() -> None:
+    ok = VoiceConfig(stt_provider="elevenlabs", stt_extra={"turn_commit_threshold": 0.75})
+    assert ok.stt_extra["turn_commit_threshold"] == 0.75
+    with pytest.raises(ValueError, match="not 'turn_prediction'"):
+        VoiceConfig(
+            stt_provider="elevenlabs",
+            stt_extra={"turn_commit_threshold": 0.75, "commit_strategy": "turn_prediction"},
+        )
+    for bad in (0, 1.5, "0.75", True):
+        with pytest.raises(ValueError, match="between 0 and 1"):
+            VoiceConfig(stt_provider="elevenlabs", stt_extra={"turn_commit_threshold": bad})
+
+
 async def test_session_ignores_a_diarized_transcript() -> None:
     """Scribe v3 Live repeats each commit split by speaker. It is not a second turn."""
     from timbal.voice.providers import SpeakerSegment, TranscriptEvent

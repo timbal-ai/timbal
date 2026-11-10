@@ -852,6 +852,16 @@ class VoiceConfig(BaseModel):
             keyterms_error = scribe_realtime_keyterms_error(self.keyterms)
             if keyterms_error is not None:
                 raise ValueError(keyterms_error)
+            threshold = extra.get("turn_commit_threshold")
+            if threshold is not None:
+                if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 < threshold <= 1:
+                    raise ValueError("turn_commit_threshold is a turn probability between 0 and 1.")
+                if extra.get("commit_strategy") == "turn_prediction":
+                    # Scribe commits on the same score. A second commit next
+                    # to its own closes the session (``commit_throttled``).
+                    raise ValueError(
+                        "turn_commit_threshold needs commit_strategy 'vad' or 'manual', not 'turn_prediction'."
+                    )
         error = flux_transcription_error(
             provider=provider,
             model=model,

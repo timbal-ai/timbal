@@ -17,6 +17,7 @@ import base64
 import contextlib
 import json
 import os
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -55,6 +56,10 @@ _DIALOGUE_FLUSH_END_CHARS = frozenset(".!?;:\n…。！？؟؛")
 STT_FATAL_MESSAGE_TYPES = frozenset(
     {
         "auth_error",
+        # "Session closed: only 0.00s of uncommitted audio": a manual commit
+        # sent within 0.3s of audio after another commit. Scribe closes the
+        # socket on it.
+        "commit_throttled",
         # A rejected query: an unknown model, ``commit_strategy=turn_prediction``
         # or ``diarize`` on a model without it, a keyterm over the limit. The
         # server closes with 1008 right after. Without this entry the session
@@ -69,6 +74,9 @@ STT_FATAL_MESSAGE_TYPES = frozenset(
 )
 
 _DEFAULT_STT_MODEL = "scribe_v3_live"
+# Scribe needs 0.3s of uncommitted audio. The margin covers the time its own
+# commit takes to reach us.
+_MIN_COMMIT_GAP_SECS = 0.4
 _DEFAULT_TTS_MODEL = "eleven_v4_turbo"
 
 
@@ -223,6 +231,16 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         # Text of a ``committed_transcript`` whose timestamped twin has not
         # arrived yet. See ``_receive_loop``.
         self._untimed_commit: str | None = None
+        # ``turn_commit_threshold``: see ``_maybe_commit_on_turn_probability``.
+        self._turn_commit_threshold: float | None = None
+        self._turn_commit_partials = 1
+        self._turn_commit_hits = 0
+        self._turn_commit_text = ""
+        self._turn_commit_sent = False
+        self._commit_requested_at = 0.0
+        self._committed_at = 0.0
+        self._partial_text, self._partial_text_since = "", 0.0
+        self._silence_ceiling = 1.5
 
     async def connect(self, config: AudioInputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
@@ -230,6 +248,21 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         extra = dict(config.extra)
         host = str(extra.pop("stt_host", "api.elevenlabs.io"))
         commit_strategy = str(extra.pop("commit_strategy", "vad"))
+        # Ours, not Scribe's: never sent on the wire.
+        threshold = extra.pop("turn_commit_threshold", None)
+        self._turn_commit_threshold = float(threshold) if threshold is not None else None
+        self._turn_commit_partials = max(1, int(extra.pop("turn_commit_partials", 1)))
+        self._turn_commit_hits, self._turn_commit_text, self._turn_commit_sent = 0, "", False
+        self._partial_text, self._partial_text_since = "", 0.0
+        self._silence_ceiling = float(extra.get("vad_silence_threshold_secs") or 1.5)
+        if self._turn_commit_threshold is not None and commit_strategy == "turn_prediction":
+            # Scribe commits by itself at a score of about 0.9. A commit of
+            # ours landing next to it finds no uncommitted audio, and Scribe
+            # answers ``commit_throttled`` and closes the session. An agent
+            # that sets both fails to load (``VoiceConfig``). A caller hello
+            # can still switch the strategy, and that must not end the call.
+            logger.warning("el_stt_turn_commit_threshold_ignored", reason="commit_strategy is turn_prediction")
+            self._turn_commit_threshold = None
 
         params: dict[str, Any] = {
             "model_id": config.model or _DEFAULT_STT_MODEL,
@@ -289,6 +322,19 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         async with self._buf_lock:
             raw = bytes(self._buf)
             self._buf.clear()
+        if commit:
+            # Scribe wants 0.3s of uncommitted audio before a commit. With less
+            # it answers ``commit_throttled`` and closes the session, which
+            # ends the call. So a commit that follows another one too closely
+            # is not sent: ours (the session's endpointer and the probability
+            # rule can ask for the same one) or Scribe's own, just reported.
+            now = time.monotonic()
+            gap = 1.0 if self._turn_commit_threshold is not None else _MIN_COMMIT_GAP_SECS
+            if now - max(self._commit_requested_at, self._committed_at) < gap:
+                logger.info("el_stt_commit_skipped", reason="too close to the previous commit")
+                commit = False
+            else:
+                self._commit_requested_at = now
         if not raw and not commit:
             return
         msg: dict[str, Any] = {
@@ -314,6 +360,42 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         except asyncio.CancelledError:
             raise
 
+    async def _maybe_commit_on_turn_probability(self, text: str, probability: float) -> None:
+        """Force the commit once Scribe's own end-of-turn score is high enough.
+
+        ``turn_prediction`` commits at a fixed score of about 0.9, which a
+        short answer ("No.", "Okay.") takes two to three seconds of silence to
+        reach. ``turn_commit_threshold`` (``stt_extra``, off by default)
+        commits at a lower score, and ``turn_commit_partials`` asks for that
+        many consecutive partials at or above it with the same words, so one
+        spike at a sentence boundary mid-speech does not cut the caller off.
+        Scribe's commit and the silence ceiling still apply after it.
+        """
+        threshold = self._turn_commit_threshold
+        if threshold is None:
+            return
+        now = time.monotonic()
+        if text != self._partial_text:
+            self._partial_text, self._partial_text_since = text, now
+        if self._turn_commit_sent or now - self._commit_requested_at < 1.0:
+            return
+        if now - self._partial_text_since > self._silence_ceiling - 0.5:
+            # The words have not changed for almost the silence ceiling, so
+            # Scribe's own VAD commit is due. Leave it alone: two commits
+            # within 0.3s of audio close the session (``commit_throttled``).
+            return
+        if probability < threshold:
+            self._turn_commit_hits, self._turn_commit_text = 0, ""
+            return
+        if text != self._turn_commit_text:
+            self._turn_commit_hits, self._turn_commit_text = 0, text
+        self._turn_commit_hits += 1
+        if self._turn_commit_hits < self._turn_commit_partials:
+            return
+        self._turn_commit_sent = True
+        logger.info("el_stt_turn_commit", turn_probability=probability, threshold=threshold, text_preview=text[:80])
+        await self._flush_audio(commit=True)
+
     async def _receive_loop(self) -> None:
         assert self._ws is not None
         try:
@@ -336,10 +418,14 @@ class ElevenLabsRealtimeSTT(SpeechToText):
                                 confidence=float(probability) if isinstance(probability, (int, float)) else None,
                             )
                         )
+                        if isinstance(probability, (int, float)):
+                            await self._maybe_commit_on_turn_probability(text, float(probability))
 
                 elif mt == "committed_transcript":
                     text = (msg.get("text") or "").strip()
                     self._untimed_commit = text or None
+                    self._committed_at = time.monotonic()
+                    self._turn_commit_hits, self._turn_commit_text, self._turn_commit_sent = 0, "", False
                     if text:
                         await self._queue.put(TranscriptEvent(type="committed", text=text))
 
