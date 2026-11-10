@@ -64,7 +64,8 @@ class Tool(Runnable):
         default=False,
         description=(
             "Keep this tool's schema out of the model's context until it searches for it "
-            "(Agent.tool_search). Anthropic models search natively; others get a search_tools tool. "
+            "(Agent.tool_search). Claude 4.5+ and OpenAI gpt-5.4+ (Responses API) search natively; "
+            "others get a search_tools tool. "
             "For large catalogs (many MCP tools); keep the few tools used on most turns loaded."
         ),
     )

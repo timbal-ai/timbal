@@ -83,6 +83,7 @@ Discovery does not invoke application tools, and tool approvals still apply.
 | `approval` | both | Gate tools through the [approval flow](/human-in-the-loop/approval-gates): `"destructive"`, `"all"`, a callable over the tool, or a callable over the tool **and the call's arguments**. See [Approval from annotations](#approval-from-annotations). |
 | `elicitation` | both | Advertise the elicitation capability and bridge server questions to `suspend()`. Default `True`. See [Elicitation](#elicitation). |
 | `sampling_model` | both | Timbal model string used to answer the server's `sampling/createMessage` requests. Default `None` (unsupported). |
+| `defer_loading` | both | Defer every tool on this server: the model finds them through [tool search](/agents/tools#tool-search) instead of receiving every schema on each call. The server's `name`, when set, is the search group. Default `False`. |
 
 ### Authentication
 
