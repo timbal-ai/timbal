@@ -493,7 +493,18 @@ class TestEmptyAtLimit:
         assert out.error["type"] == "ModelOutputTruncated"
         assert "max_tokens=4000" in out.error["message"]
 
-    async def test_structured_output_is_retried_too(self):
+    @pytest.mark.parametrize(
+        "empty",
+        [
+            thinking_only("length"),
+            # OpenAI Responses keeps empty text blocks; whitespace survives Anthropic collection.
+            Message(role="assistant", content=[TextContent(text="")], stop_reason="length"),
+            Message(role="assistant", content=[TextContent(text="  \n ")], stop_reason="max_tokens"),
+        ],
+        ids=["thinking-only", "empty-text", "blank-text"],
+    )
+    async def test_structured_output_is_retried_too(self, empty):
+        """Not spent as an output-validation round: the larger budget is the one recovery."""
         from pydantic import BaseModel
 
         class Answer(BaseModel):
@@ -501,7 +512,7 @@ class TestEmptyAtLimit:
 
         agent = Agent(
             name="agent",
-            model=in_order(thinking_only(), '{"value": 42}'),
+            model=in_order(empty, '{"value": 42}'),
             max_tokens=1000,
             output_model=Answer,
             tracing_provider=InMemoryTracingProvider,
@@ -510,6 +521,39 @@ class TestEmptyAtLimit:
         assert out.status.code == "success", out.error
         assert out.output == Answer(value=42)
         assert out.metadata["max_tokens_retry"] == {"from": 1000, "to": 4000}
+        assert [i.get("max_tokens") for i in await llm_inputs(out)] == [1000, 4000]
+        memory = await memory_of(out)
+        assert [m.role for m in memory] == ["user", "assistant"]  # no validation feedback round
+
+    async def test_retrying_the_answer_forced_by_the_denial_breaker_stays_tool_less(self):
+        writes = []
+
+        def denied(n: int) -> str:
+            return f"denied {n}"
+
+        def write(n: int) -> str:
+            writes.append(n)
+            return "written"
+
+        agent = Agent(
+            name="agent",
+            model=in_order(call("denied", n=1), thinking_only(), call("write", n=2), "done"),
+            tools=[
+                Tool(name="denied", handler=denied, guardrails=[guardrail(lambda _: False, stages=["tool_args"])]),
+                Tool(name="write", handler=write),
+            ],
+            max_tokens=1000,
+            max_consecutive_denials=1,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out = await agent(prompt="go").collect()
+        assert writes == []
+        assert out.metadata["max_tokens_retry"] == {"from": 1000, "to": 4000}
+        offered = [
+            [t["name"] if isinstance(t, dict) else t.name for t in i.get("tools") or []] for i in await llm_inputs(out)
+        ]
+        # The breaker's call and its retry offer nothing; the call after that has its tools back.
+        assert offered[:3] == [["denied", "write"], [], []]
 
     async def test_structured_output_still_empty_fails_clearly(self):
         from pydantic import BaseModel

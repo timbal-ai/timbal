@@ -542,6 +542,66 @@ class TestNativeLoop:
             for b in m["content"]
         )
 
+    @pytest.mark.parametrize(
+        ("policy", "references"),
+        [
+            (frozenset(), []),  # no tools at all
+            ("read_only", []),  # get_weather isn't read-only, so it's no longer offered
+            (None, ["get_weather"]),  # still offered: sent exactly as stored
+        ],
+    )
+    async def test_a_later_turn_drops_references_to_tools_it_no_longer_offers(self, monkeypatch, policy, references):
+        """The API answers 400 to a tool_reference with no definition in the request's tools."""
+        from unittest.mock import patch
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        fake = FakeAnthropic(
+            [
+                (
+                    [
+                        {
+                            "type": "server_tool_use",
+                            "id": "srvtoolu_1",
+                            "name": ANTHROPIC_TOOL_SEARCH_NAME,
+                            "input": {"query": "weather"},
+                        },
+                        SEARCH_RESULT,
+                        {"type": "text", "text": "Found it."},
+                    ],
+                    "end_turn",
+                ),
+                ([{"type": "text", "text": "Again."}], "end_turn"),
+            ]
+        )
+        a = agent("anthropic/claude-haiku-5-5")
+        with patch("timbal.core.llm.clients._get_client", return_value=fake):
+            first = await a(prompt="find weather").collect()
+            context(parent_id=first.run_id)._tool_policy = policy
+            second = await a(prompt="again").collect()
+        assert second.status.code == "success", second.error
+        request = fake.requests[1]
+        offered = {t["name"] for t in request.get("tools", [])}
+        replayed = [
+            b
+            for m in request["messages"]
+            if m["role"] == "assistant"
+            for b in m["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_search_tool_result"
+        ]
+        assert [r["tool_name"] for r in replayed[0]["content"]["tool_references"]] == references
+        assert set(references) <= offered
+        if policy is None:
+            assert replayed[0] == SEARCH_RESULT
+        # Memory keeps the verbatim result: only the request is narrowed.
+        memory = (await trace_of(second))[second.call_id].memory
+        kept = [
+            c.value
+            for m in memory
+            for c in Message.validate(m).content
+            if isinstance(getattr(c, "value", None), dict) and c.value.get("type") == "tool_search_tool_result"
+        ]
+        assert kept == [SEARCH_RESULT]
+
 
 # -- Observability ----------------------------------------------------------------
 

@@ -2352,6 +2352,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 _llm_memory_saved = False
                 # ? We could resolve the system prompt at each iteration
                 tools, commands = await self._resolve_tools(i, tool_policy)
+                # A retry of this same call (guardrail, validation, empty answer) keeps it tool-less.
+                withheld = withhold_tools
                 if withhold_tools:
                     tools, commands, withhold_tools = [], {}, False
                 # `tools` stays what the model may call: a deferred tool called by name runs (and loads).
@@ -2740,7 +2742,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         last_llm_usage = event.usage
                         self._record_context_measurement(current_span, event.usage, sent + 1)
 
-                        if self.output_model is not None:
+                        # An answer the output limit cut off before any text is retried with a larger
+                        # budget below; validating it would spend a correction round on nothing.
+                        if self.output_model is not None and not (
+                            _empty_at_limit(event.output)
+                            and not any(
+                                isinstance(c, ToolUseContent) and not c.is_server_tool_use
+                                for c in event.output.content
+                            )
+                        ):
                             validation_error_msg = None
                             validation_context = self.output_model_context
                             for content in event.output.content:
@@ -2815,9 +2825,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 await active_events.aclose()
                 active_events = None
                 if guardrail_retry:
+                    withhold_tools = withheld
                     continue  # re-generate with the guardrail critique appended
 
                 if need_retry:
+                    withhold_tools = withheld
                     continue  # output_model validation failed — retry with error feedback
 
                 tool_calls = [
@@ -2850,6 +2862,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             max_tokens=budget,
                             retry_max_tokens=retry_budget,
                         )
+                        withhold_tools = withheld
                         continue
                     raise ModelOutputTruncated(max_tokens_retry or budget)
 
