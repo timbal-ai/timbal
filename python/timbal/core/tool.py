@@ -60,6 +60,24 @@ class Tool(Runnable):
         ),
     )
 
+    defer_loading: bool = Field(
+        default=False,
+        description=(
+            "Keep this tool's schema out of the model's context until it searches for it "
+            "(Agent.tool_search). Claude 4.5+ and OpenAI gpt-5.4+ (Responses API) search natively; "
+            "others get a search_tools tool. "
+            "For large catalogs (many MCP tools); keep the few tools used on most turns loaded."
+        ),
+    )
+
+    search_group: str | None = Field(
+        default=None,
+        description=(
+            "Deferred tools sharing a group are offered to OpenAI's tool search as one namespace, so the "
+            "model first sees one short entry instead of every tool's description. MCPServer sets its name."
+        ),
+    )
+
     result_limit: ToolResultLimit | int | None | Literal["inherit"] = Field(
         default="inherit",
         description=(

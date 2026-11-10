@@ -43,6 +43,7 @@ async def _llm_router(
     fail_fast_rate_limit: bool = False,
     provider_params: dict[str, Any] | None = None,
     stream_idle_timeout: float | None = None,
+    deferred_tools: list[str] | None = None,
 ) -> Message:  # type: ignore[misc]  # Declared as Message for framework schema generation; runtime is an async generator of provider-specific chunks.
     """
     Internal LLM router function.
@@ -68,6 +69,7 @@ async def _llm_router(
             retry_delay=retry_delay,
             provider_params=provider_params,
             stream_idle_timeout=stream_idle_timeout,
+            deferred_tools=deferred_tools,
         ):
             yield chunk  # type: ignore[return-type]
         return
@@ -156,9 +158,11 @@ async def _llm_router(
         "provider_params": provider_params,
     }
     if provider == "anthropic":
-        create_stream, context = prepare_messages_request(**request_kwargs)
+        create_stream, context = prepare_messages_request(**request_kwargs, deferred_tools=deferred_tools)
     elif provider in ("openai", "xai") and TIMBAL_OPENAI_API == "responses":
-        create_stream, context = prepare_responses_request(provider=provider, **request_kwargs)
+        create_stream, context = prepare_responses_request(
+            provider=provider, **request_kwargs, deferred_tools=deferred_tools
+        )
     else:
         # OpenAI Chat Completions compatible providers
         create_stream, context = prepare_chat_completions_request(

@@ -2366,3 +2366,64 @@ class TestResponseCollectorTextAfterLeak:
         assert msg.content[0].phase == "commentary"
         items = msg.to_openai_responses_input()
         assert [i.get("type") or i.get("phase") for i in items] == ["commentary", "function_call"]
+
+
+class TestResponseCollectorToolSearch:
+    """Hosted tool_search items: an SDK without their types parses them as ResponseOutputMessage."""
+
+    CALL = {"id": "tsc_1", "status": "completed", "type": "tool_search_call",
+            "arguments": {"paths": ["get_weather"]}, "execution": "server"}
+    OUTPUT = {"id": "tso_1", "status": "completed", "type": "tool_search_output", "execution": "server",
+              "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]}
+
+    def test_items_kept_verbatim_in_order(self):
+        from timbal.types.content.custom import CustomContent
+
+        _make_context()
+        collector = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        items = [
+            ResponseOutputMessage.model_construct(**self.CALL),
+            ResponseOutputMessage.model_construct(**self.OUTPUT),
+            ResponseFunctionToolCall(
+                id="fc_1", call_id="call_1", type="function_call", name="get_weather", arguments='{"city":"Oslo"}'
+            ),
+        ]
+        streamed = []
+        for index, item in enumerate(items):
+            streamed.append(collector.process(ResponseOutputItemAddedEvent(
+                type="response.output_item.added", item=item, output_index=index, sequence_number=index,
+            )))
+            collector.process(ResponseOutputItemDoneEvent(
+                type="response.output_item.done", item=item, output_index=index, sequence_number=index,
+            ))
+        assert isinstance(streamed[0], ToolUse) and streamed[0].is_server_tool_use and streamed[0].name == "tool_search"
+        assert streamed[1] is None
+        message = collector.result()
+        kinds = [c.value["type"] if isinstance(c, CustomContent) else c.type for c in message.content]
+        assert kinds == ["tool_search_call", "tool_search_output", "tool_use"]
+        assert message.content[0].value == self.CALL
+        assert message.content[1].value["tools"][0]["name"] == "get_weather"
+
+    def test_function_call_namespace_is_kept_for_replay(self):
+        _make_context()
+        collector = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        # A function hosted tool search loaded comes back in a namespace of its own name;
+        # older SDK models don't declare the field, so it arrives as an extra.
+        fn = ResponseFunctionToolCall.model_construct(
+            id="fc_1", call_id="call_1", type="function_call", name="get_weather",
+            arguments='{"city":"Oslo"}', namespace="get_weather",
+        )
+        plain = ResponseFunctionToolCall(id="fc_2", call_id="call_2", type="function_call", name="get_time",
+                                         arguments="{}")
+        for index, item in enumerate((fn, plain)):
+            collector.process(ResponseOutputItemAddedEvent(
+                type="response.output_item.added", item=item, output_index=index, sequence_number=index,
+            ))
+            collector.process(ResponseOutputItemDoneEvent(
+                type="response.output_item.done", item=item, output_index=index, sequence_number=index,
+            ))
+        message = collector.result()
+        assert [c.namespace for c in message.content] == ["get_weather", None]
+        items = message.to_openai_responses_input()
+        assert items[0]["namespace"] == "get_weather" and "namespace" not in items[1]
+        assert "namespace" not in str(message.to_anthropic_input())

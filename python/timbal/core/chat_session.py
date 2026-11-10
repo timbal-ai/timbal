@@ -138,7 +138,8 @@ class ChatSession:
     (``{"type": "SESSION", "kind": ...}``): ``message`` (a message was sent),
     ``message_settled`` (a turn took it, or it was superseded), ``wake`` /
     ``wake_superseded``, ``turn_started``, ``turn_finished`` (``status``,
-    ``parked``, ``silent``), ``interrupt``, ``closed``. Read it with :meth:`events`.
+    ``parked``, ``silent``, ``tool_search`` when it loaded deferred tools, ``error`` ``{type, message}``
+    when it failed), ``interrupt``, ``closed``. Read it with :meth:`events`.
 
     Process-local, like the session store it owns. Call its methods on the loop
     it runs on.
@@ -707,6 +708,8 @@ class ChatSession:
             status=self.last_status,
             parked=self.parked,
             silent=bool(output.metadata.get("silent")),
+            **({"tool_search": output.metadata["tool_search"]} if output.metadata.get("tool_search") else {}),
+            **({"error": {k: output.error.get(k) for k in ("type", "message")}} if output.error else {}),
         )
 
     async def _pump(

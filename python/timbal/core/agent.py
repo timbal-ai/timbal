@@ -4,6 +4,7 @@ import difflib
 import inspect
 import json
 import math
+import re
 import time
 import traceback
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
@@ -32,7 +33,15 @@ from pydantic import (
 from uuid_extensions import uuid7
 
 from ..collectors.harmony_leak import LEAKED_TOOL_CALL_UNRECOVERED
-from ..errors import GuardrailBlocked, InterruptError, MaxIterExceeded, PauseRequired, RunCancelled, bail
+from ..errors import (
+    GuardrailBlocked,
+    InterruptError,
+    MaxIterExceeded,
+    ModelOutputTruncated,
+    PauseRequired,
+    RunCancelled,
+    bail,
+)
 from ..guardrails.apply import (
     build_guardrail_events,
     message_text,
@@ -116,6 +125,25 @@ DEFAULT_STEER_BLOCKED_NOTICE = (
     "not shown. Do not guess what it said. Carry on, and mention briefly that one message could not be accepted."
 )
 """Runtime message that stands in for a steered user message an input guardrail blocked."""
+
+SEARCH_TOOLS_NAME = "search_tools"
+# Used when an agent tool already has the name (e.g. an unprefixed MCP server's own search_tools).
+_SEARCH_TOOLS_FALLBACKS = ("find_tools", "load_tools", "search_deferred_tools")
+# Session key: tools search_tools loaded, per agent path, in load order.
+_LOADED_TOOLS_KEY = "__loaded_tools"
+# Models with provider-side tool search: Claude 4.5 and later; OpenAI gpt-5.4 and later (Responses API).
+_NATIVE_TOOL_SEARCH_MODEL = re.compile(
+    r"^(anthropic/claude-(opus|sonnet|haiku)-(4-[5-9]|[5-9])|openai/gpt-(5\.([4-9]|[1-9]\d)|[6-9]))"
+)
+_SEARCH_WORD = re.compile(r"[a-z0-9]+")
+# Searches in one run that find nothing before search_tools tells the model to stop looking.
+_FRUITLESS_SEARCHES = 2
+
+# Stop reasons meaning the model hit its output limit (Anthropic, OpenAI Responses, Chat Completions).
+_TRUNCATED_STOPS = frozenset({"max_tokens", "max_output_tokens", "length"})
+# An empty truncated answer is retried once with this many times the budget, up to the cap.
+_MAX_TOKENS_RETRY_FACTOR = 4
+_MAX_TOKENS_RETRY_CAP = 32_000
 
 # Agent-provided tools that only read (their constructors do not take ``read_only``).
 _READ_ONLY_BUILTINS = frozenset(
@@ -258,6 +286,92 @@ def _extract_fallbacks(model: Any) -> list[dict[str, Any]]:
 _UNSET_POLICY: Any = object()
 
 
+def _record_tool_search(span: Any, mode: str, loaded: list[str], query: str | None = None) -> None:
+    """``span.metadata.tool_search``: what each search (or direct call) loaded this run."""
+    record = span.metadata.setdefault("tool_search", {"mode": mode, "loaded": [], "searches": []})
+    record["loaded"].extend(name for name in loaded if name not in record["loaded"])
+    record["searches"].append({"query": query, "loaded": list(loaded)})
+
+
+_NO_NAMES: frozenset[str] = frozenset()
+
+
+def _has_deferred(tools: list[Any]) -> bool:
+    for tool in tools:
+        if getattr(tool, "defer_loading", False):
+            return True
+    return False
+
+
+def _empty_at_limit(message: Any) -> bool:
+    """A final answer the output limit cut off before any visible text."""
+    return isinstance(message, Message) and message.stop_reason in _TRUNCATED_STOPS and not message_text(message).strip()
+
+
+def _native_tool_search(model: Any) -> bool:
+    if not isinstance(model, str) or not _NATIVE_TOOL_SEARCH_MODEL.match(model):
+        return False
+    if model.startswith("openai/"):
+        from .llm.registry import TIMBAL_OPENAI_API
+
+        return TIMBAL_OPENAI_API == "responses"
+    return True
+
+
+def _native_search_finds(message: Message) -> list[str]:
+    """Tool names a provider-side tool search returned in one assistant message."""
+    names = []
+    for content in message.content:
+        value = content.value if isinstance(content, CustomContent) else None
+        if not isinstance(value, dict):
+            continue
+        if value.get("type") == "tool_search_tool_result":  # Anthropic
+            references = (value.get("content") or {}).get("tool_references") or []
+            names.extend(ref.get("tool_name") for ref in references if ref.get("tool_name"))
+        elif value.get("type") == "tool_search_output":  # OpenAI: functions, or namespaces of them
+            for tool in value.get("tools") or []:
+                inner = tool.get("tools") if tool.get("type") == "namespace" else [tool]
+                names.extend(t.get("name") for t in inner or [] if t.get("name"))
+    return names
+
+
+def rank_tools(tools: list[Any], query: str) -> list[Any]:
+    """Tools matching ``query``, best first: keyword hits weighted name > parameters > description."""
+    return [tool for _, tool in _score_tools(tools, query)]
+
+
+def _score_tools(tools: list[Any], query: str) -> list[tuple[int, Any]]:
+    words = set(_SEARCH_WORD.findall(query.lower()))
+    if not words:
+        return []
+    query_name = query.strip().lower()
+    indexed = []
+    for tool in tools:
+        name = tool.name.lower()
+        schema = getattr(tool, "input_schema", None) or getattr(tool, "params_model_schema", None) or {}
+        params = " ".join(schema.get("properties", {}))
+        indexed.append((
+            name,
+            (
+                (3, set(_SEARCH_WORD.findall(name))),
+                (2, set(_SEARCH_WORD.findall(params.lower()))),
+                (1, set(_SEARCH_WORD.findall((tool.description or "").lower()))),
+            ),
+        ))
+    if len(indexed) > 1:
+        # A word every tool has (an MCP server prefix like "timbal__") can't tell them apart.
+        everywhere = set.intersection(*(set().union(*(f for _, f in fields)) for _, fields in indexed))
+        words = (words - everywhere) or words
+    scored = []
+    for index, (tool, (name, fields)) in enumerate(zip(tools, indexed, strict=True)):
+        score = sum(weight * len(words & field) for weight, field in fields)
+        if name == query_name:
+            score += 10
+        if score:
+            scored.append((-score, index, tool))
+    return [(-neg_score, tool) for neg_score, _, tool in sorted(scored)]
+
+
 class AgentParams(BaseModel):
     """Input parameters for Agent execution. Use either 'prompt' or 'messages', not both."""
 
@@ -377,6 +491,13 @@ class Agent(Runnable):
     retried like a timeout (``max_retries``); after it, the call fails, since another
     attempt would repeat what was already sent. ``None`` waits forever. Raise it for
     models that think for minutes without streaming anything."""
+    tool_search: Literal["auto", "client", "off"] = "auto"
+    """How the model finds tools marked ``defer_loading`` (``Tool.defer_loading``,
+    ``MCPServer(defer_loading=True)``) without carrying all their schemas on every call.
+    ``"auto"``: Claude 4.5 and later use Anthropic's tool search (it runs server-side within the
+    same response, and found tools load without changing the cached prompt prefix); other models
+    get a ``search_tools`` tool whose finds stay loaded for the session, after the other tools.
+    ``"client"``: always ``search_tools``. ``"off"``: nothing is deferred."""
     max_consecutive_denials: int | None = 3
     """Tool calls in a row that may be denied (approval) or blocked (``tool_args``
     guardrail) before the agent stops trying: it is told not to route around the
@@ -881,12 +1002,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if has_followup_after_server_tool_use:
                     continue
                 if model_provider == "anthropic":
+                    kind = "tool_search_tool_result" if content.name.startswith("tool_search_tool") else (
+                        "web_search_tool_result"
+                    )
                     memory[-1].content.append(
                         CustomContent(
                             value={
-                                "type": "web_search_tool_result",
+                                "type": kind,
                                 "tool_use_id": content.id,
-                                "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
+                                "content": {"type": f"{kind}_error", "error_code": "unavailable"},
                             },
                         )
                     )
@@ -1455,6 +1579,94 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 self._record_allowed_tools(tools, tool_policy)
         return tools, commands
 
+    async def _plan_tool_search(
+        self, tools: list[Tool], model: Any
+    ) -> tuple[list[Tool], list[Tool], list[str] | None, set[str]]:
+        """Split a step's tools for tool search (``tool_search``).
+
+        Returns the tools offered to the model, the tools it may call (the same,
+        plus every deferred one), the names Anthropic defers natively (or None),
+        and the deferred names not loaded yet.
+        """
+        deferred = [
+            tool for tool in tools if getattr(tool, "defer_loading", False) and tool.name not in _READ_ONLY_BUILTINS
+        ]
+        if self.tool_search == "off" or not deferred:
+            return tools, tools, None, set()
+        if self.tool_search == "auto" and _native_tool_search(model):
+            return tools, tools, [tool.name for tool in deferred], set()
+        session = await get_run_context().get_session()
+        loaded_names = session.get(_LOADED_TOOLS_KEY, {}).get(self._path, [])
+        by_name = {tool.name: tool for tool in deferred}
+        loaded = [by_name[name] for name in loaded_names if name in by_name]
+        hidden = [tool for tool in deferred if tool.name not in set(loaded_names)]
+        deferred_ids = {id(tool) for tool in deferred}
+        offered = [tool for tool in tools if id(tool) not in deferred_ids] + loaded
+        dispatch = list(tools)
+        if hidden:
+            taken = {tool.name for tool in tools}
+            name = next(n for n in (SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS) if n not in taken)
+            search = self._search_tools(hidden, name, restricted=get_run_context()._tool_policy is not None)
+            offered.append(search)
+            dispatch.append(search)
+        return offered, dispatch, None, {tool.name for tool in hidden}
+
+    async def _load_tools(self, names: list[str], span: Any, query: str | None = None) -> None:
+        """Keep tools search_tools found offered for the rest of the session."""
+        session = await get_run_context().get_session()
+        loaded = session.setdefault(_LOADED_TOOLS_KEY, {}).setdefault(self._path, [])
+        loaded.extend(name for name in names if name not in loaded)
+        _record_tool_search(span, "client", names, query)
+
+    def _search_tools(self, hidden: list[Tool], name: str = SEARCH_TOOLS_NAME, *, restricted: bool = False) -> Tool:
+        """The ``search_tools`` tool over the deferred tools not loaded yet.
+
+        ``restricted``: a tool policy narrowed this turn's tools, so the ones it
+        hid can't be found either — said up front so the model stops looking.
+        """
+        names = [tool.name for tool in hidden]
+        listing = ", ".join(names[:80]) + (f", and {len(names) - 80} more" if len(names) > 80 else "")
+        scope = (
+            " This turn may only use some of your tools (for example only ones that read); "
+            "the others can't be found, so don't keep searching for them."
+            if restricted
+            else ""
+        )
+
+        async def search_tools(query: str, limit: int = 5) -> str:
+            """Find tools by what they do; the ones found become callable from your next step."""
+            scored = _score_tools(hidden, query)
+            # Found tools stay loaded for the session: skip weak matches (one shared word like "create").
+            matches = [tool for score, tool in scored if score * 2 >= scored[0][0]][: max(1, min(limit, 20))]
+            agent_span = get_run_context().parent_span()
+            if not matches:
+                record = agent_span.metadata.setdefault("tool_search", {"mode": "client", "loaded": [], "searches": []})
+                record["searches"].append({"query": query, "loaded": []})
+                misses = sum(1 for search in record["searches"] if not search["loaded"])
+                if misses >= _FRUITLESS_SEARCHES:
+                    return (
+                        f"No tool matched {query!r}, and {misses} searches this turn found nothing: what you are "
+                        f"looking for is not available{' in this turn' if restricted else ''}. Stop searching and "
+                        "answer with the tools you have."
+                    )
+                return f"No tool matched {query!r}. Try other words. Tools not loaded yet: {listing}.{scope}"
+            await self._load_tools([tool.name for tool in matches], agent_span, query)
+            found = [{"name": tool.name, "description": tool.description or ""} for tool in matches]
+            return json.dumps({"loaded": found, "note": "Call these from your next step."})
+
+        tool = Tool(
+            name=name,
+            description=(
+                f"Load tools that are not loaded yet. {len(names)} more are available: {listing}. "
+                "Search with a few words for what you need (or a tool's name); the matches become callable "
+                f"from your next step.{scope}"
+            ),
+            handler=search_tools,
+            read_only=True,
+        )
+        tool.nest(self._path)
+        return tool
+
     @staticmethod
     def _record_allowed_tools(tools: list[Any], policy: Any) -> None:
         """Note on this agent's span the run's tool policy and what it let through at its latest tool resolution
@@ -1905,13 +2117,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         kwargs.pop("prompt", None)
         kwargs.pop("messages", None)
 
-        async def _append_memory(message: Message) -> None:
-            """Append a message to both memory and its serialized dump in lockstep."""
+        async def _append_memory(message: Message) -> bool:
+            """Append a message to both memory and its serialized dump in lockstep (False: empty, not kept)."""
             message = message.without_empty_text_blocks()
             if message is None:
-                return
+                return False
             current_span.memory.append(message)
             current_span._memory_dump.append(await dump(message))
+            return True
 
         # Input guardrails run blocking, before the first LLM call — a blocked input
         # spends zero tokens and executes zero tools.
@@ -2061,6 +2274,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span._memory_dump.append(tool_result_dump)
 
         steering = self._steers(run_context, current_span)
+        # Only a tool set (MCP) or a tool the agent was given can be deferred; the tools added at run time never are.
+        may_defer = self.tool_search != "off" and any(
+            isinstance(t, ToolSet) or getattr(t, "defer_loading", False) for t in self.tools
+        )
         # Fixed for the turn; checked after every tool batch.
         denial_limit = self.max_consecutive_denials
         if denial_limit is None:
@@ -2110,6 +2327,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         # Set once max_consecutive_denials is reached: the next model call gets no tools.
         withhold_tools = False
+        # Set once a final answer came back empty at the output limit: the larger budget for the retry.
+        max_tokens_retry: int | None = None
+        last_output: Any = None
+        last_output_stored = False
 
         i = 0
         need_retry = False
@@ -2131,8 +2352,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 _llm_memory_saved = False
                 # ? We could resolve the system prompt at each iteration
                 tools, commands = await self._resolve_tools(i, tool_policy)
+                # A retry of this same call (guardrail, validation, empty answer) keeps it tool-less.
+                withheld = withhold_tools
                 if withhold_tools:
                     tools, commands, withhold_tools = [], {}, False
+                # `tools` stays what the model may call: a deferred tool called by name runs (and loads).
+                if not may_defer or not _has_deferred(tools):
+                    llm_tools, deferred_tools, unloaded_tools = tools, None, _NO_NAMES
+                else:
+                    llm_tools, tools, deferred_tools, unloaded_tools = await self._plan_tool_search(tools, model)
                 if i >= self.max_iter and not max_iter_handled:
                     # Budget spent: _resolve_tools withheld tools for this call. Apply on_max_iter.
                     max_iter_handled = True
@@ -2336,9 +2564,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     model=model,
                     messages=llm_messages,
                     system_prompt=system_prompt,
-                    tools=tools,
+                    tools=llm_tools,
                     output_model=self.output_model,
-                    **kwargs,
+                    **({"deferred_tools": deferred_tools} if deferred_tools else {}),
+                    **({**kwargs, "max_tokens": max_tokens_retry} if max_tokens_retry else kwargs),
                 )
                 async for event in active_events:
                     if isinstance(event, OutputEvent):
@@ -2508,12 +2737,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             invalidate_message_dump_caches(event.output)
 
                         # Add LLM response to conversation for next iteration
-                        await _append_memory(event.output)
+                        last_output, last_output_stored = event.output, await _append_memory(event.output)
                         _llm_memory_saved = True
                         last_llm_usage = event.usage
                         self._record_context_measurement(current_span, event.usage, sent + 1)
 
-                        if self.output_model is not None:
+                        # An answer the output limit cut off before any text is retried with a larger
+                        # budget below; validating it would spend a correction round on nothing.
+                        if self.output_model is not None and not (
+                            _empty_at_limit(event.output)
+                            and not any(
+                                isinstance(c, ToolUseContent) and not c.is_server_tool_use
+                                for c in event.output.content
+                            )
+                        ):
                             validation_error_msg = None
                             validation_context = self.output_model_context
                             for content in event.output.content:
@@ -2588,19 +2825,49 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 await active_events.aclose()
                 active_events = None
                 if guardrail_retry:
+                    withhold_tools = withheld
                     continue  # re-generate with the guardrail critique appended
 
                 if need_retry:
+                    withhold_tools = withheld
                     continue  # output_model validation failed — retry with error feedback
-
-                if self.output_model is not None:
-                    break
 
                 tool_calls = [
                     content
                     for content in current_span.memory[-1].content
                     if isinstance(content, ToolUseContent) and not content.is_server_tool_use
                 ]
+                if deferred_tools:
+                    found = _native_search_finds(current_span.memory[-1])
+                    if found:
+                        _record_tool_search(current_span, "native", found)
+
+                if (
+                    not tool_calls
+                    and getattr(last_output, "stop_reason", None) in _TRUNCATED_STOPS
+                    and _empty_at_limit(last_output)
+                ):
+                    # A reasoning model can spend the whole budget thinking and write nothing.
+                    if last_output_stored:
+                        current_span.memory.pop()
+                        current_span._memory_dump.pop()
+                    budget = kwargs.get("max_tokens") or self.max_tokens
+                    retry_budget = min(budget * _MAX_TOKENS_RETRY_FACTOR, _MAX_TOKENS_RETRY_CAP) if budget else None
+                    if max_tokens_retry is None and retry_budget and retry_budget > budget:
+                        max_tokens_retry = retry_budget
+                        current_span.metadata["max_tokens_retry"] = {"from": budget, "to": retry_budget}
+                        logger.warning(
+                            "Final answer hit max_tokens with no text; retrying with a larger budget.",
+                            path=self._path,
+                            max_tokens=budget,
+                            retry_max_tokens=retry_budget,
+                        )
+                        withhold_tools = withheld
+                        continue
+                    raise ModelOutputTruncated(max_tokens_retry or budget)
+
+                if self.output_model is not None:
+                    break
 
                 if not tool_calls:
                     if steering:
@@ -2621,6 +2888,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         current_span.metadata["silent"] = True
                     break
 
+                called_unloaded = (
+                    [call.name for call in tool_calls if call.name in unloaded_tools] if unloaded_tools else []
+                )
+                if called_unloaded:
+                    await self._load_tools(called_unloaded, current_span)
                 first_pending: OutputEvent | None = None
                 active_events = self._multiplex_tools(tools, tool_calls)
                 async for tool_call, event in active_events:
