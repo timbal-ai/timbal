@@ -46,13 +46,48 @@ def _holder_alive(owner: str | None) -> bool:
     pid = rest.partition(":")[0]
     if host != socket.gethostname() or not pid.isdigit():
         return True  # another host's: only expiry tells
+    return _pid_alive(int(pid))
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether a process of this host exists. Errs on "alive": a wrong "dead" lets two processes serve a session.
+
+    Never ``os.kill(pid, 0)`` on Windows: there any signal but the console ones *terminates* the process.
+    """
+    if os.name == "nt":
+        return _windows_pid_alive(pid)
     try:
-        os.kill(int(pid), 0)
+        os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:
-        return True  # exists, another user's
+    except OSError:
+        return True  # PermissionError: exists, another user's
     return True
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    process_query_limited_information, still_active = 0x1000, 259
+    error_invalid_parameter = 87  # what OpenProcess answers for a pid no process has
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return ctypes.get_last_error() != error_invalid_parameter  # access denied: exists
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        # An exited process whose handle someone still holds keeps its pid: its exit code tells.
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 class SessionLeased(RuntimeError):

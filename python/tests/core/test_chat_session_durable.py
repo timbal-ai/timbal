@@ -509,6 +509,18 @@ class TestStores:
         with pytest.raises(SessionLeased):  # a live one's (this process, as another owner id) holds
             await store.acquire_lease("s1", f"{socket.gethostname()}:{__import__('os').getpid()}:other")
 
+    def test_the_liveness_probe_never_signals_on_windows(self, monkeypatch):
+        """On Windows os.kill(pid, 0) is TerminateProcess: probing a live holder would kill it."""
+        from timbal.state import chat_store
+
+        def no_kill(*_):
+            raise AssertionError("os.kill on Windows terminates the process")
+
+        monkeypatch.setattr(chat_store.os, "name", "nt")
+        monkeypatch.setattr(chat_store.os, "kill", no_kill)
+        monkeypatch.setattr(chat_store, "_windows_pid_alive", lambda pid: pid == 42)
+        assert chat_store._pid_alive(42) is True and chat_store._pid_alive(7) is False
+
     async def test_listing_and_deleting(self, store):
         await store.save(SessionSnapshot(session_id="idle", agent="agent"), expect_version=None)
         await store.save(

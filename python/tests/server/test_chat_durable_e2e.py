@@ -2,7 +2,6 @@
 the dead turn is recovered by a read-only turn told what may have run, and nothing runs twice."""
 
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -108,7 +107,7 @@ class Server:
         return self
 
     def kill(self):
-        os.kill(self.proc.pid, signal.SIGKILL)
+        self.proc.kill()  # SIGKILL; TerminateProcess on Windows: no shutdown either way
         self.proc.wait(10)
 
     def stop(self):
@@ -168,6 +167,7 @@ def test_a_session_survives_kill_9_mid_tool(workdir):
         server.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="terminate() is TerminateProcess on Windows: no graceful shutdown")
 def test_a_graceful_restart_keeps_queued_messages(workdir):
     server = Server(workdir).start()
     try:
