@@ -48,6 +48,10 @@ The stored trace follows the same rule. For an interrupted turn, the agent run's
 
 Measure time to the useful answer as well as first audio. Compare providers on representative calls, including slow tools, short acknowledgements, background noise, and interruptions.
 
+## Prompt cache on the text model
+
+Join `TurnMetricsEvent.run_id` to the text agent's run and read `OutputEvent.usage`. OpenAI and Groq report cache reads as `input_cached_tokens`. Anthropic, including Claude on AWS Bedrock, reports them as `cache_read_input_tokens`. A zero count on the first turn is normal. Later turns in the same call read the prefix when it is long enough and the instructions, tools, and per-call lines are unchanged.
+
 ## Provider-reported speech usage
 
 OpenAI transcription and mini-TTS adapters emit `VoiceUsageEvent` independently of transcripts and audio. These events carry provider quantities, not dollar amounts. Other providers and custom adapters emit nothing unless they implement the usage capability.

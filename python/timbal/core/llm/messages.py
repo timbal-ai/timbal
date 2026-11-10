@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...types.message import Message
 from ...utils import transform_schema
+from .prompt_cache import anthropic_system_param
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -33,9 +34,6 @@ def prepare_messages_request(
         "stream": True,
     }
 
-    if system_prompt:
-        anthropic_kwargs["system"] = system_prompt
-
     if tools:
         anthropic_tools = [tool.anthropic_schema for tool in tools]
         if anthropic_tools:
@@ -62,8 +60,13 @@ def prepare_messages_request(
     anthropic_kwargs.update(provider_params)
     if extra_tools:
         anthropic_kwargs["tools"] = [*anthropic_kwargs.get("tools", []), *extra_tools]
-    if anthropic_kwargs["cache_control"] is None:
-        del anthropic_kwargs["cache_control"]
+    if anthropic_kwargs.get("cache_control") is None:
+        anthropic_kwargs.pop("cache_control", None)
+    # After provider_params, so an override TTL is the breakpoint's TTL too and
+    # cache_control=None stays a full opt-out (no block marker either).
+    system = anthropic_system_param(system_prompt, anthropic_kwargs.get("cache_control"))
+    if system is not None:
+        anthropic_kwargs["system"] = system
 
     async def _create_stream():
         if output_model is not None:

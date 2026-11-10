@@ -46,6 +46,7 @@ from .playback import (
     BufferedPlaybackTracker,
     PlaybackTracker,
 )
+from .prompt import voice_prompt
 from .providers import (
     AudioInputConfig,
     AudioOutputConfig,
@@ -188,6 +189,7 @@ __all__ = [
     "VoiceUsageEvent",
     "current_voice_session",
     "endpointing_delay",
+    "voice_prompt",
     "resolve_stt",
     "resolve_turn_detector",
     "stt_provider_id",
