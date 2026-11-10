@@ -12,7 +12,7 @@ Set `Agent(voice_config=...)` to configure sessions created by the server. Use a
 Set `stt_provider` and optionally `stt_model`. These are adapter IDs and speech model IDs, separate from the `provider/model` IDs used by `Agent.model`.
 
 - **`deepgram`** or **`deepgram-flux`** (default): defaults to `flux-general-multi`; requires `DEEPGRAM_API_KEY`. Flux reports native end-of-turn events, so the session uses `provider` turn detection. When `DEEPGRAM_API_KEY` is unset, each session falls back to `elevenlabs`.
-- **`elevenlabs`**: defaults to `scribe_v2_realtime`; requires `ELEVENLABS_API_KEY`.
+- **`elevenlabs`**: defaults to `scribe_v3_live` (Scribe v3 Live); requires `ELEVENLABS_API_KEY`. Set `stt_model` to `scribe_v2_realtime` to keep the previous model. See [ElevenLabs Scribe](#elevenlabs-scribe).
 - **`deepgram-nova`**: defaults to `nova-3`; requires `DEEPGRAM_API_KEY`. Select Nova explicitly or supply a `nova-*` model.
 - **`munsit`**: defaults to `munsit-en-ar`; requires `MUNSIT_API_KEY`. Reports native utterance boundaries.
 - **`openai`**: defaults to `gpt-transcribe`; requires `OPENAI_API_KEY`. Uses a transcription-only Realtime session with server VAD. It does not report native end-of-turn, so the session uses local turn detection when `timbal[voice]` is installed and lexical detection otherwise. Flux and Munsit are the adapters that force `provider` mode.
@@ -32,7 +32,7 @@ agent = Agent(
 )
 ```
 
-`keyterms` is a list of at most 100 plain phrases (a name, a brand, an acronym). Do not append a Nova weight such as `term:0.15`. Deepgram Flux and Nova-3, and ElevenLabs Scribe, send them when the socket connects. Flux can replace the whole list on that socket with `VoiceSession.set_keyterms`; an empty list clears it. The new list does not merge with the old one, and audio already transcribed is not rewritten. Nova and Scribe cannot replace terms after connect. OpenAI and Munsit reject `keyterms` at configuration time. A caller hello cannot set them. Each call copies the agent's list, so one session cannot change another's, and there is no voice handoff that would carry terms across agents.
+`keyterms` is a list of at most 100 plain phrases (a name, a brand, an acronym). Do not append a Nova weight such as `term:0.15`. Deepgram Flux and Nova-3, and ElevenLabs Scribe, send them when the socket connects. Flux can replace the whole list on that socket with `VoiceSession.set_keyterms`; an empty list clears it. The new list does not merge with the old one, and audio already transcribed is not rewritten. Nova and Scribe cannot replace terms after connect. Scribe takes at most 50 terms of 20 characters each on a call: an agent that sets `stt_provider="elevenlabs"` with more, or longer, fails to load, and a Flux agent that falls back to Scribe sends the terms that fit and logs `el_stt_keyterms_trimmed`. OpenAI and Munsit reject `keyterms` at configuration time. A caller hello cannot set them. Each call copies the agent's list, so one session cannot change another's, and there is no voice handoff that would carry terms across agents.
 
 `language` and `stt_languages` on `flux-general-multi` accept only English, Spanish, French, German, Hindi, Russian, Portuguese, Japanese, Italian, and Dutch (`en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, `nl`), including regional subtags such as `es-ES`. Catalan, Arabic, Chinese, and any other tag are rejected when the agent config is built. That is a startup check: a Flux agent that used to set `language` to `ca`, `ar`, or `zh` now fails to load instead of opening a socket Flux would reject. `stt_languages` replaces the single `language` hint for speech-to-text and is only for `flux-general-multi`. `flux-general-en` rejects a hint list. `set_language` still replaces the live hint list with one supported tag. These settings do not promise that a word will be recognized, and they do not make Flux recognize Catalan.
 
@@ -43,6 +43,30 @@ voice_config={"language": "es", "reply_language": "ca", "stt_provider": "deepgra
 ```
 
 Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable. A non-empty `keyterms` list cannot also set `keyterm`, `keyterms`, `keywords`, or `hotwords` in `stt_extra`. The agent fails to build if any of those keys is present, including when the value is `None`, `""`, or `[]`. Omit the key. An empty `keyterms` (left unset, `None`, or `[]`) does not conflict, and a `keyterm` that exists only in `stt_extra` is still passed through.
+
+### ElevenLabs Scribe
+
+`scribe_v3_live` is the default ElevenLabs model. `scribe_v2_realtime` is still served and takes the same settings, except the two marked below. Scribe options go in `stt_extra` and are sent as given:
+
+```python
+agent = Agent(
+    name="support",
+    model="openai/gpt-5.4-mini",
+    voice_config={
+        "stt_provider": "elevenlabs",
+        "language": "ca",
+        "stt_extra": {"diarize": True},
+    },
+)
+```
+
+- **`commit_strategy`**: `"vad"` (the default: Scribe commits after `vad_silence_threshold_secs` of silence), `"manual"`, or `"turn_prediction"`. `turn_prediction` is Scribe v3 Live only. Scribe then commits when it predicts the caller has finished, from the words as well as the silence. The session's own turn detector and endpointer still run on top of it, as they do for `"vad"`: it is not a `provider` turn detector, and how the two combine on real calls has not been measured.
+- **`diarize`**: Scribe v3 Live only. Each committed transcript is followed by a `TranscriptEvent` of type `diarized`, whose `speakers` list holds one `SpeakerSegment` (`speaker_id`, `text`, `start`, `end`) per run of words from the same speaker. `VoiceSession` ignores these events: they never start a turn and are not sent to the client. Read them from `stt.events()` in a [custom pipeline](/voice/custom-pipelines).
+- **`secondary_languages`**: other languages the caller may use, next to `language`.
+
+Scribe v3 Live scores each interim transcript with its end-of-turn probability. It arrives as `confidence` on `partial` transcript events. The session does not use it.
+
+A setting the chosen model does not accept (`turn_prediction` or `diarize` on `scribe_v2_realtime`, an unknown model id) ends the session with the reason ElevenLabs gave, for example `STT fatal (invalid_request): The 'diarize' parameter is only supported by scribe_v3_live.`
 
 ## Speech providers
 

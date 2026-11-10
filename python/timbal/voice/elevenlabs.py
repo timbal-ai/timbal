@@ -3,6 +3,7 @@
 Uses the official WebSocket APIs:
 
 * ``wss://api.elevenlabs.io/v1/speech-to-text/realtime`` — Scribe realtime
+  (``scribe_v3_live`` by default; ``scribe_v2_realtime`` is still served)
 * ``wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input`` — TTS stream
 * ``wss://api.elevenlabs.io/v1/text-to-dialogue/multi-stream-input`` — v4 TTS
 
@@ -25,9 +26,11 @@ from pydantic import SecretStr
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
+from .config import SCRIBE_REALTIME_KEYTERM_MAX_CHARS, SCRIBE_REALTIME_KEYTERMS_MAX
 from .providers import (
     AudioInputConfig,
     AudioOutputConfig,
+    SpeakerSegment,
     SpeechToText,
     TextToSpeech,
     TranscriptEvent,
@@ -52,15 +55,80 @@ _DIALOGUE_FLUSH_END_CHARS = frozenset(".!?;:\n…。！？؟؛")
 STT_FATAL_MESSAGE_TYPES = frozenset(
     {
         "auth_error",
+        # A rejected query: an unknown model, ``commit_strategy=turn_prediction``
+        # or ``diarize`` on a model without it, a keyterm over the limit. The
+        # server closes with 1008 right after. Without this entry the session
+        # only saw "connection closed" and the reason was lost.
+        "invalid_request",
         "quota_exceeded",
         "rate_limited",
         "resource_exhausted",
         "session_time_limit_exceeded",
+        "unaccepted_terms",
     }
 )
 
-_DEFAULT_STT_MODEL = "scribe_v2_realtime"
+_DEFAULT_STT_MODEL = "scribe_v3_live"
 _DEFAULT_TTS_MODEL = "eleven_v4_turbo"
+
+
+def _fit_scribe_keyterms(keyterms: list[str]) -> list[str]:
+    """The terms realtime Scribe will take, in order.
+
+    One term too many, or one too long, fails the whole connection and the
+    call with it. An agent that declared its vocabulary for Deepgram Flux (100
+    phrases, any length) lands here when ``DEEPGRAM_API_KEY`` is unset, so the
+    surplus is dropped and logged. An agent that names ``elevenlabs`` itself
+    is refused earlier, when its config is built.
+    """
+    fitting = [term for term in keyterms if len(term) <= SCRIBE_REALTIME_KEYTERM_MAX_CHARS]
+    kept = fitting[:SCRIBE_REALTIME_KEYTERMS_MAX]
+    if len(kept) != len(keyterms):
+        logger.warning(
+            "el_stt_keyterms_trimmed",
+            sent=len(kept),
+            dropped_too_long=len(keyterms) - len(fitting),
+            dropped_over_limit=len(fitting) - len(kept),
+        )
+    return kept
+
+
+def _speaker_segments(words: Any) -> list[SpeakerSegment]:
+    """Group a diarized word list into one segment per run of the same speaker."""
+    segments: list[SpeakerSegment] = []
+    if not isinstance(words, list):
+        return segments
+    for word in words:
+        if not isinstance(word, dict):
+            continue
+        text = word.get("text")
+        if not isinstance(text, str) or not text:
+            continue
+        speaker = word.get("speaker_id")
+        speaker = speaker if isinstance(speaker, str) and speaker else None
+        spacing = word.get("type") == "spacing"
+        last = segments[-1] if segments else None
+        # Spacing joins whichever run is open and never opens one: the gap
+        # between two speakers is labelled with either of them.
+        if last is not None and (spacing or speaker == last.speaker_id):
+            last.text += text
+            if not spacing and isinstance(word.get("end"), (int, float)):
+                last.end = float(word["end"])
+            continue
+        if spacing:
+            continue
+        start, end = word.get("start"), word.get("end")
+        segments.append(
+            SpeakerSegment(
+                speaker_id=speaker,
+                text=text,
+                start=float(start) if isinstance(start, (int, float)) else None,
+                end=float(end) if isinstance(end, (int, float)) else None,
+            )
+        )
+    for segment in segments:
+        segment.text = segment.text.strip()
+    return [segment for segment in segments if segment.text]
 
 
 def _resolve_api_key(explicit: str | SecretStr | None) -> str:
@@ -123,7 +191,23 @@ def effective_tts_model(config: AudioOutputConfig) -> str:
 
 
 class ElevenLabsRealtimeSTT(SpeechToText):
-    """ElevenLabs Scribe v2 realtime WebSocket (VAD commits by default)."""
+    """ElevenLabs Scribe realtime WebSocket (VAD commits by default).
+
+    ``scribe_v3_live`` unless ``AudioInputConfig.model`` names another Scribe
+    model (``scribe_v2_realtime``). Provider knobs ride in ``extra`` and go on
+    the query string as given:
+
+    * ``commit_strategy``: ``"vad"`` (the default here), ``"manual"``, or
+      ``"turn_prediction"`` (v3 Live only). The server's own default is
+      ``manual``, which never commits by itself, so one is always sent.
+    * ``diarize=True`` (v3 Live only): each commit is followed by a
+      ``diarized`` :class:`TranscriptEvent` carrying ``speakers``.
+    * ``secondary_languages``, ``include_timestamps``, ``no_verbatim``, ...
+
+    v3 Live partials carry the provider's end-of-turn probability, passed on
+    as ``TranscriptEvent.confidence``. Realtime Scribe takes at most 50
+    ``keyterms`` of 20 characters each. The surplus is dropped with a warning.
+    """
 
     def __init__(self, api_key: str | SecretStr | None = None) -> None:
         self._api_key_explicit = api_key
@@ -136,6 +220,9 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         self._receiver: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[TranscriptEvent | None] = asyncio.Queue()
         self._input_config: AudioInputConfig | None = None
+        # Text of a ``committed_transcript`` whose timestamped twin has not
+        # arrived yet. See ``_receive_loop``.
+        self._untimed_commit: str | None = None
 
     async def connect(self, config: AudioInputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
@@ -151,12 +238,22 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         }
         if config.language:
             params["language_code"] = config.language
+        if config.languages and "secondary_languages" not in extra:
+            # ``VoiceConfig`` refuses ``stt_languages`` on ElevenLabs, so a list
+            # here belongs to a Flux agent that fell back to Scribe for want of
+            # ``DEEPGRAM_API_KEY``. Raising would fail every such call. Scribe
+            # spells the same hint ``secondary_languages``, primary excluded.
+            primary = (config.language or "").split("-")[0].lower()
+            others = list(dict.fromkeys(tag.split("-")[0].lower() for tag in config.languages))
+            secondary = [tag for tag in others if tag and tag != primary]
+            if secondary:
+                params["secondary_languages"] = secondary
         if config.keyterms:
             extra.pop("keyterms", None)
             extra.pop("keyterm", None)
-            params["keyterms"] = list(config.keyterms)
-        elif config.languages:
-            raise ValueError("ElevenLabs Scribe takes one language_code. stt_languages is only for flux-general-multi.")
+            params["keyterms"] = _fit_scribe_keyterms(list(config.keyterms))
+        elif isinstance(extra.get("keyterms"), list):
+            extra["keyterms"] = _fit_scribe_keyterms([str(term) for term in extra["keyterms"]])
         for k, v in extra.items():
             if v is None or k.startswith("_"):
                 continue
@@ -230,12 +327,41 @@ class ElevenLabsRealtimeSTT(SpeechToText):
                 elif mt == "partial_transcript":
                     text = msg.get("text", "")
                     if text:
-                        await self._queue.put(TranscriptEvent(type="partial", text=text))
+                        # Scribe v3 Live scores every partial. v2 sends no score.
+                        probability = msg.get("turn_probability")
+                        await self._queue.put(
+                            TranscriptEvent(
+                                type="partial",
+                                text=text,
+                                confidence=float(probability) if isinstance(probability, (int, float)) else None,
+                            )
+                        )
 
-                elif mt in ("committed_transcript", "committed_transcript_with_timestamps"):
+                elif mt == "committed_transcript":
                     text = (msg.get("text") or "").strip()
+                    self._untimed_commit = text or None
                     if text:
                         await self._queue.put(TranscriptEvent(type="committed", text=text))
+
+                elif mt == "committed_transcript_with_timestamps":
+                    # With ``include_timestamps`` the server sends the plain
+                    # commit first and this one right after, same words.
+                    # Passing both on committed every utterance twice.
+                    text = (msg.get("text") or "").strip()
+                    already_committed, self._untimed_commit = self._untimed_commit, None
+                    if text and text != already_committed:
+                        await self._queue.put(TranscriptEvent(type="committed", text=text))
+
+                elif mt == "diarized_transcript":
+                    # Follows the commit it labels (``diarize=true``, v3 Live).
+                    # Its own event type, so it never reads as a second commit.
+                    text = (msg.get("text") or "").strip()
+                    speakers = _speaker_segments(msg.get("words"))
+                    if text and speakers:
+                        await self._queue.put(TranscriptEvent(type="diarized", text=text, speakers=speakers))
+
+                elif mt == "warning":
+                    logger.warning("el_stt_warning", warning=msg.get("warning"))
 
                 elif mt == "error":
                     err = msg.get("error", "Unknown STT error")

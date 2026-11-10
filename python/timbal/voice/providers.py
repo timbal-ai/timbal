@@ -75,10 +75,21 @@ class AudioOutputConfig(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+class SpeakerSegment(BaseModel):
+    """A run of consecutive words one speaker said, from a diarizing STT provider."""
+
+    speaker_id: str | None = None
+    """Provider label (``"speaker_0"``). Stable within one connection, not across calls."""
+    text: str
+    start: float | None = None
+    """Seconds from the start of the connection's audio."""
+    end: float | None = None
+
+
 class TranscriptEvent(BaseModel):
     """Single event from an STT provider."""
 
-    type: Literal["partial", "committed", "error", "eager", "resumed"]
+    type: Literal["partial", "committed", "error", "eager", "resumed", "diarized"]
     text: str = ""
     confidence: float | None = None
     """Provider end-of-turn confidence, set on ``eager`` / ``resumed``.
@@ -87,6 +98,18 @@ class TranscriptEvent(BaseModel):
     Flux ``EagerEndOfTurn``). ``resumed`` cancels it. Neither is a commit.
     Speculative generation and during-speech prediction both consume these
     events. ``resumed`` is delivered even when ``text`` is empty.
+
+    Also set on a ``partial`` from a turn-predicting transcriber (ElevenLabs
+    Scribe v3 Live ``turn_probability``). It is informational there: the
+    provider still decides the commit, and the session does not read it.
+    """
+    speakers: list[SpeakerSegment] | None = None
+    """Who said what, set on ``diarized`` only.
+
+    ``diarized`` repeats the text of the ``committed`` event before it, split
+    by speaker (ElevenLabs Scribe v3 Live with ``diarize``). It is never a
+    turn: :class:`~timbal.voice.VoiceSession` ignores it. Read it from
+    :meth:`SpeechToText.events` in a custom pipeline.
     """
 
 

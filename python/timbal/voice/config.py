@@ -64,6 +64,25 @@ DEFAULT_FILLER_SYSTEM_PROMPT = (
 FLUX_MULTI_LANGUAGES = frozenset({"en", "es", "fr", "de", "hi", "ru", "pt", "ja", "it", "nl"})
 KEYTERMS_MAX = 100
 _KEYTERM_WEIGHT = re.compile(r".+:-?\d+(?:\.\d+)?\s*$")
+# ElevenLabs' realtime endpoint refuses the whole connection past either limit,
+# on ``scribe_v2_realtime`` and ``scribe_v3_live`` alike. (Batch Scribe v3
+# takes 1,000 terms of 50 characters. That is a different endpoint.)
+SCRIBE_REALTIME_KEYTERMS_MAX = 50
+SCRIBE_REALTIME_KEYTERM_MAX_CHARS = 20
+
+
+def scribe_realtime_keyterms_error(keyterms: list[str] | None) -> str | None:
+    """Why realtime Scribe would refuse this vocabulary, or ``None`` when it fits."""
+    terms = list(keyterms or [])
+    if len(terms) > SCRIBE_REALTIME_KEYTERMS_MAX:
+        return f"ElevenLabs Scribe accepts at most {SCRIBE_REALTIME_KEYTERMS_MAX} keyterms on a call, got {len(terms)}."
+    for term in terms:
+        if len(term) > SCRIBE_REALTIME_KEYTERM_MAX_CHARS:
+            return (
+                f"ElevenLabs Scribe keyterms are at most {SCRIBE_REALTIME_KEYTERM_MAX_CHARS} characters each "
+                f"on a call: {term!r} is {len(term)}."
+            )
+    return None
 
 
 def validate_keyterms(value: Any) -> list[str]:
@@ -635,7 +654,8 @@ class VoiceConfig(BaseModel):
     Plain strings, at most 100, with no Nova keyword weights (``term:0.15``).
     Set on the agent. A caller hello cannot set it, and it is not taken from
     the caller's words or from an unheard reply. Deepgram Flux and Nova-3
-    and ElevenLabs Scribe accept them when the socket connects. Flux can
+    and ElevenLabs Scribe accept them when the socket connects. Scribe takes
+    at most 50, of 20 characters each. Flux can
     replace the whole list on the open socket. Empty leaves recognition
     unchanged. This does not rewrite a transcript and does not promise the
     words will be recognized.
@@ -826,6 +846,12 @@ class VoiceConfig(BaseModel):
                 f"{provider or 'this speech provider'} {model or ''}".strip()
                 + " does not accept keyterms. Use Deepgram Flux, Nova-3, or ElevenLabs Scribe."
             )
+        if provider == "elevenlabs":
+            # Only when the agent names ElevenLabs. A Flux agent that falls back
+            # to Scribe keeps its list and the adapter sends the part that fits.
+            keyterms_error = scribe_realtime_keyterms_error(self.keyterms)
+            if keyterms_error is not None:
+                raise ValueError(keyterms_error)
         error = flux_transcription_error(
             provider=provider,
             model=model,
