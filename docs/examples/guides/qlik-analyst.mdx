@@ -1,0 +1,167 @@
+---
+title: "Qlik Analyst"
+description: "Answer business questions with figures from Qlik Cloud (Qlik Sense) apps, as each user or as a service identity"
+---
+
+This guide shows how to:
+- Connect Timbal to Qlik Cloud with only a tenant URL, a client ID and a client secret
+- Choose between **personal** access (each user's own Qlik permissions) and **service** access (one machine identity)
+- Give an agent the Qlik tools and the instructions to use them
+
+The complete example lives in [`examples/qlik`](https://github.com/timbal-ai/timbal/tree/main/examples/qlik).
+
+## The tools
+
+| Tool | What it does |
+| --- | --- |
+| `QlikWhoAmI` (`qlik_whoami`) | Who the tools act as, the roles, and the mode (`personal` / `service`). |
+| `QlikListApps` (`qlik_list_apps`) | Apps this identity can open, searchable by name and space, paginated. |
+| `QlikGetAppFields` (`qlik_get_app_fields`) | The app's tables, row counts and fields. |
+| `QlikQuery` (`qlik_query`) | A hypercube (dimensions x measures) through the Qlik Engine API, with set analysis. |
+
+## Setup Requirements
+
+<AccordionGroup>
+  <Accordion title="Installing Packages">
+    ```bash
+    pip install timbal websockets python-dotenv
+    ```
+    `websockets` is needed by `qlik_query` only (the Engine API is a websocket). It also comes with `timbal[server]`.
+  </Accordion>
+  <Accordion title="Creating the OAuth client in Qlik Cloud">
+    <Steps>
+      <Step title="Open the OAuth settings">
+        With the **Tenant Admin** role, open `https://<tenant>.<region>.qlikcloud.com` and go to **Administration** > **Integration** > **OAuth**. Click **Create new**.
+      </Step>
+      <Step title="Configure the client">
+        1. **Client type:** `Web`
+        2. **Name:** for example `Timbal agent`
+        3. **Scopes:** `user_default`, plus `offline_access` for personal mode (it yields a refresh token)
+        4. **Redirect URLs** (personal mode): `http://localhost:8765/callback`, plus your app's own callback if it signs users in
+      </Step>
+      <Step title="Service mode only: allow machine-to-machine">
+        Enable **Allow Machine-to-Machine (M2M)** and set the consent method to **Trusted**.
+
+        <Warning>
+        Without both, Qlik refuses the `client_credentials` grant with `OAUTH-5`. The tools name this requirement in the error.
+        </Warning>
+      </Step>
+      <Step title="Copy the credentials">
+        Click **Create**, then copy the **client ID** and the **client secret**. The secret is shown only once.
+      </Step>
+    </Steps>
+  </Accordion>
+</AccordionGroup>
+
+## Choose an Authentication Method
+
+<Tabs>
+  <Tab title="Personal (user OAuth)">
+    **Use this if** each person should see only what their own Qlik roles, spaces and Section Access allow.
+
+    The tools send that person's access token, so Qlik enforces their permissions. Locally, sign in once with the example's script:
+
+    ```bash
+    python setup_credentials.py
+    ```
+
+    It opens the Qlik sign-in page, catches the redirect on `http://localhost:8765/callback`, and prints the lines to add to `.env`:
+
+    ```bash
+    QLIK_TENANT_URL=https://your-tenant.eu.qlikcloud.com
+    QLIK_CLIENT_ID=your_oauth_client_id
+    QLIK_CLIENT_SECRET=your_oauth_client_secret
+    QLIK_AUTH_MODE=personal
+    QLIK_REFRESH_TOKEN=...
+    ```
+
+    The tools exchange the refresh token for access tokens as needed and keep the newest one when Qlik rotates it. On the Timbal platform, a personal Qlik integration supplies the user's token instead (pass `integration=`).
+  </Tab>
+  <Tab title="Service (machine-to-machine)">
+    **Use this if** the agent runs unattended, or everyone using it may see the same data.
+
+    ```bash
+    QLIK_TENANT_URL=https://your-tenant.eu.qlikcloud.com
+    QLIK_CLIENT_ID=your_oauth_client_id
+    QLIK_CLIENT_SECRET=your_oauth_client_secret
+    QLIK_AUTH_MODE=service
+    ```
+
+    The tools obtain a token through the `client_credentials` grant and cache it until shortly before it expires. That token acts as the OAuth client's own identity: ask the agent *"who are you in Qlik?"* (`qlik_whoami`) and add that identity to the spaces whose apps it should read.
+  </Tab>
+</Tabs>
+
+## Building the Agent
+
+The Qlik tools read their credentials from the environment, so adding them is enough:
+
+```python fragment
+from timbal import Agent
+from timbal.tools import QlikGetAppFields, QlikListApps, QlikQuery, QlikWhoAmI
+
+agent = Agent(
+    name="qlik_analyst",
+    model="anthropic/claude-sonnet-4-6",
+    max_tokens=4096,
+    max_iter=15,
+    system_prompt=(
+        "You are a data analyst. Find the Qlik app with qlik_list_apps, read its fields with "
+        "qlik_get_app_fields, then compute figures with qlik_query. Never invent a field or a figure."
+    ),
+    tools=[QlikWhoAmI(), QlikListApps(), QlikGetAppFields(), QlikQuery()],
+)
+
+result = await agent(prompt="What were total sales by region in 2026?").collect()
+print(result.output.collect_text())
+```
+
+A typical answer takes three calls:
+
+```python fragment
+qlik_list_apps(query="sales")
+qlik_get_app_fields(app_id="...")
+qlik_query(app_id="...", dimensions=["Region"], measures=["Sum({<Year={2026}>} Sales)"])
+```
+
+`dimensions` are field names (or `=expressions`); `measures` are Qlik expressions, and filters go inside them as set analysis. Measures come back as numbers, dimensions as Qlik's display text, and `truncated` says whether more rows exist than `max_rows`.
+
+### Shipping the instructions as a Skill
+
+The example packages the tools and their instructions as a [Skill](/agents/skills): `skills/qlik/SKILL.md` tells the agent how to explore an app, write set analysis and respect permission boundaries, and `skills/qlik/tools/qlik_tools.py` creates the four tools. Copy the folder into your project and point the agent at it:
+
+```python fragment
+agent = Agent(
+    name="qlik_analyst",
+    model="anthropic/claude-sonnet-4-6",
+    max_tokens=4096,
+    skills_path="./skills",
+)
+```
+
+## Configuration Reference
+
+Every tool takes the same optional fields, which win over the environment:
+
+| Field | Env var | Mode |
+| --- | --- | --- |
+| `tenant_url` | `QLIK_TENANT_URL` | both |
+| `mode` | `QLIK_AUTH_MODE` | pins `personal` or `service` |
+| `token` | `QLIK_ACCESS_TOKEN` | personal |
+| `refresh_token` | `QLIK_REFRESH_TOKEN` | personal (with client ID and secret) |
+| `client_id`, `client_secret` | `QLIK_CLIENT_ID`, `QLIK_CLIENT_SECRET` | service (and personal refresh) |
+| `api_key` | `QLIK_API_KEY` | service (a Qlik API key instead of OAuth) |
+| `integration` | | a Timbal platform integration supplying any of the above |
+
+<Note>
+When `mode` is not set, a person's token is tried before the service credentials. Set `mode="personal"` wherever a user without a Qlik sign-in must be refused rather than answered through the service identity.
+</Note>
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `OAUTH-5` on the `client_credentials` grant | The client does not allow M2M or is not Trusted. |
+| `Qlik rejected the personal credentials (401)` | The refresh token expired or was revoked. Sign in again. |
+| `the app does not exist or this identity may not open it` | Wrong `app_id`, or the identity lacks access to the app's space. |
+| `Bad expression` from `qlik_query` | A field name or the expression syntax is wrong. Check `qlik_get_app_fields`. |
+| `invalid redirect_uri` during sign-in | Add the callback URL to the client's redirect URLs. |
