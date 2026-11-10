@@ -1469,8 +1469,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return
         span.metadata["tool_policy"] = describe_tool_policy(policy)
         # The latest decision only: a callable may take a permission back between steps.
+        # Ordered by when it was made, not by when its span started: concurrent spans of one agent decide out
+        # of start order, and the restore must not bring back a permission a later decision took away.
         allowed = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
+        decided_at = time.time_ns()
         span.metadata["tool_policy_allowed"] = allowed
+        span.metadata["tool_policy_decided_at"] = decided_at
         # A run started inside a call of the run the policy came from keeps its spans in a trace of its own: note
         # the decision on that call's span too, where a session continuing the parked run restores it from.
         origin = run_context.__dict__.get("_tool_policy_origin")
@@ -1478,7 +1482,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             origin_context, origin_call_id = origin
             origin_span = origin_context._trace.get(origin_call_id)
             if origin_span is not None:
-                origin_span.metadata.setdefault("nested_tool_policy_allowed", {})[span.path] = allowed
+                nested = origin_span.metadata.setdefault("nested_tool_policy_allowed", {})
+                seen = nested.get(span.path)
+                if seen is None or decided_at >= seen["at"]:
+                    nested[span.path] = {"allowed": allowed, "at": decided_at}
 
     @staticmethod
     def _tool_allowed(tool: Any, policy: Any) -> bool:

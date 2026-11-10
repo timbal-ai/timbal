@@ -144,12 +144,28 @@ def _tool_policy(value: Any) -> Any:
 
 
 async def _paused_run_policy(run_context: RunContext) -> Any:
-    """The tool policy of the paused run ``run_context`` resumes (its root span's ``metadata.tool_policy``), or
-    ``None``. A resume that does not name a policy must not run with more tools than the run it continues had."""
+    """The tool policy of the paused run ``run_context`` resumes (its root span's ``metadata.tool_policy``).
+
+    A resume that does not name a policy must not run with more tools than the run it continues had, so a
+    failed read is a retryable ``503`` before any job starts, never "all tools". ``None`` only when there is
+    no paused run to keep it from: the parent is not stored (or tracing is off), or did not end paused.
+    """
     from ..core.agent import _is_pause
     from ..core.tool_policy import restore_tool_policy
 
-    trace = await run_context._get_parent_trace()
+    provider = run_context._tracing_provider
+    if provider is None:
+        return None
+    try:
+        trace = await provider.get_strict(run_context)
+    except Exception as e:
+        logger.warning("Paused run lookup failed", parent_id=run_context.parent_id, error=str(e))
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read the run being resumed to keep its tool policy; retry, "
+            "or name 'context.tool_policy' explicitly.",
+            headers={"Retry-After": "1"},
+        ) from e
     root = trace.get(trace._root_call_id) if trace is not None and trace._root_call_id is not None else None
     if root is None or not _is_pause(root.status):
         return None

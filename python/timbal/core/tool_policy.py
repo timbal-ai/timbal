@@ -4,8 +4,8 @@ A policy is ``"read_only"``, a collection of tool names, a callable ``(tool) -> 
 tools). Every agent of a run filters what its model sees with it (``Agent._tool_allowed``) and records it on
 its span; the run's root span records it too (``metadata.tool_policy``). A callable is not stored: a run
 continuing a paused one rebuilds it from the tool paths the agents noted they were offered
-(``tool_policy_allowed``; agents of runs started inside a call note theirs on that call's span too,
-``nested_tool_policy_allowed``).
+(``tool_policy_allowed``, timed by ``tool_policy_decided_at``; agents of runs started inside a call note
+theirs on that call's span too, ``nested_tool_policy_allowed``).
 """
 
 from dataclasses import dataclass
@@ -36,23 +36,29 @@ class ToolPaths:
 def allowed_tool_paths(trace: Any) -> frozenset[str]:
     """What a callable tool policy let through in ``trace``, as last decided.
 
-    Each agent notes on its span what its latest tool resolution allowed (``tool_policy_allowed``), and an
-    agent of a run started inside one of this run's calls (a tool or step body, a background tool) notes it on
-    that call's span as well (``nested_tool_policy_allowed``, by agent path), since its own spans live in
-    another trace. An agent seen more than once counts by its latest record, so a later decision (a
-    permission taken back) wins over an earlier one.
+    Each agent notes on its span what its latest tool resolution allowed (``tool_policy_allowed``, made at
+    ``tool_policy_decided_at``, ns), and an agent of a run started inside one of this run's calls (a tool or step
+    body, a background tool) notes it on that call's span as well (``nested_tool_policy_allowed``: agent path ->
+    ``{"allowed", "at"}``), since its own spans live in another trace. An agent seen more than once counts by its
+    latest decision, so a permission taken back stays taken back, also when concurrent calls decide out of the
+    order they started in. Records from before decisions were timed fall back to their span's start.
     """
     latest: dict[str, tuple[int, list[str]]] = {}
     for span in trace.values():
         metadata = span.metadata or {}
-        t0 = span.t0 or 0
-        records = list((metadata.get("nested_tool_policy_allowed") or {}).items())
+        started = (span.t0 or 0) * 1_000_000  # ms -> ns
+        records = [
+            (path, record.get("at", started), record.get("allowed", []))
+            for path, record in (metadata.get("nested_tool_policy_allowed") or {}).items()
+        ]
         if "tool_policy_allowed" in metadata:
-            records.append((span.path, metadata["tool_policy_allowed"]))
-        for path, allowed in records:
+            records.append(
+                (span.path, metadata.get("tool_policy_decided_at", started), metadata["tool_policy_allowed"])
+            )
+        for path, at, allowed in records:
             seen = latest.get(path)
-            if seen is None or t0 >= seen[0]:
-                latest[path] = (t0, allowed)
+            if seen is None or at >= seen[0]:
+                latest[path] = (at, allowed)
     return frozenset(path for _, allowed in latest.values() for path in allowed)
 
 

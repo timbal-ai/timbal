@@ -662,14 +662,8 @@ class TestContextToolPolicy:
     def test_a_resume_that_leaves_the_policy_out_keeps_the_paused_runs(
         self, app, route, resume_context, ran, header
     ):
-        import json
-
         client = TestClient(app)
-        paused = client.post("/stream", json={"prompt": "gate", "context": {"tool_policy": "read_only"}})
-        events = [json.loads(line[len("data: ") :]) for line in paused.text.splitlines() if line.startswith("data: ")]
-        run_id = events[0]["run_id"]
-        approval_id = next(e["approval_id"] for e in events if e.get("approval_id"))
-        assert events[-1]["status"]["reason"] == "approval_required"
+        run_id, approval_id = _pause_read_only_gate(client)
 
         response = client.post(
             route,
@@ -678,6 +672,46 @@ class TestContextToolPolicy:
         assert response.status_code == 200, response.text
         assert response.headers.get("X-Timbal-Tool-Policy") == header
         assert fixture().WRITES == ran
+
+    @pytest.mark.parametrize("route", ["/run", "/stream"])
+    def test_a_resume_whose_paused_run_cannot_be_read_is_a_retryable_503(self, app, route, monkeypatch):
+        """A failed read must not turn into "all tools": the resume is refused before any job starts."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        client = TestClient(app)
+        run_id, approval_id = _pause_read_only_gate(client)
+        original = InMemoryTracingProvider.get_strict.__func__
+        failures = [OSError("tracing blip")]
+
+        async def flaky(cls, run_context):
+            if failures:
+                raise failures.pop()
+            return await original(cls, run_context)
+
+        monkeypatch.setattr(InMemoryTracingProvider, "get_strict", classmethod(flaky))
+        body = {"prompt": "gate", "resume": {approval_id: True}, "context": {"parent_id": run_id}}
+
+        jobs_before = len(app.state.job_store._jobs)
+        refused = client.post(route, json=body)
+        assert refused.status_code == 503, refused.text
+        assert refused.headers["Retry-After"] == "1"
+        assert "tool_policy" in refused.json()["detail"]
+        assert len(app.state.job_store._jobs) == jobs_before  # refused before any job started
+
+        retried = client.post(route, json=body)
+        assert retried.status_code == 200, retried.text
+        assert retried.headers.get("X-Timbal-Tool-Policy") == "read_only"
+        assert fixture().WRITES == []
+
+
+def _pause_read_only_gate(client) -> tuple[str, str]:
+    """Run the fixture's ``gate`` prompt read-only until it pauses for approval: ``(run_id, approval_id)``."""
+    import json
+
+    paused = client.post("/stream", json={"prompt": "gate", "context": {"tool_policy": "read_only"}})
+    events = [json.loads(line[len("data: ") :]) for line in paused.text.splitlines() if line.startswith("data: ")]
+    assert events[-1]["status"]["reason"] == "approval_required"
+    return events[0]["run_id"], next(e["approval_id"] for e in events if e.get("approval_id"))
 
 
 class TestRequireNew:
