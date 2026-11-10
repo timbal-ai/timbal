@@ -2820,9 +2820,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if need_retry:
                     continue  # output_model validation failed — retry with error feedback
 
-                if self.output_model is not None:
-                    break
-
                 tool_calls = [
                     content
                     for content in current_span.memory[-1].content
@@ -2855,6 +2852,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         )
                         continue
                     raise ModelOutputTruncated(max_tokens_retry or budget)
+
+                if self.output_model is not None:
+                    break
 
                 if not tool_calls:
                     if steering:
