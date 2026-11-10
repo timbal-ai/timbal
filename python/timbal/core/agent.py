@@ -293,6 +293,16 @@ def _record_tool_search(span: Any, mode: str, loaded: list[str], query: str | No
     record["searches"].append({"query": query, "loaded": list(loaded)})
 
 
+_NO_NAMES: frozenset[str] = frozenset()
+
+
+def _has_deferred(tools: list[Any]) -> bool:
+    for tool in tools:
+        if getattr(tool, "defer_loading", False):
+            return True
+    return False
+
+
 def _empty_at_limit(message: Any) -> bool:
     """A final answer the output limit cut off before any visible text."""
     return isinstance(message, Message) and message.stop_reason in _TRUNCATED_STOPS and not message_text(message).strip()
@@ -2107,13 +2117,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         kwargs.pop("prompt", None)
         kwargs.pop("messages", None)
 
-        async def _append_memory(message: Message) -> None:
-            """Append a message to both memory and its serialized dump in lockstep."""
+        async def _append_memory(message: Message) -> bool:
+            """Append a message to both memory and its serialized dump in lockstep (False: empty, not kept)."""
             message = message.without_empty_text_blocks()
             if message is None:
-                return
+                return False
             current_span.memory.append(message)
             current_span._memory_dump.append(await dump(message))
+            return True
 
         # Input guardrails run blocking, before the first LLM call — a blocked input
         # spends zero tokens and executes zero tools.
@@ -2263,6 +2274,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span._memory_dump.append(tool_result_dump)
 
         steering = self._steers(run_context, current_span)
+        # Only a tool set (MCP) or a tool the agent was given can be deferred; the tools added at run time never are.
+        may_defer = self.tool_search != "off" and any(
+            isinstance(t, ToolSet) or getattr(t, "defer_loading", False) for t in self.tools
+        )
         # Fixed for the turn; checked after every tool batch.
         denial_limit = self.max_consecutive_denials
         if denial_limit is None:
@@ -2340,7 +2355,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if withhold_tools:
                     tools, commands, withhold_tools = [], {}, False
                 # `tools` stays what the model may call: a deferred tool called by name runs (and loads).
-                llm_tools, tools, deferred_tools, unloaded_tools = await self._plan_tool_search(tools, model)
+                if not may_defer or not _has_deferred(tools):
+                    llm_tools, deferred_tools, unloaded_tools = tools, None, _NO_NAMES
+                else:
+                    llm_tools, tools, deferred_tools, unloaded_tools = await self._plan_tool_search(tools, model)
                 if i >= self.max_iter and not max_iter_handled:
                     # Budget spent: _resolve_tools withheld tools for this call. Apply on_max_iter.
                     max_iter_handled = True
@@ -2717,9 +2735,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             invalidate_message_dump_caches(event.output)
 
                         # Add LLM response to conversation for next iteration
-                        before = len(current_span.memory)
-                        await _append_memory(event.output)
-                        last_output, last_output_stored = event.output, len(current_span.memory) > before
+                        last_output, last_output_stored = event.output, await _append_memory(event.output)
                         _llm_memory_saved = True
                         last_llm_usage = event.usage
                         self._record_context_measurement(current_span, event.usage, sent + 1)
@@ -2817,7 +2833,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if found:
                         _record_tool_search(current_span, "native", found)
 
-                if not tool_calls and _empty_at_limit(last_output):
+                if (
+                    not tool_calls
+                    and getattr(last_output, "stop_reason", None) in _TRUNCATED_STOPS
+                    and _empty_at_limit(last_output)
+                ):
                     # A reasoning model can spend the whole budget thinking and write nothing.
                     if last_output_stored:
                         current_span.memory.pop()
@@ -2855,7 +2875,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         current_span.metadata["silent"] = True
                     break
 
-                called_unloaded = [call.name for call in tool_calls if call.name in unloaded_tools]
+                called_unloaded = (
+                    [call.name for call in tool_calls if call.name in unloaded_tools] if unloaded_tools else []
+                )
                 if called_unloaded:
                     await self._load_tools(called_unloaded, current_span)
                 first_pending: OutputEvent | None = None

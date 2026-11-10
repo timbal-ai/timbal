@@ -46,13 +46,16 @@ def prepare_messages_request(
         anthropic_kwargs["system"] = system_prompt
 
     if tools:
-        deferred = set(deferred_tools or ())
-        anthropic_tools = [
-            {**tool.anthropic_schema, "defer_loading": True} if tool.name in deferred else tool.anthropic_schema
-            for tool in tools
-        ]
-        if deferred.intersection(tool.name for tool in tools):
-            anthropic_tools.append({"type": ANTHROPIC_TOOL_SEARCH_TYPE, "name": ANTHROPIC_TOOL_SEARCH_NAME})
+        if not deferred_tools:
+            anthropic_tools = [tool.anthropic_schema for tool in tools]
+        else:
+            deferred = set(deferred_tools)
+            anthropic_tools = [
+                {**tool.anthropic_schema, "defer_loading": True} if tool.name in deferred else tool.anthropic_schema
+                for tool in tools
+            ]
+            if deferred.intersection(tool.name for tool in tools):
+                anthropic_tools.append({"type": ANTHROPIC_TOOL_SEARCH_TYPE, "name": ANTHROPIC_TOOL_SEARCH_NAME})
         if anthropic_tools:
             anthropic_kwargs["tools"] = anthropic_tools
 
