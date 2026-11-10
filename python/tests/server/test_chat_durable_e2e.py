@@ -205,11 +205,18 @@ def test_two_workers_on_one_file_never_run_a_session_twice(workdir):
     try:
         session_id = httpx.post(f"{server.url}/chat/sessions", json={}).json()["session_id"]
         codes = []
-        for i in range(12):
-            codes.append(
-                httpx.post(f"{server.url}/chat/sessions/{session_id}/messages", json={"text": f"m{i}"}).status_code
-            )
-        assert set(codes) <= {202, 409} and 202 in codes
+
+        def send():
+            response = httpx.post(f"{server.url}/chat/sessions/{session_id}/messages", json={"text": f"m{len(codes)}"})
+            codes.append(response.status_code)
+            return response.status_code
+
+        for _ in range(12):
+            send()
+        # Which worker takes a connection is the OS's call, and not an even one (Windows can hand a run of them
+        # to the same worker): keep going until one reaches the session's worker, not a fixed number of tries.
+        until(lambda: 202 in codes or send() == 202, timeout=30, what="a message to reach the session's worker")
+        assert set(codes) <= {202, 409}
         accepted = codes.count(202)
 
         def settled():
