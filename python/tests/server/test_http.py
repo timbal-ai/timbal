@@ -642,48 +642,6 @@ class TestContextToolPolicy:
         exposed = {name.strip().lower() for name in response.headers["access-control-expose-headers"].split(",")}
         assert {"x-timbal-tool-policy", "x-timbal-version", "x-timbal-capabilities"} <= exposed
 
-    def test_healthcheck_advertises_the_capability(self, app):
-        response = TestClient(app).get("/healthcheck")
-        assert response.status_code == 204
-        assert "context.tool_policy" in response.headers["x-timbal-capabilities"].split(",")
-        assert response.headers["x-timbal-version"] == __version__
-
-    def test_meta_lists_the_capabilities(self, app):
-        response = TestClient(app).get("/meta")
-        assert response.status_code == 200
-        assert response.json() == {
-            "version": __version__,
-            "capabilities": ["context.tool_policy", "context.require_new", "context.trigger"],
-        }
-
-    @pytest.mark.parametrize(
-        ("context", "header"),
-        [
-            ({}, None),
-            ({"tool_policy": None}, None),
-            ({"tool_policy": "read_only"}, "read_only"),
-            ({"tool_policy": ["peek"]}, "names"),
-        ],
-    )
-    @pytest.mark.parametrize("route", ["/run", "/stream"])
-    def test_an_applied_policy_is_confirmed_on_the_response(self, app, route, context, header):
-        response = TestClient(app).post(route, json={"prompt": "go", "context": context})
-        assert response.status_code == 200
-        assert response.headers.get("x-timbal-tool-policy") == header
-
-    @pytest.mark.parametrize(
-        ("method", "route", "body"),
-        [
-            ("GET", "/healthcheck", None),
-            ("POST", "/run", {"prompt": "go", "context": {"tool_policy": "read_only"}}),
-            ("POST", "/stream", {"prompt": "go", "context": {"tool_policy": "read_only"}}),
-        ],
-    )
-    def test_a_browser_on_another_origin_can_read_the_headers(self, app, method, route, body):
-        response = TestClient(app).request(method, route, json=body, headers={"Origin": "https://app.example"})
-        exposed = {name.strip().lower() for name in response.headers["access-control-expose-headers"].split(",")}
-        assert {"x-timbal-tool-policy", "x-timbal-version", "x-timbal-capabilities"} <= exposed
-
     @pytest.mark.parametrize("policy", ["everything", 3, [1, 2], {"names": ["peek"]}])
     @pytest.mark.parametrize("route", ["/run", "/stream"])
     def test_an_invalid_policy_is_a_400(self, app, route, policy):

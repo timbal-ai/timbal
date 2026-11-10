@@ -2140,25 +2140,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 self._record_allowed_tools(tools, tool_policy)
         return tools, commands
 
-    @staticmethod
-    def _record_allowed_tools(tools: list[Any], policy: Any) -> None:
-        """Note on this agent's span the run's tool policy and what it let through at its latest tool resolution
-        (``metadata.tool_policy`` / ``tool_policy_allowed``): proof after the fact that it was enforced, and how a
-        session continuing a parked run restores a callable policy, which is not stored with the run."""
-        run_context = get_run_context()
-        if run_context is None:
-            return
-        try:
-            span = run_context.current_span()
-        except Exception:
-            return
-        if policy == READ_ONLY_POLICY:
-            span.metadata["tool_policy"] = READ_ONLY_POLICY
-        else:
-            span.metadata["tool_policy"] = "custom" if callable(policy) else sorted(policy)
-        # The latest decision only: a callable may take a permission back between steps.
-        span.metadata["tool_policy_allowed"] = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
-
     async def _plan_tool_search(
         self, tools: list[Tool], model: Any
     ) -> tuple[list[Tool], list[Tool], list[str] | None, set[str]]:
