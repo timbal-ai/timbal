@@ -28,6 +28,7 @@ __all__ = [
     "ChatSessionStore",
     "InMemoryChatSessionStore",
     "SessionLeased",
+    "SessionNotStored",
     "SessionSnapshot",
     "SnapshotConflict",
     "SqliteChatSessionStore",
@@ -92,6 +93,11 @@ def _windows_pid_alive(pid: int) -> bool:
 
 class SessionLeased(RuntimeError):
     """Another live process holds the session."""
+
+
+class SessionNotStored(RuntimeError):
+    """The session's latest state could not be written (the store failed): a change made since the last write
+    would not survive a restart."""
 
 
 class SnapshotConflict(RuntimeError):

@@ -12,6 +12,7 @@ from timbal.state.chat_store import (
     PROCESS_OWNER,
     InMemoryChatSessionStore,
     SessionLeased,
+    SessionNotStored,
     SessionSnapshot,
     SnapshotConflict,
     SqliteChatSessionStore,
@@ -326,7 +327,8 @@ class TestEdges:
         assert wakes == [
             ("recovery", "recovery", "read_only"),
             ("wake", "r", frozenset({"work"})),
-            ("wake", "c", "read_only"),  # a callable cannot be stored: the safe policy comes back
+            # A callable cannot be stored, and "read_only" could be wider than it was: no tools at all.
+            ("wake", "c", frozenset()),
         ]
         await records(restored, "turn_finished", 3, after=after_restore(restored))
         await restored.close()
@@ -736,3 +738,188 @@ class TestRestore:
         await records(restored, "turn_finished", 1, after=restored.log.forgotten_through)
         assert root_outputs(restored)[0].output.collect_text() == "echo: again"
         await restored.close()
+
+
+class FlakyReads(CrashableSqlite):
+    """The next ``fail_reads`` reads of a run fail; the next ``slow_reads`` take ``read_delay`` seconds."""
+
+    fail_reads = 0
+    slow_reads = 0
+    read_delay = 0.0
+
+    @classmethod
+    async def _flaky(cls):
+        if cls.slow_reads > 0:
+            cls.slow_reads -= 1
+            await asyncio.sleep(cls.read_delay)
+        if cls.fail_reads > 0:
+            cls.fail_reads -= 1
+            raise OSError("store unreachable")
+
+    @classmethod
+    async def get(cls, run_context):
+        await cls._flaky()
+        return await super().get(run_context)
+
+    @classmethod
+    async def get_strict(cls, run_context):
+        await cls._flaky()
+        return await super().get_strict(run_context)
+
+
+@pytest.fixture
+def flaky_db(tmp_path):
+    provider = FlakyReads.configured(
+        _path=tmp_path / "timbal.db", crashed=False, fail_reads=0, slow_reads=0, read_delay=0.0
+    )
+    return provider, SqliteChatSessionStore(tmp_path / "timbal.db")
+
+
+class TestRestoreSafety:
+    async def test_a_failed_write_is_reported_by_flush(self, db, monkeypatch):
+        provider, store = db
+
+        async def down(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        async with ChatSession(make_agent(provider, Gate(released=True)), session_store=store) as session:
+            monkeypatch.setattr(store, "save", down)
+            event = session.send("later", mode="collect")  # held by the collect window: no turn takes it yet
+            with pytest.raises(SessionNotStored, match="disk full"):
+                await session.flush()
+            assert session.withdraw(event.id) and event.state == "withdrawn"
+            assert session.pending_messages() == []
+            monkeypatch.undo()
+
+    async def test_a_taken_message_is_stored_before_its_turn_starts(self, db):
+        """Taken from the queue, a message is in no turn yet: a restart then must not lose it."""
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        hold = asyncio.Event()
+        real_pump = session._pump
+
+        async def slow_start(*args, **kwargs):
+            await hold.wait()  # the turn's first event is late
+            return await real_pump(*args, **kwargs)
+
+        session._pump = slow_start
+        first = session.send("first")
+        for _ in range(100):
+            if session._in_flight is not None:
+                break
+            await asyncio.sleep(0.01)
+        session.send("second", mode="followup")
+        await session.flush()
+        snapshot = await store.load(session.id)
+        assert [e["id"] for e in snapshot.in_flight["events"]] == [first.id]
+        await crash(session)
+        hold.set()
+        provider.crashed = False
+
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
+        await records(restored, "turn_finished", 2, after=after_restore(restored))
+        assert [o.output.collect_text() for o in root_outputs(restored)] == ["echo: first", "echo: second"]
+        await restored.close()
+
+    async def test_an_unreadable_dead_turn_fails_the_restore_instead_of_running_it_again(self, flaky_db):
+        provider, store = flaky_db
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        await crash(session)
+        provider.crashed = False
+        stored = await store.load(session.id)
+
+        provider.fail_reads = 1
+        again = Gate(released=True)
+        with pytest.raises(OSError, match="unreachable"):
+            await ChatSession.from_store(make_agent(provider, again), store, session.id)
+        assert (await store.load(session.id)).in_flight == stored.in_flight  # kept for the retry
+        # The failed attempt let go of the lease: the retry gets it, and recovers instead of re-running.
+        restored = await ChatSession.from_store(make_agent(provider, again), store, session.id)
+        (started,) = await records(restored, "turn_started", 1, after=after_restore(restored))
+        assert started["trigger"]["kind"] == "recovery"
+        assert again.calls == 0  # the tool was not run a second time
+        await restored.close()
+
+    async def test_no_turn_starts_before_the_dead_turn_is_settled(self, flaky_db, monkeypatch):
+        provider, store = flaky_db
+        real_recover = ChatSession._recover
+
+        async def work_arrives_meanwhile(self, in_flight):
+            # A background task finishing, or an event, while the dead turn's trace is still being read.
+            self._work_arrived()
+            return await real_recover(self, in_flight)
+
+        monkeypatch.setattr(ChatSession, "_recover", work_arrives_meanwhile)
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        session.send("also this", mode="followup")
+        await crash(session)
+        provider.crashed = False
+
+        # The dead turn's trace (the first read) is slow; anything read after it is not. The queued message must
+        # still wait for the recovery turn.
+        provider.slow_reads, provider.read_delay = 1, 0.3
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
+        started = await records(restored, "turn_started", 2, after=after_restore(restored))
+        await records(restored, "turn_finished", 2, after=after_restore(restored))
+        assert [s["trigger"]["kind"] for s in started] == ["recovery", "user_message"]
+        await restored.close()
+
+    async def test_a_parked_turn_under_a_callable_policy_keeps_its_restrictions(self, db):
+        """The callable allowed charge only: read-only lookup must stay out after a restart."""
+        provider, store = db
+
+        def pays(messages):
+            if messages[-1].role == "tool":
+                return "paid"
+            text = last_user_text(messages)
+            return tool_call("charge", "call-pay") if "pay" in text else f"echo: {text}"
+
+        def lookup() -> str:
+            return "found"
+
+        tools = (Tool(name="lookup", handler=lookup, read_only=True),)
+        session = ChatSession(
+            gated_agent(provider, Charge(), extra_tools=tools, model_handler=pays), session_store=store
+        )
+        session.wake("pay the invoice", key="pay", tool_policy=lambda tool: tool.name == "charge")
+        await records(session, "turn_finished", 1)
+        assert session.parked
+        await session.close(keep=True)
+        assert (await store.load(session.id)).last_options["tool_policy"] == "custom"
+
+        restored = await ChatSession.from_store(
+            gated_agent(provider, Charge(released=True), extra_tools=tools, model_handler=pays), store, session.id
+        )
+        policy = restored._last_options.tool_policy
+        assert policy != "read_only" and policy.paths == {"agent.charge"}
+        await restored.close()
+
+    async def test_the_snapshot_is_read_under_the_lease_and_a_failed_restore_lets_it_go(self, db):
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hi")
+        await records(session, "turn_finished", 1)
+        await session.close(keep=True)
+        calls = []
+        real_acquire, real_load = store.acquire_lease, store.load
+
+        async def acquire(session_id, owner):
+            calls.append("lease")
+            return await real_acquire(session_id, owner)
+
+        async def load(session_id):
+            calls.append("load")
+            return await real_load(session_id)
+
+        store.acquire_lease, store.load = acquire, load
+        other = Agent(name="other", model=TestModel(responses=["x"]), tracing_provider=provider)
+        with pytest.raises(ValueError):
+            await ChatSession.from_store(other, store, session.id)
+        assert calls == ["lease", "load"]
+        await store.acquire_lease(session.id, "elsewhere:1:x")  # the failed attempt holds nothing

@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from ..core.chat_session import SEND_MODES, ChatSession
 from ..state.background import BACKGROUND_LOG_GAPPED
-from ..state.chat_store import ChatSessionStore, SessionLeased, SqliteChatSessionStore
+from ..state.chat_store import ChatSessionStore, SessionLeased, SessionNotStored, SqliteChatSessionStore
 
 logger = structlog.get_logger("timbal.server.chat")
 
@@ -102,23 +102,37 @@ async def _restore(request: Request, session_id: str) -> ChatSession | None:
     store = _store(request)
     if store is None:
         return None
-    state = request.app.state
-    restoring: dict[str, asyncio.Task] = getattr(state, "chat_restoring", None) or {}
-    state.chat_restoring = restoring
-    task = restoring.get(session_id)
-    if task is None:
-        task = restoring[session_id] = asyncio.ensure_future(ChatSession.from_store(_agent(request), store, session_id))
-        task.add_done_callback(lambda _: restoring.pop(session_id, None))
     try:
-        session = await asyncio.shield(task)
+        return await _restore_once(request.app, _agent(request), store, session_id)
     except LookupError:
         return None
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except SessionLeased as e:
         raise HTTPException(status_code=409, detail=f"Chat session {session_id!r} is served by another process.") from e
-    _sessions(request).setdefault(session_id, session)
-    return _sessions(request)[session_id]
+    except Exception as e:
+        # The store or the run's trace could not be read: nothing was taken over, the stored state stays.
+        logger.error("chat_session_restore_failed", session_id=session_id, error=str(e))
+        raise HTTPException(
+            status_code=503, detail=f"Chat session {session_id!r} could not be restored: {e}", headers=_RETRY
+        ) from e
+
+
+async def _restore_once(app: Any, agent: Any, store: ChatSessionStore, session_id: str) -> ChatSession:
+    """``ChatSession.from_store``, one at a time per id (requests and the startup retry share it), into the map."""
+    state = app.state
+    restoring: dict[str, asyncio.Task] = getattr(state, "chat_restoring", None) or {}
+    state.chat_restoring = restoring
+    task = restoring.get(session_id)
+    if task is None:
+        task = restoring[session_id] = asyncio.ensure_future(ChatSession.from_store(agent, store, session_id))
+        task.add_done_callback(lambda _: restoring.pop(session_id, None))
+    session = await asyncio.shield(task)
+    sessions = getattr(state, "chat_sessions", None)
+    if sessions is None:
+        sessions = state.chat_sessions = {}
+    sessions.setdefault(session_id, session)
+    return sessions[session_id]
 
 
 async def restore_chat_sessions(app: Any) -> list[str]:
@@ -135,20 +149,62 @@ async def restore_chat_sessions(app: Any) -> list[str]:
     sessions = getattr(app.state, "chat_sessions", None)
     if sessions is None:
         sessions = app.state.chat_sessions = {}
-    restored = []
+    restored, skipped = [], []
     for session_id in await store.list_ids(with_work=True):
         if session_id in sessions:
             continue
         try:
-            sessions[session_id] = await ChatSession.from_store(runnable, store, session_id)
+            await _restore_once(app, runnable, store, session_id)
             restored.append(session_id)
         except SessionLeased:
-            continue  # another live worker serves it
+            skipped.append(session_id)  # another worker serves it, or a predecessor's lease has not run out yet
+        except (LookupError, ValueError):
+            continue
         except Exception as e:
             logger.error("chat_session_restore_failed", session_id=session_id, error=str(e))
+            skipped.append(session_id)
     if restored:
         logger.info("chat_sessions_restored", count=len(restored))
+    if skipped:
+        # A replacement can start before the old container's lease runs out (and a new hostname, or a reused
+        # pid, makes its holder look alive): try those again, or their queued work waits for a client.
+        app.state.chat_restore_retry = asyncio.get_running_loop().create_task(
+            _retry_restores(app, runnable, store, skipped)
+        )
     return restored
+
+
+async def _retry_restores(app: Any, agent: Any, store: ChatSessionStore, session_ids: list[str]) -> None:
+    """Retry restoring sessions skipped at startup, every third of a lease, while they still have work waiting
+    and nobody here holds them. A live worker that serves one keeps its lease, and clears the work."""
+    waiting = set(session_ids)
+    interval = max(store.lease_ttl_s / 3, 0.05)
+    while waiting:
+        await asyncio.sleep(interval)
+        sessions = getattr(app.state, "chat_sessions", None) or {}
+        for session_id in sorted(waiting):
+            if session_id in sessions:
+                waiting.discard(session_id)
+                continue
+            try:
+                snapshot = await store.load(session_id)
+            except Exception as e:
+                logger.warning("chat_session_restore_retry_failed", session_id=session_id, error=str(e))
+                continue
+            if snapshot is None or not snapshot.has_work():
+                waiting.discard(session_id)
+                continue
+            try:
+                await _restore_once(app, agent, store, session_id)
+            except SessionLeased:
+                continue
+            except (LookupError, ValueError):
+                waiting.discard(session_id)
+            except Exception as e:
+                logger.warning("chat_session_restore_retry_failed", session_id=session_id, error=str(e))
+            else:
+                waiting.discard(session_id)
+                logger.info("chat_session_restored_late", session_id=session_id)
 
 
 def _agent(request: Request) -> Any:
@@ -180,11 +236,36 @@ async def _reap(sessions: dict[str, ChatSession]) -> None:
 async def close_chat_sessions(app: Any) -> None:
     """Close every session (server shutdown). Durable ones are kept for the next process, a turn this cuts
     recovered there."""
+    retry = getattr(app.state, "chat_restore_retry", None)
+    if retry is not None and not retry.done():
+        retry.cancel()
+        with contextlib.suppress(BaseException):
+            await retry
     sessions = getattr(app.state, "chat_sessions", None) or {}
     for session in list(sessions.values()):
         with contextlib.suppress(Exception):
             await session.close(keep=True)
     sessions.clear()
+
+
+_RETRY = {"Retry-After": "1"}
+
+
+async def _stored(session: ChatSession, undo: Any = None) -> None:
+    """``session.flush()`` for a route about to acknowledge a change: a failed write is a ``503``, a session
+    another process took a ``409``. ``undo`` takes the change back if no turn has taken it yet (returns True),
+    so the ``503`` means nothing was accepted and a retry cannot run it twice."""
+    try:
+        await session.flush()
+    except SessionLeased as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except SessionNotStored as e:
+        if undo is not None and undo():
+            raise HTTPException(status_code=503, detail=f"{e}. Nothing was accepted: retry.", headers=_RETRY) from e
+        raise HTTPException(
+            status_code=503,
+            detail=f"{e}. The request was taken (a turn has it), but it would not survive a restart: do not resend.",
+        ) from e
 
 
 def _jsonable(item: Any) -> Any:
@@ -259,9 +340,13 @@ async def create_session(request: Request) -> JSONResponse:
     except Exception as e:
         await session.close()
         raise HTTPException(status_code=503, detail=f"Could not load the run the session continues: {e}") from e
-    sessions[session.id] = session
     session.persist()
-    await session.flush()
+    try:
+        await session.flush()
+    except (SessionNotStored, SessionLeased) as e:
+        await session.close()  # never acknowledged: nothing of it stays
+        raise HTTPException(status_code=503, detail=f"{e}. No session was opened: retry.", headers=_RETRY) from e
+    sessions[session.id] = session
     return _json(session.state(), status_code=201)
 
 
@@ -299,7 +384,7 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    await session.flush()  # durable: the 202 means it survives a restart
+    await _stored(session, lambda: session.withdraw(event.id))  # durable: the 202 means it survives a restart
     return _json(
         {"message": {**event.receipt(), "text": event.text}, "mode": mode or session.busy_mode, "busy": busy},
         status_code=202,
@@ -330,7 +415,7 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    await session.flush()
+    await _stored(session, lambda: session.withdraw(wake_id))
     return _json({"wake_id": wake_id, "busy": session.busy}, status_code=202)
 
 
@@ -338,7 +423,7 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
 async def interrupt_session(request: Request, session_id: str) -> JSONResponse:
     session = await _session(request, session_id)
     interrupted = session.interrupt()
-    await session.flush()
+    await _stored(session)
     return _json({"interrupted": interrupted})
 
 
@@ -355,7 +440,7 @@ async def resume_session(request: Request, session_id: str) -> JSONResponse:
     except (RuntimeError, ValueError) as e:
         # Not waiting for an answer (yet), or an id already answered differently.
         raise HTTPException(status_code=409, detail=str(e)) from e
-    await session.flush()
+    await _stored(session, lambda: session.withdraw_answers(values))
     return _json({"resumed": True}, status_code=202)
 
 

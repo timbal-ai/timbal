@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from timbal.core.chat_session import ChatSession
 from timbal.server.chat import session_store_for
 from timbal.server.http import create_app
-from timbal.state.chat_store import PROCESS_OWNER, SqliteChatSessionStore
+from timbal.state.chat_store import PROCESS_OWNER, SessionSnapshot, SqliteChatSessionStore
 
 AGENT = textwrap.dedent(
     """
@@ -163,6 +163,55 @@ def test_a_session_still_closing_is_restored_only_once_its_close_is_done(client,
     assert client.get(f"/chat/sessions/{session_id}").status_code == 200
     assert order == ["closed", "restore"]
     assert client.app.state.chat_sessions[session_id] is not session
+
+
+def test_a_message_that_could_not_be_stored_is_a_503_and_not_kept(client, monkeypatch):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+
+    async def down(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(client.app.state.chat_store, "save", down)
+    # collect: no turn takes it before the route answers, so the route can take it back.
+    response = client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi", "mode": "collect"})
+    assert response.status_code == 503 and response.headers["retry-after"] == "1"
+    assert "Nothing was accepted" in response.json()["detail"]
+    monkeypatch.undo()
+    state = client.get(f"/chat/sessions/{session_id}").json()
+    assert state["pending"] == []
+    time.sleep(1.3)  # past the collect window: still no turn
+    assert client.get(f"/chat/sessions/{session_id}").json()["turns"] == 0
+
+
+def test_startup_retries_a_session_whose_old_lease_had_not_run_out(tmp_path, monkeypatch):
+    """A replacement starting before its predecessor's lease expires restores the session once it does."""
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    monkeypatch.setattr(SqliteChatSessionStore, "lease_ttl_s", 0.3)
+    store = SqliteChatSessionStore(tmp_path / "timbal.db")
+    message = {
+        "id": "m1",
+        "text": "hi",
+        "source": "user",
+        "lane": "later",
+        "mode": "followup",
+        "posted_at": time.time(),
+    }
+
+    async def seed():
+        await store.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None)
+        await store.acquire_lease("s1", "old-host:1:x")  # another host's: alive until it expires
+
+    asyncio.run(seed())
+    with TestClient(create_app()) as client:
+        sessions = client.app.state.chat_sessions
+        assert "s1" not in sessions  # skipped at startup: the lease was still live
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (sessions.get("s1") and sessions["s1"].turns == 1):
+            time.sleep(0.05)
+        assert sessions.get("s1") is not None and sessions["s1"].turns == 1
 
 
 def test_delete_removes_it_for_good(client):

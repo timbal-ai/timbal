@@ -24,7 +24,14 @@ from ..state.background import (
     forget_idle_background_store,
     store_for_run,
 )
-from ..state.chat_store import PROCESS_OWNER, ChatSessionStore, SessionLeased, SessionSnapshot, SnapshotConflict
+from ..state.chat_store import (
+    PROCESS_OWNER,
+    ChatSessionStore,
+    SessionLeased,
+    SessionNotStored,
+    SessionSnapshot,
+    SnapshotConflict,
+)
 from ..types.approval import Cancel
 from ..types.content import TextContent
 from ..types.events import OutputEvent
@@ -148,16 +155,23 @@ def _with_note(prompt: Message, note: str) -> Message:
 
 
 def _store_policy(policy: Any) -> Any:
-    """A tool policy as a snapshot holds it. A callable cannot be stored: it comes back ``"read_only"``."""
+    """A tool policy as a snapshot holds it. A callable cannot be stored: it is ``"custom"`` (see _load_policy)."""
     if policy is None or policy == "read_only":
         return policy
     if callable(policy):
-        logger.warning("chat_session_policy_not_durable", detail="a callable tool_policy restores as 'read_only'")
-        return "read_only"
+        return "custom"
     return sorted(policy)
 
 
-def _load_policy(stored: Any) -> Any:
+def _load_policy(stored: Any, trace: Any = None) -> Any:
+    """A stored policy back. ``"custom"`` (a callable) never comes back wider than it was: with the trace of a
+    run it governed, the tools its agents were offered there (by path); without one, no tools at all. Not
+    ``"read_only"``: the callable may have denied read-only tools too."""
+    if stored == "custom":
+        if trace is None:
+            logger.warning("chat_session_policy_restored_empty", detail="a callable tool_policy restores with no tools")
+            return frozenset()
+        return restore_tool_policy("custom", trace)
     return frozenset(stored) if isinstance(stored, list) else stored
 
 
@@ -392,6 +406,10 @@ class ChatSession:
         self._close_done = asyncio.Event()
         self._keep = False
         self._in_flight: dict[str, Any] | None = None
+        # The latest failed snapshot write (cleared by the next good one): flush() reports it.
+        self._save_error: Exception | None = None
+        # from_store() is still settling the stored state: no turn may start before it is done.
+        self._hold_worker = False
 
     # -- Public API -------------------------------------------------------------
 
@@ -488,6 +506,32 @@ class ChatSession:
             self._ensure_worker()
             return True
         return self._interrupt_now()
+
+    def withdraw(self, work_id: str) -> bool:
+        """Take back a message (event id) or wake (wake id) no turn has taken yet; False once one has.
+
+        For a caller that could not get it stored (:meth:`flush` raised): withdrawn, a retry cannot run it twice.
+        """
+        withdrawn = self._store.withdraw_event(work_id)
+        if not withdrawn:
+            wake = next((wake for wake in self._wakes if wake.id == work_id), None)
+            if wake is not None:
+                self._wakes.remove(wake)
+                self._record("wake_withdrawn", wake_id=wake.id)
+                withdrawn = True
+        if withdrawn:
+            self._persist()
+        return withdrawn
+
+    def withdraw_answers(self, values: dict[str, Any]) -> bool:
+        """Take back answers sent with :meth:`resume` that no turn has taken yet; False once one has."""
+        queued = self._resume
+        if queued is None or any(queued.get(key) != value for key, value in values.items()):
+            return False
+        rest = {key: value for key, value in queued.items() if key not in values}
+        self._resume = rest or None
+        self._persist()
+        return True
 
     def _restore_pending(self) -> bool:
         return self._restore_from is not None or (self._restoring is not None and not self._restoring.done())
@@ -637,35 +681,58 @@ class ChatSession:
         Raises LookupError (no such session), ValueError (another agent's) or
         :class:`~timbal.state.chat_store.SessionLeased` (another live process serves it).
         """
-        snapshot = await session_store.load(session_id)
-        if snapshot is None or snapshot.closed:
-            raise LookupError(f"No stored chat session {session_id!r}.")
-        if snapshot.agent != agent.name:
-            raise ValueError(f"Chat session {session_id!r} belongs to agent {snapshot.agent!r}, not {agent.name!r}.")
+        # The lease first, then the row: read before it, a previous owner could still write (and let go)
+        # in between, and this process would serve an older state than the store holds.
         await session_store.acquire_lease(session_id, PROCESS_OWNER)
-        config = {**snapshot.config, **kwargs}
-        session = cls(agent, parent_id=snapshot.head, session_id=session_id, session_store=session_store, **config)
-        session._version, session._leased = snapshot.version, True
-        session.turns, session.last_status, session._parked = snapshot.turns, snapshot.last_status, snapshot.parked
-        session._last_prompt = _load_prompt(snapshot.last_prompt)
-        session._last_options = _TurnOptions(
-            tool_policy=_load_policy(snapshot.last_options.get("tool_policy")),
-            silence=bool(snapshot.last_options.get("silence")),
-            # A parked wake or recovery turn is resumed without steering, as it ran.
-            steer=snapshot.last_options.get("steer", True) is not False,
-        )
-        session.log.restart_at(snapshot.log_cursor + _LOG_RESTART_GAP)
-        session._restore_events(snapshot.pending)
-        session._wakes = [_Wake.from_dict(data) for data in snapshot.wakes]
-        session._resume = _load_resume(snapshot.resume)
-        recovered = None
-        if snapshot.in_flight is not None:
-            recovered = await session._recover(snapshot.in_flight)
-        if session._parked and session._last_context is None:
-            session._last_context = await session._load_run(session.head)
+        session: ChatSession | None = None
+        try:
+            snapshot = await session_store.load(session_id)
+            if snapshot is None or snapshot.closed:
+                raise LookupError(f"No stored chat session {session_id!r}.")
+            if snapshot.agent != agent.name:
+                raise ValueError(
+                    f"Chat session {session_id!r} belongs to agent {snapshot.agent!r}, not {agent.name!r}."
+                )
+            config = {**snapshot.config, **kwargs}
+            session = cls(agent, parent_id=snapshot.head, session_id=session_id, session_store=session_store, **config)
+            # Queuing the stored events would start the worker: not before the dead turn is settled (its recovery
+            # goes first, and a turn finishing meanwhile would store a snapshot without it).
+            session._hold_worker = True
+            session._version, session._leased = snapshot.version, True
+            session.turns, session.last_status, session._parked = snapshot.turns, snapshot.last_status, snapshot.parked
+            session._last_prompt = _load_prompt(snapshot.last_prompt)
+            session.log.restart_at(snapshot.log_cursor + _LOG_RESTART_GAP)
+            session._wakes = [_Wake.from_dict(data) for data in snapshot.wakes]
+            session._resume = _load_resume(snapshot.resume)
+            recovered = None
+            if snapshot.in_flight is not None:
+                # First: the messages a dead turn took were sent before anything still pending, and go back
+                # ahead of it.
+                recovered = await session._recover(snapshot.in_flight)
+            session._restore_events(snapshot.pending)
+            if session._parked and session._last_context is None:
+                session._last_context = await session._load_run(session.head)
+            parked_trace = session._last_context._trace if session._parked and session._last_context else None
+            session._last_options = _TurnOptions(
+                # A callable's parked turn resumes with the tools its agents were offered (by path).
+                tool_policy=_load_policy(snapshot.last_options.get("tool_policy"), parked_trace),
+                silence=bool(snapshot.last_options.get("silence")),
+                # A parked wake or recovery turn is resumed without steering, as it ran.
+                steer=snapshot.last_options.get("steer", True) is not False,
+            )
+        except BaseException:
+            # Nothing was written: the stored state stays as it was, for the next attempt (or another process).
+            if session is not None:
+                session._lost = True  # stores nothing while it lets go of the task store
+                with contextlib.suppress(BaseException):
+                    await session.close(keep=True)
+            with contextlib.suppress(Exception):
+                await session_store.release_lease(session_id, PROCESS_OWNER)
+            raise
         session._record("restored", head=session.head, recovered=recovered, pending=len(snapshot.pending))
         session._persist()
         session._lease_task = asyncio.get_running_loop().create_task(session._renew_lease())
+        session._hold_worker = False
         if session._wakes or session._resume is not None or session._store.pending_events():
             session._work.set()
             session._ensure_worker()
@@ -736,6 +803,8 @@ class ChatSession:
     # -- Turns ------------------------------------------------------------------
 
     def _ensure_worker(self) -> None:
+        if self._hold_worker:
+            return
         if self._worker is None or self._worker.done():
             self._worker = asyncio.get_running_loop().create_task(self._serve())
 
@@ -954,6 +1023,11 @@ class ChatSession:
             if resume is not None:
                 in_flight["resume"] = _dump_resume(resume)
                 in_flight["approved"] = self._approved_calls(resume)
+            # Stored from now, not from the turn's first event: what it took (messages, a wake, answers) is no
+            # longer pending, and a restart before that event would lose it. A turn that never started is put
+            # back by recovery (nothing of it stored), or here, below, if this process sees it end first.
+            self._in_flight = in_flight
+            self._persist()
             turn = asyncio.get_running_loop().create_task(self._pump(context, kwargs, followup, trigger, in_flight))
             self._turn, self._turn_context = turn, context
             try:
@@ -1078,8 +1152,23 @@ class ChatSession:
     async def flush(self) -> None:
         """Wait until the session's latest state is stored (at once when it is not durable).
 
-        The HTTP routes call it before answering: a message's ``202`` means it survives a restart.
+        The HTTP routes call it before answering: a message's ``202`` means it survives a restart. Raises
+        :class:`~timbal.state.chat_store.SessionNotStored` when the store failed (once more after a retry here),
+        and :class:`~timbal.state.chat_store.SessionLeased` when another process took the session: either
+        way the latest change is not stored.
         """
+        await self._saves_done()
+        if self._session_store is None:
+            return
+        if not self._lost and self._dirty:
+            self._persist()  # the write that failed, once more
+            await self._saves_done()
+        if self._lost:
+            raise SessionLeased(f"Chat session {self.id!r} is served by another process now.")
+        if self._dirty:
+            raise SessionNotStored(f"Chat session {self.id!r} could not be stored: {self._save_error}")
+
+    async def _saves_done(self) -> None:
         while self._saver is not None and not self._saver.done():
             await asyncio.shield(self._saver)
 
@@ -1141,10 +1230,11 @@ class ChatSession:
                 self._lose(str(e))
                 return
             except Exception as e:
-                # Kept dirty: the next change retries. A route's flush() returns: it does not hang on a store.
-                self._dirty = True
+                # Kept dirty: the next change (or flush()) retries; flush() reports it, and does not hang.
+                self._dirty, self._save_error = True, e
                 logger.error("chat_session_save_failed", session_id=self.id, error=str(e))
                 return
+            self._save_error = None
             if not self._leased and not self.closed:
                 try:
                     await store.acquire_lease(self.id, PROCESS_OWNER)
@@ -1186,7 +1276,12 @@ class ChatSession:
         lease, self._lease_task = self._lease_task, None
         if lease is not None and not lease.done() and lease is not asyncio.current_task():
             lease.cancel()
-        await self.flush()
+        try:
+            await self.flush()
+        except SessionNotStored as e:
+            logger.error("chat_session_close_not_stored", session_id=self.id, error=str(e))
+        except SessionLeased:
+            pass
         if self._lost:
             return
         try:
@@ -1257,7 +1352,12 @@ class ChatSession:
         if run_id is None:
             return None
         lookup = RunContext(parent_id=run_id, tracing_provider=self._agent.tracing_provider)
-        trace = await lookup._get_parent_trace()
+        provider = lookup._tracing_provider
+        if provider is None:
+            return None
+        # Strict: an unreadable run raises (from_store fails, the snapshot stays for a retry). Taken for a
+        # missing one, a dead turn that ran tools would have its input queued and run again.
+        trace = await provider.get_strict(lookup)
         if trace is None or not trace.as_records():
             return None
         loaded = RunContext(id=run_id, parent_id=trace.parent_id, tracing_provider=self._agent.tracing_provider)

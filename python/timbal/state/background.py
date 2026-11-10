@@ -659,7 +659,7 @@ def format_user_message(events: Sequence[SessionEvent], *, steered: bool = False
 MAX_SESSION_EVENT_CHARS = 4_000
 
 SessionEventSource = Literal["app", "client", "user"]
-SessionEventState = Literal["pending", "delivered", "superseded"]
+SessionEventState = Literal["pending", "delivered", "superseded", "withdrawn"]
 SessionEventLane = Literal["next", "later"]
 """When a session event reaches a turn. ``"later"``: at the start of the next one.
 ``"next"``: the running turn takes it after its current tool batch, when it steers
@@ -677,7 +677,8 @@ class SessionEvent:
     ``state`` leaves ``"pending"`` once: ``"delivered"`` when a turn takes the
     event into its memory (``run_id`` names that run once it has started), or
     ``"superseded"`` when a later event with the same ``key`` replaces it while
-    still pending. Delivered means the model got it, not that the user saw or
+    still pending, or ``"withdrawn"`` when its poster took it back before any
+    turn did (:meth:`BackgroundTaskStore.withdraw_event`). Delivered means the model got it, not that the user saw or
     heard anything.
 
     ``announce`` is the event's own policy (None: the receiving channel's
@@ -1539,6 +1540,15 @@ class BackgroundTaskStore:
     def pending_events(self) -> list[SessionEvent]:
         """Peek the events no turn has taken yet."""
         return list(self._events)
+
+    def withdraw_event(self, event_id: str) -> bool:
+        """Take back an event no turn has taken yet (settled ``"withdrawn"``). False once one has."""
+        for event in self._events:
+            if event.id == event_id:
+                self._events.remove(event)
+                event._settle("withdrawn")
+                return True
+        return False
 
     def restore_event(self, data: dict[str, Any]) -> SessionEvent:
         """Queue an event saved with :meth:`SessionEvent.to_dict` (a durable session coming back after a
