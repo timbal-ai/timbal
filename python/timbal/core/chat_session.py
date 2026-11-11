@@ -229,7 +229,7 @@ def _was_cut(status: Any) -> bool:
 
 def _ended_by_itself(turn: asyncio.Task) -> bool:
     """A turn's task that produced its run's outcome, and not because it was cut."""
-    if turn.cancelled() or turn.exception() is not None:
+    if not turn.done() or turn.cancelled() or turn.exception() is not None:
         return False
     output = turn.result()
     return output is not None and not _was_cut(output.status)
@@ -1233,8 +1233,12 @@ class ChatSession:
                 stopping = True
                 if not turn.done():
                     turn.cancel()
-                    with contextlib.suppress(BaseException):
-                        await turn
+                    while not turn.done():
+                        # Until it is over, whatever cancels this worker again meanwhile: what follows reads
+                        # its outcome. wait(), not `await turn`: that would pass a second cancellation on to
+                        # the turn and cut its cleanup short (and raise the turn's own error here).
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await asyncio.wait({turn})
                     if not _ended_by_itself(turn):
                         raise
         finally:

@@ -737,6 +737,40 @@ class TestRestore:
         assert finished["status"]["code"] == "success" and charge.gate.calls == 1
         await restored.close()
 
+    async def test_a_second_cancellation_of_the_worker_does_not_cut_the_turns_cleanup(self, db):
+        """Stopping waits for the turn to be over, also when something cancels the worker again meanwhile (a
+        second close, the loop shutting down): the turn's own cleanup is not interrupted, and what is read
+        afterwards is the outcome of a task that has ended."""
+        provider, store = db
+        entered, cleaned = asyncio.Event(), []
+
+        async def work() -> str:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.2)  # letting go of what it held takes a moment
+                cleaned.append("done")
+                raise
+            return "worked"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="work", handler=work)],
+            tracing_provider=provider,
+        )
+        session = ChatSession(agent, session_store=store)
+        session.send("start")
+        await asyncio.wait_for(entered.wait(), 3)
+        worker = session._worker
+        closing = asyncio.get_running_loop().create_task(session.close(keep=True))
+        await asyncio.sleep(0.05)
+        worker.cancel()  # again, while the turn is still cleaning up
+        await closing
+        assert cleaned == ["done"] and not session.busy
+        assert (await store.load(session.id)).in_flight["cut"] == "shutdown"  # cut by the close: recovered later
+
     async def test_a_run_that_ended_by_itself_is_adopted_even_if_marked_cut(self, db):
         provider, store = db
         charge = Charge(released=True)
