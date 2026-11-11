@@ -62,7 +62,7 @@ agent = Agent(
 
 - **`commit_strategy`**: `"vad"` (the default: Scribe commits after `vad_silence_threshold_secs` of silence), `"manual"`, or `"turn_prediction"` (Scribe v3 Live only). See [Scribe turn prediction](#scribe-turn-prediction) before choosing the last one.
 - **`vad_silence_threshold_secs`**: 1.2 by default here. Scribe accepts 0.192 to 3.0.
-- **`turn_commit_threshold`**: off by default. Commits from Scribe v3 Live's turn probability at a score you choose. See [Scribe turn prediction](#scribe-turn-prediction).
+- **`turn_commit_threshold`**: 0.75 on Scribe v3 Live. Commits when Scribe's turn probability reaches that score, without waiting out the silence. `0` or `None` turns it off. See [Scribe turn prediction](#scribe-turn-prediction).
 - **`diarize`**: Scribe v3 Live only. Each committed transcript is followed by a `TranscriptEvent` of type `diarized`, whose `speakers` list holds one `SpeakerSegment` (`speaker_id`, `text`, `start`, `end`) per run of words from the same speaker. `VoiceSession` ignores these events: they never start a turn and are not sent to the client. Read them from `stt.events()` in a [custom pipeline](/voice/custom-pipelines).
 - **`secondary_languages`**: other languages the caller may use, next to `language`.
 
@@ -76,14 +76,16 @@ Scribe v3 Live scores each interim transcript with the probability that the call
 
 `commit_strategy="turn_prediction"` has Scribe commit when that score reaches about 0.9. The score is not adjustable. `vad_silence_threshold_secs` still applies as a ceiling: Scribe commits at that much silence whatever the score. At the default 1.2 seconds it behaves like `"vad"`, except that a finished question or sentence commits about half a second sooner. Raising the ceiling keeps a mid-sentence pause in one piece, and makes short answers slow: the score climbs slowly after "No." or "Okay.", which then take two to three seconds to commit. With the session's local turn detector, a ceiling of 2 or 3 seconds also let the session's commit and Scribe's collide. Keep the ceiling at 1.2 seconds when you use it.
 
-`turn_commit_threshold` applies your own score instead. The adapter commits when a partial reaches it, and Scribe's silence ceiling stays as the backstop. It needs `commit_strategy` `"vad"` or `"manual"`: with `"turn_prediction"` the two commits collide, and the agent fails to load.
+`turn_commit_threshold` applies a score of ours instead, and it is what a session uses by default. The adapter commits when a partial reaches it, and Scribe's silence ceiling stays as the backstop. The default is 0.75 on Scribe v3 Live with `commit_strategy="vad"`. `scribe_v2_realtime` sends no score, so nothing changes there. With `"manual"` it is off unless you set it, and with `"turn_prediction"` it is off: the two commits would collide, and an agent that sets both fails to load.
 
 ```python
 voice_config={
     "stt_provider": "elevenlabs",
-    "stt_extra": {"turn_commit_threshold": 0.75},
+    "stt_extra": {"turn_commit_threshold": 0},  # off: commit on Scribe's VAD silence only
 }
 ```
+
+In the replay harness, with the local turn detector, the default took median dead air from 1.36 to 1.02 seconds and passed every run, where the same sessions without it lost 7 of 156. That is two batches of synthetic audio, not a measurement on your calls.
 
 `turn_commit_partials` (default 1) asks for that many consecutive partials at or above the score with the same words. At 0.75 a caller is rarely cut off mid-sentence. At 0.6 it happens often enough to hear. An utterance Scribe scores low, such as a bare number, waits for the silence ceiling, so a higher ceiling makes those turns slower. Measurements are in `benchmarks/voice/README.md`.
 

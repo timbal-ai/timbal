@@ -53,7 +53,10 @@ def test_scribe_turn_commit_threshold_is_checked_at_config_time() -> None:
             stt_provider="elevenlabs",
             stt_extra={"turn_commit_threshold": 0.75, "commit_strategy": "turn_prediction"},
         )
-    for bad in (0, 1.5, "0.75", True):
+    assert VoiceConfig(stt_provider="elevenlabs", stt_extra={"turn_commit_threshold": 0}).stt_extra["turn_commit_threshold"] == 0
+    off = {"turn_commit_threshold": 0, "commit_strategy": "turn_prediction"}
+    assert VoiceConfig(stt_provider="elevenlabs", stt_extra=off).stt_extra == off
+    for bad in (-0.1, 1.5, "0.75", True):
         with pytest.raises(ValueError, match="between 0 and 1"):
             VoiceConfig(stt_provider="elevenlabs", stt_extra={"turn_commit_threshold": bad})
 

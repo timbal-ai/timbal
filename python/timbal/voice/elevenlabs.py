@@ -77,6 +77,11 @@ _DEFAULT_STT_MODEL = "scribe_v3_live"
 # Scribe needs 0.3s of uncommitted audio. The margin covers the time its own
 # commit takes to reach us.
 _MIN_COMMIT_GAP_SECS = 0.4
+# Commit when Scribe v3 Live's turn probability reaches this, ahead of its VAD
+# silence. Measured in benchmarks/voice (README, "Scribe v3 Live scores the
+# turn"): 0.75 cut a caller off mid-speech in 2 of 32 clip runs, 0.6 in 7.
+DEFAULT_TURN_COMMIT_THRESHOLD = 0.75
+_UNSET: Any = object()
 _DEFAULT_TTS_MODEL = "eleven_v4_turbo"
 
 
@@ -213,8 +218,11 @@ class ElevenLabsRealtimeSTT(SpeechToText):
     * ``secondary_languages``, ``include_timestamps``, ``no_verbatim``, ...
 
     v3 Live partials carry the provider's end-of-turn probability, passed on
-    as ``TranscriptEvent.confidence``. Realtime Scribe takes at most 50
-    ``keyterms`` of 20 characters each. The surplus is dropped with a warning.
+    as ``TranscriptEvent.confidence``. Under ``vad`` the adapter also commits
+    when that score reaches ``turn_commit_threshold`` (0.75 by default, ``None``
+    or 0 for off), without waiting out the silence. Realtime Scribe takes at
+    most 50 ``keyterms`` of 20 characters each. The surplus is dropped with a
+    warning.
     """
 
     def __init__(self, api_key: str | SecretStr | None = None) -> None:
@@ -248,9 +256,16 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         extra = dict(config.extra)
         host = str(extra.pop("stt_host", "api.elevenlabs.io"))
         commit_strategy = str(extra.pop("commit_strategy", "vad"))
-        # Ours, not Scribe's: never sent on the wire.
-        threshold = extra.pop("turn_commit_threshold", None)
-        self._turn_commit_threshold = float(threshold) if threshold is not None else None
+        model = config.model or _DEFAULT_STT_MODEL
+        # Ours, not Scribe's: never sent on the wire. Unset means the default,
+        # which is on for Scribe v3 Live under ``vad`` (v2 sends no score, and
+        # a ``manual`` caller asked to own every commit). ``None`` or 0 is off.
+        threshold = extra.pop("turn_commit_threshold", _UNSET)
+        explicit = threshold is not _UNSET
+        if not explicit:
+            on_by_default = model.startswith("scribe_v3") and commit_strategy == "vad"
+            threshold = DEFAULT_TURN_COMMIT_THRESHOLD if on_by_default else None
+        self._turn_commit_threshold = float(threshold) if threshold else None
         self._turn_commit_partials = max(1, int(extra.pop("turn_commit_partials", 1)))
         self._turn_commit_hits, self._turn_commit_text, self._turn_commit_sent = 0, "", False
         self._partial_text, self._partial_text_since = "", 0.0
@@ -265,7 +280,7 @@ class ElevenLabsRealtimeSTT(SpeechToText):
             self._turn_commit_threshold = None
 
         params: dict[str, Any] = {
-            "model_id": config.model or _DEFAULT_STT_MODEL,
+            "model_id": model,
             "audio_format": extra.pop("audio_format", None) or _stt_audio_format(config),
             "commit_strategy": commit_strategy,
         }
@@ -365,7 +380,7 @@ class ElevenLabsRealtimeSTT(SpeechToText):
 
         ``turn_prediction`` commits at a fixed score of about 0.9, which a
         short answer ("No.", "Okay.") takes two to three seconds of silence to
-        reach. ``turn_commit_threshold`` (``stt_extra``, off by default)
+        reach. ``turn_commit_threshold`` (``stt_extra``, 0.75 on v3 Live)
         commits at a lower score, and ``turn_commit_partials`` asks for that
         many consecutive partials at or above it with the same words, so one
         spike at a sentence boundary mid-speech does not cut the caller off.

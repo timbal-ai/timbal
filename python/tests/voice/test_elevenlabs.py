@@ -281,7 +281,7 @@ class TestScribeCommitGap:
 
     async def test_a_later_commit_is_sent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _, stt = await _commits_sent(monkeypatch, [{"message_type": "committed_transcript", "text": "Yes."}], {})
-        stt._committed_at -= 1.0  # a second of audio since
+        stt._committed_at -= 2.0  # two seconds of audio since
         await stt.commit()
         assert sum(json.loads(frame)["commit"] for frame in stt._ws.sent) == 1
 
@@ -306,9 +306,34 @@ class TestScribeTurnCommitThreshold:
         assert sent == 0
         assert stt._turn_commit_threshold is None
 
-    async def test_off_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        sent, _ = await _commits_sent(monkeypatch, [_partial("Yes.", 0.99)], {})
-        assert sent == 0
+    async def test_on_at_075_for_v3_live_under_vad_and_nowhere_else(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def sent(config: AudioInputConfig, probability: float) -> int:
+            ws = _ScriptedWs([_partial("Yes.", probability)])
+
+            async def fake_connect(_uri: str, **_kw: Any) -> _ScriptedWs:
+                return ws
+
+            monkeypatch.setattr(el, "ws_connect", fake_connect)
+            stt = el.ElevenLabsRealtimeSTT(api_key="test-key")
+            await stt.connect(config)
+            async for _ in stt.events():
+                pass
+            return sum(json.loads(frame)["commit"] for frame in ws.sent)
+
+        assert el.DEFAULT_TURN_COMMIT_THRESHOLD == 0.75
+        assert await sent(AudioInputConfig(), 0.75) == 1
+        assert await sent(AudioInputConfig(), 0.74) == 0
+        assert await sent(AudioInputConfig(model="scribe_v3_live", extra={"commit_strategy": "vad"}), 0.8) == 1
+        # v2 sends no score. If it ever did, the default is still v3 Live's.
+        assert await sent(AudioInputConfig(model="scribe_v2_realtime"), 0.99) == 0
+        # A manual caller owns every commit. Scribe's own prediction would collide.
+        assert await sent(AudioInputConfig(extra={"commit_strategy": "manual"}), 0.99) == 0
+        assert await sent(AudioInputConfig(extra={"commit_strategy": "turn_prediction"}), 0.99) == 0
+        for off in (None, 0, 0.0):
+            assert await sent(AudioInputConfig(extra={"turn_commit_threshold": off}), 0.99) == 0
+        # Set explicitly, it works on manual too.
+        manual = AudioInputConfig(extra={"commit_strategy": "manual", "turn_commit_threshold": 0.9})
+        assert await sent(manual, 0.95) == 1
 
     async def test_one_commit_per_utterance_once_the_score_is_reached(self, monkeypatch: pytest.MonkeyPatch) -> None:
         frames = [

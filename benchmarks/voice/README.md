@@ -1472,7 +1472,7 @@ accepted:
 
 | detector | Scribe setting | batches | passed | throttled | dead air p50 / mean / p95 |
 |---|---|---|---|---|---|
-| `local` | `vad`, ceiling 1.2 (shipped) | 2 | 149/156 | 0 | 1.36 / 1.49 / 2.88 s |
+| `local` | `vad`, ceiling 1.2, no threshold | 2 | 149/156 | 0 | 1.36 / 1.49 / 2.88 s |
 | `local` | `turn_prediction`, ceiling 1.2 | 1 | 75/78 | 0 | 1.30 / 1.49 / 2.81 s |
 | `local` | `turn_prediction`, ceiling 3.0 | 2 | 132/156 | 5 | 1.52 / 1.76 / 4.16 s |
 | `local` | `vad`, ceiling 3.0 | 1 | 67/78 | 0 | 1.60 / 1.86 / 4.21 s |
@@ -1484,9 +1484,9 @@ accepted:
 | `provider` | threshold 0.75, ceiling 2.0 | 1 | 73/74 | 0 | 1.17 / 1.37 / 2.36 s |
 | `provider` | threshold 0.75, ceiling 3.0 | 1 | 74/74 | 0 | 1.17 / 1.47 / 3.13 s |
 
-With the `local` detector the threshold belongs at the shipped ceiling: a third
-of a second less median dead air, a better tail, and the seven runs the shipped
-setting loses all pass. The `vad`, ceiling 3.0 row is the control that says the
+With the `local` detector the threshold belongs at the 1.2 second ceiling: a
+third of a second less median dead air, a better tail, and the seven runs lost
+without it all pass. The `vad`, ceiling 3.0 row is the control that says the
 gain is the score and not the longer ceiling. Under `provider`, where nothing of
 ours can merge a pause, the threshold with a 3 second ceiling passes every
 scenario, including the pause splits that are known failures for that detector,
@@ -1503,11 +1503,20 @@ model across sessions, and the audio is studio-clean TTS. The collision is
 narrowed, not closed: the adapter now refuses a commit within 0.4 seconds of the
 previous one, which took plain `turn_prediction` at a 3 second ceiling from 4
 throttled calls in a batch to 1. A commit that crosses Scribe's on the wire is
-still throttled. The threshold stays opt-in.
+still throttled.
+
+The adapter now ships the best row: 0.75 is the default for Scribe v3 Live under
+`vad`, at the 1.2 second ceiling. That is a default set on two batches, so the
+first thing to do with real call audio is to run both rows again. A cell on
+`scribe_v3_live` therefore has the threshold unless it says otherwise:
 
 ```bash
+# the default
 uv run python benchmarks/voice/cli.py --stt elevenlabs --detector local --repeat 2 \
-    --stt-param model=scribe_v3_live --stt-param turn_commit_threshold=0.75
+    --stt-param model=scribe_v3_live
+# the "no threshold" row
+uv run python benchmarks/voice/cli.py --stt elevenlabs --detector local --repeat 2 \
+    --stt-param model=scribe_v3_live --stt-param turn_commit_threshold=0
 ```
 
 ## Running
