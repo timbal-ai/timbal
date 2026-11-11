@@ -2517,6 +2517,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         ],
                                     }
                                 )
+                                if run_context._before_tool_dispatch is not None:
+                                    await run_context._before_tool_dispatch(
+                                        self._path, [(tool_use_id, tool.name, tool_input)]
+                                    )
                                 # Run the tool (raw stream — see _multiplex_tools;
                                 # same pending-cancel detection as the fast path)
                                 _cmd_task = asyncio.current_task()
@@ -2561,6 +2565,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         consecutive_denials = await self._resumed_denials(run_context)
                     tool_calls = pending_tool_uses
                     first_pending: OutputEvent | None = None
+                    if run_context._before_tool_dispatch is not None:
+                        await run_context._before_tool_dispatch(
+                            self._path, [(call.id, call.name, call.input) for call in tool_calls]
+                        )
                     active_events = self._multiplex_tools(tools, tool_calls, cut=cut)
                     async for tool_call, event in active_events:
                         await _process_tool_event(event, tool_call.id, append_to_messages=True)
@@ -3014,6 +3022,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if called_unloaded:
                     await self._load_tools(called_unloaded, current_span)
                 first_pending: OutputEvent | None = None
+                if run_context._before_tool_dispatch is not None:
+                    await run_context._before_tool_dispatch(
+                        self._path, [(call.id, call.name, call.input) for call in tool_calls]
+                    )
                 active_events = self._multiplex_tools(tools, tool_calls, cut=cut)
                 async for tool_call, event in active_events:
                     await _process_tool_event(event, tool_call.id, append_to_messages=True)

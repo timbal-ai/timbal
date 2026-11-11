@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import functools
 import json
 import math
 import os
@@ -34,8 +35,8 @@ from ..state.chat_store import (
     SnapshotConflict,
 )
 from ..types.approval import Cancel
-from ..types.content import TextContent, ToolUseContent
-from ..types.events import OutputEvent, StartEvent
+from ..types.content import TextContent
+from ..types.events import OutputEvent
 from ..types.message import RUNTIME_SOURCE, Message
 from .session_scheduler import Followup, SessionScheduler, is_parked, user_batch
 from .tool_policy import ToolPaths as _ToolPaths  # noqa: F401 — re-exported for callers and tests
@@ -234,11 +235,13 @@ def _outcome(span: Any) -> str:
     return _brief(span.error.get("message") if isinstance(span.error, dict) else span.output)
 
 
-def _tool_calls(context: RunContext) -> tuple[list[str], list[str]]:
+def _tool_calls(context: RunContext, dispatched: list[dict[str, Any]] | tuple = ()) -> tuple[list[str], list[str]]:
     """A dead turn's tool calls: completed (an outcome stored) and unconfirmed (asked for or started, no outcome).
 
     The model's requests come from its stored calls' outputs as well as the agent's memory: a save can land
-    between a model call ending and its tool spans (or the memory) being stored.
+    between a model call ending and its tool spans (or the memory) being stored. ``dispatched``: the calls the
+    session recorded before the agent ran them (``in_flight.dispatched``). One the trace does not show at all
+    (saved before that step, or not since) is unconfirmed too: it may have run.
     """
     root = context.root_span()
     llm_path = f"{root.path}.llm"
@@ -249,6 +252,9 @@ def _tool_calls(context: RunContext) -> tuple[list[str], list[str]]:
         for block in _blocks(message, "tool_use"):
             if block.get("id"):
                 requests.setdefault(block["id"], (block.get("name") or "?", block.get("input")))
+    for call in dispatched:
+        if call.get("id"):
+            requests.setdefault(call["id"], (call.get("name") or "?", call.get("input")))
     results = {block.get("id"): block for message in memory for block in _blocks(message, "tool_result")}
     spans: dict[str, list[Any]] = {}
     for span in children:
@@ -275,21 +281,30 @@ def _tool_calls(context: RunContext) -> tuple[list[str], list[str]]:
 
 
 def _recovery_notice(
-    completed: list[str], unconfirmed: list[str], *, asked: list[str] | None = None, unrecorded: bool = False
+    completed: list[str],
+    unconfirmed: list[str],
+    *,
+    asked: list[str] | None = None,
+    untraced: bool = False,
+    answered: bool = False,
 ) -> str:
-    """``asked``: what the dead turn was answering, when nothing of it is stored (the model cannot read it in
-    the history). ``unrecorded``: it had asked for tool calls the stored trace does not show."""
+    """``asked``: what the dead turn was answering, when no stored run holds it (the model cannot read it in
+    the history). ``untraced``: nothing of the turn itself was stored, only what the session recorded.
+    ``answered``: it was acting on the user's answer to a parked question, which is closed now."""
     lines = [_RECOVERY_HEADER]
     if asked:
         lines.append("It was answering: " + "; ".join(json.dumps(_brief(text, 500)) for text in asked) + ".")
+    if answered:
+        lines.append(
+            "It was acting on the user's answer to a pending question or approval. That question is closed now: "
+            "ask again if it still matters."
+        )
     if completed:
         lines.append("Completed before the restart: " + "; ".join(completed) + ".")
     if unconfirmed:
         lines.append("Started but not confirmed (each may or may not have run): " + "; ".join(unconfirmed) + ".")
-    if unrecorded:
-        lines.append(
-            "It had asked for tool calls that were not recorded before the restart: each may or may not have run."
-        )
+    if untraced:
+        lines.append("The rest of that turn was not recorded before the restart.")
     elif not completed and not unconfirmed:
         lines.append("No tool call had run yet.")
     lines.append(_RECOVERY_ADVICE)
@@ -308,16 +323,6 @@ def _split_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         else:
             stored[name] = value
     return stored, sorted(unstored)
-
-
-def _dispatches(event: Any) -> bool:
-    """Whether a turn's event means work with side effects is about to run: a model call that asks for tools
-    (the agent runs them once this event is consumed), or a tool, step or sub-agent starting without one (a
-    slash command, a resumed approval)."""
-    if isinstance(event, OutputEvent) and event.path.endswith(".llm"):
-        content = getattr(event.output, "content", None) or []
-        return any(isinstance(block, ToolUseContent) and not block.is_server_tool_use for block in content)
-    return isinstance(event, StartEvent) and event.parent_call_id is not None and not event.path.endswith(".llm")
 
 
 class ChatSession:
@@ -457,6 +462,10 @@ class ChatSession:
         self._stored_changes = 0
         # from_store() is still settling the stored state: no turn may start before it is done.
         self._hold_worker = False
+        # Set by _recover: the parked question a dead resume was acting on is to be abandoned (from_store), and
+        # the events the dead run's stored memory shows (taken by it, whatever an older snapshot says).
+        self._abandon_parked = False
+        self._shown_events: set[str] = set()
         # Turns in a row the store would not record the start of: they did not run (see _write_ahead).
         self._store_failures = 0
         # The restorable events last seen queued: one arriving through the task store is stored at once.
@@ -473,7 +482,10 @@ class ChatSession:
 
     @property
     def busy(self) -> bool:
-        return self._turn is not None and not self._turn.done()
+        """A turn is running, or has just ended and is not settled yet: its status, and whether it left the
+        session parked, are recorded in the same step that ends this (never "not busy" with the last
+        turn's outcome still missing)."""
+        return self._turn is not None
 
     @property
     def run_id(self) -> str | None:
@@ -826,9 +838,13 @@ class ChatSession:
                 # First: the messages a dead turn took were sent before anything still pending, and go back
                 # ahead of it.
                 recovered = await session._recover(snapshot.in_flight)
-            session._restore_events(snapshot.pending)
+            # Not the ones the dead run's stored memory shows: it took them, and the snapshot that would have
+            # said so was never written.
+            session._restore_events([event for event in snapshot.pending if event["id"] not in session._shown_events])
             if session._parked and session._last_context is None:
                 session._last_context = await session._load_run(session.head)
+            if session._abandon_parked:
+                session._abandon_question("The server restarted while the answer to this was being acted on.")
             parked_trace = session._last_context._trace if session._parked and session._last_context else None
             last_policy = snapshot.last_options.get("tool_policy")
             session._last_options = _TurnOptions(
@@ -1179,6 +1195,9 @@ class ChatSession:
             # Stored from now, not from the turn's first event: what it took (messages, a wake, answers) is no
             # longer pending, and a restart before that event would lose it. A turn that never started is put
             # back by recovery (nothing of it stored), or here, below, if this process sees it end first.
+            if self._session_store is not None:
+                # The agent says which tool calls it is about to run, and waits for the store to hold them.
+                context._before_tool_dispatch = functools.partial(self._note_dispatch, in_flight)
             self._in_flight = in_flight
             self._persist()
             turn = asyncio.get_running_loop().create_task(
@@ -1260,7 +1279,7 @@ class ChatSession:
         """Run one turn on its own task (so it can be cut) and copy its events into the log.
 
         Written ahead, on a durable session: the turn does not start before the store holds that it took its
-        input (``mark``), and no tool runs before the store holds that the model asked for some. A restart
+        input (``mark``), and no tool call runs before the store holds it (:meth:`_note_dispatch`). A restart
         can then tell a turn that never ran (its input is queued again) from one that may have acted (a
         read-only recovery turn), whatever the trace provider had saved by then.
         """
@@ -1284,18 +1303,34 @@ class ChatSession:
                         if followup is not None:
                             followup.started(context)
                     self.log.put_nowait(event)
-                    if not in_flight.get("dispatched") and _dispatches(event):
-                        # The agent is suspended at this event: it runs the tools once the next one is asked
-                        # for. Held here until the store has the mark, however long the store takes.
-                        in_flight["dispatched"] = True
-                        self._persist()
-                        await self._write_ahead(self.mark(), wait=True)
                     if isinstance(event, OutputEvent) and event.run_id == context.id and event.parent_call_id is None:
                         output = event
         finally:
             if not started and followup is not None:
                 followup.release()
         return output
+
+    async def _note_dispatch(
+        self, in_flight: dict[str, Any], agent_path: str, calls: list[tuple[str, str, Any]]
+    ) -> None:
+        """The agent is about to run these tool calls (``RunContext._before_tool_dispatch``: a model's, a
+        slash command's, those a resume left pending): they are stored with the turn first, however long the
+        store takes. Told by the agent itself, so it holds for every tool, whatever it is called and however
+        it is started; what a restart finds recorded here and not in the trace may have run."""
+        recorded = in_flight.setdefault("dispatched", [])
+        if agent_path != self._agent._path and recorded:
+            return  # a sub-agent's calls: the root agent's call that runs it is recorded, recovery reads that
+        known = {call["id"] for call in recorded}
+        new = [
+            {"id": call_id, "name": name, "input": _brief(arguments, 200)}
+            for call_id, name, arguments in calls
+            if call_id not in known
+        ]
+        if not new:
+            return
+        recorded.extend(new)
+        self._persist()
+        await self._write_ahead(self.mark(), wait=True)
 
     async def _write_ahead(self, mark: int, *, wait: bool = False) -> None:
         """Return once the store holds the session as of ``mark`` (at once when it is not durable).
@@ -1432,6 +1467,7 @@ class ChatSession:
         while self._dirty and not self._lost:
             self._dirty = False
             covers = self._changes
+            created = self._version is None
             snapshot = self._snapshot()
             try:
                 self._version = await store.save(snapshot, expect_version=self._version, owner=PROCESS_OWNER)
@@ -1443,18 +1479,28 @@ class ChatSession:
                 self._dirty, self._save_error = True, e
                 logger.error("chat_session_save_failed", session_id=self.id, error=str(e))
                 return
-            self._save_error, self._stored_changes = None, covers
-            for wake in self._wakes:
-                if wake.replaced and wake.mark <= covers:
-                    wake.replaced = []  # stored: withdrawing a later replacement puts this one back
-            if not self._leased and not self.closed:
+            if created:
+                # Inserted with this process's lease, in the same write (ChatSessionStore.save): the row never
+                # exists without an owner, and there is no second write that could fail and leave it so.
+                self._leased = True
+            elif not self._leased and not self.closed:
                 try:
                     await store.acquire_lease(self.id, PROCESS_OWNER)
                 except SessionLeased as e:
                     self._lose(str(e))
                     return
+                except Exception as e:
+                    # Like a failed write: not counted as stored, tried again with the next one.
+                    self._dirty, self._save_error = True, e
+                    logger.error("chat_session_lease_failed", session_id=self.id, error=str(e))
+                    return
                 self._leased = True
+            if self._leased and self._lease_task is None and not self.closed:
                 self._lease_task = asyncio.get_running_loop().create_task(self._renew_lease())
+            self._save_error, self._stored_changes = None, covers
+            for wake in self._wakes:
+                if wake.replaced and wake.mark <= covers:
+                    wake.replaced = []  # stored: withdrawing a later replacement puts this one back
 
     async def _renew_lease(self) -> None:
         store = self._session_store
@@ -1530,37 +1576,17 @@ class ChatSession:
                 calls.append(f"{name}({_brief(approval.get('input'), 80)})")
         return calls
 
-    def _recover_resume(self, in_flight: dict[str, Any], run_id: str) -> str:
-        """A resume that died before storing anything: the parked turn is answered again. The approvals it
-        claimed stay claimed (``TracingProvider.claim_approval``), so the gated calls that may have started are
-        not run twice; a recovery turn after it says they may have run. A provider without claims could
-        run them again: the session parks instead, and the user answers again."""
-        from ..state.tracing.providers.base import TracingProvider
-
-        provider = self._agent.tracing_provider
-        claims = isinstance(provider, type) and provider.claim_approval.__func__ is not (
-            TracingProvider.claim_approval.__func__
-        )
-        self._parked = True
-        if not claims:
-            logger.warning("chat_session_resume_reparked", session_id=self.id, dead_run_id=run_id)
-            return "reparked"
-        self._resume = _load_resume(in_flight["resume"])
-        approved = in_flight.get("approved") or []
-        if approved and self.on_dead_turn != "drop":
-            notice = _recovery_notice([], approved)
-            self._wakes.insert(
-                0,
-                _Wake(
-                    text=notice,
-                    key=RECOVERY_KIND,
-                    tool_policy="read_only",
-                    silent_ok=True,
-                    kind=RECOVERY_KIND,
-                    trigger={"kind": RECOVERY_KIND, "dead_run_id": run_id, "cut": in_flight.get("cut") or "crash"},
-                ),
-            )
-        return "resumed_again"
+    def _abandon_question(self, reason: str) -> None:
+        """Answer what the parked turn still waits for with a cancel (answers already given stand): the gated
+        tools never run, the run ends ``cancelled``."""
+        if self._last_context is None:
+            return
+        answered = self._resume or {}
+        pending = [a["approval_id"] for a in self._last_context.pending_approvals()]
+        pending += [i["interaction_id"] for i in self._last_context.pending_interactions()]
+        pending = [pending_id for pending_id in pending if pending_id not in answered]
+        if pending:
+            self._resume = {**answered, **{pending_id: Cancel(reason=reason) for pending_id in pending}}
 
     def _restore_events(self, stored: list[dict[str, Any]]) -> None:
         # Restored in the same process (an idle session let go), the run's task store may still hold them.
@@ -1603,49 +1629,60 @@ class ChatSession:
             self.last_status = _status_dict(root.status)
             self._last_context = context if self._parked else None
             return "finished"
-        dispatched = bool(in_flight.get("dispatched"))
-        if root is None and (not dispatched or in_flight.get("resume") is not None):
-            # Nothing of it is stored and it had not asked for a tool (that is stored before any runs, see
-            # _pump): it did nothing. Its input goes back in the queue. A resume is answered again instead
-            # (its approvals stay claimed).
+        dispatched = in_flight.get("dispatched")
+        calls = [call for call in dispatched if isinstance(call, dict)] if isinstance(dispatched, list) else []
+        resumed = in_flight.get("resume") is not None
+        events = in_flight.get("events") or []
+        if root is None and not dispatched:
+            # Nothing of it is stored and it had run no tool call (each is stored before it runs, see
+            # _note_dispatch): it did nothing. Its input goes back in the queue, the answers to a parked
+            # turn included (none of the calls they were for had started).
             self._scheduler.head = in_flight.get("parent_id")
-            self._restore_events(in_flight.get("events") or [])
+            self._restore_events(events)
             if in_flight.get("wake") is not None:
                 self._wakes.insert(0, _Wake.from_dict(in_flight["wake"]))
-            if in_flight.get("resume") is not None:
-                return self._recover_resume(in_flight, run_id)
+            if resumed:
+                self._parked = True
+                self._resume = _load_resume(in_flight["resume"])
             return "requeued"
         if root is None:
-            # It had asked for tools and no trace of it is stored (a provider that saves at the end of a run,
-            # or in the background): they may have run. Its input is not run again; the recovery turn is told
-            # what it was answering, since no stored run holds it.
+            # It may have acted and no trace of it is stored (a provider that saves at the end of a run, or
+            # in the background). Nothing is run again: the recovery turn is told what it was answering (no
+            # stored run holds that) and which calls it had started.
             self._scheduler.head = in_flight.get("parent_id")
-            asked = [event.get("text") or "" for event in in_flight.get("events") or []]
+            asked = [event.get("text") or "" for event in events]
             if in_flight.get("wake") is not None:
                 asked.append(in_flight["wake"].get("text") or "")
-            notice = _recovery_notice([], [], asked=[text for text in asked if text], unrecorded=True)
+            unconfirmed = [f"{call.get('name') or '?'}({_brief(call.get('input'), 80)})" for call in calls]
+            if resumed:
+                # It was acting on the user's answers to a parked turn. Answering it again would run again
+                # whatever followed them: a claimed approval protects its own call, not the tool that
+                # asked the question, nor the ones the model called next. The question is abandoned instead.
+                self._parked = True
+                self._abandon_parked = True
+                approved = in_flight.get("approved") or []
+                unconfirmed = [*approved, *(call for call in unconfirmed if call not in approved)]
+            notice = _recovery_notice(
+                [], unconfirmed, asked=[text for text in asked if text], untraced=True, answered=resumed
+            )
         else:
             self._scheduler.head = run_id
             self._parked = False
-            # A message steered into it that its stored memory does not show (saved before it joined) would be
-            # lost with it: back in the queue, for a turn of its own after the recovery.
+            # What its stored memory shows it took, by event id (every message built from session events
+            # carries them). A steered one it does not show would be lost with the run: back in the queue.
             memory = root.memory if isinstance(root.memory, list) else []
-            seen = "\n".join(
-                block.get("text") or ""
+            self._shown_events = {
+                event_id
                 for message in memory
-                if isinstance(message, dict) and message.get("role") == "user"
-                for block in _blocks(message, "text")
-            )
+                if isinstance(message, dict)
+                for event_id in (message.get("metadata") or {}).get("event_ids") or []
+            }
             self._restore_events(
-                [
-                    event
-                    for event in in_flight.get("events") or []
-                    if event.get("steered") and (event.get("text") or "") not in seen
-                ]
+                [event for event in events if event.get("steered") and event.get("id") not in self._shown_events]
             )
-            completed, unconfirmed = _tool_calls(context)
-            # Asked for tools the stored trace does not show (saved before that step): say so, not "none ran".
-            notice = _recovery_notice(completed, unconfirmed, unrecorded=dispatched and not (completed or unconfirmed))
+            # Calls the session recorded and the trace does not show (saved before them) are unconfirmed.
+            completed, unconfirmed = _tool_calls(context, calls)
+            notice = _recovery_notice(completed, unconfirmed)
         if self.on_dead_turn == "drop":
             return "dropped"
         if self.on_dead_turn == "notify":

@@ -155,6 +155,7 @@ class ChatSessionStore(ABC):
     async def save(self, snapshot: SessionSnapshot, *, expect_version: int | None, owner: str | None = None) -> int:
         """Write ``snapshot`` if the stored version is ``expect_version`` (None: the row must not exist) and, with
         ``owner``, no other owner holds the lease (expired or not: one that took it may not have written yet).
+        A new row is created with ``owner``'s lease, in the same write: a session never exists unowned.
         Returns the new version; raises :class:`SnapshotConflict` otherwise."""
 
     @abstractmethod
@@ -193,8 +194,11 @@ class InMemoryChatSessionStore(ChatSessionStore):
             raise SnapshotConflict(f"session {snapshot.session_id}: leased by {row[1]}")
         stored = SessionSnapshot.from_json(snapshot.to_json())
         stored.version = (current or 0) + 1
-        owner, until = (row[1], row[2]) if row is not None else (None, 0.0)
-        self._rows[snapshot.session_id] = (stored, owner, until)
+        if row is not None:
+            holder, until = row[1], row[2]
+        else:
+            holder, until = (owner, time.time() + self.lease_ttl_s) if owner is not None else (None, 0.0)
+        self._rows[snapshot.session_id] = (stored, holder, until)
         return stored.version
 
     async def delete(self, session_id: str) -> None:
@@ -260,13 +264,15 @@ class SqliteChatSessionStore(ChatSessionStore):
         body = SessionSnapshot.from_json(snapshot.to_json())
         body.version = new_version
         raw, now = body.to_json(), int(time.time() * 1000)
+        lease_until = time.time() + self.lease_ttl_s if owner is not None else None
 
         def write(conn):
             if expect_version is None:
                 cursor = conn.execute(
-                    "INSERT OR IGNORE INTO chat_sessions (session_id, agent, snapshot, version, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (snapshot.session_id, snapshot.agent, raw, new_version, now),
+                    "INSERT OR IGNORE INTO chat_sessions "
+                    "(session_id, agent, snapshot, version, updated_at, lease_owner, lease_until) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (snapshot.session_id, snapshot.agent, raw, new_version, now, owner, lease_until),
                 )
             elif owner is None:
                 cursor = conn.execute(

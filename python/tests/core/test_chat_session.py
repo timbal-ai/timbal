@@ -763,6 +763,26 @@ class TestRobustness:
             memory = await stored_memory(root_outputs(session)[1])
             assert [m.collect_text() for m in memory if m.role == "user"] == ["hi", "pay", "later"]
 
+    async def test_a_session_is_busy_until_its_turn_is_settled(self):
+        """Between the turn's task ending and its outcome being recorded, a reader must not see an idle
+        session that has no status for the turn it just ran."""
+        samples = []
+        async with ChatSession(make_agent(Gate())) as session:
+            real_pump = session._pump
+
+            async def pump(*args, **kwargs):
+                output = await real_pump(*args, **kwargs)
+                # Runs once the turn's task is done and before the session has settled it.
+                asyncio.get_running_loop().call_soon(lambda: samples.append((session.busy, session.last_status)))
+                return output
+
+            session._pump = pump
+            session.send("hi")
+            await records(session, "turn_finished", 1)
+            await asyncio.sleep(0)
+            assert samples == [(True, None)]
+            assert not session.busy and session.last_status["code"] == "success"
+
     async def test_a_turn_failing_before_it_starts_backs_off_then_waits_for_new_work(self, monkeypatch):
         import timbal.core.chat_session as chat_session_module
 

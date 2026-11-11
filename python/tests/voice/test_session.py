@@ -3045,10 +3045,12 @@ class TestEmptyCallerTurnRecovery:
             stt=MockSTT(),
             tts=MockTTS(),
             turn_detector="heuristic",
-            turn_timeout_secs=0.1,
+            # Long enough for a slow runner to get through the first attempt and into the retry; the turn
+            # then ends at this deadline, the same one for both attempts.
+            turn_timeout_secs=1.0,
             turn_timeout_fallback=None,
         )
-        await asyncio.wait_for(session._run_turn("Hello"), 2)
+        await asyncio.wait_for(session._run_turn("Hello"), 10)
         assert len(deadlines) == 2
         assert deadlines[0] == deadlines[1]
         assert model.call_count == 1

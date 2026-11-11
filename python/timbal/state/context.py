@@ -230,6 +230,10 @@ class RunContext(BaseModel):
     #       marks its span ``metadata.silent`` (a turn the runtime started may stay quiet)
     #   _cut: asyncio.Event | None — set by the channel on a 'now' message: the steering
     #       root agent cuts its answer or its interruptible tools and takes the message
+    #   _before_tool_dispatch: async (agent_path, [(tool_use_id, name, input)]) | None — awaited
+    #       by every agent of the run right before it runs tool calls (a model's, a slash
+    #       command's, those a resume left pending): a durable chat session records them
+    #       first, so a restart knows what may have run
     #   _resume_values: dict — active resume values keyed by id, supplied via
     #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
     #       approval gate (value normalized to ``ApprovalResolution``) or a
@@ -349,6 +353,7 @@ class RunContext(BaseModel):
             _tool_policy_origin=None,
             _silence_token=None,
             _cut=None,
+            _before_tool_dispatch=None,
         )
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.

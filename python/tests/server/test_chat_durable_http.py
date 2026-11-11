@@ -393,6 +393,26 @@ def test_deleting_a_session_another_process_took_is_a_409(client):
     assert stored is not None and not stored.closed  # it goes on there
 
 
+def test_a_session_is_created_with_its_lease_in_one_write(client, monkeypatch):
+    """No second write to take the lease: one that fails cannot leave a row nobody holds or knows of."""
+    store = client.app.state.chat_store
+
+    async def unreachable(*_args, **_kwargs):
+        raise OSError("store unreachable")
+
+    monkeypatch.setattr(store, "acquire_lease", unreachable)
+    response = client.post("/chat/sessions", json={})
+    assert response.status_code == 201, response.text
+    session_id = response.json()["session_id"]
+    monkeypatch.undo()
+    assert session_id in [state["session_id"] for state in client.get("/chat/sessions").json()]
+
+    def owner(conn):
+        return conn.execute("SELECT lease_owner FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone()
+
+    assert client.portal.call(store._run, owner)[0] == PROCESS_OWNER
+
+
 def test_delete_removes_it_for_good(client):
     session_id = client.post("/chat/sessions", json={}).json()["session_id"]
     assert client.delete(f"/chat/sessions/{session_id}").json() == {"closed": True}

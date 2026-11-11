@@ -238,7 +238,8 @@ class TestEdges:
         restored = await ChatSession.from_store(gated_agent(provider, again), store, session.id)
         started = await records(restored, "turn_started", 2, after=after_restore(restored))
         await records(restored, "turn_finished", 2, after=after_restore(restored))
-        # The stored answers go again, but the approval stays claimed by the dead run: no second charge.
+        # The question is abandoned (a resume that cancels it), not answered again: no second charge, and
+        # nothing the model called after it runs again either. The recovery turn names the approved call.
         assert [s["trigger"]["kind"] for s in started] == ["resume", "recovery"]
         text = Message.validate(root_outputs(restored)[1].input["prompt"]).collect_text()
         assert "Started but not confirmed" in text and "charge(" in text
@@ -246,7 +247,7 @@ class TestEdges:
         assert not restored.parked
         await restored.close()
 
-    async def test_without_approval_claims_a_dead_resume_parks_again(self, tmp_path):
+    async def test_a_dead_resume_is_not_answered_again_without_approval_claims_either(self, tmp_path):
         from timbal.state.tracing.providers.base import TracingProvider
 
         class NoClaims(CrashableSqlite):
@@ -263,9 +264,11 @@ class TestEdges:
 
         again = Charge(released=True)
         restored = await ChatSession.from_store(gated_agent(provider, again), store, session.id)
-        await asyncio.sleep(0.1)
-        assert restored.parked and restored._resume is None and again.gate.calls == 0
-        assert restored.state()["pending_approvals"][0]["approval_id"] == approval.approval_id
+        started = await records(restored, "turn_started", 2, after=after_restore(restored))
+        await records(restored, "turn_finished", 2, after=after_restore(restored))
+        assert [s["trigger"]["kind"] for s in started] == ["resume", "recovery"]
+        # Not left parked for the user to approve a second time: that would charge again.
+        assert not restored.parked and again.gate.calls == 0
         await restored.close()
 
     async def test_a_second_crash_during_the_recovery_turn(self, db):
@@ -643,7 +646,8 @@ class TestRestore:
         session = ChatSession(make_agent(provider, gate), session_store=store)
         session.send("start")
         await asyncio.wait_for(gate.entered.wait(), 3)
-        assert (await store.load(session.id)).in_flight["dispatched"] is True  # stored before the tool ran
+        dispatched = (await store.load(session.id)).in_flight["dispatched"]
+        assert [call["name"] for call in dispatched] == ["work"]  # stored before the tool ran
         await crash(session)
         provider.crashed = False
 
@@ -652,6 +656,7 @@ class TestRestore:
         assert restored.state()["pending"] == []
         notice = restored._wakes[0].text
         assert 'It was answering: "start".' in notice and "not recorded before the restart" in notice
+        assert "Started but not confirmed (each may or may not have run): work(" in notice
         (started,) = await records(restored, "turn_started", 1, after=restored.log.forgotten_through)
         assert started["trigger"]["kind"] == "recovery"
         (finished,) = await records(restored, "turn_finished", 1, after=restored.log.forgotten_through)
@@ -1181,8 +1186,10 @@ class TestWriteAheadOfTurns:
     def test_the_notice_for_tool_calls_the_trace_does_not_show(self):
         from timbal.core.chat_session import _recovery_notice
 
-        notice = _recovery_notice([], [], asked=["pay the invoice"], unrecorded=True)
+        notice = _recovery_notice([], ["charge({})"], asked=["pay the invoice"], untraced=True, answered=True)
         assert 'It was answering: "pay the invoice".' in notice
+        assert "Started but not confirmed (each may or may not have run): charge({})." in notice
+        assert "That question is closed now" in notice
         assert "not recorded before the restart" in notice and "No tool call had run yet" not in notice
         assert "No tool call had run yet." in _recovery_notice([], [])
 
@@ -1288,7 +1295,7 @@ class TestSteeredMessages:
     async def _steered_then_crashed(self, provider, store, *, trace_until_steered):
         first, second = Gate(), Gate()
         session = ChatSession(steering_agent(provider, first, second), session_store=store)
-        session.send("start")
+        session.send("start also")  # holds the text of the message steered in after it
         await asyncio.wait_for(first.entered.wait(), 3)
         if not trace_until_steered:
             provider.crashed = True  # what is stored of the run from here on never lands
@@ -1299,7 +1306,7 @@ class TestSteeredMessages:
         stored = await store.load(session.id)
         assert stored.pending == []
         assert [(e["text"], e.get("steered", False)) for e in stored.in_flight["events"]] == [
-            ("start", False),
+            ("start also", False),
             ("also", True),
         ]
         await crash(session)
@@ -1332,8 +1339,22 @@ class TestSteeredMessages:
         session, _ = await self._steered_then_crashed(provider, store, trace_until_steered=True)
         agent = steering_agent(provider, Gate(released=True), Gate(released=True))
         restored = await ChatSession.from_store(agent, store, session.id)
-        assert 'It was answering: "start"; "also".' in restored._wakes[0].text
+        assert 'It was answering: "start also"; "also".' in restored._wakes[0].text
         assert restored.state()["pending"] == []
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        await restored.close()
+
+    async def test_one_the_stored_run_shows_is_not_restored_from_an_older_snapshot(self, db):
+        """The snapshot that says a turn took it may never be written: the stored run says so too."""
+        provider, store = db
+        session, also = await self._steered_then_crashed(provider, store, trace_until_steered=True)
+        stale = await store.load(session.id)
+        taken = stale.in_flight["events"].pop()  # as stored before the turn took it: still pending
+        stale.pending = [{key: value for key, value in taken.items() if key != "steered"}]
+        await store.save(stale, expect_version=stale.version)
+        agent = steering_agent(provider, Gate(released=True), Gate(released=True))
+        restored = await ChatSession.from_store(agent, store, session.id)
+        assert also.id not in [p["event_id"] for p in restored.state()["pending"]]
         await records(restored, "turn_finished", 1, after=after_restore(restored))
         await restored.close()
 
@@ -1379,3 +1400,210 @@ class TestLeaseRunsOut:
         await session.wait_closed()
         assert not session.busy  # its turn was cut with it
         assert (await store.load(session.id)).version == version  # and it wrote nothing more
+
+
+class TestRecordedToolCalls:
+    """The agent tells the session which tool calls it is about to run; they are stored before any does."""
+
+    async def test_a_resumed_question_is_not_answered_again_once_the_turn_went_on(self, db):
+        """Answering the question again would run again the tool the model called after it."""
+        from timbal.state import suspend
+
+        provider, store = db
+
+        def ask() -> str:
+            return str(suspend({"question": "Ship it?"}))
+
+        def model(messages):
+            text = last_user_text(messages)
+            if "cut off by a server restart" in text:
+                return "recovered"
+            results = sum(1 for message in messages if message.role == "tool")
+            if not results:
+                return tool_call("ask", "call-ask")
+            return tool_call("ship", "call-ship") if results == 1 else "done"
+
+        def agent(ship):
+            return Agent(
+                name="agent",
+                model=TestModel(handler=model),
+                tools=[Tool(name="ask", handler=ask), Tool(name="ship", handler=ship.work)],
+                tracing_provider=provider,
+            )
+
+        first = Gate()
+        session = ChatSession(agent(first), session_store=store)
+        session.send("go")
+        await records(session, "turn_finished", 1)
+        (question,) = session.state()["pending_interactions"]
+        provider.crashed = True  # nothing of the resumed turn is ever stored
+        session.resume({question["interaction_id"]: "yes"})
+        await asyncio.wait_for(first.entered.wait(), 3)  # it took the answer and went on to an ordinary tool
+        await crash(session)
+        provider.crashed = False
+
+        again = Gate(released=True)
+        restored = await ChatSession.from_store(agent(again), store, session.id)
+        notice = restored._wakes[0].text
+        assert "That question is closed now" in notice and "ship(" in notice
+        started = await records(restored, "turn_started", 2, after=after_restore(restored))
+        await records(restored, "turn_finished", 2, after=after_restore(restored))
+        assert [s["trigger"]["kind"] for s in started] == ["resume", "recovery"]
+        assert again.calls == 0 and not restored.parked  # the tool did not run a second time
+        await restored.close()
+
+    async def test_a_resume_that_ran_nothing_gets_its_answers_back(self, db):
+        """Stored as taken, then the process died before any of the calls it was for had started."""
+        provider, store = db
+        charge = Charge(released=True)
+        session, approval = await parked(provider, store, charge)
+        hold = asyncio.Event()
+        real_pump = session._pump
+
+        async def never_starts(*args, **kwargs):
+            await hold.wait()
+            return await real_pump(*args, **kwargs)
+
+        session._pump = never_starts
+        session.resume({approval.approval_id: True})
+        for _ in range(100):
+            if session._in_flight is not None:
+                break
+            await asyncio.sleep(0.01)
+        await session.flush()
+        assert (await store.load(session.id)).in_flight["resume"] and charge.gate.calls == 0
+        await crash(session)
+        provider.crashed = False
+
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert finished["status"]["code"] == "success" and charge.gate.calls == 1  # approved once, charged once
+        await restored.close()
+
+    async def test_a_slash_command_is_recorded_whatever_its_tool_is_called(self, db):
+        provider, store = db
+        provider.crashed = True  # no trace of the turn ever lands
+
+        def agent(gate):
+            return Agent(
+                name="agent",
+                model=TestModel(handler=handler),
+                tools=[Tool(name="llm", command="/doit", handler=gate.work)],  # named like the model's own span
+                tracing_provider=provider,
+            )
+
+        gate = Gate()
+        session = ChatSession(agent(gate), session_store=store)
+        session.send("/doit")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        assert [call["name"] for call in (await store.load(session.id)).in_flight["dispatched"]] == ["llm"]
+        await crash(session)
+        provider.crashed = False
+
+        again = Gate(released=True)
+        restored = await ChatSession.from_store(agent(again), store, session.id)
+        assert restored.state()["pending"] == []
+        (started,) = await records(restored, "turn_started", 1, after=after_restore(restored))
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert started["trigger"]["kind"] == "recovery" and again.calls == 0
+        await restored.close()
+
+    async def test_a_call_started_after_the_last_stored_step_is_reported(self, db):
+        """The trace shows `lookup` done; `ship` started after the last save that landed."""
+        provider, store = db
+
+        def lookup() -> str:
+            return "found"
+
+        def model(messages):
+            text = last_user_text(messages)
+            if "cut off by a server restart" in text:
+                return "recovered"
+            results = sum(1 for message in messages if message.role == "tool")
+            if not results:
+                return tool_call("lookup", "call-lookup")
+            if results == 1:
+                provider.crashed = True  # from here on nothing of the run is stored
+                return tool_call("ship", "call-ship")
+            return "done"
+
+        def agent(ship):
+            return Agent(
+                name="agent",
+                model=TestModel(handler=model),
+                tools=[Tool(name="lookup", handler=lookup), Tool(name="ship", handler=ship.work)],
+                tracing_provider=provider,
+            )
+
+        first = Gate()
+        session = ChatSession(agent(first), session_store=store)
+        session.send("go")
+        await asyncio.wait_for(first.entered.wait(), 3)
+        await crash(session)
+        provider.crashed = False
+
+        restored = await ChatSession.from_store(agent(Gate(released=True)), store, session.id)
+        notice = restored._wakes[0].text
+        assert "Completed before the restart: lookup(" in notice
+        assert "Started but not confirmed (each may or may not have run): ship(" in notice
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        await restored.close()
+
+    async def test_a_sub_agents_calls_are_left_to_the_call_that_runs_it(self, db):
+        provider, store = db
+        gate = Gate()
+        child = Agent(
+            name="child",
+            model=TestModel(handler=lambda messages: "done" if messages[-1].role == "tool" else tool_call("dig", "c1")),
+            tools=[Tool(name="dig", handler=gate.work)],
+            tracing_provider=provider,
+        )
+        parent = Agent(
+            name="agent",
+            model=TestModel(
+                handler=lambda messages: (
+                    "done"
+                    if messages[-1].role == "tool"
+                    else Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="p1", name="child", input={"prompt": "dig"})],
+                        stop_reason="tool_use",
+                    )
+                )
+            ),
+            tools=[child],
+            tracing_provider=provider,
+        )
+        async with ChatSession(parent, session_store=store) as session:
+            session.send("go")
+            await asyncio.wait_for(gate.entered.wait(), 3)
+            dispatched = (await store.load(session.id)).in_flight["dispatched"]
+            assert [call["name"] for call in dispatched] == ["child"]
+            gate.release.set()
+            await records(session, "turn_finished", 1)
+
+
+class TestCreatedWithItsLease:
+    @pytest.fixture(params=["memory", "sqlite"])
+    def store(self, request, tmp_path):
+        return InMemoryChatSessionStore() if request.param == "memory" else SqliteChatSessionStore(tmp_path / "s.db")
+
+    async def test_a_new_row_is_its_owners_from_the_write_that_creates_it(self, store):
+        await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None, owner="a")
+        with pytest.raises(SessionLeased):
+            await store.acquire_lease("s1", "b")
+        await store.acquire_lease("s1", "a")
+        await store.save(SessionSnapshot(session_id="s2", agent="agent"), expect_version=None)  # no owner: free
+        await store.acquire_lease("s2", "b")
+
+    async def test_a_session_does_not_need_a_second_write_to_hold_its_lease(self, db):
+        provider, store = db
+
+        async def unreachable(*_args, **_kwargs):
+            raise OSError("store unreachable")
+
+        store.acquire_lease = unreachable  # the write that used to take the lease after the row was there
+        async with ChatSession(make_agent(provider, Gate(released=True)), session_store=store) as session:
+            session.persist()
+            await session.flush()
+            assert session._leased and session.state()["durable"]

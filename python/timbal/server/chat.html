@@ -534,8 +534,7 @@
         });
         S.busy = false; S.runId = null;
         const how = { continued: " · the cut turn is being recovered", requeued: " · the cut turn's messages run again",
-          finished: "", notified: " · the next turn is told about the cut one", dropped: "", resumed_again: " · the answers are sent again",
-          reparked: " · answer the pending approval again" }[d.recovered] || "";
+          finished: "", notified: " · the next turn is told about the cut one", dropped: "" }[d.recovered] || "";
         note(`↻ server restarted: session restored${how}`, "warn");
         refreshState();
         break;
