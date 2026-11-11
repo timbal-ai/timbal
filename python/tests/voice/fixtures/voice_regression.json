@@ -1,0 +1,74 @@
+{
+  "p95_eou_to_first_audio_ms": 2500,
+  "p95_silence_to_first_audio_ms": 2500,
+  "min_eou_samples": 3,
+  "cases": [
+    {
+      "id": "support_simple",
+      "source": "benchmarks/voice/scenario.py support_simple",
+      "expected_user_turns": 1,
+      "expect_interrupted": false,
+      "user_text_contains": ["delivery window"],
+      "steps": [
+        {"op": "partial", "text": "What time is the delivery window?"},
+        {"op": "sleep", "seconds": 0.05},
+        {"op": "commit", "text": "What time is the delivery window?"},
+        {"op": "sleep", "seconds": 0.25}
+      ]
+    },
+    {
+      "id": "support_trailing_conjunction",
+      "source": "benchmarks/voice/scenario.py support_trailing_conjunction",
+      "expected_user_turns": 1,
+      "expect_interrupted": false,
+      "user_text_contains": ["lamp", "arrived"],
+      "steps": [
+        {"op": "partial", "text": "I ordered a lamp last week and"},
+        {"op": "sleep", "seconds": 0.04},
+        {"op": "commit", "text": "I ordered a lamp last week and"},
+        {"op": "sleep", "seconds": 0.2},
+        {"op": "partial", "text": "it still hasn't arrived.", "forbid_audio_yet": true},
+        {"op": "sleep", "seconds": 0.04},
+        {"op": "commit", "text": "it still hasn't arrived."},
+        {"op": "sleep", "seconds": 0.3}
+      ]
+    },
+    {
+      "id": "noise_during_reply",
+      "source": "benchmarks/voice noise captions such as (music) must not cut a reply",
+      "expected_user_turns": 1,
+      "expect_interrupted": false,
+      "steps": [
+        {"op": "commit", "text": "Tell me about your return policy."},
+        {"op": "wait_audio"},
+        {"op": "commit", "text": "(music)"},
+        {"op": "sleep", "seconds": 0.2}
+      ]
+    },
+    {
+      "id": "hesitation_during_reply",
+      "source": "benchmarks/voice/scenario.py medical_hesitation",
+      "expected_user_turns": 1,
+      "expect_interrupted": false,
+      "steps": [
+        {"op": "commit", "text": "The pain started on Tuesday."},
+        {"op": "wait_audio"},
+        {"op": "commit", "text": "Uh."},
+        {"op": "sleep", "seconds": 0.2}
+      ]
+    },
+    {
+      "id": "support_barge_in",
+      "source": "benchmarks/voice/scenario.py support_barge_in",
+      "expected_user_turns": 2,
+      "expect_interrupted": true,
+      "user_text_contains": ["return policy", "cancel that"],
+      "steps": [
+        {"op": "commit", "text": "Tell me about your return policy."},
+        {"op": "wait_audio"},
+        {"op": "commit", "text": "Actually, cancel that and check the other order."},
+        {"op": "sleep", "seconds": 0.6}
+      ]
+    }
+  ]
+}
