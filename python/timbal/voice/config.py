@@ -558,6 +558,82 @@ class SpeculativeGeneration(BaseModel):
     this."""
 
 
+NATURAL_SPEECH_RHYTHM: dict[str, float] = {"join_gaps": 0.9, "stretch_pauses": 0.8, "promote_gaps": 0.08}
+"""What ``tts_rhythm=True`` selects. Tuned on ``eleven_v4_turbo`` against a
+recording of a human agent, with ``tts_tempo=1.2``. No pause is lengthened
+past 0.55 s, or past ``max_tts_pause_secs`` when that is lower."""
+
+
+class SpeechRhythm(BaseModel):
+    """Join the words of synthesized speech and keep its real pauses. Off unless a share is set.
+
+    Neural TTS leaves a 0.12-0.20 s gap between many words and few pauses of
+    0.3-0.5 s. A person runs the words together and pauses now and then. Each
+    silence between two stretches of speech is sorted by length: under
+    ``gap_min_secs`` it is a consonant and is left alone; up to
+    ``gap_max_secs`` it is a gap between two words; longer is a comma or
+    sentence pause. Speech is never changed or delayed, and neither is the
+    silence before the first word or after the last. A silence is held until
+    the speech after it arrives, but not past the moment the caller would
+    hear it. See :mod:`timbal.voice.rhythm`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    join_gaps: float = Field(default=0.0, ge=0.0, le=1.0)
+    """Share of the gaps between words that are closed to 23-73 ms. 0 leaves
+    them alone."""
+    stretch_pauses: float = Field(default=0.0, ge=0.0, le=1.0)
+    """Share of the comma and sentence pauses that are lengthened by 1.4-2.3x.
+    None ends up longer than 0.55 s, or than ``max_tts_pause_secs`` when
+    that is lower."""
+    promote_gaps: float = Field(default=0.0, ge=0.0, le=1.0)
+    """Share of the gaps between words that become a pause of 0.30-0.55 s.
+    Taken from the same gaps as ``join_gaps``, so the two add up to at most 1."""
+    gap_min_secs: float = Field(default=0.12, ge=0.0, le=1.0)
+    """A silence shorter than this is the closure of a stop consonant."""
+    gap_max_secs: float = Field(default=0.20, ge=0.0, le=0.9)
+    """A silence this long or longer is a real pause. Lower it for a voice
+    whose comma pauses are short, or they are joined as well. At most 0.9:
+    a silence that long is passed on before its end is known."""
+    quiet_dbfs: float = Field(default=-42.0, ge=-90.0, le=-20.0)
+    """A 10 ms frame whose RMS level is under this belongs to a silence. Only
+    frames with no sample over it are removed or repeated, so a soft
+    consonant or a breath inside the silence is kept. Not the same measure
+    as ``tts_quiet_dbfs``, which is a peak level."""
+    seed: int | None = None
+    """Fix the random draws. Unset draws differently on every reply."""
+
+    @field_validator("join_gaps", "stretch_pauses", "promote_gaps", "gap_min_secs", "gap_max_secs", mode="before")
+    @classmethod
+    def _reject_bool(cls, v: Any) -> Any:
+        # ``True`` is an int. A JSON ``true`` must not become 1.0.
+        if isinstance(v, bool):
+            raise ValueError("must be a number, not a boolean")
+        return v
+
+    @model_validator(mode="after")
+    def _shares_fit(self) -> SpeechRhythm:
+        if self.join_gaps + self.promote_gaps > 1:
+            raise ValueError("join_gaps and promote_gaps are shares of the same gaps: together at most 1")
+        if self.gap_max_secs < self.gap_min_secs:
+            raise ValueError("gap_max_secs must not be below gap_min_secs")
+        return self
+
+    @property
+    def enabled(self) -> bool:
+        return self.join_gaps > 0 or self.stretch_pauses > 0 or self.promote_gaps > 0
+
+
+def coerce_speech_rhythm(value: Any) -> Any:
+    """``True`` is the measured preset and ``False`` is off. Anything else passes through."""
+    if value is True:
+        return dict(NATURAL_SPEECH_RHYTHM)
+    if value is False:
+        return None
+    return value
+
+
 class VoiceEventsConfig(BaseModel):
     """Event turns (see ``VoiceSession.notify``). Server-side only — never client-settable."""
 
@@ -584,6 +660,7 @@ _OPTIONAL_VOICE_BLOCKS = {
     "recording": RecordingConfig,
     "events": VoiceEventsConfig,
     "speculative_generation": SpeculativeGeneration,
+    "tts_rhythm": SpeechRhythm,
 }
 
 
@@ -764,6 +841,12 @@ class VoiceConfig(BaseModel):
     """Pitch-preserving speaking rate. ``None`` (default) and ``1.0`` leave
     the audio unchanged; ``1.1`` is a little faster. Requires the
     ``timbal[voice]`` extra when it is not 1. Applied after pause trimming."""
+    tts_rhythm: SpeechRhythm | None = None
+    """Join the gaps between words and keep or lengthen the real pauses.
+    ``None`` (default) and ``{}`` leave the audio unchanged. ``True`` selects
+    :data:`NATURAL_SPEECH_RHYTHM`. Applied before pause trimming and tempo, on
+    the provider's own pause lengths. Requires the ``timbal[voice]`` extra when
+    set. Server-side: a caller hello cannot set it. See :class:`SpeechRhythm`."""
     hangup_grace_secs: float | None = Field(default=None, ge=0, le=HANGUP_GRACE_MAX_SECS)
     """Seconds to keep the line up after a goodbye has been heard, before
     ``end_call`` tears the session down.
@@ -907,6 +990,11 @@ class VoiceConfig(BaseModel):
         if isinstance(v, dict) and "enabled" not in v:
             return {**v, "enabled": True}
         return v
+
+    @field_validator("tts_rhythm", mode="before")
+    @classmethod
+    def _coerce_tts_rhythm(cls, v: Any) -> Any:
+        return coerce_speech_rhythm(v)
 
     @field_validator("hangup_grace_secs", mode="before")
     @classmethod

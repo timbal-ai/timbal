@@ -78,8 +78,10 @@ from .config import (
     FillerConfig,
     GreetingConfig,
     SpeculativeGeneration,
+    SpeechRhythm,
     UserIdleConfig,
     coerce_greeting,
+    coerce_speech_rhythm,
     language_key,
     normalize_hangup_grace_secs,
     omit_empty_voice_blocks,
@@ -874,6 +876,7 @@ class VoiceSession:
         max_tts_pause_secs: float | None = None,
         tts_quiet_dbfs: float = -45.0,
         tts_tempo: float | None = None,
+        tts_rhythm: SpeechRhythm | dict[str, Any] | bool | None = None,
         hangup_grace_secs: float | None = None,
         turn_timeout_secs: float = DEFAULT_TURN_TIMEOUT_SECS,
         turn_timeout_fallback: str | None = DEFAULT_TURN_TIMEOUT_FALLBACK,
@@ -966,6 +969,14 @@ class VoiceSession:
         ):
             raise ValueError("tts_tempo must be finite and positive")
         self.tts_tempo = None if tts_tempo is None else float(tts_tempo)
+        # Off unless a share is set. ``True`` is the measured preset, and an
+        # empty block is unset, as in VoiceConfig.
+        tts_rhythm = coerce_speech_rhythm(tts_rhythm)
+        if isinstance(tts_rhythm, dict):
+            tts_rhythm = SpeechRhythm.model_validate(tts_rhythm) if tts_rhythm else None
+        if tts_rhythm is not None and not isinstance(tts_rhythm, SpeechRhythm):
+            raise ValueError("tts_rhythm must be a SpeechRhythm, a dict of its fields, or a boolean")
+        self.tts_rhythm: SpeechRhythm | None = tts_rhythm if tts_rhythm is not None and tts_rhythm.enabled else None
         # Logged once when pace is configured but the session audio is not PCM16.
         self._tts_pace_encoding_warned = False
         # Confirmation window after end_call's goodbye. 0 hangs up as soon as
@@ -6960,7 +6971,13 @@ class VoiceSession:
         self._tts_tail = task
 
     def _postprocess_tts(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
-        """Pause trim, then tempo. Defaults return ``chunks`` unchanged.
+        """Pause rhythm, pause trim, then tempo. Defaults return ``chunks`` unchanged.
+
+        Rhythm runs first because it sorts silences by the length the provider
+        gave them: after a cap, a sentence pause and a gap between two words
+        can be the same length. Rhythm is told the cap, so it never lengthens
+        a pause past it: the pause limiter measures silence another way and
+        cannot be relied on to undo it.
 
         Byte accounting (playback, ``_turn_audio_bytes``, the segment record,
         the call recorder) runs on whatever this yields, which is the PCM the
@@ -6976,10 +6993,33 @@ class VoiceSession:
                 logger.warning(
                     "tts_pace_skipped",
                     encoding=self.audio_output.encoding,
-                    reason="pause trimming and tempo require pcm_s16le",
+                    reason="pause rhythm, pause trimming and tempo require pcm_s16le",
                 )
             return chunks
         rate = self.audio_output.sample_rate
+        tempo = self.tts_tempo
+        rhythm = self.tts_rhythm
+        if rhythm is not None:
+            from .rhythm import LENGTHENED_MAX_SECS, shape_pauses
+
+            longest = LENGTHENED_MAX_SECS
+            if self.max_tts_pause_secs is not None:
+                longest = min(longest, self.max_tts_pause_secs)
+            chunks = shape_pauses(
+                chunks,
+                sample_rate=rate,
+                join_gaps=rhythm.join_gaps,
+                stretch_pauses=rhythm.stretch_pauses,
+                promote_gaps=rhythm.promote_gaps,
+                gap_min_secs=rhythm.gap_min_secs,
+                gap_max_secs=rhythm.gap_max_secs,
+                quiet_dbfs=rhythm.quiet_dbfs,
+                max_pause_secs=longest,
+                # Tempo plays what rhythm yields faster than real time, and
+                # rhythm needs to know when the caller has heard it all.
+                playback_rate=tempo if tempo is not None else 1.0,
+                seed=rhythm.seed,
+            )
         if self.max_tts_pause_secs is not None:
             from .pauses import limit_pauses
 
@@ -6989,7 +7029,6 @@ class VoiceSession:
                 max_pause_secs=self.max_tts_pause_secs,
                 quiet_dbfs=self.tts_quiet_dbfs,
             )
-        tempo = self.tts_tempo
         if tempo is not None and not math.isclose(tempo, 1.0, abs_tol=1e-6):
             from .tempo import change_tempo
 
@@ -6997,7 +7036,7 @@ class VoiceSession:
         return chunks
 
     def _tts_pace_enabled(self) -> bool:
-        if self.max_tts_pause_secs is not None:
+        if self.max_tts_pause_secs is not None or self.tts_rhythm is not None:
             return True
         tempo = self.tts_tempo
         return tempo is not None and not math.isclose(tempo, 1.0, abs_tol=1e-6)
