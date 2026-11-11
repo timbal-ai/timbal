@@ -6975,7 +6975,9 @@ class VoiceSession:
 
         Rhythm runs first because it sorts silences by the length the provider
         gave them: after a cap, a sentence pause and a gap between two words
-        can be the same length. The cap then bounds a lengthened pause too.
+        can be the same length. Rhythm is told the cap, so it never lengthens
+        a pause past it: the pause limiter measures silence another way and
+        cannot be relied on to undo it.
 
         Byte accounting (playback, ``_turn_audio_bytes``, the segment record,
         the call recorder) runs on whatever this yields, which is the PCM the
@@ -6995,10 +6997,14 @@ class VoiceSession:
                 )
             return chunks
         rate = self.audio_output.sample_rate
+        tempo = self.tts_tempo
         rhythm = self.tts_rhythm
         if rhythm is not None:
-            from .rhythm import shape_pauses
+            from .rhythm import LENGTHENED_MAX_SECS, shape_pauses
 
+            longest = LENGTHENED_MAX_SECS
+            if self.max_tts_pause_secs is not None:
+                longest = min(longest, self.max_tts_pause_secs)
             chunks = shape_pauses(
                 chunks,
                 sample_rate=rate,
@@ -7008,6 +7014,10 @@ class VoiceSession:
                 gap_min_secs=rhythm.gap_min_secs,
                 gap_max_secs=rhythm.gap_max_secs,
                 quiet_dbfs=rhythm.quiet_dbfs,
+                max_pause_secs=longest,
+                # Tempo plays what rhythm yields faster than real time, and
+                # rhythm needs to know when the caller has heard it all.
+                playback_rate=tempo if tempo is not None else 1.0,
                 seed=rhythm.seed,
             )
         if self.max_tts_pause_secs is not None:
@@ -7019,7 +7029,6 @@ class VoiceSession:
                 max_pause_secs=self.max_tts_pause_secs,
                 quiet_dbfs=self.tts_quiet_dbfs,
             )
-        tempo = self.tts_tempo
         if tempo is not None and not math.isclose(tempo, 1.0, abs_tol=1e-6):
             from .tempo import change_tempo
 

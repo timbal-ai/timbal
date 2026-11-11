@@ -139,19 +139,31 @@ agent = Agent(
 
 ### Pause rhythm
 
-A synthesized voice tends to leave a 0.12 to 0.20 s gap between two words where a person runs them together, and its sentence pauses are all about the same length. `tts_rhythm` reshapes the silences and leaves the speech samples as they are. It runs before `max_tts_pause_secs` and `tts_tempo`, so the cap also bounds a pause it lengthened. Speech is passed on as it arrives. Only a silence is held, until the next sound shows how long it was, so the first audio of a reply is not delayed.
+A synthesized voice tends to leave a 0.12 to 0.20 s gap between two words where a person runs them together, and its sentence pauses are all about the same length. `tts_rhythm` reshapes the silences between words and leaves the speech samples as they are. It runs before `max_tts_pause_secs` and `tts_tempo`.
+
+Each silence between two stretches of speech is sorted by its length. Shorter than `gap_min_secs`, it is the closure of a consonant and is not changed. Up to `gap_max_secs`, it is a gap between two words: it can be closed, or turned into a pause. Longer than that, it is a pause at a comma or a full stop, and it can be lengthened. The silence before the first word and after the last one is not changed. Neither is a silence of 0.9 s or more.
 
 | Field | Default | What it does |
 | --- | --- | --- |
-| `join_gaps` | `0.0` | Share of the gaps between two words that are closed to 23-73 ms. |
+| `join_gaps` | `0.0` | Share of the gaps between two words that are closed to 23 to 73 ms. |
 | `stretch_pauses` | `0.0` | Share of the pauses at a comma or a full stop that are lengthened 1.4 to 2.3 times. |
-| `promote_gaps` | `0.0` | Share of the gaps between two words that become a 0.30-0.55 s pause, as when a speaker stops to think. |
+| `promote_gaps` | `0.0` | Share of the gaps between two words that become a pause of 0.30 to 0.55 s, as when a speaker stops to think. |
 | `gap_min_secs` | `0.12` | A silence shorter than this is the closure of a consonant and is never changed. |
-| `gap_max_secs` | `0.20` | A silence at least this long is a pause, not a gap between two words. |
-| `quiet_dbfs` | `-42.0` | Level under which a 10 ms frame counts as silence. |
+| `gap_max_secs` | `0.20` | A silence at least this long is a pause, not a gap between two words. At most `0.9`. |
+| `quiet_dbfs` | `-42.0` | A 10 ms frame whose RMS level is under this belongs to a silence. From `-90` to `-20`. |
 | `seed` | `None` | Fixes which silences are picked, for a repeatable test. |
 
-`join_gaps` and `promote_gaps` draw from the same gaps, so together they are at most 1. `tts_rhythm=True` selects `join_gaps=0.9`, `stretch_pauses=0.8`, `promote_gaps=0.08`. A block with no share set changes nothing. `tts_rhythm` is server-only: a client hello cannot set or clear it.
+Each share is a number from 0 to 1. `join_gaps` and `promote_gaps` draw from the same gaps, so together they are at most 1. `gap_max_secs` must be at least `gap_min_secs`. A boolean is not accepted where a number is expected. A block that breaks any of these fails when the agent is built. `tts_rhythm=True` selects `join_gaps=0.9`, `stretch_pauses=0.8`, `promote_gaps=0.08`. A block with no share set changes nothing. `tts_rhythm` is server-only: a client hello cannot set or clear it.
+
+What `tts_rhythm` does not do:
+
+- **Lengthen a pause past 0.55 s**, or past `max_tts_pause_secs` when that is lower. This holds with no cap set. A pause the provider made longer than that is left as it is.
+- **Cut or repeat soft sound.** A silence found by its frame level still holds the end of a word, a final "s", or a breath. Only its true silence is removed or repeated: the longest stretch of frames with no sample over `quiet_dbfs`. A joined gap keeps at least 10 ms of that stretch. A silence with less than 30 ms of it is not lengthened. `quiet_dbfs` is an RMS level over a 10 ms frame. `tts_quiet_dbfs` is a peak level, so the two numbers do not compare.
+- **Hold speech back.** Speech is passed on as it arrives. A silence is held until the speech after it arrives, because its length is not known before. If the provider stalls, the held silence is passed on unchanged once the caller has heard the audio before it, and the rest of that silence is not reshaped.
+
+A provider that takes the reply as one stream of text (ElevenLabs, Deepgram, Fish Audio) returns one stream of audio, so a pause between two sentences is shaped like any other. A provider that synthesizes each sentence on its own (OpenAI, Munsit) returns one clip per sentence. The pause between two sentences is then the end of one clip and the start of the next, and it keeps the length the provider gave it.
+
+Each stream of audio that had a silence between words logs one `tts_rhythm_shaped` line at INFO: how many silences it found (`gaps`), and how many were `joined`, `promoted`, `stretched`, `kept` (a word gap the draw left alone), `skipped` (picked, but with no true silence to work on or already at the bound) and `released` (given up because the provider stalled).
 
 ```python
 agent = Agent(

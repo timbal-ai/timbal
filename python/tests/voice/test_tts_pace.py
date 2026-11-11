@@ -284,6 +284,55 @@ class TestByteAccounting:
         finally:
             recorder.close()
 
+    async def test_rhythm_without_a_cap_still_bounds_a_lengthened_pause(self, tmp_path: Path) -> None:
+        """No cap configured: 0.45 s times 2.3 would be over a second of silence in the middle of a reply."""
+        raw = _word_gap_phrase(0.45)
+        session, recorder = _session(_PcmTTS(raw), tmp_path, tts_rhythm={"stretch_pauses": 1.0, "seed": 1})
+        try:
+            await session._speak(TEXT)
+            assert _pause_secs(_emitted(session)) == pytest.approx(0.55, abs=0.001)
+        finally:
+            recorder.close()
+
+    @pytest.mark.parametrize(
+        ("cap", "tempo", "longest", "rate"),
+        [(None, None, 0.55, 1.0), (0.35, 1.2, 0.35, 1.2), (0.80, 1.0, 0.55, 1.0)],
+    )
+    async def test_rhythm_is_told_the_cap_and_the_tempo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cap, tempo, longest: float, rate: float
+    ) -> None:
+        """The cap, so that no pause is lengthened past it. The tempo, so that a held
+        silence is given up when the caller has heard the audio before it."""
+        seen: dict = {}
+
+        def spy(chunks, **kwargs):
+            seen.update(kwargs)
+            return chunks
+
+        monkeypatch.setattr("timbal.voice.rhythm.shape_pauses", spy)
+        session, recorder = _session(
+            _PcmTTS(_word_gap_phrase()), tmp_path, tts_rhythm=True, max_tts_pause_secs=cap, tts_tempo=tempo
+        )
+        try:
+            await session._speak(TEXT)
+            assert seen["max_pause_secs"] == longest
+            assert seen["playback_rate"] == rate
+        finally:
+            recorder.close()
+
+    async def test_sentences_spoken_one_by_one_keep_the_pause_between_them(self, tmp_path: Path) -> None:
+        """A provider without a text stream synthesizes each sentence on its own. The air that
+        closes one and opens the next is the pause between them: rhythm leaves it alone."""
+        speech = _const(int(0.12 * SR), 12_000)
+        raw = _const(int(0.25 * SR), 0) + speech + _const(int(0.20 * SR), 0)
+        session, recorder = _session(_PcmTTS(raw), tmp_path, tts_rhythm=True)
+        try:
+            await session._speak("alpha beta.")
+            await session._speak("gamma delta.")
+            assert _emitted(session) == raw + raw
+        finally:
+            recorder.close()
+
     async def test_rhythm_alone_skips_non_pcm_audio(self, tmp_path: Path) -> None:
         raw = _word_gap_phrase()
         session, recorder = _session(_PcmTTS(raw), tmp_path, tts_rhythm=True)

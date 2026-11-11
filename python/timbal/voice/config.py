@@ -560,19 +560,22 @@ class SpeculativeGeneration(BaseModel):
 
 NATURAL_SPEECH_RHYTHM: dict[str, float] = {"join_gaps": 0.9, "stretch_pauses": 0.8, "promote_gaps": 0.08}
 """What ``tts_rhythm=True`` selects. Tuned on ``eleven_v4_turbo`` against a
-recording of a human agent, with ``max_tts_pause_secs=0.55`` and
-``tts_tempo=1.2``."""
+recording of a human agent, with ``tts_tempo=1.2``. No pause is lengthened
+past 0.55 s, or past ``max_tts_pause_secs`` when that is lower."""
 
 
 class SpeechRhythm(BaseModel):
     """Join the words of synthesized speech and keep its real pauses. Off unless a share is set.
 
-    Neural TTS leaves a 120-250 ms gap between many words and few pauses of
+    Neural TTS leaves a 0.12-0.20 s gap between many words and few pauses of
     0.3-0.5 s. A person runs the words together and pauses now and then. Each
-    internal silence is sorted by length: under ``gap_min_secs`` it is a
-    consonant and is left alone; up to ``gap_max_secs`` it is a gap between
-    two words; longer is a comma or sentence pause. Speech is never delayed.
-    See :mod:`timbal.voice.rhythm`.
+    silence between two stretches of speech is sorted by length: under
+    ``gap_min_secs`` it is a consonant and is left alone; up to
+    ``gap_max_secs`` it is a gap between two words; longer is a comma or
+    sentence pause. Speech is never changed or delayed, and neither is the
+    silence before the first word or after the last. A silence is held until
+    the speech after it arrives, but not past the moment the caller would
+    hear it. See :mod:`timbal.voice.rhythm`.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -582,17 +585,22 @@ class SpeechRhythm(BaseModel):
     them alone."""
     stretch_pauses: float = Field(default=0.0, ge=0.0, le=1.0)
     """Share of the comma and sentence pauses that are lengthened by 1.4-2.3x.
-    ``max_tts_pause_secs`` still bounds the result."""
+    None ends up longer than 0.55 s, or than ``max_tts_pause_secs`` when
+    that is lower."""
     promote_gaps: float = Field(default=0.0, ge=0.0, le=1.0)
     """Share of the gaps between words that become a pause of 0.30-0.55 s.
     Taken from the same gaps as ``join_gaps``, so the two add up to at most 1."""
     gap_min_secs: float = Field(default=0.12, ge=0.0, le=1.0)
     """A silence shorter than this is the closure of a stop consonant."""
-    gap_max_secs: float = Field(default=0.20, ge=0.0, le=2.0)
+    gap_max_secs: float = Field(default=0.20, ge=0.0, le=0.9)
     """A silence this long or longer is a real pause. Lower it for a voice
-    whose comma pauses are short, or they are joined as well."""
-    quiet_dbfs: float = Field(default=-42.0, allow_inf_nan=False)
-    """Frame level below which PCM counts as silence."""
+    whose comma pauses are short, or they are joined as well. At most 0.9:
+    a silence that long is passed on before its end is known."""
+    quiet_dbfs: float = Field(default=-42.0, ge=-90.0, le=-20.0)
+    """A 10 ms frame whose RMS level is under this belongs to a silence. Only
+    frames with no sample over it are removed or repeated, so a soft
+    consonant or a breath inside the silence is kept. Not the same measure
+    as ``tts_quiet_dbfs``, which is a peak level."""
     seed: int | None = None
     """Fix the random draws. Unset draws differently on every reply."""
 
