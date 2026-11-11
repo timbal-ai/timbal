@@ -9,6 +9,8 @@ process would restore it, driven until it is idle, and checked:
 - **nothing acknowledged is lost**: a message, wake or answer whose ``flush()`` returned is in the
   conversation, or is named in a recovery notice;
 - **nothing is answered twice**: no session event appears in the history more than once;
+- **a stop holds**: once an interrupt is acknowledged against a question the session waits on (or is about
+  to), the tool behind that question never runs, whatever is approved afterwards;
 - **nothing said is forgotten**: while the process lives, every answer of a turn the session reported as
   finished is in the stored conversation (after a crash an unsaved answer is gone, and recovery says so);
 - **it settles**: the restored session becomes idle (answering what it still waits for), with nothing left
@@ -64,10 +66,13 @@ class Fault:
     - ``"close"``: the process shuts down in order from there (``close(keep=True)``); its writes land.
     - ``"store"`` / ``"trace"``: that store fails for ``length`` writes, and the process lives on.
     - ``"taken"``: another process takes the session over just before that write to the session store.
+
+    ``then=(kind, after)``: an outage that the process does not outlive. It dies (``"die"``) or shuts down
+    (``"close"``) ``after`` writes into it.
     """
 
-    def __init__(self, at=None, kind="die", *, length=3):
-        self.at, self.kind, self.length = at, kind, length
+    def __init__(self, at=None, kind="die", *, length=3, then=None):
+        self.at, self.kind, self.length, self.then = at, kind, length, then
         self.writes = 0
         self.gone = asyncio.Event()  # the process died, or is shutting down: the caller stops
         self.dead = False
@@ -81,10 +86,13 @@ class Fault:
             return False
         self.writes += 1
         if self.at is not None and self.writes > self.at and not self.gone.is_set():
-            if self.kind == "die":
+            kind = self.kind
+            if self.then is not None and self.writes > self.at + self.then[1]:
+                kind = self.then[0]
+            if kind == "die":
                 self.die()
                 return False
-            if self.kind == "close":
+            if kind == "close":
                 self.gone.set()
                 self.closing = asyncio.ensure_future(self.session.close(keep=True))
         return True
@@ -322,6 +330,7 @@ class Client:
         self.session, self.fault, self.calls = session, fault, calls
         self.acked: dict[str, str] = {}  # event id -> text
         self.acked_wakes: list[str] = []
+        self.must_not_run: set[str] = set()  # tools an acknowledged stop has ruled out
 
     async def stored(self) -> bool:
         """``session.flush()`` as a route awaits it. False: the process died first, or the store refused."""
@@ -337,17 +346,20 @@ class Client:
     def _alive(self) -> bool:
         return not self.fault.gone.is_set() and not self.session.closed
 
-    async def send(self, text, mode=None) -> None:
+    async def send(self, text, mode=None) -> bool:
+        """Send a message as the route does. True: it was acknowledged."""
         if not self._alive():
-            return
+            return False
         with contextlib.suppress(RuntimeError):  # closed under us
             event = self.session.send(text, mode=mode, defer_cut=True)
             mark = self.session.mark()
             if await self.stored() or (self._alive() and self.session.stored_since(mark)):
                 self.acked[event.id] = text
                 self.session.cut_for(event, mode)
-            elif self._alive():
+                return True
+            if self._alive():
                 self.session.withdraw(event.id)  # as the route does before its 503
+        return False
 
     async def wake(self, text, key=None) -> None:
         if not self._alive():
@@ -501,7 +513,19 @@ async def queued_behind_an_approval(c):
 async def approval_abandoned(c):
     await c.send("pay")
     if await c.until(lambda: c.session.parked or c.at_rest()):
-        await c.send("never mind", mode="interrupt")
+        if c.calls["charge"] == 0 and await c.send("never mind", mode="interrupt"):
+            c.must_not_run.add("charge")
+    await c.settle()
+
+
+async def approval_abandoned_as_it_parks(c):
+    """The stop comes when the turn has just asked for approval and is ending: with the trace store away it
+    is still busy then, waiting for its trace, and not parked yet."""
+    await c.send("pay")
+    if await c.until(lambda: c.session.turns or c.at_rest()):
+        await asyncio.sleep(0.012)
+        if c.calls["charge"] == 0 and await c.send("never mind", mode="interrupt"):
+            c.must_not_run.add("charge")
     await c.settle()
 
 
@@ -529,6 +553,7 @@ SCENARIOS = {
     "collected": collected,
     "queued_behind_an_approval": queued_behind_an_approval,
     "approval_abandoned": approval_abandoned,
+    "approval_abandoned_as_it_parks": approval_abandoned_as_it_parks,
     "wake_replaced": wake_replaced,
 }
 
@@ -572,7 +597,7 @@ async def run_once(tmp_path, scenario, durability, *faults):
         else:
             await fault.closing
             forget(session)
-        acked, acked_wakes = client.acked, client.acked_wakes
+        acked, acked_wakes, must_not_run = client.acked, client.acked_wakes, client.must_not_run
         fault = faults.pop(0) if faults else Fault()
         provider = FaultySqlite.configured(_path=path, fault=fault, durability=durability)
         store = faulty_store(path, fault)
@@ -584,7 +609,7 @@ async def run_once(tmp_path, scenario, durability, *faults):
             return {"writes": writes, "calls": calls, "session": None, "before": before, "path": path}
         fault.session = session
         client = Client(session, fault, calls)
-        client.acked, client.acked_wakes = acked, acked_wakes
+        client.acked, client.acked_wakes, client.must_not_run = acked, acked_wakes, must_not_run
         await client.settle()
         writes.append(fault.writes)
     fault.at = None  # the scenario is over: nothing fails any more
@@ -616,6 +641,8 @@ async def _check(result, label):
     if session is None:
         return
     client, store = result["client"], result["store"]
+    for name in client.must_not_run:
+        assert calls[name] == 0, f"{label}: {name} ran after a stop was acknowledged"
     memory = await history(session)
     notices = " ".join(texts(m) for m in memory if RECOVERY in texts(m))
     taken = collections.Counter(
@@ -718,6 +745,31 @@ async def test_a_second_crash_during_the_recovery_loses_and_repeats_nothing(tmp_
             except AssertionError as error:
                 failures.append(str(error).splitlines()[0])
     assert not failures, f"{len(failures)} of {points} double crash points:\n" + "\n".join(failures)
+
+
+@pytest.mark.parametrize("end", ["die", "close"])
+@pytest.mark.parametrize("scenario", sorted(SCENARIOS))
+async def test_a_process_ending_during_a_trace_outage_loses_and_repeats_nothing(tmp_path, scenario, end, monkeypatch):
+    """The trace store goes away at a write and the process does not outlive the outage: it dies, or shuts
+    down, a few writes into it. A turn that ended meanwhile is held open for its trace all that time, which
+    is when its user is most likely to send something, or to stop it."""
+    import timbal.core.chat_session as chat_session_module
+
+    monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.005)
+    clean = await run_once(tmp_path, scenario, "sync")
+    await check(clean, f"{scenario}/no fault")
+    failures, points = [], 0
+    for at in range(clean["writes"][0]):
+        for after in (1, 3):
+            points += 1
+            label = f"{scenario}/trace away from write {at + 1}, {end} {after} writes later"
+            fault = Fault(at, "trace", length=1000, then=(end, after))
+            try:
+                await check(await run_once(tmp_path, scenario, "sync", fault), label)
+            except (AssertionError, SessionNotStored) as error:
+                first = str(error).splitlines()[0]
+                failures.append(first if label in first else f"{label}: {first}")
+    assert not failures, f"{len(failures)} of {points} points:\n" + "\n".join(failures)
 
 
 @pytest.mark.parametrize("scenario", sorted(SCENARIOS))

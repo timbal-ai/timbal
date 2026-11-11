@@ -1891,7 +1891,7 @@ class TestFoundByTheCrashSweeps:
         await records(session, "turn_started", 1)
         await asyncio.sleep(0.2)  # the turn has ended; its last save keeps failing
         if how == "interrupt()":
-            assert session.interrupt() is False  # nothing is running that could be cut
+            assert session.interrupt() is False  # nothing to cut, and it left no question
         else:
             session.send("stop", mode="interrupt" if how == "an interrupt message" else "now")
         await asyncio.sleep(0.2)
@@ -1906,3 +1906,136 @@ class TestFoundByTheCrashSweeps:
         texts = [m["content"][0].get("text") for m in memory.root_span().memory if m.get("role") == "user"]
         assert texts == (["hi"] if how == "interrupt()" else ["hi", "stop"])  # the first turn is in the history
         await session.close()
+
+    @pytest.mark.parametrize("how", ["interrupt()", "an interrupt message"])
+    async def test_an_interrupt_during_the_wait_for_a_parked_turns_trace_abandons_the_question(
+        self, tmp_path, monkeypatch, how
+    ):
+        """The turn ended waiting for an approval and its trace is not stored yet. A stop then has nothing to
+        cut, but it must not be dropped: once the turn is settled the question is abandoned, as a stop on a
+        parked session does. Otherwise the session waits, and a later approval runs the gated tool."""
+        import timbal.core.chat_session as chat_session_module
+
+        monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.01)
+
+        class Unreachable(SqliteTracingProvider):
+            down = False
+
+            @classmethod
+            async def _store(cls, run_context):
+                if cls.down:
+                    raise OSError("the trace store is unreachable")
+                await super()._store(run_context)
+
+        provider = Unreachable.configured(_path=tmp_path / "timbal.db", down=True)
+        store = SqliteChatSessionStore(tmp_path / "timbal.db")
+        charge = Charge(released=True)
+        session = ChatSession(gated_agent(provider, charge), session_store=store)
+        session.send("pay")
+        await records(session, "turn_started", 1)
+        await asyncio.sleep(0.2)  # the turn has ended on the approval; its last save keeps failing
+        assert session.busy and not session.parked
+        if how == "interrupt()":
+            assert session.interrupt() is True
+        else:
+            session.send("never mind", mode="interrupt")
+        provider.down = False
+        expected = 2 if how == "interrupt()" else 3  # the parked turn, the one that cancels it (, the message)
+        finished = await records(session, "turn_finished", expected)
+        assert finished[0]["parked"] is True and finished[1]["status"]["code"] == "cancelled"
+        assert not session.parked and session.state().get("pending_approvals") is None
+        assert charge.gate.calls == 0  # the gated tool never ran, and nothing is left to approve
+        if how != "interrupt()":
+            assert root_outputs(session)[-1].output.collect_text() == "echo: never mind"
+        await session.close()
+
+    async def test_a_stop_taken_just_before_a_shutdown_still_abandons_the_question_after_it(self, db):
+        """interrupt() said yes to a turn that had ended and was not settled yet; the session is stopped before
+        it is. The stop is stored with the session, and the question is abandoned by whoever restores it."""
+        provider, store = db
+        charge = Charge(released=True)
+        session = ChatSession(gated_agent(provider, charge), session_store=store)
+        real_pump, taken, closing = session._pump, [], []
+
+        async def pump(*args, **kwargs):
+            output = await real_pump(*args, **kwargs)
+            loop = asyncio.get_running_loop()
+            # Both land once the turn's task is over and before the worker has settled the turn.
+            loop.call_soon(lambda: taken.append(session.interrupt()))
+            closing.append(loop.create_task(session.close(keep=True)))
+            return output
+
+        session._pump = pump
+        session.send("pay")
+        for _ in range(250):
+            if closing:
+                break
+            await asyncio.sleep(0.02)
+        await closing[0]
+        assert taken == [True]
+
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert finished["status"]["code"] == "cancelled"
+        assert not restored.parked and restored.state().get("pending_approvals") is None
+        assert charge.gate.calls == 0
+        await restored.close()
+
+    @pytest.mark.parametrize("end", ["a crash", "a shutdown"])
+    @pytest.mark.parametrize("trace", ["not stored", "stored"])
+    async def test_a_stop_taken_during_that_wait_outlives_the_process(self, tmp_path, monkeypatch, trace, end):
+        """The stop is stored as what it amounts to (a cancel for the question) when it is taken, not kept in
+        mind until the turn is settled: the process may never get there."""
+        import timbal.core.chat_session as chat_session_module
+
+        monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.01)
+
+        class Unreachable(SqliteTracingProvider):
+            down = False
+
+            @classmethod
+            async def _store(cls, run_context):
+                if cls.down:
+                    raise OSError("the trace store is unreachable")
+                await super()._store(run_context)
+
+        provider = Unreachable.configured(_path=tmp_path / "timbal.db", down=True)
+        store = SqliteChatSessionStore(tmp_path / "timbal.db")
+        charge = Charge(released=True)
+        session = ChatSession(gated_agent(provider, charge), session_store=store)
+        real_trace_stored = session._trace_stored
+
+        async def stored_and_no_further(context):
+            await real_trace_stored(context)
+            await asyncio.Event().wait()  # the process ends before the turn is settled
+
+        session._trace_stored = stored_and_no_further
+        session.send("pay")
+        await records(session, "turn_started", 1)
+        await asyncio.sleep(0.2)  # the turn has ended on the approval; its last save keeps failing
+        run_id = session.run_id
+        assert session.interrupt() is True
+        await session.flush()  # what the route waits for before it says so
+        assert (await store.load(session.id)).resume  # the cancel, next to the turn in flight
+        if trace == "stored":
+            provider.down = False
+            for _ in range(250):
+                run = await session._load_run(run_id)
+                if run is not None and run.root_span().t1 is not None:
+                    break
+                await asyncio.sleep(0.02)
+            assert session.busy and not session.parked  # ended, stored, and not settled
+        if end == "a crash":
+            await kill(session)
+        else:
+            await session.close(keep=True)
+        provider.down = False
+
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
+        if trace == "stored":
+            assert finished["status"]["code"] == "cancelled"  # the question, answered with the stored cancel
+        await asyncio.sleep(0.1)
+        assert not restored.parked and restored.state().get("pending_approvals") is None
+        assert charge.gate.calls == 0  # nothing is left to approve, and the gated tool never ran
+        await restored.close()

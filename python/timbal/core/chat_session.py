@@ -247,6 +247,11 @@ def _ended_by_itself(turn: asyncio.Task) -> bool:
     return output is not None and not _was_cut(output.status)
 
 
+def _ended_parked(turn: asyncio.Task) -> bool:
+    """A turn's task whose run ended waiting on an approval or a question."""
+    return _ended_by_itself(turn) and is_parked(turn.result().status)
+
+
 def _brief(value: Any, limit: int = 160) -> str:
     text = value if isinstance(value, str) else repr(value)
     text = " ".join(text.split())
@@ -684,18 +689,46 @@ class ChatSession:
             self._record("interrupt", run_id=self.run_id)
             turn.cancel()
             return True
+        reason = "The user moved on before answering."
+        if turn is not None:
+            # The turn has ended and is not settled yet (its trace is being stored): nothing of it is left to
+            # cut. If it ended on a question, that is what the stop is about, as on a parked session: the
+            # answer is stored now and taken once the turn is settled (resume() itself waits for that).
+            # Dropped here, the session would park on a question its user has just walked away from, and a
+            # later approval would run the gated tool.
+            context = self._turn_context
+            if context is None or not _ended_parked(turn):
+                return False
+            pending = self._cancel_pending(context, reason)
+            if not pending:
+                return False
+            self._record("interrupt", run_id=context.id, abandoned=pending)
+            self.last_activity = time.monotonic()
+            self._persist()
+            return True
         if self.parked and self._last_context is not None:
-            reason = "The user moved on before answering."
-            answered = self._resume or {}
-            pending = [a["approval_id"] for a in self._last_context.pending_approvals()]
-            pending += [i["interaction_id"] for i in self._last_context.pending_interactions()]
-            pending = [pending_id for pending_id in pending if pending_id not in answered]
+            pending = self._unanswered(self._last_context)
             if not pending:
                 return False
             self._record("interrupt", run_id=self._last_context.id, abandoned=pending)
             self.resume({pending_id: Cancel(reason=reason) for pending_id in pending})
             return True
         return False
+
+    def _unanswered(self, context: RunContext) -> list[str]:
+        """What a run that ended on approvals / questions still waits for: the ids no queued answer covers."""
+        answered = self._resume or {}
+        pending = [a["approval_id"] for a in context.pending_approvals()]
+        pending += [i["interaction_id"] for i in context.pending_interactions()]
+        return [pending_id for pending_id in pending if pending_id not in answered]
+
+    def _cancel_pending(self, context: RunContext, reason: str) -> list[str]:
+        """Queue a cancel for everything ``context`` still waits for (answers already given stand): the gated
+        tools never run, the run ends ``cancelled``. The ids it cancelled."""
+        pending = self._unanswered(context)
+        if pending:
+            self._resume = {**(self._resume or {}), **{pending_id: Cancel(reason=reason) for pending_id in pending}}
+        return pending
 
     @property
     def parked(self) -> bool:
@@ -1659,14 +1692,8 @@ class ChatSession:
     def _abandon_question(self, reason: str) -> None:
         """Answer what the parked turn still waits for with a cancel (answers already given stand): the gated
         tools never run, the run ends ``cancelled``."""
-        if self._last_context is None:
-            return
-        answered = self._resume or {}
-        pending = [a["approval_id"] for a in self._last_context.pending_approvals()]
-        pending += [i["interaction_id"] for i in self._last_context.pending_interactions()]
-        pending = [pending_id for pending_id in pending if pending_id not in answered]
-        if pending:
-            self._resume = {**answered, **{pending_id: Cancel(reason=reason) for pending_id in pending}}
+        if self._last_context is not None:
+            self._cancel_pending(self._last_context, reason)
 
     def _restore_events(self, stored: list[dict[str, Any]]) -> None:
         # Restored in the same process (an idle session let go), the run's task store may still hold them.
