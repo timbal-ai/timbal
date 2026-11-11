@@ -11,6 +11,7 @@ import traceback
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any, Literal
 
 from pydantic import (
@@ -2096,13 +2097,6 @@ class Runnable(ABC, BaseModel):
             # produce an orphan parent_call_id that trace validation rejects.
             _parent_call_id = None
             _call_id = None
-        previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
-        if _background_handoff_control is not None:
-            run_context.__dict__["_background_handoff_control"] = _background_handoff_control
-        # Never mutated in place (readers only look values up), so a call without resume values shares the dict.
-        previous_resume_values = run_context._resume_values
-        if resume_values:
-            run_context.__dict__["_resume_values"] = {**previous_resume_values, **resume_values}
         set_run_context(run_context)
 
         _new_parent_call_id = _call_id
@@ -2185,6 +2179,15 @@ class Runnable(ABC, BaseModel):
         # first so finally closes *this* object, not the child's.
         emit_sink = None
         spawned_background = False
+        # Installed last, with nothing that can raise before the ``try`` whose ``finally`` takes them
+        # back off: a call that fails while it is being set up leaves neither on the context.
+        previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
+        if _background_handoff_control is not None:
+            run_context.__dict__["_background_handoff_control"] = _background_handoff_control
+        # A read-only mapping (see RunContext's NOTE), so a call without resume values shares it.
+        previous_resume_values = run_context._resume_values
+        if resume_values:
+            run_context.__dict__["_resume_values"] = MappingProxyType({**previous_resume_values, **resume_values})
         handoff_control = (
             getattr(run_context, "_background_handoff_control", None)
             if self.background_mode == "auto" and self._is_async_gen and not self._is_orchestrator
@@ -2705,6 +2708,10 @@ class Runnable(ABC, BaseModel):
             # them. Only check the IDs introduced by THIS call; nested children
             # don't re-introduce them.
             if resume_values:
+                # Only a call that installed values takes them off (a plain attribute, see RunContext's
+                # NOTE). A call that brought none has nothing to undo, and writing back what it saw when
+                # it started would reinstall them if it outlived the call that did (a background child).
+                run_context.__dict__["_resume_values"] = previous_resume_values
                 unused = [rid for rid in resume_values if rid not in run_context._used_resume_ids]
                 if unused:
                     _get_logger().warning(
@@ -2713,8 +2720,6 @@ class Runnable(ABC, BaseModel):
                         unused_resume_ids=unused,
                         runnable_path=self._path,
                     )
-            # Every call ends here: a plain attribute (see RunContext's NOTE), so skip BaseModel.__setattr__.
-            run_context.__dict__["_resume_values"] = previous_resume_values
             if _background_handoff_control is not None:
                 _background_handoff_control.close()
                 if previous_handoff_control is None:
