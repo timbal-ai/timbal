@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import inspect
 import math
 import random
 import re
@@ -85,6 +86,7 @@ from .events import (
     VoiceSessionEvent,
     VoiceUsageEvent,
 )
+from .language import normalize_language_tag, reply_language_instruction, with_reply_language
 from .metrics import TurnMetrics, TurnMetricsEvent
 from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
 from .providers import (
@@ -198,7 +200,7 @@ def _strip_markdown(text: str, *, previous_text: str = "") -> str:
     # A punctuation-only segment may already have been sent to TTS when the
     # number arrives. Carry enough raw context to recognize that boundary.
     prefix = previous_text[-2:]
-    text = _LEAKED_DIGITS.sub(r"\1", prefix + text)[len(prefix):]
+    text = _LEAKED_DIGITS.sub(r"\1", prefix + text)[len(prefix) :]
     text = _MD_BOLD.sub(r"\1", text)
     text = _MD_HEADER.sub("", text)
     text = _MD_NUMBERED_LIST.sub("", text)
@@ -439,7 +441,9 @@ class VoiceSession:
         # once the agent has drained, at most ``max_count`` times, and ends the
         # session after ``hangup_after_secs`` without a word from the user.
         self.user_idle: UserIdleConfig | None = (
-            user_idle if isinstance(user_idle, UserIdleConfig) or user_idle is None else UserIdleConfig.model_validate(user_idle)
+            user_idle
+            if isinstance(user_idle, UserIdleConfig) or user_idle is None
+            else UserIdleConfig.model_validate(user_idle)
         )
         self._idle_agent: Agent | None = None
         self._idle_task: asyncio.Task[None] | None = None
@@ -904,6 +908,43 @@ class VoiceSession:
             raise
         self._prepared = True
 
+    async def set_language(self, language: str | None) -> bool:
+        """Set the conversation language for later replies and the STT hint.
+
+        The reply instruction changes on the next turn either way. The return
+        value is whether the open speech-to-text socket accepted it. Deepgram
+        Flux ``flux-general-multi`` does, via ``Configure`` ``language_hints``
+        (``[]`` when ``language`` is ``None`` or ``""``, which clears a sticky
+        hint). Scribe, Nova, Munsit, and OpenAI transcription keep the new
+        value for their next ``connect`` and do not retarget the open socket.
+
+        ``None`` or blank clears a configured language: the model is told to
+        follow the user's latest substantive message, unless the agent's own
+        prompt already names one reply language.
+        """
+        raw = None if language is None else str(language)
+        if raw is not None and raw.strip() and normalize_language_tag(raw) is None:
+            raise ValueError(f"language must be a BCP-47 tag, got {language!r}")
+        tag = normalize_language_tag(raw)
+        if tag == normalize_language_tag(self.audio_input.language):
+            return False
+        self.audio_input.language = tag
+        update = getattr(self.stt, "update_language", None)
+        if update is None:
+            logger.info("voice_language_set", language=tag, stt_live=False)
+            return False
+        try:
+            result = update(tag)
+            if not inspect.isawaitable(result):
+                logger.info("voice_language_set", language=tag, stt_live=False)
+                return False
+            applied = bool(await result)
+        except Exception as e:  # noqa: BLE001 — a language change must not drop the call
+            logger.warning("voice_stt_language_update_failed", language=tag, error=str(e))
+            return False
+        logger.info("voice_language_set", language=tag, stt_live=applied)
+        return applied
+
     @property
     def closed(self) -> bool:
         """``True`` once :meth:`close` ran — the caller hung up or the host
@@ -1050,9 +1091,7 @@ class VoiceSession:
                 # unheard tail of this turn never reaches the file. The recorder
                 # clamps to its queue, so an estimate that lags the drain only
                 # over-keeps a fraction of a second.
-                self._recorder.drop_agent_tail(
-                    max(0, self._turn_audio_bytes - self._turn_heard_bytes)
-                )
+                self._recorder.drop_agent_tail(max(0, self._turn_audio_bytes - self._turn_heard_bytes))
         # Same rule as the reply's post-completion rewrite below: a real barge-in
         # rewrites what was left unheard, ``close()`` leaves the transcript alone.
         if was_active and truncate_completed and self._greeting_record is not None:
@@ -2376,9 +2415,7 @@ class VoiceSession:
         self._turn_memory_baseline = 0
         self._turn_tts_boundary_chars = 0
         self._turn_started_at = time.monotonic()
-        self._turn_deadline = (
-            self._turn_started_at + self.turn_timeout_secs if self.turn_timeout_secs > 0 else None
-        )
+        self._turn_deadline = self._turn_started_at + self.turn_timeout_secs if self.turn_timeout_secs > 0 else None
         self._turn_index += 1
         self._turn_first_token_at = None
         self._turn_first_audio_at = None
@@ -2475,11 +2512,20 @@ class VoiceSession:
             # What the caller *heard*, not what was configured: an interruptible
             # opener cut mid-sentence leaves a prefix, and one cut before a
             # single word landed leaves nothing to not-repeat.
-            greeting_heard = self._greeting_heard_text()
-            if greeting_heard and self._last_run_context is None:
-                agent_kwargs["system_prompt"] = _dont_greet_again_prompt(
-                    await self._agent_system_prompt(), greeting_heard
-                )
+            # Every turn, not only the one after a greeting. The language
+            # paragraph is per-call stable until ``set_language``; the
+            # already-greeted note is turn one only, and stays last so it is
+            # not buried under the language pin.
+            #
+            # A callable agent prompt must run inside the turn. Resolving it
+            # here, before ``agent()`` forks the next ``RunContext``, would
+            # show turn two the previous run. ``Agent`` awaits a callable
+            # ``system_prompt`` after that fork. A static prompt is resolved
+            # now so the call kwarg stays a string.
+            if getattr(self.agent, "_system_prompt_fn", None) is not None:
+                agent_kwargs["system_prompt"] = self._compose_turn_system_prompt
+            else:
+                agent_kwargs["system_prompt"] = await self._compose_turn_system_prompt()
             agen = self.agent(**agent_kwargs)
             # Armed at turn start rather than at the first tool call: a model
             # that thinks for seconds before calling anything is dead air too.
@@ -2538,9 +2584,7 @@ class VoiceSession:
                         # its live run context. Keep the caller turn's grace period,
                         # spoken phrases, repeat cadence, and remaining budget.
                         arm_think_filler = (
-                            self.filler is not None
-                            and self.filler.enabled
-                            and self.filler.think_delay_secs is not None
+                            self.filler is not None and self.filler.enabled and self.filler.think_delay_secs is not None
                         )
                         retry_kwargs = dict(agent_kwargs)
                         retry_kwargs.pop("prompt", None)
@@ -3339,9 +3383,7 @@ class VoiceSession:
         self._turn_filler_text = f"{self._turn_filler_text} {phrase}".strip()
         logger.info("filler_speak", phrase=phrase, tool=tool_name, **_trace_debug_fields())
         await self._speak(phrase, filler=True)
-        if self._cancel_turn.is_set() or (
-            (task := asyncio.current_task()) is not None and task.cancelling()
-        ):
+        if self._cancel_turn.is_set() or ((task := asyncio.current_task()) is not None and task.cancelling()):
             return
         # Everything below commits only after synthesis finishes: a turn
         # cancelled mid-speak must not count a filler that never reached the
@@ -3385,7 +3427,10 @@ class VoiceSession:
                 f"\nThe work is taking a while and you already told the caller: {said}. "
                 "Say a different short follow-up so they know you're still there."
             )
-        out = await self._filler_agent(prompt=prompt).collect()
+        out = await self._filler_agent(
+            prompt=prompt,
+            system_prompt=with_reply_language(self.filler.system_prompt, self.audio_input.language),
+        ).collect()
         if out.status.code != "success" or out.output is None:
             logger.debug("filler_generation_failed", status=out.status.code, error=out.error)
             return None
@@ -3748,20 +3793,23 @@ class VoiceSession:
         if not instructions:
             return None
         parts = [p for p in (await self._agent_system_prompt(), DEFAULT_USER_IDLE_SYSTEM_PROMPT, instructions) if p]
+        idle_prompt = with_reply_language("\n\n".join(parts), self.audio_input.language)
         if self._idle_agent is None:
             self._idle_agent = Agent(
                 name="voice_user_idle",
                 model=cfg.model or self.model or self.agent.model,
-                system_prompt="\n\n".join(parts),
+                system_prompt=idle_prompt,
                 max_tokens=96,
                 tracing_provider=None,
             )
         recent = " / ".join(e.text for e in self._transcript[-4:] if e.text)[-600:]
-        prompt = f"Conversation so far: {recent}\n\nThe user has gone quiet. Say your line." if recent else "Say your line."
+        prompt = (
+            f"Conversation so far: {recent}\n\nThe user has gone quiet. Say your line." if recent else "Say your line."
+        )
         ambient_ctx = get_run_context()
         set_run_context(None)
         try:
-            out = await self._idle_agent(prompt=prompt).collect()
+            out = await self._idle_agent(prompt=prompt, system_prompt=idle_prompt).collect()
         finally:
             set_run_context(ambient_ctx)
         if out.status.code != "success" or out.output is None:
@@ -3941,6 +3989,19 @@ class VoiceSession:
             return 0
         return max(0, int(record[1]) - self.playback.played_bytes)
 
+    async def _compose_turn_system_prompt(self) -> str:
+        """Agent prompt plus the reply-language line, and the turn-one greeting note.
+
+        Called either before ``agent()`` (static prompts) or from inside the
+        run (callable prompts). The greeting note reads what the caller heard,
+        which is known before the model starts.
+        """
+        prompt = with_reply_language(await self._agent_system_prompt(), self.audio_input.language)
+        greeting_heard = self._greeting_heard_text()
+        if greeting_heard and self._last_run_context is None:
+            prompt = _dont_greet_again_prompt(prompt, greeting_heard)
+        return prompt
+
     async def _agent_system_prompt(self) -> str | None:
         """The agent's own resolved system prompt, or ``None``.
 
@@ -3973,11 +4034,11 @@ class VoiceSession:
         instructions = (self.greeting.instructions or "").strip()
         if not instructions:
             return None
-        parts = [
-            p
-            for p in (await self._agent_system_prompt(), DEFAULT_GREETING_SYSTEM_PROMPT, instructions)
-            if p
-        ]
+        parts = [p for p in (await self._agent_system_prompt(), DEFAULT_GREETING_SYSTEM_PROMPT, instructions) if p]
+        # No user utterance yet, so the unset "match the latest message" policy
+        # does not apply. A configured language still pins the opener.
+        if self.audio_input.language:
+            parts.append(reply_language_instruction(self.audio_input.language))
         # Kept on the session (like ``_filler_agent``) so the assembled prompt is
         # readable after the fact — it is the whole configuration surface of a
         # generated opener, and it runs exactly once per call.
@@ -4247,8 +4308,13 @@ class VoiceSession:
                 pass
 
     async def _speak(
-        self, text: str, *, filler: bool = False, greeting: bool = False,
-        idle: bool = False, previous_text: str = "",
+        self,
+        text: str,
+        *,
+        filler: bool = False,
+        greeting: bool = False,
+        idle: bool = False,
+        previous_text: str = "",
     ) -> None:
         """Synthesize ``text`` and emit its audio.
 
@@ -4472,7 +4538,7 @@ class VoiceSession:
                 not remaining_completed or remaining_completed[-1][1] != self._turn_iteration_prefix
             ):
                 prefix = self._turn_iteration_prefix
-                iteration_text = self._turn_assistant_text[len(prefix):]
+                iteration_text = self._turn_assistant_text[len(prefix) :]
                 if not iteration_text or not (text.startswith(iteration_text) or iteration_text.startswith(text)):
                     continue
             else:
@@ -4490,12 +4556,14 @@ class VoiceSession:
             spoken_text = _strip_markdown(text).strip()
             remaining = heard_text
             if spoken_prefix:
-                remaining = heard_text[len(spoken_prefix):].lstrip() if heard_text.startswith(spoken_prefix) else ""
-            heard_iteration = remaining[:len(spoken_text)].rstrip()
+                remaining = heard_text[len(spoken_prefix) :].lstrip() if heard_text.startswith(spoken_prefix) else ""
+            heard_iteration = remaining[: len(spoken_text)].rstrip()
             non_text = [c for c in message.content if not isinstance(c, TextContent)]
             content = [TextContent(text=heard_iteration), *non_text] if heard_iteration else non_text
             heard_reply = Message(
-                role="assistant", content=content, stop_reason=message.stop_reason,
+                role="assistant",
+                content=content,
+                stop_reason=message.stop_reason,
                 metadata={**message.metadata, "interrupted": True},
             )
             # Leave the LLM span's original Message intact for observability.
@@ -4504,7 +4572,9 @@ class VoiceSession:
             else:
                 root.memory.pop(index)
             output = root.output
-            if isinstance(output, Message) and (output is message or (index == last_index and output.collect_text() == text)):
+            if isinstance(output, Message) and (
+                output is message or (index == last_index and output.collect_text() == text)
+            ):
                 root.output = heard_reply
             rewritten = True
         return rewritten
