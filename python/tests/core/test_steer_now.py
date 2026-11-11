@@ -228,6 +228,20 @@ class TestToolCut:
         spans = [span for span in context._trace.as_records() if span.path in seen]
         assert len(spans) == 2 and all(span.t1 is not None for span in spans)
 
+    async def test_closing_while_a_cuttable_batch_waits_leaves_no_helper_task_behind(self):
+        """The batch waits on the next event and on the cut at once: cancelled there (a close, an interrupt),
+        neither wait may be left pending."""
+        probe = Probe()
+        a = agent(batch_model("charge"), [probe.tool("charge", forever=True)])
+        before = asyncio.all_tasks()
+        session = ChatSession(a)
+        session.send("start")
+        await asyncio.wait_for(probe.started["charge"].wait(), 2)
+        await session.close()
+        await asyncio.sleep(0)
+        left = [task for task in asyncio.all_tasks() - before if not task.done() and task is not asyncio.current_task()]
+        assert left == [], [task.get_coro().__qualname__ for task in left]
+
 
 class SlowStream(StreamingTestModel):
     """Streams its scripts a chunk at a time so a test can act mid-answer."""

@@ -2034,14 +2034,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if cut is not None and not cut.is_set():
                     getter = asyncio.ensure_future(queue.get())
                     waiter = asyncio.ensure_future(cut.wait())
-                    await asyncio.wait({getter, waiter}, return_when=asyncio.FIRST_COMPLETED)
-                    waiter.cancel()
-                    if not getter.done():
-                        getter.cancel()
-                        try:
-                            await getter
-                        except asyncio.CancelledError:
-                            pass
+                    try:
+                        await asyncio.wait({getter, waiter}, return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        # Also when this batch is cancelled while it waits (the turn interrupted, the session
+                        # closed): neither helper may outlive it, waiting on an event nobody will set.
+                        waiter.cancel()
+                        if not getter.done():
+                            getter.cancel()
+                        await asyncio.gather(getter, waiter, return_exceptions=True)
                     item = None if getter.cancelled() else getter.result()
                 else:
                     item = await queue.get()

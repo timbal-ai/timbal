@@ -27,12 +27,12 @@ from ..state.background import (
     store_for_run,
 )
 from ..state.chat_store import (
-    PROCESS_OWNER,
     ChatSessionStore,
     SessionLeased,
     SessionNotStored,
     SessionSnapshot,
     SnapshotConflict,
+    process_owner,
 )
 from ..types.approval import Cancel
 from ..types.content import TextContent
@@ -218,6 +218,18 @@ def _status_dict(status: Any) -> dict[str, Any] | None:
     if isinstance(status, dict):
         return {k: status.get(k) for k in ("code", "reason", "message")}
     return {"code": status.code, "reason": status.reason, "message": status.message}
+
+
+def _shown_events(root: Any) -> set[str]:
+    """The session events a stored run's memory shows it took, by id: every message built from events carries
+    them (``metadata.event_ids``)."""
+    memory = root.memory if isinstance(root.memory, list) else []
+    return {
+        event_id
+        for message in memory
+        if isinstance(message, dict)
+        for event_id in (message.get("metadata") or {}).get("event_ids") or []
+    }
 
 
 def _was_cut(status: Any) -> bool:
@@ -823,7 +835,7 @@ class ChatSession:
         # in between, and this process would serve an older state than the store holds.
         session: ChatSession | None = None
         try:
-            await session_store.acquire_lease(session_id, PROCESS_OWNER)
+            await session_store.acquire_lease(session_id, process_owner())
             snapshot = await session_store.load(session_id)
             if snapshot is None or snapshot.closed:
                 raise LookupError(f"No stored chat session {session_id!r}.")
@@ -882,7 +894,7 @@ class ChatSession:
                 with contextlib.suppress(BaseException):
                     await session.close(keep=True)
             with contextlib.suppress(Exception):
-                await session_store.release_lease(session_id, PROCESS_OWNER)
+                await session_store.release_lease(session_id, process_owner())
             raise
         session._record("restored", head=session.head, recovered=recovered, pending=len(snapshot.pending))
         session._persist()
@@ -1345,10 +1357,34 @@ class ChatSession:
                     self.log.put_nowait(event)
                     if isinstance(event, OutputEvent) and event.run_id == context.id and event.parent_call_id is None:
                         output = event
+            if output is not None:
+                await self._trace_stored(context)
         finally:
             if not started and followup is not None:
                 followup.release()
         return output
+
+    async def _trace_stored(self, context: RunContext) -> None:
+        """Return once the provider holds the trace of the turn that just ended.
+
+        The conversation is in the traces: the next turn reads this one from the provider. A turn whose last
+        save failed (the run itself only logs that and goes on) would be a turn nobody remembers: its
+        messages gone from the history, a question it parked on answered into nothing. So the turn is not
+        over, and the session starts nothing else, until a save lands.
+        """
+        delay = _TURN_RETRY_DELAY_S
+        while context.__dict__.get("_trace_unsaved"):
+            logger.warning("chat_session_trace_not_stored", session_id=self.id, run_id=context.id)
+            try:
+                await asyncio.sleep(delay)
+                await context._save_trace(barrier=True)
+            except asyncio.CancelledError:
+                if self.closed:
+                    # Stopped with its trace still behind: it stays the turn in flight, and a restart
+                    # recovers it from what the provider does hold.
+                    raise
+                return  # interrupted: the turn had ended, only the wait for its trace is given up
+            delay = min(delay * 2, _RESTORE_RETRY_MAX_S)
 
     async def _note_dispatch(
         self, in_flight: dict[str, Any], agent_path: str, calls: list[tuple[str, str, Any]]
@@ -1510,7 +1546,7 @@ class ChatSession:
             created = self._version is None
             snapshot = self._snapshot()
             try:
-                self._version = await store.save(snapshot, expect_version=self._version, owner=PROCESS_OWNER)
+                self._version = await store.save(snapshot, expect_version=self._version, owner=process_owner())
             except SnapshotConflict as e:
                 self._lose(str(e))
                 return
@@ -1525,7 +1561,7 @@ class ChatSession:
                 self._leased = True
             elif not self._leased and not self.closed:
                 try:
-                    await store.acquire_lease(self.id, PROCESS_OWNER)
+                    await store.acquire_lease(self.id, process_owner())
                 except SessionLeased as e:
                     self._lose(str(e))
                     return
@@ -1551,7 +1587,7 @@ class ChatSession:
             if self.closed:
                 return
             try:
-                await store.acquire_lease(self.id, PROCESS_OWNER)
+                await store.acquire_lease(self.id, process_owner())
                 renewed = time.monotonic()
             except SessionLeased as e:
                 self._lose(str(e))
@@ -1593,9 +1629,14 @@ class ChatSession:
             return
         try:
             if not self._keep:
-                await store.delete(self.id)
+                # Only what this process last wrote, and only while nobody else holds it: a session another
+                # process took meanwhile (this one stalled past its lease) is theirs, row included.
+                await store.delete(self.id, expect_version=self._version, owner=process_owner())
             elif self._leased:
-                await store.release_lease(self.id, PROCESS_OWNER)
+                await store.release_lease(self.id, process_owner())
+        except SnapshotConflict as e:
+            self._lost = True  # its caller is told the session lives on elsewhere (DELETE: 409)
+            logger.error("chat_session_ownership_lost", session_id=self.id, reason=str(e))
         except Exception as e:
             logger.error("chat_session_close_store_failed", session_id=self.id, error=str(e))
             if not self._keep and not closed_stored:
@@ -1670,15 +1711,21 @@ class ChatSession:
             self._parked = is_parked(root.status)
             self.last_status = _status_dict(root.status)
             self._last_context = context if self._parked else None
+            # The snapshots that said it took them (a steered message, most of all) may never have been
+            # written: what its memory shows is not pending any more.
+            self._shown_events = _shown_events(root)
             return "finished"
         dispatched = in_flight.get("dispatched")
         calls = [call for call in dispatched if isinstance(call, dict)] if isinstance(dispatched, list) else []
         resumed = in_flight.get("resume") is not None
         events = in_flight.get("events") or []
-        if root is None and not dispatched:
-            # Nothing of it is stored and it had run no tool call (each is stored before it runs, see
-            # _note_dispatch): it did nothing. Its input goes back in the queue, the answers to a parked
-            # turn included (none of the calls they were for had started).
+        if not dispatched:
+            # It had run no tool call (each is stored before it runs, see _note_dispatch): whatever is stored
+            # of it, it did nothing that cannot be done again. Its input goes back in the queue, the answers
+            # to a parked turn included (none of the calls they were for had started), and the next turn
+            # continues from the run before it. Not a recovery turn on top of it: a run cut during its
+            # model call (a shutdown, most often) stores a trace whose memory need not hold its prompt,
+            # and the message would be answered by nobody.
             self._scheduler.head = in_flight.get("parent_id")
             self._restore_events(events)
             if in_flight.get("wake") is not None:
@@ -1712,13 +1759,7 @@ class ChatSession:
             self._parked = False
             # What its stored memory shows it took, by event id (every message built from session events
             # carries them). A steered one it does not show would be lost with the run: back in the queue.
-            memory = root.memory if isinstance(root.memory, list) else []
-            self._shown_events = {
-                event_id
-                for message in memory
-                if isinstance(message, dict)
-                for event_id in (message.get("metadata") or {}).get("event_ids") or []
-            }
+            self._shown_events = _shown_events(root)
             self._restore_events(
                 [event for event in events if event.get("steered") and event.get("id") not in self._shown_events]
             )

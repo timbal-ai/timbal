@@ -23,8 +23,8 @@ from typing import Any
 
 from uuid_extensions import uuid7
 
-__all__ = [
-    "PROCESS_OWNER",
+__all__ = [  # ``PROCESS_OWNER`` is still readable (module __getattr__), for code written before process_owner()
+    "process_owner",
     "ChatSessionStore",
     "InMemoryChatSessionStore",
     "SessionLeased",
@@ -34,8 +34,28 @@ __all__ = [
     "SqliteChatSessionStore",
 ]
 
-PROCESS_OWNER = f"{socket.gethostname()}:{os.getpid()}:{uuid7(as_type='hex')}"
-"""This process, as a lease owner: unique across restarts of the same pid."""
+_OWNER: tuple[int, str] | None = None
+
+
+def process_owner() -> str:
+    """This process, as a lease owner: ``host:pid:uuid``, unique across restarts of the same pid.
+
+    Resolved when it is used, per pid: a server that imports this module and then forks its workers must
+    not hand every child the parent's identity (each would renew, and take, the others' leases).
+    """
+    global _OWNER
+    pid = os.getpid()
+    if _OWNER is None or _OWNER[0] != pid:
+        _OWNER = (pid, f"{socket.gethostname()}:{pid}:{uuid7(as_type='hex')}")
+    return _OWNER[1]
+
+
+def __getattr__(name: str) -> Any:
+    # ``chat_store.PROCESS_OWNER`` still reads as this process's owner, at the time it is read. Importing the
+    # name copies the value of that moment: after a fork it is the parent's. Call process_owner() instead.
+    if name == "PROCESS_OWNER":
+        return process_owner()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _holder_alive(owner: str | None) -> bool:
@@ -159,7 +179,10 @@ class ChatSessionStore(ABC):
         Returns the new version; raises :class:`SnapshotConflict` otherwise."""
 
     @abstractmethod
-    async def delete(self, session_id: str) -> None: ...
+    async def delete(self, session_id: str, *, expect_version: int | None = None, owner: str | None = None) -> None:
+        """Remove the session. With ``expect_version`` and/or ``owner``: only while it is still at that version
+        and no other owner holds its lease. Raises :class:`SnapshotConflict` otherwise (another process took
+        the session and it is theirs now); a row already gone is not an error."""
 
     @abstractmethod
     async def list_ids(self, *, with_work: bool = False) -> list[str]:
@@ -201,8 +224,15 @@ class InMemoryChatSessionStore(ChatSessionStore):
         self._rows[snapshot.session_id] = (stored, holder, until)
         return stored.version
 
-    async def delete(self, session_id: str) -> None:
-        self._rows.pop(session_id, None)
+    async def delete(self, session_id: str, *, expect_version: int | None = None, owner: str | None = None) -> None:
+        row = self._rows.get(session_id)
+        if row is None:
+            return
+        if expect_version is not None and row[0].version != expect_version:
+            raise SnapshotConflict(f"session {session_id}: stored version {row[0].version}, expected {expect_version}")
+        if owner is not None and row[1] not in (None, owner):
+            raise SnapshotConflict(f"session {session_id}: leased by {row[1]}")
+        del self._rows[session_id]
 
     async def list_ids(self, *, with_work: bool = False) -> list[str]:
         return [
@@ -296,12 +326,28 @@ class SqliteChatSessionStore(ChatSessionStore):
             )
         return new_version
 
-    async def delete(self, session_id: str) -> None:
-        def write(conn):
-            conn.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
-            conn.commit()
+    async def delete(self, session_id: str, *, expect_version: int | None = None, owner: str | None = None) -> None:
+        clauses, params = ["session_id = ?"], [session_id]
+        if expect_version is not None:
+            clauses.append("version = ?")
+            params.append(expect_version)
+        if owner is not None:
+            clauses.append("(lease_owner IS NULL OR lease_owner = ?)")
+            params.append(owner)
 
-        await self._run(write)
+        def write(conn):
+            # One statement: the check and the delete cannot be split by another process's write.
+            cursor = conn.execute(f"DELETE FROM chat_sessions WHERE {' AND '.join(clauses)}", params)
+            gone = cursor.rowcount == 1 or (
+                conn.execute("SELECT 1 FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone() is None
+            )
+            conn.commit()
+            return gone
+
+        if not await self._run(write):
+            raise SnapshotConflict(
+                f"session {session_id}: not at version {expect_version}, or leased by another owner than {owner}"
+            )
 
     async def list_ids(self, *, with_work: bool = False) -> list[str]:
         def query(conn):

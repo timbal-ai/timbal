@@ -236,6 +236,9 @@ class RunContext(BaseModel):
     #       marks its span ``metadata.silent`` (a turn the runtime started may stay quiet)
     #   _cut: asyncio.Event | None — set by the channel on a 'now' message: the steering
     #       root agent cuts its answer or its interruptible tools and takes the message
+    #   _trace_unsaved: bool — the latest write-through save of the trace failed (cleared by the
+    #       next one that lands): what the provider holds is behind the run. A chat session does
+    #       not go on to the next turn while it is (the next turn reads this one from the provider)
     #   _before_tool_dispatch: async (agent_path, [(tool_use_id, name, input)]) | None — awaited
     #       by every agent of the run right before it runs tool calls (a model's, a slash
     #       command's, those a resume left pending): a durable chat session records them
@@ -363,6 +366,7 @@ class RunContext(BaseModel):
             _silence_token=None,
             _cut=None,
             _before_tool_dispatch=None,
+            _trace_unsaved=False,
         )
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
@@ -511,10 +515,12 @@ class RunContext(BaseModel):
                 error=str(e),
             )
             self.update_usage("tracing:save_failed", 1)
+            self.__dict__["_trace_unsaved"] = True
             return False
         finally:
             uploads.count(self, "tracing:wait_ms", round((time.monotonic() - t0) * 1000))
         uploads.count(self, "tracing:saves")
+        self.__dict__["_trace_unsaved"] = False
         return True
 
     async def _end_background_work(self) -> None:

@@ -57,6 +57,17 @@ def test_page_and_meta(client):
     assert meta["modes"] == ["steer", "now", "followup", "collect", "interrupt"]
 
 
+def test_the_playground_builds_ask_cards_from_the_session_state(client):
+    """A restored session's log has no APPROVAL / INTERACTION event to replay: the cards must come from
+    ``pending_approvals`` / ``pending_interactions`` of the state, every time it is fetched."""
+    page = client.get("/chat/").text
+    refresh = page[page.index("async function refreshState()") : page.index("function resetView()")]
+    assert "pendingCards(state)" in refresh
+    cards = page[page.index("function pendingCards(state)") : page.index("function resetView()")]
+    assert "state.pending_approvals" in cards and 'askCard("approval"' in cards
+    assert "state.pending_interactions" in cards and 'askCard("interaction"' in cards
+
+
 def test_steer_joins_the_running_turn(client):
     session_id = open_session(client)
     client.post(f"/chat/sessions/{session_id}/messages", json={"text": "start"})

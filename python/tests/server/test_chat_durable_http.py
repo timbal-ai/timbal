@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from timbal.core.chat_session import ChatSession
 from timbal.server.chat import session_store_for
 from timbal.server.http import create_app
-from timbal.state.chat_store import PROCESS_OWNER, SessionSnapshot, SqliteChatSessionStore
+from timbal.state.chat_store import SessionSnapshot, SqliteChatSessionStore, process_owner
 
 AGENT = textwrap.dedent(
     """
@@ -132,7 +132,7 @@ def test_a_session_this_process_lost_answers_409_then_comes_back(client):
     session_id = client.post("/chat/sessions", json={}).json()["session_id"]
     store = client.app.state.chat_store
     session = client.app.state.chat_sessions[session_id]
-    client.portal.call(store.release_lease, session_id, PROCESS_OWNER)  # lapsed
+    client.portal.call(store.release_lease, session_id, process_owner())  # lapsed
     client.portal.call(store.acquire_lease, session_id, "elsewhere:1:x")
 
     async def lose():
@@ -385,7 +385,7 @@ def test_a_session_being_deleted_is_not_restored_meanwhile(client):
 def test_deleting_a_session_another_process_took_is_a_409(client):
     session_id = client.post("/chat/sessions", json={}).json()["session_id"]
     store = client.app.state.chat_store
-    client.portal.call(store.release_lease, session_id, PROCESS_OWNER)  # lapsed, before this copy noticed...
+    client.portal.call(store.release_lease, session_id, process_owner())  # lapsed, before this copy noticed...
     client.portal.call(store.acquire_lease, session_id, "elsewhere:1:x")  # ...and another worker has it
     response = client.delete(f"/chat/sessions/{session_id}")
     assert response.status_code == 409 and "another process" in response.json()["detail"]
@@ -410,7 +410,7 @@ def test_a_session_is_created_with_its_lease_in_one_write(client, monkeypatch):
     def owner(conn):
         return conn.execute("SELECT lease_owner FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone()
 
-    assert client.portal.call(store._run, owner)[0] == PROCESS_OWNER
+    assert client.portal.call(store._run, owner)[0] == process_owner()
 
 
 def test_delete_removes_it_for_good(client):

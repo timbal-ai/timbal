@@ -9,13 +9,13 @@ from timbal.core.test_model import TestModel
 from timbal.state import RunContext, set_call_id, set_parent_call_id, set_run_context
 from timbal.state.background import forget_idle_background_store
 from timbal.state.chat_store import (
-    PROCESS_OWNER,
     InMemoryChatSessionStore,
     SessionLeased,
     SessionNotStored,
     SessionSnapshot,
     SnapshotConflict,
     SqliteChatSessionStore,
+    process_owner,
 )
 from timbal.state.tracing.providers import SqliteTracingProvider
 from timbal.types.content import ToolUseContent
@@ -378,7 +378,7 @@ class TestEdges:
         await records(session, "turn_finished", 1)
         await session.flush()
         session._lease_task.cancel()  # renewals stopped: nothing notices the takeover but the save
-        await store.release_lease(session.id, PROCESS_OWNER)  # as good as lapsed
+        await store.release_lease(session.id, process_owner())  # as good as lapsed
         await store.acquire_lease(session.id, "elsewhere:1:x")
         version = (await store.load(session.id)).version
         session.wake("ping", key="p")
@@ -510,7 +510,7 @@ class TestStores:
         dead.wait()
         await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
         await store.acquire_lease("s1", f"{socket.gethostname()}:{dead.pid}:old")
-        await store.acquire_lease("s1", PROCESS_OWNER)
+        await store.acquire_lease("s1", process_owner())
         with pytest.raises(SessionLeased):  # a live one's (this process, as another owner id) holds
             await store.acquire_lease("s1", f"{socket.gethostname()}:{__import__('os').getpid()}:other")
 
@@ -832,7 +832,7 @@ class TestRestore:
         session.send("hi")
         await records(session, "turn_finished", 1)
         await session.flush()
-        await store.release_lease(session.id, PROCESS_OWNER)
+        await store.release_lease(session.id, process_owner())
         await store.acquire_lease(session.id, "another-process")
         with pytest.raises(SessionLeased):
             await ChatSession.from_store(make_agent(provider, Gate()), store, session.id)
@@ -1694,3 +1694,175 @@ class TestCreatedWithItsLease:
             session.persist()
             await session.flush()
             assert session._leased and session.state()["durable"]
+
+
+async def kill(session):
+    """The process dies where it stands: no last flush (unlike :func:`crash`), its tasks just stop."""
+    session._lost = True  # stores nothing more
+    tasks = [t for t in (session._worker, session._turn, session._lease_task, session._saver) if t is not None]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    session.closed = True
+    session._scheduler.release(session._store)
+    forget_idle_background_store(session._store)
+
+
+class TestSnapshotBehindTheTrace:
+    """The trace provider and the session store are written separately: either can be ahead at a crash."""
+
+    async def test_a_steered_message_a_finished_run_shows_is_not_answered_again(self, db):
+        """The run answered the steered message and its trace was stored; the snapshots after it never were,
+        so the last one still lists the message as pending."""
+        provider, store = db
+        first = Gate()
+
+        def model(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            text = last_user_text(messages)
+            return tool_call("first", "call-first") if text == "start" else f"echo: {text}"
+
+        def agent(gate):
+            return Agent(
+                name="agent",
+                model=TestModel(handler=model),
+                tools=[Tool(name="first", handler=gate.work)],
+                tracing_provider=provider,
+            )
+
+        session = ChatSession(agent(first), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(first.entered.wait(), 3)
+        also = session.send("also", mode="steer")
+        await session.flush()  # acknowledged: stored as pending, with the turn in flight
+        real_save = store.save
+
+        async def never_lands(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        store.save = never_lands  # from here on no snapshot is written
+        first.release.set()
+        await records(session, "turn_finished", 1)  # it took the message, answered it, and its trace is stored
+        assert root_outputs(session)[0].output.collect_text() == "echo: also"
+        await kill(session)
+        store.save = real_save
+        stored = await store.load(session.id)
+        assert [e["id"] for e in stored.pending] == [also.id] and stored.in_flight is not None
+
+        restored = await ChatSession.from_store(agent(Gate(released=True)), store, session.id)
+        assert restored.state()["pending"] == []
+        await asyncio.sleep(0.3)
+        assert restored.turns == 1 and not restored.busy  # no second turn for the same message
+        await restored.close()
+
+
+class TestConditionalDelete:
+    @pytest.fixture(params=["memory", "sqlite"])
+    def store(self, request, tmp_path):
+        return InMemoryChatSessionStore() if request.param == "memory" else SqliteChatSessionStore(tmp_path / "s.db")
+
+    async def test_delete_takes_the_row_only_at_the_version_and_owner_given(self, store):
+        version = await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None, owner="a")
+        with pytest.raises(SnapshotConflict):
+            await store.delete("s1", expect_version=version + 1, owner="a")  # someone wrote since
+        with pytest.raises(SnapshotConflict):
+            await store.delete("s1", expect_version=version, owner="b")  # someone else holds it
+        assert await store.load("s1") is not None
+        await store.delete("s1", expect_version=version, owner="a")
+        assert await store.load("s1") is None
+        await store.delete("s1", expect_version=version, owner="a")  # already gone: not an error
+        await store.save(SessionSnapshot(session_id="s2", agent="agent"), expect_version=None)
+        await store.delete("s2")  # unconditional, as before
+        assert await store.load("s2") is None
+
+    async def test_closing_does_not_delete_a_session_another_process_took(self, db):
+        """This copy stalled past its lease; another worker took the session and wrote to it. A close here
+        whose last write fails must not then delete the other worker's row."""
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hi")
+        await records(session, "turn_finished", 1)
+        await session.flush()
+        session._lease_task.cancel()
+        await store.release_lease(session.id, process_owner())  # lapsed...
+        await store.acquire_lease(session.id, "elsewhere:1:x")  # ...taken...
+        theirs = await store.load(session.id)
+        theirs.turns = 99
+        await store.save(theirs, expect_version=theirs.version, owner="elsewhere:1:x")  # ...and written to
+        real_save = store.save
+
+        async def down(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        store.save = down  # this copy's closing snapshot fails, so it never learns from a version conflict
+        await session.close()
+        store.save = real_save
+        kept = await store.load(session.id)
+        assert kept is not None and kept.turns == 99  # the other worker's row is still there
+        assert session.lost  # and the caller is told (DELETE answers 409)
+
+
+class TestFoundByTheCrashSweeps:
+    """Bugs ``test_chat_session_crash_points.py`` found, each pinned here on its own."""
+
+    async def test_a_message_whose_turn_a_shutdown_cut_during_the_model_call_is_answered_after_it(self, db):
+        """An orderly stop stores the cut run's trace, and that trace need not hold the prompt. The turn ran no
+        tool call, so its message goes back in the queue: a recovery turn on top of it would answer nobody."""
+        provider, store = db
+        thinking = asyncio.Event()
+
+        async def before_the_model() -> None:
+            thinking.set()
+            await asyncio.sleep(30)  # the shutdown comes here: started, no tool call yet
+
+        slow = Agent(
+            name="agent", model=TestModel(handler=handler), pre_hook=before_the_model, tracing_provider=provider
+        )
+        session = ChatSession(slow, session_store=store)
+        sent = session.send("hello")
+        await asyncio.wait_for(thinking.wait(), 3)
+        await session.flush()
+        await session.close(keep=True)
+
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
+        assert [p["event_id"] for p in restored.state()["pending"]] == [sent.id]
+        (started,) = await records(restored, "turn_started", 1, after=after_restore(restored))
+        assert started["trigger"]["kind"] == "user_message"  # its own turn, not a recovery turn
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert root_outputs(restored)[0].output.collect_text() == "echo: hello"
+        await restored.close()
+
+    async def test_a_turn_is_not_over_until_its_trace_is_stored(self, tmp_path, monkeypatch):
+        """The next turn reads this one from the trace store. A turn whose last save failed is held open until
+        a save lands: settled without it, the conversation would go on with no memory of it."""
+        import timbal.core.chat_session as chat_session_module
+
+        monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.01)
+
+        class Unreachable(SqliteTracingProvider):
+            down = False
+
+            @classmethod
+            async def _store(cls, run_context):
+                if cls.down:
+                    raise OSError("the trace store is unreachable")
+                await super()._store(run_context)
+
+        provider = Unreachable.configured(_path=tmp_path / "timbal.db", down=True)
+        store = SqliteChatSessionStore(tmp_path / "timbal.db")
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hi")
+        await records(session, "turn_started", 1)
+        await asyncio.sleep(0.3)
+        log = [r for r in session.log.peek()[0] if isinstance(r, dict)]
+        assert session.busy and not [r for r in log if r.get("kind") == "turn_finished"]  # held open
+        provider.down = False
+        (finished,) = await records(session, "turn_finished", 1)
+        assert finished["status"]["code"] == "success"
+        session.send("again")
+        await records(session, "turn_finished", 2)
+        memory = await session._load_run(session.head)
+        texts = [m["content"][0].get("text") for m in memory.root_span().memory if m.get("role") == "user"]
+        assert texts == ["hi", "again"]  # the first turn is in the history the second one read
+        await session.close()

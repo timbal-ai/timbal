@@ -785,8 +785,21 @@
       $("head-id").textContent = short(state.head);
       $("head-id").title = state.head || "";
       S.parked = state.parked;
+      pendingCards(state);
       setStatus();
     } catch { /* the stream will say if the server went away */ }
+  }
+
+  // What a parked session waits for, from its state: the events that asked are not in the log of a session
+  // the server restored (or of one whose log dropped them), so without this there is no button to answer.
+  // askCard() skips an id it already shows, so the live events and this can both run, in either order.
+  function pendingCards(state) {
+    for (const a of state.pending_approvals || []) {
+      askCard("approval", { ...a, runnable_path: a.path, runnable_name: (a.path || "").split(".").pop() });
+    }
+    for (const i of state.pending_interactions || []) {
+      askCard("interaction", { ...i, runnable_path: i.path, runnable_name: (i.path || "").split(".").pop() });
+    }
   }
 
   function resetView() {
