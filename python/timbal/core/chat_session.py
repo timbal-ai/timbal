@@ -710,9 +710,9 @@ class ChatSession:
         """Answer the parked turn: ``{approval_id: ...}`` / ``{interaction_id: value}``, as for ``resume=``."""
         if self.closed:
             raise RuntimeError("The chat session is closed.")
-        turn = self._turn
-        if turn is not None and not turn.done():
-            # Its answers, if it ends waiting for some, are taken once it does.
+        if self.busy:
+            # Its answers, if it ends waiting for some, are taken once it does (it is busy until the turn
+            # is settled: ended, and its trace stored).
             raise RuntimeError("A turn of this session is running; answer once it waits for an answer.")
         if not self.parked and not self._restore_pending():
             # Before restore() has finished, the answers wait for it: dropped if the run is not parked after all.
@@ -1236,14 +1236,21 @@ class ChatSession:
             self._turn, self._turn_context = turn, context
             try:
                 await asyncio.wait({turn})
+                if not turn.cancelled() and turn.exception() is None and turn.result() is not None:
+                    # Here, on the worker, and not on the turn's own task: an interrupt cancels that task,
+                    # and this turn has ended. There is nothing left of it to cut, and the session is busy
+                    # for as long as this takes, which is just when an interrupt is likely to come.
+                    await self._trace_stored(context)
             except asyncio.CancelledError:
                 # The worker is being stopped (a close). A turn still running is cut with it and stays the
                 # turn in flight (the agent ends it as interrupted; close() marks it, and a restart
                 # recovers it). One that had already ended, or that ends by itself all the same, is settled
                 # below like any other: how it ended (parked, perhaps) must not be lost with the worker, nor
-                # the turn be stored as one that was cut.
+                # the turn be stored as one that was cut. Unless its trace is not stored: then it stays the
+                # turn in flight too, and a restart recovers it from what the provider does hold.
                 stopping = True
-                if not turn.done():
+                cut = not turn.done()
+                if cut:
                     turn.cancel()
                     while not turn.done():
                         # Until it is over, whatever cancels this worker again meanwhile: what follows reads
@@ -1251,8 +1258,8 @@ class ChatSession:
                         # the turn and cut its cleanup short (and raise the turn's own error here).
                         with contextlib.suppress(asyncio.CancelledError):
                             await asyncio.wait({turn})
-                    if not _ended_by_itself(turn):
-                        raise
+                if (cut and not _ended_by_itself(turn)) or context.__dict__.get("_trace_unsaved"):
+                    raise
         finally:
             self._turn = None
             scheduler.turn_finished()
@@ -1357,8 +1364,6 @@ class ChatSession:
                     self.log.put_nowait(event)
                     if isinstance(event, OutputEvent) and event.run_id == context.id and event.parent_call_id is None:
                         output = event
-            if output is not None:
-                await self._trace_stored(context)
         finally:
             if not started and followup is not None:
                 followup.release()
@@ -1370,20 +1375,14 @@ class ChatSession:
         The conversation is in the traces: the next turn reads this one from the provider. A turn whose last
         save failed (the run itself only logs that and goes on) would be a turn nobody remembers: its
         messages gone from the history, a question it parked on answered into nothing. So the turn is not
-        over, and the session starts nothing else, until a save lands.
+        over, and the session starts nothing else, until a save lands. Only stopping the session ends the
+        wait (it runs on the worker): an interrupt has nothing to cut in a turn that has ended.
         """
         delay = _TURN_RETRY_DELAY_S
         while context.__dict__.get("_trace_unsaved"):
             logger.warning("chat_session_trace_not_stored", session_id=self.id, run_id=context.id)
-            try:
-                await asyncio.sleep(delay)
-                await context._save_trace(barrier=True)
-            except asyncio.CancelledError:
-                if self.closed:
-                    # Stopped with its trace still behind: it stays the turn in flight, and a restart
-                    # recovers it from what the provider does hold.
-                    raise
-                return  # interrupted: the turn had ended, only the wait for its trace is given up
+            await asyncio.sleep(delay)
+            await context._save_trace(barrier=True)
             delay = min(delay * 2, _RESTORE_RETRY_MAX_S)
 
     async def _note_dispatch(

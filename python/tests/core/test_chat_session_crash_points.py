@@ -9,6 +9,8 @@ process would restore it, driven until it is idle, and checked:
 - **nothing acknowledged is lost**: a message, wake or answer whose ``flush()`` returned is in the
   conversation, or is named in a recovery notice;
 - **nothing is answered twice**: no session event appears in the history more than once;
+- **nothing said is forgotten**: while the process lives, every answer of a turn the session reported as
+  finished is in the stored conversation (after a crash an unsaved answer is gone, and recovery says so);
 - **it settles**: the restored session becomes idle (answering what it still waits for), with nothing left
   pending, and what it stores then matches what it holds.
 
@@ -31,6 +33,7 @@ from timbal.state import background, set_call_id, set_parent_call_id, set_run_co
 from timbal.state.chat_store import SessionNotStored, SqliteChatSessionStore
 from timbal.state.tracing.providers import SqliteTracingProvider
 from timbal.types.content import ToolUseContent
+from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
 SIDE_EFFECTS = ("work", "ship", "charge", "doit", "dig")
@@ -450,6 +453,16 @@ async def interrupted(c):
     await c.settle()
 
 
+async def interrupted_as_it_ends(c):
+    """The interrupt comes when the turn's tool is done and the turn is ending: with the trace store away it
+    is still busy then, waiting for its trace."""
+    await c.send("work")
+    if await c.until(lambda: c.calls["work"] or c.at_rest()):
+        await asyncio.sleep(0.012)
+        await c.send("stop", mode="interrupt")
+    await c.settle()
+
+
 async def cut_now(c):
     await c.send("batch")
     if await c.until(lambda: c.calls["ship"] or c.at_rest()):
@@ -508,6 +521,7 @@ SCENARIOS = {
     "questioned": questioned,
     "woken": woken,
     "interrupted": interrupted,
+    "interrupted_as_it_ends": interrupted_as_it_ends,
     "cut_now": cut_now,
     "batch": batch,
     "delegated": delegated,
@@ -613,6 +627,14 @@ async def _check(result, label):
         assert any(text in texts(m) for m in memory), f"{label}: acknowledged wake {text!r} was lost"
     twice = [event_id for event_id, count in taken.items() if count > 1]
     assert not twice, f"{label}: answered twice: {[client.acked.get(e, e) for e in twice]}"
+    if len(result["writes"]) == 1:
+        # One process, start to end: what it told the user it answered is what the next turn will read.
+        said = [texts(m) for m in memory if m.get("role") == "assistant"]
+        for event in session.log.peek(session.log.forgotten_through)[0]:
+            if isinstance(event, OutputEvent) and event.parent_call_id is None and event.path == "agent":
+                answer = event.output.collect_text() if isinstance(event.output, Message) else ""
+                if event.status.code == "success" and answer:
+                    assert answer in said, f"{label}: the answer {answer!r} is not in the stored conversation"
     assert client.at_rest() and not session.parked, f"{label}: not settled: {session.state()}"
     await session.flush()
     stored = await store.load(session.id)

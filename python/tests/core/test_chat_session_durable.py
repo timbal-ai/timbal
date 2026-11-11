@@ -1866,3 +1866,43 @@ class TestFoundByTheCrashSweeps:
         texts = [m["content"][0].get("text") for m in memory.root_span().memory if m.get("role") == "user"]
         assert texts == ["hi", "again"]  # the first turn is in the history the second one read
         await session.close()
+
+    @pytest.mark.parametrize("how", ["interrupt()", "an interrupt message", "a now message"])
+    async def test_an_interrupt_does_not_give_up_the_wait_for_a_turns_trace(self, tmp_path, monkeypatch, how):
+        """The session is busy while a finished turn waits for its trace, so an interrupt is likely to come
+        just then. The turn has ended: there is nothing to cut, and going on without its trace would lose it."""
+        import timbal.core.chat_session as chat_session_module
+
+        monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.01)
+
+        class Unreachable(SqliteTracingProvider):
+            down = False
+
+            @classmethod
+            async def _store(cls, run_context):
+                if cls.down:
+                    raise OSError("the trace store is unreachable")
+                await super()._store(run_context)
+
+        provider = Unreachable.configured(_path=tmp_path / "timbal.db", down=True)
+        store = SqliteChatSessionStore(tmp_path / "timbal.db")
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hi")
+        await records(session, "turn_started", 1)
+        await asyncio.sleep(0.2)  # the turn has ended; its last save keeps failing
+        if how == "interrupt()":
+            assert session.interrupt() is False  # nothing is running that could be cut
+        else:
+            session.send("stop", mode="interrupt" if how == "an interrupt message" else "now")
+        await asyncio.sleep(0.2)
+        log = [r for r in session.log.peek()[0] if isinstance(r, dict)]
+        assert session.busy and not [r for r in log if r.get("kind") == "turn_finished"]  # still held open
+        assert session.turns == 1  # and nothing else started
+        provider.down = False
+        expected = 1 if how == "interrupt()" else 2
+        finished = await records(session, "turn_finished", expected)
+        assert [f["status"]["code"] for f in finished] == ["success"] * expected
+        memory = await session._load_run(session.head)
+        texts = [m["content"][0].get("text") for m in memory.root_span().memory if m.get("role") == "user"]
+        assert texts == (["hi"] if how == "interrupt()" else ["hi", "stop"])  # the first turn is in the history
+        await session.close()
