@@ -578,7 +578,7 @@ class SpeechRhythm(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     join_gaps: float = Field(default=0.0, ge=0.0, le=1.0)
-    """Share of the gaps between words that are closed to 35-85 ms. 0 leaves
+    """Share of the gaps between words that are closed to 23-73 ms. 0 leaves
     them alone."""
     stretch_pauses: float = Field(default=0.0, ge=0.0, le=1.0)
     """Share of the comma and sentence pauses that are lengthened by 1.4-2.3x.

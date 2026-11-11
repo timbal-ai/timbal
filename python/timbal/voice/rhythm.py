@@ -10,7 +10,7 @@ This filter sorts each internal silence by its length and reshapes it:
 * shorter than ``gap_min_secs``: left alone. It is the closure of a stop
   consonant ("p", "t", "k"), and shortening it eats the consonant.
 * between ``gap_min_secs`` and ``gap_max_secs``: a gap between two words. With
-  probability ``join_gaps`` it is closed to 35-85 ms. With probability
+  probability ``join_gaps`` it is closed to 23-73 ms. With probability
   ``promote_gaps`` it becomes a pause of 0.30-0.55 s instead (the speaker who
   stops to think mid-sentence). The rest are left alone.
 * ``gap_max_secs`` or longer: a comma or sentence pause. It is kept and, with
@@ -42,7 +42,7 @@ LEAD_SECS = 0.06
 """Silence kept before the first word. Providers open with 100-300 ms of air."""
 MAX_HOLD_SECS = 0.9
 """A silence this long is released without waiting to see how it ends."""
-JOINED_SECS = (0.035, 0.085)
+JOINED_SECS = (0.023, 0.073)
 """What a joined word gap is shortened to."""
 PROMOTED_SECS = (0.30, 0.55)
 """What a word gap promoted to a pause is lengthened to."""
@@ -244,18 +244,23 @@ class PauseShaper:
         return self._cut_middle(silence, target)
 
     def _cut_middle(self, silence: Any, target: int) -> Any:
-        """Drop the middle and crossfade. The head is the tail of the word before
-        and the end is the attack of the word after, so both are kept."""
+        """``silence`` cut to ``target`` samples: the middle is dropped and the
+        two ends are crossfaded. The head is the tail of the word before and
+        the end is the attack of the word after, so both are kept."""
         np = self._np
         size = len(silence)
-        target = max(target, 2 * self._fade + 1)
+        target = max(target, self._fade + 1)
         if target >= size:
             return silence
-        head_len = target // 2
+        # The crossfade plays ``fade`` samples of both ends at once, so the two
+        # ends together are ``fade`` samples longer than what comes out.
+        fade = min(self._fade, size - target)
+        if fade < 2:
+            fade = 0
+        head_len = (target + fade) // 2
         head = silence[:head_len].astype(np.float32)
-        tail = silence[size - (target - head_len) :].astype(np.float32)
-        fade = min(self._fade, len(head), len(tail))
-        if fade > 1:
+        tail = silence[size - (target + fade - head_len) :].astype(np.float32)
+        if fade:
             ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
             head[-fade:] = head[-fade:] * np.cos(ramp * np.pi / 2) + tail[:fade] * np.sin(ramp * np.pi / 2)
             tail = tail[fade:]

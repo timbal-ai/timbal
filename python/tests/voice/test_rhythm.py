@@ -115,6 +115,30 @@ class TestWordGaps:
         assert JOINED_SECS[0] - 2 * FRAME_SECS <= gap <= JOINED_SECS[1] + 2 * FRAME_SECS
         assert len(out) < len(word) * 2 + len(_quiet(0.16))
 
+    @pytest.mark.parametrize("sr", [8_000, 16_000, 24_000, 44_100])
+    @pytest.mark.parametrize("secs", [0.023, 0.05, 0.073, 0.1])
+    async def test_a_closed_gap_is_exactly_as_long_as_asked(self, sr: int, secs: float) -> None:
+        """The crossfade plays both ends of the cut at once. That overlap must not come off the gap."""
+        word = _speech(0.2, sr=sr)
+        shaper = PauseShaper(sr, join_gaps=1.0, joined_secs=(secs, secs))
+        out = shaper.push(word + _quiet(0.16, sr=sr) + word) + shaper.finish()
+        assert shaper.stats["joined"] == 1
+        assert (len(out) - 2 * len(word)) // 2 == int(secs * sr)
+
+    @pytest.mark.parametrize("seed", range(1, 9))
+    async def test_a_closed_gap_stays_inside_the_documented_span(self, seed: int) -> None:
+        word = _speech(0.2)
+        out = await _run([word + _quiet(0.16) + word], join_gaps=1.0, seed=seed)
+        left = (len(out) - 2 * len(word)) / 2 / SR
+        assert JOINED_SECS[0] - 1 / SR <= left <= JOINED_SECS[1]
+
+    async def test_a_cut_of_a_few_samples_still_gives_the_asked_length(self) -> None:
+        """Less to remove than the crossfade is long: the fade shrinks, the length does not."""
+        word = _speech(0.2)
+        shaper = PauseShaper(SR, join_gaps=1.0, joined_secs=(0.155, 0.155))
+        out = shaper.push(word + _room_tone(0.16) + word) + shaper.finish()
+        assert (len(out) - 2 * len(word)) // 2 == int(0.155 * SR)
+
     async def test_join_share_zero_leaves_the_gap_alone(self) -> None:
         raw = _speech(0.2) + _quiet(0.16) + _speech(0.2)
         assert await _run([raw], stretch_pauses=1.0, seed=1) == raw
@@ -277,7 +301,7 @@ class TestStreaming:
             raw = word + _quiet(0.16, sr=sr) + word
             out = await _run([raw], sample_rate=sr, join_gaps=1.0, seed=1)
             removed = (len(raw) - len(out)) / 2 / sr
-            assert 0.16 - JOINED_SECS[1] - 2 * FRAME_SECS <= removed <= 0.16 - JOINED_SECS[0] + 2 * FRAME_SECS
+            assert 0.16 - JOINED_SECS[1] <= removed <= 0.16 - JOINED_SECS[0] + 1 / sr
 
 
 class TestQuietLevel:
