@@ -1,10 +1,11 @@
 # ruff: noqa: T201
-"""Personal mode: sign in to Qlik Cloud once and get a refresh token for the tools.
+"""Personal mode: sign in to Qlik Cloud once and save a refresh token for the tools.
 
 Runs the OAuth authorization-code flow (with PKCE) against your tenant: it opens the
 Qlik sign-in page, catches the redirect on http://localhost:8765/callback, exchanges the
-code and prints the QLIK_REFRESH_TOKEN line to paste into .env. The tools exchange that
-refresh token for access tokens as they need them.
+code and saves the tokens to QLIK_TOKEN_FILE (default .qlik_token.json, owner-only). The
+tools exchange the refresh token for access tokens as they need them and write the newest
+one back to that file, since Qlik can rotate refresh tokens on each use.
 
 Prerequisites (see README.md):
 - QLIK_TENANT_URL, QLIK_CLIENT_ID and QLIK_CLIENT_SECRET in .env
@@ -20,16 +21,18 @@ import hashlib
 import os
 import secrets
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 from dotenv import load_dotenv
-from timbal.tools.qlik import PERSONAL_SCOPES, QlikWhoAmI, normalize_tenant_url
+from timbal.tools.qlik import PERSONAL_SCOPES, QlikWhoAmI, normalize_tenant_url, write_token_file
 
 PORT = int(os.getenv("QLIK_CALLBACK_PORT", "8765"))
 REDIRECT_URI = f"http://localhost:{PORT}/callback"
+TOKEN_FILE = os.getenv("QLIK_TOKEN_FILE") or ".qlik_token.json"
 
 
 def _pkce() -> tuple[str, str]:
@@ -112,12 +115,24 @@ async def main() -> None:
     if not tokens.get("refresh_token"):
         raise SystemExit("Qlik returned no refresh token: check that the client allows the offline_access scope.")
 
+    write_token_file(
+        TOKEN_FILE,
+        {
+            "tenant_url": tenant,
+            "client_id": client_id,
+            "refresh_token": tokens["refresh_token"],
+            "access_token": tokens["access_token"],
+            "expires_at": time.time() + max(60, int(tokens.get("expires_in") or 3600)),
+        },
+    )
+
     me = await QlikWhoAmI(tenant_url=tenant, token=tokens["access_token"])().collect()
     who = me.output if me.status.code == "success" else {}
-    print(f"Signed in as {who.get('name')} <{who.get('email')}>.\n")
-    print("Add these lines to .env:\n")
+    print(f"Signed in as {who.get('name')} <{who.get('email')}>.")
+    print(f"Tokens saved to {TOKEN_FILE} (keep it out of version control).\n")
+    print("Make sure .env has:\n")
     print("QLIK_AUTH_MODE=personal")
-    print(f"QLIK_REFRESH_TOKEN={tokens['refresh_token']}")
+    print(f"QLIK_TOKEN_FILE={TOKEN_FILE}")
 
 
 if __name__ == "__main__":

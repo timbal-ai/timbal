@@ -1,6 +1,9 @@
 """Tests for Qlik Cloud tools: personal (user OAuth) + service (M2M) auth, REST wiring, Engine hypercube."""
 
+import asyncio
 import json
+import os
+import sys
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -17,6 +20,7 @@ from timbal.tools.qlik import (
     QlikGetAppFields,
     QlikListApps,
     QlikQuery,
+    QlikTokenError,
     QlikWhoAmI,
     _resolve_auth,
     build_hypercube_def,
@@ -35,6 +39,7 @@ def _tool(**kwargs: object) -> SimpleNamespace:
         "tenant_url": TENANT,
         "token": None,
         "refresh_token": None,
+        "token_file": None,
         "client_id": None,
         "client_secret": None,
         "api_key": None,
@@ -60,9 +65,11 @@ def _clean(monkeypatch: pytest.MonkeyPatch) -> None:
         "QLIK_API_KEY",
         "QLIK_AUTH_MODE",
         "QLIK_SERVICE_SCOPES",
+        "QLIK_TOKEN_FILE",
     ):
         monkeypatch.delenv(var, raising=False)
     qlik._TOKEN_CACHE.clear()
+    qlik._LOCKS.clear()
 
 
 def _mock_http(monkeypatch: pytest.MonkeyPatch, handler: Any) -> list[httpx.Request]:
@@ -149,7 +156,7 @@ async def test_refresh_token_exchanged_with_client(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("timbal.tools.qlik.get_token_from_refresh_token", exchange)
     tool = _tool(refresh_token=SecretStr("rt"), client_id="cid", client_secret=SecretStr("secret"))
     assert await _resolve_auth(tool) == QlikAuth(TENANT, "refreshed-access", "personal")
-    exchange.assert_awaited_once_with(TENANT, "cid", "secret", "rt")
+    exchange.assert_awaited_once_with(TENANT, "cid", "secret", "rt", token_file=None)
 
 
 @pytest.mark.asyncio
@@ -459,7 +466,7 @@ class _FakeEngine:
         self.url: str | None = None
         self.headers: dict[str, str] | None = None
 
-    def connect(self, url: str, **kwargs: Any) -> "_FakeEngine":
+    async def connect(self, url: str, **kwargs: Any) -> "_FakeEngine":
         self.url = url
         self.headers = kwargs.get("additional_headers")
         return self
@@ -554,3 +561,241 @@ async def test_query_tool_needs_a_dimension_or_measure() -> None:
     out = await QlikQuery(token=SecretStr("user"), tenant_url=TENANT)(app_id="app-1").collect()
     assert out.status.code == "error"
     assert "at least one dimension or one measure" in out.error["message"]
+
+
+# ---------------------------------------------------------------------------
+# Refresh token rotation: durable across processes, single exchange at a time
+# ---------------------------------------------------------------------------
+
+
+def _rotating_token_server(monkeypatch: pytest.MonkeyPatch, *, valid: set[str] | None = None) -> list[str]:
+    """A token endpoint that rotates: each refresh token works once and yields the next one."""
+    alive = set(valid) if valid is not None else {"rt1"}
+    spent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        presented = json.loads(request.content)["refresh_token"]
+        spent.append(presented)
+        if presented not in alive:
+            return httpx.Response(401, json={"errors": [{"title": "Unauthorized", "code": "OAUTH-5", "status": "401"}]})
+        alive.discard(presented)
+        n = len(spent)
+        alive.add(f"rotated-{n}")
+        return httpx.Response(
+            200, json={"access_token": f"at-{n}", "refresh_token": f"rotated-{n}", "expires_in": 3600}
+        )
+
+    _mock_http(monkeypatch, handler)
+    return spent
+
+
+@pytest.mark.asyncio
+async def test_rotated_refresh_token_survives_a_restart_via_token_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    spent = _rotating_token_server(monkeypatch)
+    token_file = tmp_path / "qlik_token.json"
+    assert await qlik.get_token_from_refresh_token(TENANT, "cid", "secret", "rt1", token_file=token_file) == "at-1"
+    saved = json.loads(token_file.read_text())
+    assert saved["refresh_token"] == "rotated-1"
+    assert (saved["tenant_url"], saved["client_id"]) == (TENANT, "cid")
+
+    # A new process: empty cache, the access token expired, the env still holds the spent rt1.
+    qlik._TOKEN_CACHE.clear()
+    token_file.write_text(json.dumps({**saved, "expires_at": 0}))
+    assert await qlik.get_token_from_refresh_token(TENANT, "cid", "secret", "rt1", token_file=token_file) == "at-2"
+    assert spent == ["rt1", "rotated-1"]
+    assert json.loads(token_file.read_text())["refresh_token"] == "rotated-2"
+
+
+@pytest.mark.asyncio
+async def test_valid_access_token_in_file_is_reused_without_a_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    spent = _rotating_token_server(monkeypatch)
+    token_file = tmp_path / "t.json"
+    qlik.write_token_file(
+        token_file,
+        {"tenant_url": TENANT, "client_id": "cid", "refresh_token": "rt1", "access_token": "saved", "expires_at": 9e12},
+    )
+    assert await qlik.get_token_from_refresh_token(TENANT, "cid", "secret", None, token_file=token_file) == "saved"
+    assert spent == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_spend_the_refresh_token_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    spent = _rotating_token_server(monkeypatch)
+    token_file = tmp_path / "t.json"
+    tokens = await asyncio.gather(
+        *(qlik.get_token_from_refresh_token(TENANT, "cid", "secret", "rt1", token_file=token_file) for _ in range(5))
+    )
+    assert tokens == ["at-1"] * 5
+    assert spent == ["rt1"]
+
+
+@pytest.mark.asyncio
+async def test_refused_file_token_falls_back_to_a_new_sign_in(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    spent = _rotating_token_server(monkeypatch, valid={"fresh-sign-in"})
+    token_file = tmp_path / "t.json"
+    qlik.write_token_file(token_file, {"tenant_url": TENANT, "client_id": "cid", "refresh_token": "revoked"})
+    token = await qlik.get_token_from_refresh_token(TENANT, "cid", "secret", "fresh-sign-in", token_file=token_file)
+    assert token == "at-2"
+    assert spent == ["revoked", "fresh-sign-in"]
+    assert json.loads(token_file.read_text())["refresh_token"] == "rotated-2"
+
+
+@pytest.mark.asyncio
+async def test_bad_client_secret_is_not_retried(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    seen = _mock_http(
+        monkeypatch,
+        lambda _: httpx.Response(
+            400, json={"errors": [{"title": "Invalid client_secret", "code": "OAUTH-22", "status": "400"}]}
+        ),
+    )
+    token_file = tmp_path / "t.json"
+    qlik.write_token_file(token_file, {"tenant_url": TENANT, "client_id": "cid", "refresh_token": "from-file"})
+    with pytest.raises(QlikTokenError, match="client_secret is wrong") as exc_info:
+        await qlik.get_token_from_refresh_token(TENANT, "cid", "bad", "from-env", token_file=token_file)
+    assert exc_info.value.code == "OAUTH-22"
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_spent_refresh_token_explains_rotation(monkeypatch: pytest.MonkeyPatch) -> None:
+    _rotating_token_server(monkeypatch, valid=set())
+    with pytest.raises(QlikTokenError, match="already used.*QLIK_TOKEN_FILE"):
+        await qlik.get_token_from_refresh_token(TENANT, "cid", "secret", "rt1")
+
+
+@pytest.mark.asyncio
+async def test_token_file_for_another_client_is_ignored(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    spent = _rotating_token_server(monkeypatch)
+    token_file = tmp_path / "t.json"
+    qlik.write_token_file(token_file, {"tenant_url": TENANT, "client_id": "other", "refresh_token": "theirs"})
+    assert await qlik.get_token_from_refresh_token(TENANT, "cid", "secret", "rt1", token_file=token_file) == "at-1"
+    assert spent == ["rt1"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_token_file_is_owner_only(tmp_path: Any) -> None:
+    token_file = tmp_path / "t.json"
+    qlik.write_token_file(token_file, {"refresh_token": "x"})
+    assert os.stat(token_file).st_mode & 0o777 == 0o600
+    assert qlik.read_token_file(token_file) == {"refresh_token": "x"}
+    assert qlik.read_token_file(tmp_path / "missing.json") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_auth_uses_token_file_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    _rotating_token_server(monkeypatch)
+    token_file = tmp_path / "t.json"
+    qlik.write_token_file(token_file, {"tenant_url": TENANT, "client_id": "cid", "refresh_token": "rt1"})
+    monkeypatch.setenv("QLIK_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("QLIK_CLIENT_ID", "cid")
+    monkeypatch.setenv("QLIK_CLIENT_SECRET", "secret")
+    assert await _resolve_auth(_tool()) == QlikAuth(TENANT, "at-1", "personal")
+
+
+@pytest.mark.asyncio
+async def test_missing_token_file_in_personal_mode_says_to_sign_in(tmp_path: Any) -> None:
+    tool = _tool(mode="personal", token_file=str(tmp_path / "nope.json"), client_id="cid", client_secret="s")
+    with pytest.raises(CredentialNotAvailable, match="sign in first"):
+        await _resolve_auth(tool)
+
+
+@pytest.mark.parametrize(
+    ("code", "hint"),
+    [("OAUTH-14", "does not know this client_id"), ("OAUTH-22", "client_secret is wrong")],
+)
+@pytest.mark.asyncio
+async def test_client_errors_are_explained(monkeypatch: pytest.MonkeyPatch, code: str, hint: str) -> None:
+    _mock_http(monkeypatch, lambda _: httpx.Response(400, json={"errors": [{"code": code, "status": "400"}]}))
+    with pytest.raises(QlikTokenError, match=hint):
+        await qlik.get_token_from_client_credentials(TENANT, "cid", "secret")
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [(401, "rejected the personal credentials"), (403, "may not open it"), (404, "may not open it")],
+)
+@pytest.mark.asyncio
+async def test_engine_handshake_rejection_reads_like_rest(
+    monkeypatch: pytest.MonkeyPatch, status: int, message: str
+) -> None:
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    async def refuse(*_args: Any, **_kwargs: Any) -> None:
+        raise InvalidStatus(Response(status, "refused", Headers()))
+
+    monkeypatch.setattr("websockets.asyncio.client.connect", refuse)
+    with pytest.raises(ValueError, match=message):
+        await engine_hypercube(QlikAuth(TENANT, "tok", "personal"), "app-1", ["Region"], [], 10)
+
+
+@pytest.mark.asyncio
+async def test_failed_token_file_write_keeps_the_new_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    _rotating_token_server(monkeypatch)
+
+    def read_only(*_args: Any, **_kwargs: Any) -> None:
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr("timbal.tools.qlik.write_token_file", read_only)
+    token = await qlik.get_token_from_refresh_token(TENANT, "cid", "secret", "rt1", token_file=tmp_path / "t.json")
+    assert token == "at-1"
+    # Still served from memory, without spending another refresh token.
+    assert await qlik.get_token_from_refresh_token(TENANT, "cid", "secret", "rt1", token_file=tmp_path / "t.json")
+
+
+def test_processes_sharing_a_token_file_spend_it_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """Two event loops in two threads, with no shared cache, stand in for two processes."""
+    import threading
+
+    class NoCache(dict):
+        def __setitem__(self, key: str, value: Any) -> None:
+            return None
+
+    monkeypatch.setattr(qlik, "_TOKEN_CACHE", NoCache())
+    alive = {"rt1"}
+    spent: list[str] = []
+    guard = threading.Lock()
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        presented = json.loads(request.content)["refresh_token"]
+        with guard:
+            spent.append(presented)
+            ok = presented in alive
+            alive.discard(presented)
+            n = len(spent)
+            alive.add(f"rotated-{n}")
+        threading.Event().wait(0.2)  # a slow token endpoint widens the race window
+        if not ok:
+            return httpx.Response(401, json={"errors": [{"code": "OAUTH-5", "status": "401"}]})
+        return httpx.Response(
+            200, json={"access_token": f"at-{n}", "refresh_token": f"rotated-{n}", "expires_in": 3600}
+        )
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs)
+    )
+    token_file = tmp_path / "t.json"
+    qlik.write_token_file(token_file, {"tenant_url": TENANT, "client_id": "cid", "refresh_token": "rt1"})
+    results: list[Any] = []
+
+    def worker() -> None:
+        try:
+            results.append(
+                asyncio.run(qlik.get_token_from_refresh_token(TENANT, "cid", "secret", None, token_file=token_file))
+            )
+        except Exception as exc:  # collected, asserted below
+            results.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert results == ["at-1", "at-1"]
+    assert spent == ["rt1"]

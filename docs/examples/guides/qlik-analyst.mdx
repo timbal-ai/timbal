@@ -65,17 +65,17 @@ The complete example lives in [`examples/qlik`](https://github.com/timbal-ai/tim
     python setup_credentials.py
     ```
 
-    It opens the Qlik sign-in page, catches the redirect on `http://localhost:8765/callback`, and prints the lines to add to `.env`:
+    It opens the Qlik sign-in page, catches the redirect on `http://localhost:8765/callback`, and saves the tokens to `.qlik_token.json` (readable by you only). `.env` then needs:
 
     ```bash
     QLIK_TENANT_URL=https://your-tenant.eu.qlikcloud.com
     QLIK_CLIENT_ID=your_oauth_client_id
     QLIK_CLIENT_SECRET=your_oauth_client_secret
     QLIK_AUTH_MODE=personal
-    QLIK_REFRESH_TOKEN=...
+    QLIK_TOKEN_FILE=.qlik_token.json
     ```
 
-    The tools exchange the refresh token for access tokens as needed and keep the newest one when Qlik rotates it. On the Timbal platform, a personal Qlik integration supplies the user's token instead (pass `integration=`).
+    The tools exchange the refresh token for access tokens as needed. Qlik can rotate refresh tokens on each use, so the newest one is written back to the token file; without the file it would live only in memory and a restart would reuse a spent token. On the Timbal platform, a personal Qlik integration supplies the user's token instead (pass `integration=`).
   </Tab>
   <Tab title="Service (machine-to-machine)">
     **Use this if** the agent runs unattended, or everyone using it may see the same data.
@@ -148,6 +148,7 @@ Every tool takes the same optional fields, which win over the environment:
 | `mode` | `QLIK_AUTH_MODE` | pins `personal` or `service` |
 | `token` | `QLIK_ACCESS_TOKEN` | personal |
 | `refresh_token` | `QLIK_REFRESH_TOKEN` | personal (with client ID and secret) |
+| `token_file` | `QLIK_TOKEN_FILE` | personal: where the newest refresh token is kept |
 | `client_id`, `client_secret` | `QLIK_CLIENT_ID`, `QLIK_CLIENT_SECRET` | service (and personal refresh) |
 | `api_key` | `QLIK_API_KEY` | service (a Qlik API key instead of OAuth) |
 | `integration` | | a Timbal platform integration supplying any of the above |
@@ -160,7 +161,9 @@ When `mode` is not set, a person's token is tried before the service credentials
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `OAUTH-5` on the `client_credentials` grant | The client does not allow M2M or is not Trusted. |
+| `OAUTH-5` on the `client_credentials` grant | The client authenticated but does not allow M2M or is not Trusted. |
+| `OAUTH-5` on the `refresh_token` grant | The refresh token expired, was revoked, or was already used. Sign in again and keep `QLIK_TOKEN_FILE` set. |
+| `OAUTH-22` / `OAUTH-14` | Wrong client secret / unknown client ID (or the wrong tenant). |
 | `Qlik rejected the personal credentials (401)` | The refresh token expired or was revoked. Sign in again. |
 | `the app does not exist or this identity may not open it` | Wrong `app_id`, or the identity lacks access to the app's space. |
 | `Bad expression` from `qlik_query` | A field name or the expression syntax is wrong. Check `qlik_get_app_fields`. |

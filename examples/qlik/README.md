@@ -14,7 +14,7 @@ Qlik OAuth client.
 | `agent.py` | The agent. Run it with a question, or with no arguments for interactive mode. |
 | `skills/qlik/SKILL.md` | The agent's instructions for Qlik: when to use which tool, set analysis, rules. |
 | `skills/qlik/tools/qlik_tools.py` | The four Qlik tools, loaded with the skill. |
-| `setup_credentials.py` | Personal mode only: signs a person in once and prints their refresh token. |
+| `setup_credentials.py` | Personal mode only: signs a person in once and saves their tokens to `.qlik_token.json`. |
 | `.env.example` | The variables to fill in. |
 
 The tools themselves live in `timbal.tools.qlik`:
@@ -46,8 +46,9 @@ The tools support two modes. Choose the one that fits who should see the data.
 - The agent answers on behalf of a signed-in user
 
 The tools send that person's access token, so Qlik enforces their permissions. Locally,
-`setup_credentials.py` signs you in once and gives you a refresh token; the tools turn it
-into access tokens as needed (and keep the newest refresh token when Qlik rotates it). On the
+`setup_credentials.py` signs you in once and saves a refresh token to a token file; the tools
+turn it into access tokens as needed and write the newest refresh token back to that file,
+because Qlik can rotate refresh tokens on each use (the old one then stops working). On the
 Timbal platform, a personal Qlik integration supplies the user's token instead.
 
 ### Method 2: Service (machine-to-machine)
@@ -107,14 +108,17 @@ python setup_credentials.py
 ```
 
 It opens the Qlik sign-in page, waits for the redirect on `http://localhost:8765/callback`,
-shows who you signed in as, and prints the two lines to add to `.env`:
+shows who you signed in as, and saves the tokens to `.qlik_token.json` (readable by you only).
+Make sure `.env` has:
 
 ```bash
 QLIK_AUTH_MODE=personal
-QLIK_REFRESH_TOKEN=...
+QLIK_TOKEN_FILE=.qlik_token.json
 ```
 
-Keep `.env` out of version control: the refresh token is your Qlik access.
+Keep `.env` and `.qlik_token.json` out of version control (this folder's `.gitignore` does):
+the refresh token is your Qlik access. Every process that uses the same token file shares the
+current refresh token, so run the agent from this folder or use an absolute path.
 
 ## Step 3: Give the identity access to the apps
 
@@ -156,6 +160,7 @@ Every tool takes the same optional fields, which win over the environment:
 | `mode` | `QLIK_AUTH_MODE` | pins `personal` or `service` |
 | `token` | `QLIK_ACCESS_TOKEN` | personal |
 | `refresh_token` | `QLIK_REFRESH_TOKEN` | personal (with client ID and secret) |
+| `token_file` | `QLIK_TOKEN_FILE` | personal: where the newest refresh token is kept |
 | `client_id`, `client_secret` | `QLIK_CLIENT_ID`, `QLIK_CLIENT_SECRET` | service (and personal refresh) |
 | `api_key` | `QLIK_API_KEY` | service (a Qlik API key instead of OAuth) |
 | `integration` | | a Timbal platform integration supplying any of the above |
@@ -168,8 +173,11 @@ through the service identity.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `OAUTH-5` on the `client_credentials` grant | The client is not allowed M2M or is not Trusted. Fix Step 1.7. |
-| `Qlik rejected the personal credentials (401)` | The refresh token expired or was revoked. Run `setup_credentials.py` again. |
+| `OAUTH-5` on the `client_credentials` grant | The client authenticated but is not allowed M2M or is not Trusted. Fix Step 1.7. |
+| `OAUTH-5` on the `refresh_token` grant | The refresh token expired, was revoked, or was already used. Run `setup_credentials.py` again, and keep `QLIK_TOKEN_FILE` set. |
+| `OAUTH-22` | Wrong client secret for this client ID. |
+| `OAUTH-14` | Unknown client ID (or the wrong tenant). |
+| `Qlik rejected the personal credentials (401)` | The access token expired or was revoked. Run `setup_credentials.py` again. |
 | `the app does not exist or this identity may not open it` | Wrong `app_id`, or the identity lacks access to its space (Step 3). |
 | `Bad expression` from `qlik_query` | A field name or the expression syntax is wrong. Check `qlik_get_app_fields`. |
 | `invalid redirect_uri` during sign-in | Add `http://localhost:8765/callback` to the client's redirect URLs (Step 1.6). |

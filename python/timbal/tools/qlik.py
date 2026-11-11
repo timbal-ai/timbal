@@ -6,7 +6,9 @@ Two connection modes, the same split as Power BI's:
   Qlik roles, space access and Section Access. Token from ``Integration("qlik")``
   (``token`` / ``access_token``), tool field ``token``, or env ``QLIK_ACCESS_TOKEN``;
   or a ``refresh_token`` (integration, tool field, env ``QLIK_REFRESH_TOKEN``) that is
-  exchanged with the OAuth client's ``client_id`` + ``client_secret``.
+  exchanged with the OAuth client's ``client_id`` + ``client_secret``. Qlik can rotate
+  refresh tokens on each use, so point ``token_file`` / env ``QLIK_TOKEN_FILE`` at a file
+  to keep the newest one across restarts (``examples/qlik/setup_credentials.py`` writes it).
 - **service** (machine-to-machine): the tools act as the OAuth client itself.
   ``client_id`` + ``client_secret`` go through the ``client_credentials`` grant, or a
   Qlik API key (``api_key`` / env ``QLIK_API_KEY``) is sent as the Bearer token.
@@ -33,19 +35,25 @@ Integration credentials (type: oauth or credentials):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import math
 import os
 import time
+import weakref
+from collections.abc import Iterator
 from typing import Annotated, Any, Literal, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
+import structlog
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..errors import CredentialNotAvailable
 from ..platform.integrations import Integration
+
+logger = structlog.get_logger("timbal.tools.qlik")
 
 #: Scopes a personal sign-in asks for; ``offline_access`` yields the refresh token.
 PERSONAL_SCOPES = "user_default offline_access"
@@ -62,6 +70,7 @@ _ENV_VARS = [
     "QLIK_TENANT_URL",
     "QLIK_ACCESS_TOKEN",
     "QLIK_REFRESH_TOKEN",
+    "QLIK_TOKEN_FILE",
     "QLIK_CLIENT_ID",
     "QLIK_CLIENT_SECRET",
     "QLIK_API_KEY",
@@ -148,24 +157,52 @@ def _cache_key(*parts: str) -> str:
     return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
 
 
-def _token_error(response: Any) -> str:
-    """Qlik's error code and title from a failed /oauth/token response."""
+class QlikTokenError(ValueError):
+    """Qlik's /oauth/token refused a grant. ``code`` is Qlik's error code (``OAUTH-5``, ...) when it sent one."""
+
+    def __init__(self, message: str, *, code: str | None = None, grant_type: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.grant_type = grant_type
+
+
+# Qlik error codes seen on /oauth/token, with what to do about them.
+_TOKEN_HINTS = {
+    "OAUTH-14": "Qlik does not know this client_id: check QLIK_CLIENT_ID and the tenant URL.",
+    "OAUTH-22": "The client_secret is wrong for this client_id: copy it again from Administration > OAuth.",
+}
+_SERVICE_OAUTH5_HINT = (
+    "The client authenticated but may not use client_credentials: service mode needs an OAuth client that "
+    "allows machine-to-machine access and uses the 'Trusted' consent method (Administration > OAuth)."
+)
+_REFRESH_OAUTH5_HINT = (
+    "The refresh token was refused: it expired, was revoked, or was already used (Qlik can rotate refresh "
+    "tokens on each use). Sign in again, and set QLIK_TOKEN_FILE so the newest refresh token survives restarts."
+)
+
+
+def _token_error(response: Any) -> tuple[str | None, str]:
+    """Qlik's error code, and code + title + detail as text, from a failed /oauth/token response."""
     try:
         body = response.json()
     except ValueError:
-        return (getattr(response, "text", "") or "")[:200]
+        return None, (getattr(response, "text", "") or "")[:200]
     errors = body.get("errors") if isinstance(body, dict) else None
     if isinstance(errors, list) and errors and isinstance(errors[0], dict):
         first = errors[0]
-        return " ".join(str(v) for v in (first.get("code"), first.get("title"), first.get("detail")) if v)
+        code = first.get("code")
+        text = " ".join(str(v) for v in (code, first.get("title"), first.get("detail")) if v)
+        return (str(code) if code else None), text
     if isinstance(body, dict):
-        return " ".join(str(v) for v in (body.get("error"), body.get("error_description")) if v)
-    return str(body)[:200]
+        code = body.get("error")
+        return (str(code) if code else None), " ".join(str(v) for v in (code, body.get("error_description")) if v)
+    return None, str(body)[:200]
 
 
 async def _token_request(tenant_url: str, payload: dict[str, str]) -> dict[str, Any]:
     import httpx
 
+    grant_type = payload.get("grant_type")
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
         response = await client.post(
             f"{tenant_url}/oauth/token",
@@ -173,18 +210,93 @@ async def _token_request(tenant_url: str, payload: dict[str, str]) -> dict[str, 
             headers={"Accept": "application/json"},
         )
     if response.status_code >= 400:
-        detail = _token_error(response)
-        if "OAUTH-5" in detail and payload.get("grant_type") == "client_credentials":
-            raise ValueError(
-                "Qlik refused the client_credentials grant (OAUTH-5). Service mode needs an OAuth client "
-                "that allows machine-to-machine access and uses the 'Trusted' consent method "
-                f"(Administration > OAuth). Upstream: {detail}"
-            )
-        raise ValueError(f"Qlik token request ({payload.get('grant_type')}) failed: {response.status_code} {detail}")
+        code, detail = _token_error(response)
+        hint = _TOKEN_HINTS.get(code or "")
+        if code == "OAUTH-5" and grant_type == "client_credentials":
+            hint = _SERVICE_OAUTH5_HINT
+        elif code == "OAUTH-5" and grant_type == "refresh_token":
+            hint = _REFRESH_OAUTH5_HINT
+        message = f"Qlik token request ({grant_type}) failed: {response.status_code} {detail}"
+        raise QlikTokenError(f"{message}. {hint}" if hint else message, code=code, grant_type=grant_type)
     body = response.json()
     if not isinstance(body.get("access_token"), str):
-        raise ValueError("Qlik token response did not include access_token.")
+        raise QlikTokenError("Qlik token response did not include access_token.", grant_type=grant_type)
     return body
+
+
+# Serializes token exchanges per credential set, so concurrent tool calls do not spend the
+# same refresh token twice (a rotating refresh token is single-use). Per event loop, since an
+# asyncio.Lock must not be shared across loops; weak keys so a closed loop takes its locks along.
+_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+
+
+def _lock(key: str) -> asyncio.Lock:
+    locks = _LOCKS.setdefault(asyncio.get_running_loop(), {})
+    lock = locks.get(key)
+    if lock is None:
+        lock = locks[key] = asyncio.Lock()
+    return lock
+
+
+@contextlib.contextmanager
+def _file_lock(path: str) -> Iterator[None]:
+    """Exclusive OS lock on ``<path>.lock`` while a token file is read, exchanged and rewritten,
+    so separate processes sharing one token file do not spend the same refresh token twice."""
+    lock_path = f"{path}.lock"
+    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+            import msvcrt
+
+            while True:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # retries for ~10 s, then raises
+                    break
+                except OSError:
+                    continue
+            try:
+                yield
+            finally:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def read_token_file(path: str | os.PathLike[str]) -> dict[str, Any] | None:
+    """The token state saved by ``write_token_file``, or None when the file is missing or unreadable."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("refresh_token") else None
+
+
+def write_token_file(path: str | os.PathLike[str], data: dict[str, Any]) -> None:
+    """Save token state atomically, readable by the owner only (it holds a live refresh token)."""
+    target = os.fspath(path)
+    directory = os.path.dirname(os.path.abspath(target))
+    os.makedirs(directory, exist_ok=True)
+    tmp = os.path.join(directory, f".{os.path.basename(target)}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, target)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def _expires_at(body: dict[str, Any]) -> float:
@@ -198,36 +310,126 @@ def _expires_at(body: dict[str, Any]) -> float:
 async def get_token_from_client_credentials(tenant_url: str, client_id: str, client_secret: str) -> str:
     """Service mode: an access token for the OAuth client itself, cached until shortly before it expires."""
     key = _cache_key("client_credentials", tenant_url, client_id, client_secret)
-    cached = _TOKEN_CACHE.get(key)
-    if cached and cached[1] - time.time() > _TOKEN_SKEW:
-        return cached[0]
-    body = await _token_request(
-        tenant_url,
-        {
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "scope": os.getenv("QLIK_SERVICE_SCOPES", SERVICE_SCOPES),
-        },
-    )
-    _TOKEN_CACHE[key] = (body["access_token"], _expires_at(body), None)
-    return body["access_token"]
+    async with _lock(key):
+        cached = _TOKEN_CACHE.get(key)
+        if cached and cached[1] - time.time() > _TOKEN_SKEW:
+            return cached[0]
+        body = await _token_request(
+            tenant_url,
+            {
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "scope": os.getenv("QLIK_SERVICE_SCOPES", SERVICE_SCOPES),
+            },
+        )
+        _TOKEN_CACHE[key] = (body["access_token"], _expires_at(body), None)
+        return body["access_token"]
 
 
-async def get_token_from_refresh_token(tenant_url: str, client_id: str, client_secret: str, refresh_token: str) -> str:
+async def get_token_from_refresh_token(
+    tenant_url: str,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str | None,
+    *,
+    token_file: str | os.PathLike[str] | None = None,
+) -> str:
     """Personal mode: a user's access token from their refresh token.
 
-    Qlik may rotate the refresh token on every use, so the newest one is kept in the
-    cache entry and used for the next exchange. Persist it yourself if the process
-    restarts often (``exchange_refresh_token`` returns the whole token response).
+    Qlik can rotate the refresh token on every use, which makes the old one useless. The
+    newest one is kept in memory, and in ``token_file`` when given, so it survives restarts
+    and every process sharing the file uses the same, current token. Exchanges for one
+    credential set run one at a time.
+
+    The token file wins over ``refresh_token`` (it holds the newest); if Qlik refuses the
+    file's token and ``refresh_token`` differs (the user signed in again), that one is tried.
     """
-    key = _cache_key("refresh_token", tenant_url, client_id, client_secret, refresh_token)
+    if token_file is None and not refresh_token:
+        raise ValueError("A refresh token or a token file is required.")
+    path = os.path.abspath(os.fspath(token_file)) if token_file is not None else None
+    key = _cache_key("refresh_token", tenant_url, client_id, client_secret, path or refresh_token or "")
+    async with _lock(key):
+        if path is None:
+            return await _refresh_locked(key, tenant_url, client_id, client_secret, refresh_token, None)
+        lock = _file_lock(path)
+        # Waiting for another process blocks, so wait in a thread. If this call is cancelled
+        # meanwhile, the thread still gets the lock later: release it as soon as it does.
+        entering = asyncio.ensure_future(asyncio.to_thread(lock.__enter__))
+        try:
+            await asyncio.shield(entering)
+        except asyncio.CancelledError:
+            entering.add_done_callback(lambda f: None if f.exception() else lock.__exit__(None, None, None))
+            raise
+        try:
+            return await _refresh_locked(key, tenant_url, client_id, client_secret, refresh_token, path)
+        finally:
+            lock.__exit__(None, None, None)
+
+
+async def _refresh_locked(
+    key: str, tenant_url: str, client_id: str, client_secret: str, refresh_token: str | None, token_file: str | None
+) -> str:
+    """The body of ``get_token_from_refresh_token``, run while its locks are held."""
+    now = time.time()
     cached = _TOKEN_CACHE.get(key)
-    if cached and cached[1] - time.time() > _TOKEN_SKEW:
+    if cached and cached[1] - now > _TOKEN_SKEW:
         return cached[0]
-    current = cached[2] if cached and cached[2] else refresh_token
-    body = await exchange_refresh_token(tenant_url, client_id, client_secret, current)
-    _TOKEN_CACHE[key] = (body["access_token"], _expires_at(body), body.get("refresh_token") or current)
+
+    stored = read_token_file(token_file) if token_file else None
+    if stored and (stored.get("tenant_url"), stored.get("client_id")) not in (
+        (tenant_url, client_id),
+        (None, None),
+    ):
+        stored = None  # saved for another tenant or client
+    if stored and isinstance(stored.get("access_token"), str):
+        expires_at = float(stored.get("expires_at") or 0)
+        if expires_at - now > _TOKEN_SKEW:
+            _TOKEN_CACHE[key] = (stored["access_token"], expires_at, stored["refresh_token"])
+            return stored["access_token"]
+
+    candidates = [t for t in ((stored or {}).get("refresh_token"), cached[2] if cached else None, refresh_token) if t]
+    candidates = list(dict.fromkeys(candidates))  # newest first, no repeats
+    if not candidates:
+        raise CredentialNotAvailable(
+            "Qlik",
+            missing=["refresh_token"],
+            env_vars=["QLIK_REFRESH_TOKEN", "QLIK_TOKEN_FILE"],
+            message=f"Qlik token file {os.fspath(token_file)!r} holds no refresh token; sign in again.",
+        )
+    body: dict[str, Any] | None = None
+    used = candidates[0]
+    for i, candidate in enumerate(candidates):
+        try:
+            body = await exchange_refresh_token(tenant_url, client_id, client_secret, candidate)
+            used = candidate
+            break
+        except QlikTokenError as exc:
+            # Only a refused token is worth retrying with an older candidate; a bad
+            # client id/secret or an outage fails the same way for all of them.
+            if exc.code != "OAUTH-5" or i == len(candidates) - 1:
+                raise
+    assert body is not None
+
+    newest = body.get("refresh_token") or used
+    expires_at = _expires_at(body)
+    _TOKEN_CACHE[key] = (body["access_token"], expires_at, newest)
+    if token_file:
+        try:
+            write_token_file(
+                token_file,
+                {
+                    "tenant_url": tenant_url,
+                    "client_id": client_id,
+                    "refresh_token": newest,
+                    "access_token": body["access_token"],
+                    "expires_at": expires_at,
+                },
+            )
+        except OSError as exc:
+            # The old refresh token is already spent: failing the call would lose the new one
+            # too. Keep it in memory for this process and say why the next one may fail.
+            logger.warning("qlik_token_file_write_failed", path=token_file, error=str(exc))
     return body["access_token"]
 
 
@@ -254,6 +456,7 @@ async def _resolve_auth(tool: Any) -> QlikAuth:
 
     tenant_url = _tenant_url(tool, creds)
     mode = _mode(tool, creds)
+    token_file_missing: str | None = None
 
     if mode != "service":
         token = _first(
@@ -267,9 +470,13 @@ async def _resolve_auth(tool: Any) -> QlikAuth:
         refresh = _first(
             getattr(tool, "refresh_token", None), creds.get("refresh_token"), os.getenv("QLIK_REFRESH_TOKEN")
         )
+        token_file = _first(getattr(tool, "token_file", None), os.getenv("QLIK_TOKEN_FILE"))
+        if token_file and not refresh and read_token_file(token_file) is None:
+            token_file_missing = token_file
+            token_file = None
         client = _client_parts(tool, creds)
-        if refresh and client:
-            token = await get_token_from_refresh_token(tenant_url, *client, refresh)
+        if (refresh or token_file) and client:
+            token = await get_token_from_refresh_token(tenant_url, *client, refresh, token_file=token_file)
             return QlikAuth(tenant_url, token, "personal")
 
     if mode != "personal":
@@ -281,6 +488,14 @@ async def _resolve_auth(tool: Any) -> QlikAuth:
             token = await get_token_from_client_credentials(tenant_url, *client)
             return QlikAuth(tenant_url, token, "service")
 
+    if token_file_missing and mode != "service":
+        raise CredentialNotAvailable(
+            "Qlik",
+            missing=["refresh_token"],
+            env_vars=["QLIK_TOKEN_FILE"],
+            message=f"Qlik token file {token_file_missing!r} is missing or holds no refresh token: "
+            "sign in first (examples/qlik/setup_credentials.py writes it).",
+        )
     if mode == "personal":
         missing = ["token", "refresh_token + client_id + client_secret"]
     elif mode == "service":
@@ -288,6 +503,19 @@ async def _resolve_auth(tool: Any) -> QlikAuth:
     else:
         missing = ["token", "refresh_token", "client_id + client_secret", "api_key"]
     raise CredentialNotAvailable("Qlik", missing=missing, env_vars=_ENV_VARS)
+
+
+def _raise_for_access(auth: QlikAuth, status: int, *, app: bool) -> None:
+    """The same message for a refused token or app, whether REST or the Engine websocket said so."""
+    if status == 401:
+        hint = (
+            "Sign in to Qlik again (the user's token expired or was revoked)."
+            if auth.mode == "personal"
+            else "Check the OAuth client or API key."
+        )
+        raise ValueError(f"Qlik rejected the {auth.mode} credentials (401). {hint}")
+    if status in (403, 404) and app:
+        raise ValueError(f"Qlik answered {status}: the app does not exist or this identity may not open it.")
 
 
 async def _qlik_get(auth: QlikAuth, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -299,17 +527,7 @@ async def _qlik_get(auth: QlikAuth, path: str, params: dict[str, Any] | None = N
             params=params or None,
             headers={"Authorization": f"Bearer {auth.token}", "Accept": "application/json"},
         )
-    if response.status_code == 401:
-        hint = (
-            "Sign in to Qlik again (the user's token expired or was revoked)."
-            if auth.mode == "personal"
-            else "Check the OAuth client or API key."
-        )
-        raise ValueError(f"Qlik rejected the {auth.mode} credentials (401). {hint}")
-    if response.status_code in (403, 404) and path.startswith("/api/v1/apps/"):
-        raise ValueError(
-            f"Qlik answered {response.status_code}: the app does not exist or this identity may not open it."
-        )
+    _raise_for_access(auth, response.status_code, app=path.startswith("/api/v1/apps/"))
     response.raise_for_status()
     return response.json() if response.content else {}
 
@@ -367,6 +585,7 @@ async def engine_hypercube(
     """Open the app over the Engine API (JSON-RPC on a websocket) and read one hypercube."""
     try:
         from websockets.asyncio.client import connect
+        from websockets.exceptions import InvalidStatus
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError(
             "qlik_query needs the `websockets` package: pip install websockets (or timbal[server])."
@@ -426,12 +645,17 @@ async def engine_hypercube(
         return {"columns": columns, "rows": rows, "total_rows": total, "truncated": total > len(rows)}
 
     async def session() -> dict[str, Any]:
-        async with connect(
-            f"wss://{host}/app/{app_id}",
-            additional_headers={"Authorization": f"Bearer {auth.token}"},
-            open_timeout=20,
-            max_size=64 * 1024 * 1024,
-        ) as ws:
+        try:
+            ws = await connect(
+                f"wss://{host}/app/{app_id}",
+                additional_headers={"Authorization": f"Bearer {auth.token}"},
+                open_timeout=20,
+                max_size=64 * 1024 * 1024,
+            )
+        except InvalidStatus as exc:
+            _raise_for_access(auth, exc.response.status_code, app=True)
+            raise
+        async with ws:
             return await run(ws)
 
     return await asyncio.wait_for(session(), timeout=timeout)
@@ -445,6 +669,7 @@ class _QlikTool(Tool):
     tenant_url: str | None = None
     token: SecretStr | None = None
     refresh_token: SecretStr | None = None
+    token_file: str | None = None
     client_id: str | None = None
     client_secret: SecretStr | None = None
     api_key: SecretStr | None = None
@@ -460,6 +685,7 @@ class _QlikTool(Tool):
                     "tenant_url": self.tenant_url,
                     "token": self.token,
                     "refresh_token": self.refresh_token,
+                    "token_file": self.token_file,
                     "client_id": self.client_id,
                     "client_secret": self.client_secret,
                     "api_key": self.api_key,
