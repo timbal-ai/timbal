@@ -705,6 +705,59 @@ class TestRestore:
         await records(restored, "turn_finished", 1, after=restored.log.forgotten_through)
         await restored.close()
 
+    async def test_a_turn_that_had_ended_when_the_session_closed_is_not_a_cut_one(self, db):
+        """A shutdown that comes between a turn ending and the session recording it must not store the turn
+        as cut: here it ended waiting for an approval, and a recovery turn would be chained onto it."""
+        provider, store = db
+        charge = Charge(released=True)
+        session = ChatSession(gated_agent(provider, charge), session_store=store)
+        real_pump, closing = session._pump, []
+
+        async def pump(*args, **kwargs):
+            output = await real_pump(*args, **kwargs)
+            # Runs once the turn's task is over, before the worker has settled the turn.
+            closing.append(asyncio.get_running_loop().create_task(session.close(keep=True)))
+            return output
+
+        session._pump = pump
+        session.send("pay")
+        for _ in range(250):
+            if closing:
+                break
+            await asyncio.sleep(0.02)
+        await closing[0]
+        stored = await store.load(session.id)
+        assert stored.in_flight is None and stored.parked and stored.turns == 1
+
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        assert restored.parked and restored._wakes == []  # the approval still waits; nothing to recover
+        (approval,) = restored.state()["pending_approvals"]
+        restored.resume({approval["approval_id"]: True})
+        (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert finished["status"]["code"] == "success" and charge.gate.calls == 1
+        await restored.close()
+
+    async def test_a_run_that_ended_by_itself_is_adopted_even_if_marked_cut(self, db):
+        provider, store = db
+        charge = Charge(released=True)
+        session, approval = await parked(provider, store, charge)
+        await session.close(keep=True)
+        snapshot = await store.load(session.id)
+        snapshot.in_flight = {  # as a shutdown that cancelled the worker right after the run ended left it
+            "run_id": snapshot.head,
+            "parent_id": None,
+            "trigger": {"kind": "user_message"},
+            "events": [],
+            "wake": None,
+            "cut": "shutdown",
+        }
+        await store.save(snapshot, expect_version=snapshot.version)
+
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        assert restored.parked and restored._wakes == []
+        assert restored.state()["pending_approvals"][0]["approval_id"] == approval.approval_id
+        await restored.close()
+
     @pytest.mark.parametrize("on_dead_turn", ["notify", "drop"])
     async def test_on_dead_turn_can_skip_the_recovery_turn(self, db, on_dead_turn):
         provider, store = db

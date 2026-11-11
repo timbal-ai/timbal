@@ -199,6 +199,35 @@ class TestToolCut:
         outs = [e for e in events if isinstance(e, OutputEvent) and e.path == "agent.search"]
         assert [(o.call_id, o.status.reason) for o in outs] == [(start.call_id, "steered")]
 
+    async def test_a_tool_cut_before_its_start_was_taken_closes_on_its_own_span_too(self):
+        """The cut can land while a tool's START is still queued. Its result must wait for that START and go
+        out on the same span, not on a made-up one with the real START thrown away."""
+        probe = Probe()
+        a = agent(
+            batch_model("search", "browse"),
+            [probe.tool("search", forever=True, read_only=True), probe.tool("browse", forever=True, read_only=True)],
+        )
+        context = RunContext(tracing_provider=InMemoryTracingProvider)
+        context._steering, context._cut = True, asyncio.Event()
+
+        async def cut_as_the_batch_starts(_agent_path, _calls):
+            # In before any event of the batch is taken: once the first START is, the second is still queued.
+            context._cut.set()
+
+        context._before_tool_dispatch = cut_as_the_batch_starts
+        set_run_context(context)
+        seen: dict[str, list] = {}
+        async for event in a(prompt="start"):
+            if event.path in ("agent.search", "agent.browse") and event.type in ("START", "OUTPUT"):
+                seen.setdefault(event.path, []).append(event)
+        for path in ("agent.search", "agent.browse"):
+            start, result = seen[path]  # one START, then one result, for each
+            assert start.type == "START" and isinstance(result, OutputEvent), path
+            assert (result.status.reason, result.call_id) == ("steered", start.call_id), path
+        # And no span of the trace is left running.
+        spans = [span for span in context._trace.as_records() if span.path in seen]
+        assert len(spans) == 2 and all(span.t1 is not None for span in spans)
+
 
 class SlowStream(StreamingTestModel):
     """Streams its scripts a chunk at a time so a test can act mid-answer."""

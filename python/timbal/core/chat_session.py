@@ -220,6 +220,21 @@ def _status_dict(status: Any) -> dict[str, Any] | None:
     return {"code": status.code, "reason": status.reason, "message": status.message}
 
 
+def _was_cut(status: Any) -> bool:
+    """A run that ended because it was cancelled from outside (a close, an interrupt), as opposed to one
+    that ended by itself, parked on an approval or a question included."""
+    data = _status_dict(status) or {}
+    return data.get("code") == "cancelled" and data.get("reason") == "interrupted"
+
+
+def _ended_by_itself(turn: asyncio.Task) -> bool:
+    """A turn's task that produced its run's outcome, and not because it was cut."""
+    if turn.cancelled() or turn.exception() is not None:
+        return False
+    output = turn.result()
+    return output is not None and not _was_cut(output.status)
+
+
 def _brief(value: Any, limit: int = 160) -> str:
     text = value if isinstance(value, str) else repr(value)
     text = " ".join(text.split())
@@ -764,7 +779,9 @@ class ChatSession:
                 worker.cancel()
                 with contextlib.suppress(BaseException):
                     await worker
-            if cut is not None:
+            if cut is not None and self._in_flight is cut:
+                # Still the turn in flight: this close cut it. One that ended meanwhile was settled as it
+                # stopped (its in-flight record is gone), and is not a cut turn.
                 self._in_flight = {**cut, "cut": "shutdown"}
             if self._last_context is not None:
                 self._scheduler.unmark(self._last_context)
@@ -1169,6 +1186,7 @@ class ChatSession:
         """Run one turn the scheduler is already busy with (``turn_started``), and settle it."""
         scheduler = self._scheduler
         turn: asyncio.Task | None = None
+        stopping = False
         try:
             kwargs, trigger, options = self._turn_inputs(followup, resume, wake)
             context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
@@ -1207,15 +1225,33 @@ class ChatSession:
             try:
                 await asyncio.wait({turn})
             except asyncio.CancelledError:
-                turn.cancel()
-                with contextlib.suppress(BaseException):
-                    await turn
-                raise
+                # The worker is being stopped (a close). A turn still running is cut with it and stays the
+                # turn in flight (the agent ends it as interrupted; close() marks it, and a restart
+                # recovers it). One that had already ended, or that ends by itself all the same, is settled
+                # below like any other: how it ended (parked, perhaps) must not be lost with the worker, nor
+                # the turn be stored as one that was cut.
+                stopping = True
+                if not turn.done():
+                    turn.cancel()
+                    with contextlib.suppress(BaseException):
+                        await turn
+                    if not _ended_by_itself(turn):
+                        raise
         finally:
             self._turn = None
             scheduler.turn_finished()
             if turn is None and followup is not None:
                 followup.release()
+        self._settle_turn(turn, context, resume, wake)
+        if stopping:
+            raise asyncio.CancelledError
+
+    def _settle_turn(
+        self, turn: asyncio.Task, context: RunContext, resume: dict[str, Any] | None, wake: _Wake | None
+    ) -> None:
+        """Record how a turn ended: its status and whether it left the session parked, or, for one that
+        never started or failed before it did, its work handed back. One step, with nothing awaited."""
+        scheduler = self._scheduler
         output = None
         if not turn.cancelled():
             error = turn.exception()
@@ -1622,8 +1658,10 @@ class ChatSession:
         context = await self._load_run(run_id)
         root = context.root_span() if context is not None else None
         cut = in_flight.get("cut")
-        if root is not None and root.t1 is not None and cut is None:
-            # It finished; the process died before the session stored that.
+        if root is not None and root.t1 is not None and (cut is None or not _was_cut(root.status)):
+            # It finished; the process died before the session stored that. Also when a shutdown marked it
+            # as cut: a run that ended by itself (answered, parked on a question) was not cut, and treating
+            # it as one would chain a recovery turn onto a run that waits for its user.
             self._scheduler.head = run_id
             self._parked = is_parked(root.status)
             self.last_status = _status_dict(root.status)

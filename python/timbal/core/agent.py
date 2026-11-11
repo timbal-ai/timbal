@@ -2027,6 +2027,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             spans: dict[str, tuple[str, str | None]] = {}  # tool_call id -> its span (call_id, parent)
             finished: set[str] = set()
             dropped: set[str] = set()
+            # Cut before their START was taken off the queue: the steered result waits for it, so it goes
+            # out on the tool's real span (after its START), not on a made-up one beside it.
+            awaiting: set[str] = set()
             while remaining > 0:
                 if cut is not None and not cut.is_set():
                     getter = asyncio.ensure_future(queue.get())
@@ -2046,6 +2049,22 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     tool_call, event = item
                     if event is None:
                         remaining -= 1
+                        if tool_call.id in awaiting:
+                            # Its task is over. On its span if it had got as far as a START, else on none.
+                            awaiting.discard(tool_call.id)
+                            dropped.add(tool_call.id)
+                            yield tool_call, self._steered_event(tool_call, spans.get(tool_call.id))
+                    elif tool_call.id in awaiting:
+                        if event.type == "START" and tool_call.id not in spans:
+                            spans[tool_call.id] = (event.call_id, event.parent_call_id)
+                            yield tool_call, event  # its card opens; the steered result closes it
+                        elif isinstance(event, OutputEvent) and spans.get(tool_call.id, (None,))[0] == event.call_id:
+                            # It had finished before the cancel landed (a cancelled tool queues no result):
+                            # its own result stands.
+                            awaiting.discard(tool_call.id)
+                            finished.add(tool_call.id)
+                            yield tool_call, event
+                        # Anything else it queued before the cancel landed is not shown.
                     elif tool_call.id not in dropped:  # else queued before the cancel landed
                         if event.type == "START" and tool_call.id not in spans:
                             spans[tool_call.id] = (event.call_id, event.parent_call_id)
@@ -2058,8 +2077,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             continue
                         if self._interruptible(self._resolve_tool_for_call(tools, tc)):
                             task.cancel()
-                            dropped.add(tc.id)
-                            yield tc, self._steered_event(tc, spans.get(tc.id))
+                            if tc.id in spans:
+                                dropped.add(tc.id)
+                                yield tc, self._steered_event(tc, spans[tc.id])
+                            else:
+                                awaiting.add(tc.id)
                     cut = None  # one cut per batch; the rest runs to the end
         except (asyncio.CancelledError, GeneratorExit, InterruptError):
             raise
