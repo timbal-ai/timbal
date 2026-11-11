@@ -143,6 +143,8 @@ A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `t
 
 Recording, ambient audio, `events`, `speculative_generation`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, `first_flush_min_words`, `keyterms`, and `stt_languages` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`, `speculative_generation`) are treated as unset so they do not wipe an inherited value.
 
+`hesitation` is server-only as well, and an empty `hesitation` block is unset. See [Hesitation sounds](#hesitation-sounds).
+
 ## Mix providers
 
 With `OPENAI_API_KEY` configured, this selects OpenAI for transcription and speech while keeping `agent.model` as the conversation model:
@@ -253,6 +255,60 @@ See [Greetings](/voice/greetings) for fixed and generated openers, timing, and o
 ## Tool-call fillers
 
 See [Spoken fillers](/voice/fillers) to enable a waiting phrase, tune generation, or repeat it during a long tool call. [Thinking sounds](/voice/thinking-sounds) are a separate browser feature.
+
+## Hesitation sounds
+
+A person on the phone does not open every sentence cleanly. Now and then the first thing out is a sound while the thought forms. `hesitation` puts that sound in front of some replies: "Eh... son diez con sesenta." It is off unless you set it, it is server-side (a caller hello cannot set or clear it), and it applies only to the cascaded pipeline, not to a `RealtimeSession`.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={"language": "es", "hesitation": True},
+)
+```
+
+`True` is `{"rate": 0.15}`. `None`, `False`, an empty block and `{"rate": 0}` add nothing.
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `rate` | `0.15` | Chance, from 0 to 1, that a reply opening that can take a sound gets one. |
+| `openers` | `None` | The sounds. A list serves every language. A dict is keyed by language, as `filler.phrases` is: `"es"`, `"en"`, region dropped, `"*"` for any other. |
+| `seed` | `None` | Fixes the draws, for a repeatable test. |
+
+The sound is only in the text sent to the speech provider. Reply deltas, `AgentTextDone`, the transcript and the agent's memory keep the model's words. An opening is the first segment the session speaks at the start of a turn, or the first after a tool call. Nothing else can get a sound: not a later sentence of the same reply, and not a line the session speaks as written (a greeting, a filler, an idle prompt, the hangup farewell, the turn-timeout fallback, the rest of a reply resumed after a false interruption).
+
+An opening gets a sound when all of these hold:
+
+- **It starts with a letter.** Not with a figure, `¿`, `¡`, a quote or a bracket.
+- **Its first clause has three words or more.** The first clause ends at the first comma, full stop, colon, semicolon, question mark, exclamation mark, ellipsis or dash that is followed by a space or ends the segment. "Vale,", "De acuerdo.", "Hasta luego," and "Pedro," are an acknowledgement, a goodbye and a name, and are said clean. The comma in "10,60" does not end the clause.
+- **The model did not hesitate on its own.** An opening that starts with one of the language's openers ("A ver, ..."), or with a bare "mm", "eh", "ehm", "um", "uh", "hmm", "ah" or "er" of any length followed by a comma, a full stop, an ellipsis or a dash, is left as it is and counts as hesitated.
+- **The opening before it was not hesitated**, by the session or by the model. That is the previous turn's opening, or the one before the tool call.
+- **A random draw falls under `rate`.**
+
+No two openings in a row are hesitated, so the share that gets a sound is at most `rate`, and it is `rate / (1 + rate)` when every opening can take one: 0.13 for the default, every other one for `1`. The same sound is not used twice running when the language has another. After the sound, the reply's first word loses its capital when its second character is a lowercase letter, so an acronym ("DNI") and a one-letter word ("A", "I") keep theirs.
+
+Write each opener the way the voice should read it, ending in a comma or an ellipsis: `"eh..."` pauses longer than `"eh,"`. It starts with a letter and has at most 24 characters, and a language takes at most 24 of them. A block that breaks one of these rules fails when the config is built. The built-in sounds, used for a language `openers` does not cover (no entry for it and no `"*"`):
+
+| Language | Sounds |
+| --- | --- |
+| `es` | `eh...`, `mm...`, `pues...`, `a ver,`, `mm,`, `eh,` |
+| `en` | `um,`, `well,`, `so,`, `mm,` |
+| `ca` | `eh...`, `mm...`, `doncs...`, `a veure,`, `mm,`, `eh,` |
+
+The language is the one the reply is pinned to: `reply_language` when it is a tag, otherwise `language`. With neither set, or with `reply_language: "follow"`, only a list or the `"*"` entry is used. A reply language with no sounds is spoken clean, and `tts_hesitation_unavailable` is logged once per language at INFO.
+
+What it costs and what it leaves alone:
+
+- **First audio is not delayed.** The sound is the first audio. The reply's first word comes later by the length of the sound: 0.33 to 0.93 s (median 0.58 s) for the built-in sounds on ElevenLabs `eleven_v4_turbo`, before `tts_tempo`.
+- **An interrupted reply keeps the words the caller heard, without the sound.** The sound's audio is taken out before played bytes are mapped to text. On that voice a sound takes about twice the audio of as many characters of the sentence behind it (0.8 to 3.5 times over 32 syntheses, median 2.0), so its share is counted double. A cut within that share keeps none of the reply.
+- **A speculative reply that is dropped does not count.** Nobody heard it, so the reply that is spoken can still hesitate.
+- **A reply the caller cuts before its audio starts does count.** The sound was already added to the text for the voice, so `TurnMetrics.hesitations` includes it and the next opening is said clean.
+
+Each sound logs `tts_hesitation` at INFO with the `opener` and the start of the reply, and `TurnMetrics.hesitations` counts them for the turn. An opening that got none logs `tts_hesitation_skipped` at DEBUG with the reason: `already`, `not_a_word`, `short_opening`, `after_hesitation` or `draw`. `voice_session_config` logs `hesitation_rate`.
 
 ## Operator defaults
 

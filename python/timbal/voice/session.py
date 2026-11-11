@@ -77,9 +77,11 @@ from .config import (
     DEFAULT_USER_IDLE_SYSTEM_PROMPT,
     FillerConfig,
     GreetingConfig,
+    HesitationConfig,
     SpeculativeGeneration,
     UserIdleConfig,
     coerce_greeting,
+    coerce_hesitation,
     language_key,
     normalize_hangup_grace_secs,
     omit_empty_voice_blocks,
@@ -109,6 +111,7 @@ from .events import (
     VoiceSessionEvent,
     VoiceUsageEvent,
 )
+from .hesitation import SOUND_AUDIO_WEIGHT, Hesitated, Hesitator
 from .language import (
     normalize_language_tag,
     parse_reply_language,
@@ -885,6 +888,7 @@ class VoiceSession:
         eager_eot_threshold: float | None = None,
         model: str | None = None,
         filler: FillerConfig | dict[str, Any] | None = None,
+        hesitation: HesitationConfig | dict[str, Any] | bool | None = None,
         greeting: GreetingConfig | dict[str, Any] | str | None = None,
         user_idle: UserIdleConfig | dict[str, Any] | None = None,
         call_context: dict[str, str] | None = None,
@@ -1081,6 +1085,28 @@ class VoiceSession:
         # Segments/bytes as of the last filler — "spoken since then" checks.
         self._turn_filler_segments_baseline = 0
         self._turn_filler_audio_baseline = 0
+        # A hesitation sound at the opening of some replies (see
+        # HesitationConfig). Off unless a rate is set: ``True`` is the default
+        # rate and an empty block is unset, as in VoiceConfig.
+        hesitation = omit_empty_voice_blocks({"hesitation": coerce_hesitation(hesitation)}).get("hesitation")
+        if isinstance(hesitation, dict):
+            hesitation = HesitationConfig.model_validate(hesitation)
+        if hesitation is not None and not isinstance(hesitation, HesitationConfig):
+            raise ValueError("hesitation must be a HesitationConfig, a dict of its fields, or a boolean")
+        self.hesitation: HesitationConfig | None = hesitation if hesitation is not None and hesitation.enabled else None
+        self._hesitator: Hesitator | None = None
+        if self.hesitation is not None:
+            self._hesitator = Hesitator(self.hesitation.rate, self.hesitation.openers, seed=self.hesitation.seed)
+        # True until the first segment of a model step has been spoken: from
+        # the start of the turn, and again once a tool boundary has gone by.
+        self._turn_hesitation_due = False
+        self._turn_hesitations = 0
+        # ``id(record) -> (offset, chars)``: a sound that is in a segment
+        # record's audio and not in its text.
+        self._turn_tts_added: dict[int, tuple[int, int]] = {}
+        self._hesitation_rewind: tuple[bool, str] | None = None
+        # Reply languages already reported as having no openers.
+        self._hesitation_unavailable: set[str | None] = set()
         # Audio counters when the current soft-timeout quiet window opened.
         self._soft_audio_baseline = 0
         self._soft_segments_baseline = 0
@@ -4008,6 +4034,9 @@ class VoiceSession:
         self.speculative_generations_discarded += 1
         attempt.gate.discard()
         attempt.hold.discard()
+        if self._hesitator is not None and self._hesitation_rewind is not None:
+            self._hesitator.restore(self._hesitation_rewind)
+            self._hesitation_rewind = None
         self._speculative_tts_stash.clear()
         self._speculative_text_deltas.clear()
         self._speculative_final_text = None
@@ -4884,6 +4913,12 @@ class VoiceSession:
         self._turn_audio_playing_until = 0.0
         self._turn_played_baseline = self.playback.played_bytes
         self._turn_tts_segment_records = []
+        self._turn_tts_added = {}
+        self._turn_hesitation_due = True
+        self._turn_hesitations = 0
+        # A speculative reply that is dropped was never heard: its hesitation
+        # must not make the confirmed reply open clean.
+        self._hesitation_rewind = self._hesitator.state() if speculative and self._hesitator is not None else None
         # A greeting still draining when this turn starts (deferred barge-in)
         # sits ahead of the reply on the played axis. Seed a text-less segment
         # for it so interruption truncation walks past those bytes instead of
@@ -6856,6 +6891,66 @@ class VoiceSession:
             return
         self._schedule_tts_now(text)
 
+    def _hesitate(self, clean: str) -> Hesitated | None:
+        """``clean`` with a hesitation sound, when it opens a model step and gets one.
+
+        Called on the TTS chain, so openings are considered in the order they
+        are spoken, and text held back for an unconfirmed speculative turn is
+        not considered until it is confirmed.
+        """
+        if self._hesitator is None or not self._turn_hesitation_due:
+            return None
+        self._turn_hesitation_due = False
+        language = self.effective_reply_language()
+        hesitated, reason = self._hesitator.consider(clean, language)
+        if hesitated is not None:
+            self._turn_hesitations += 1
+            # INFO on purpose: the sound is heard on the call and is in no transcript.
+            logger.info(
+                "tts_hesitation",
+                opener=hesitated.opener.strip(),
+                text_preview=clean.strip()[:60],
+                **_trace_debug_fields(),
+            )
+        elif reason != "no_openers":
+            logger.debug("tts_hesitation_skipped", reason=reason, text_preview=clean.strip()[:60])
+        elif language not in self._hesitation_unavailable:
+            # INFO, once per language: the knob is on and these replies never hesitate.
+            self._hesitation_unavailable.add(language)
+            logger.info("tts_hesitation_unavailable", language=language, reason="no openers for the reply language")
+        return hesitated
+
+    def _heard_segments(self) -> list[tuple[str, int]]:
+        """This turn's ``(text, bytes)`` records, for mapping played bytes to heard text.
+
+        A hesitation sound is in a record's audio and not in its text. Mapped
+        as it is, a cut early in the reply would credit the caller with words
+        the playhead had not reached. The sound's share of the audio becomes
+        a text-less segment where it was spoken, the way a filler's audio is.
+        The share is by characters, like the rest of the mapping, with the
+        sound's counted ``SOUND_AUDIO_WEIGHT`` times.
+        """
+        segments: list[tuple[str, int]] = []
+        for record in self._turn_tts_segment_records:
+            text, num_bytes = str(record[0]), int(record[1])
+            added = self._turn_tts_added.get(id(record))
+            if added is None or num_bytes <= 0:
+                segments.append((text, num_bytes))
+                continue
+            offset, chars = added
+            if not text[:offset].strip():
+                # Leading whitespace stays with the words that follow it.
+                offset = 0
+            chars *= SOUND_AUDIO_WEIGHT
+            spoken_chars = len(text) + chars
+            before = num_bytes * offset // spoken_chars
+            sound = num_bytes * chars // spoken_chars
+            if offset:
+                segments.append((text[:offset], before))
+            segments.append(("", sound))
+            segments.append((text[offset:], num_bytes - before - sound))
+        return segments
+
     def _schedule_tts_now(self, text: str, *, advance_cursor: bool = True, previous_text: str | None = None) -> None:
         if not text:
             return
@@ -6873,6 +6968,7 @@ class VoiceSession:
             clean = _strip_markdown(text, previous_text=previous_text)
             if not clean.strip():
                 return
+            hesitated = self._hesitate(clean)
             # Resolve the context after the preceding boundary: an enabled beat
             # may have finished it. Otherwise reuse it to keep prosody continuous.
             if self._turn_tts_stream is None and self._turn_tts_pump is None and not self._cancel_turn.is_set():
@@ -6894,14 +6990,16 @@ class VoiceSession:
                     self._turn_tts_segment_records.append(record)
                 self._turn_tts_segments += 1
                 if record is not None:
+                    if hesitated is not None:
+                        self._turn_tts_added[id(record)] = (len(record[0]) + hesitated.offset, len(hesitated.opener))
                     record[0] += clean
                 try:
-                    await stream.feed(clean)
+                    await stream.feed(clean if hesitated is None else hesitated.spoken)
                 except Exception as e:
                     logger.error("tts_feed_error", error=str(e), text_preview=clean[:80], exc_info=True)
                     await self._emit(SessionError(message=f"TTS failed: {e}"))
                 return
-            await self._speak(text, previous_text=previous_text)
+            await self._speak(text, previous_text=previous_text, hesitated=hesitated)
 
         t = asyncio.create_task(chain())
         self._tts_tasks.add(t)
@@ -6924,6 +7022,8 @@ class VoiceSession:
             await self._await_tts_predecessor(prev)
             if self._cancel_turn.is_set():
                 return
+            # Whatever is spoken next is the opening of the step after the tool.
+            self._turn_hesitation_due = True
             stream = self._turn_tts_stream
             beat = self.tool_beat_secs or 0.0
             if stream is not None:
@@ -7092,7 +7192,7 @@ class VoiceSession:
             # catches a TTS provider returning truncated audio.
             logger.info(
                 "turn_tts_stream_end",
-                text_chars=sum(len(r[0]) for r in records),
+                text_chars=sum(len(r[0]) + self._turn_tts_added.get(id(r), (0, 0))[1] for r in records),
                 text_preview="".join(r[0] for r in records)[:120],
                 audio_chunks=chunk_count,
                 audio_bytes=total_bytes,
@@ -7128,6 +7228,7 @@ class VoiceSession:
         greeting: bool = False,
         idle: bool = False,
         previous_text: str = "",
+        hesitated: Hesitated | None = None,
     ) -> None:
         """Synthesize ``text`` and emit its audio.
 
@@ -7136,6 +7237,9 @@ class VoiceSession:
         timings, ignores the per-turn cancel flag (stopping it is
         ``interrupt()``'s job, by cancelling the task) and keeps its own
         ``[text, bytes]`` record for barge-in truncation.
+
+        ``hesitated`` is ``text`` with a hesitation sound added: the voice is
+        given that, and the record keeps ``text``.
         """
         text = _strip_markdown(text, previous_text=previous_text)
         turnless = greeting or idle
@@ -7158,6 +7262,10 @@ class VoiceSession:
         # Filler segments record empty text: interruption truncation then counts
         # their played bytes without attributing words to the *reply*.
         segment_record: list = ["" if filler else text, 0]
+        spoken = text
+        if hesitated is not None:
+            spoken = hesitated.spoken
+            self._turn_tts_added[id(segment_record)] = (hesitated.offset, len(hesitated.opener))
         if greeting:
             # The opener belongs to no turn: it is not in any turn's segment
             # list (``_run_turn`` seeds a text-less stand-in for whatever is
@@ -7170,7 +7278,7 @@ class VoiceSession:
         else:
             self._turn_tts_segment_records.append(segment_record)
         try:
-            async for chunk in self._postprocess_tts(self.tts.synthesize(text)):
+            async for chunk in self._postprocess_tts(self.tts.synthesize(spoken)):
                 # Turnless speech predates / sits outside every turn, so the
                 # per-turn cancel flag says nothing about it: stopping it is
                 # ``interrupt()``'s job, by cancelling this task.
@@ -7202,7 +7310,7 @@ class VoiceSession:
             # early) — at ~16kHz PCM expect very roughly >1.5KB per char.
             logger.info(
                 "turn_tts_synthesize_end",
-                text_chars=len(text),
+                text_chars=len(spoken),
                 text_preview=text[:120],
                 audio_chunks=chunk_count,
                 audio_bytes=total_bytes,
@@ -7283,7 +7391,7 @@ class VoiceSession:
         heard_bytes = self._turn_heard_bytes
         if heard_bytes is None:
             heard_bytes = max(0, self.playback.played_bytes - self._turn_played_baseline)
-        segments = [(str(t), int(b)) for t, b in self._turn_tts_segment_records]
+        segments = self._heard_segments()
         heard_text = map_played_bytes_to_text(segments, heard_bytes)
         # "" means "nothing was heard"; None (never set) means "unknown".
         self._last_interruption_heard_text = heard_text
@@ -7294,7 +7402,7 @@ class VoiceSession:
             heard_bytes=heard_bytes,
             heard_chars=len(heard_text),
             generated_chars=len(self._turn_assistant_text),
-            tts_segments=len(segments),
+            tts_segments=len(self._turn_tts_segment_records),
             replace_last=replace_last,
             **_trace_debug_fields(),
         )
@@ -7446,6 +7554,7 @@ class VoiceSession:
             predictive_endpoint=self._turn_predictive_endpoint,
             filler_spoken=self._turn_filler_count > 0,
             filler_count=self._turn_filler_count,
+            hesitations=self._turn_hesitations,
             event=self._turn_is_event,
             speculative=self._turn_speculative,
             speculative_generations_started=self.speculative_generations_started,
