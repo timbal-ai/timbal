@@ -68,7 +68,7 @@ async def end_call() -> str:
     if session is None:
         return "No live call. Do not hang up."
     if not await session.commit_hangup():
-        return "The caller spoke again. Do not hang up. Keep helping."
+        return "Do not hang up. Keep helping."
     return "Ending the call."
 
 
@@ -81,9 +81,12 @@ _PROMPT = (
     "When they ask about an order, call check_order before you answer and then say only what it returned. "
     "When they dictate a phone number or spell a name, wait until they finish and read the entire number "
     "or the entire name back once, digit by digit or letter by letter. "
-    "When they say goodbye or ask you to hang up, say one short goodbye and call end_call. "
-    "If end_call says they spoke again, stay on the line and help them. "
-    "If they say goodbye again, say one short goodbye and call end_call again."
+    "Say one short goodbye and call end_call only when the caller is ending the conversation "
+    "or asking you to hang up. "
+    "If they are thanking you, or telling you to continue, stay on the line and ask what they need. "
+    "Do not speak a farewell unless you are calling end_call. "
+    "If end_call says not to hang up, stay on the line and help them. "
+    "If they end the conversation again, say one short goodbye and call end_call again."
 )
 
 voice_config = ship_voice_config(ship_language())

@@ -79,6 +79,9 @@ def demo_voice_config(model: str | None = None) -> dict[str, Any]:
         "ignore_backchannels": True,
         "speculative_generation": {"enabled": preset.enabled, "preemptive_tts": preset.preemptive_tts},
         "max_tts_pause_secs": 0.2,
+        # Start the first spoken clause at a comma once it has four words, so a
+        # long one-sentence reply is not held until its period.
+        "first_flush_min_words": 4,
         "filler": {"enabled": True, "soft_timeout_secs": 0.8, "message": "Un momento."},
         "hangup_grace_secs": 1.2,
         "entity_patience": True,
@@ -231,7 +234,7 @@ async def end_call() -> str:
     if session is None:
         return "No live call. Do not hang up."
     if not await session.commit_hangup():
-        return "The caller spoke again. Do not hang up. Keep helping."
+        return "Do not hang up. Keep helping."
     return "Ending the call."
 
 
@@ -254,9 +257,12 @@ _PROMPT = (
     "To open a ticket, call stage_support_ticket, read the preview, and wait. "
     "Call apply_pending only after they clearly say yes. If they say no, call cancel_pending. "
     "Never say a change is saved until apply_pending says it is saved. "
-    "When they say goodbye or ask you to hang up, say one short goodbye and call end_call. "
-    "If end_call says they spoke again, stay on the line and help them. "
-    "If they say goodbye again, say one short goodbye and call end_call again."
+    "Say one short goodbye and call end_call only when the caller is ending the conversation "
+    "or asking you to hang up. "
+    "If they are thanking you, or telling you to continue, stay on the line and ask what they need. "
+    "Do not speak a farewell unless you are calling end_call. "
+    "If end_call says not to hang up, stay on the line and help them. "
+    "If they end the conversation again, say one short goodbye and call end_call again."
 )
 
 voice_config = demo_voice_config()

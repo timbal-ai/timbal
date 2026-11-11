@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import os
 from collections.abc import AsyncIterator
@@ -54,6 +55,63 @@ _AUDIO_FLUSH_BYTES = int(16_000 * _AUDIO_FLUSH_INTERVAL * 2)  # 2560
 # Nova drops the socket with NET-0001 after ~10s without audio; send KeepAlive
 # well inside that window (Deepgram recommends every 3-5s).
 _NOVA_KEEPALIVE_INTERVAL = 5.0
+# Flux acks a Configure in a few hundred ms. Past this the ack is treated as
+# lost so later updates are not queued behind it forever.
+_CONFIGURE_ACK_TIMEOUT_SECS = 3.0
+
+
+# ``eot_threshold`` at which Flux suppresses natural end of turn: the patient setting.
+_PATIENT_EOT_THRESHOLD = 1.0
+# A message refused because another was pending is sent again at most this often.
+_CONFIGURE_MAX_ATTEMPTS = 3
+
+
+def _configure_thresholds(msg: dict[str, Any]) -> dict[str, Any]:
+    thresholds = msg.get("thresholds")
+    return thresholds if isinstance(thresholds, dict) else {}
+
+
+def _configure_busy(msg: dict[str, Any]) -> bool:
+    """Flux refused a Configure because another one had not been answered yet."""
+    code = str(msg.get("code") or "")
+    text = str(msg.get("description") or msg.get("message") or "").lower()
+    return code == "CONFIGURE_ALREADY_PENDING" or "pending" in text
+
+
+@dataclasses.dataclass(frozen=True)
+class _PendingConfigure:
+    kind: str
+    body: dict[str, Any]
+    patient: bool = False
+    attempts: int = 0
+
+
+def _configure_matches(message: _PendingConfigure, msg: dict[str, Any]) -> bool:
+    """A ``ConfigureSuccess`` does not contradict ``message``.
+
+    Flux reports the active config in its answer. A field it does not report
+    cannot rule the message out.
+    """
+    for key, sent in message.body.items():
+        got = msg.get(key)
+        if got is None:
+            continue
+        if isinstance(sent, dict):
+            if not isinstance(got, dict):
+                return False
+            for name, value in sent.items():
+                if name in got and not _same_value(got[name], value):
+                    return False
+        elif not _same_value(got, sent):
+            return False
+    return True
+
+
+def _same_value(got: Any, sent: Any) -> bool:
+    if isinstance(got, (int, float)) and isinstance(sent, (int, float)):
+        return abs(float(got) - float(sent)) < 1e-6
+    return got == sent
+
 
 # Query params Flux accepts (used to filter stt_extra passthrough).
 _FLUX_QUERY_KEYS = frozenset(
@@ -152,8 +210,18 @@ class _DeepgramSTTBase(SpeechToText):
         self.eager_suppressed_count = 0
         self.on_eager_end_of_turn: Any = None
         self.patient_thresholds_live = False
-        self._patient_pending = False
-        self._patience_configure = False
+        # Flux processes one ``Configure`` at a time and rejects another sent
+        # before the ack ("Too many pending `Configure` messages"), so a rejected
+        # restore would leave patient thresholds on the socket.
+        # The message awaiting its ack, and the latest waiting message per kind
+        # (each kind replaces its own value).
+        self._configure_inflight: _PendingConfigure | None = None
+        self._configure_waiting: dict[str, _PendingConfigure] = {}
+        self._configure_timeout: asyncio.Task[None] | None = None
+        # Configures sent and not answered yet, including ones whose wait timed out.
+        self._configure_unanswered = 0
+        # Answers no longer counted because their wait ran out; one may still arrive.
+        self._configure_abandoned = 0
 
     def _build_uri(self, config: AudioInputConfig) -> str:
         raise NotImplementedError
@@ -161,6 +229,7 @@ class _DeepgramSTTBase(SpeechToText):
     async def connect(self, config: AudioInputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
         self._input_config = config
+        self._reset_configure()
         uri = self._build_uri(config)
         logger.debug("dg_stt_connecting", uri=uri[:160])
         self._ws = await ws_connect(
@@ -269,7 +338,170 @@ class _DeepgramSTTBase(SpeechToText):
             with contextlib.suppress(Exception):
                 await self._ws.send(json.dumps(payload))
 
+    async def _try_send_json(self, payload: dict[str, Any]) -> bool:
+        async with self._wire_lock:
+            if self._ws is None:
+                return False
+            try:
+                await self._ws.send(json.dumps(payload))
+            except Exception as e:  # noqa: BLE001 — a dead socket is reported by the receive loop
+                logger.warning("dg_flux_configure_send_failed", error=str(e))
+                return False
+            return True
+
+    async def _configure(self, kind: str, body: dict[str, Any], *, patient: bool = False) -> bool:
+        """Send one ``Configure``, or hold it until Flux has answered the earlier ones.
+
+        False when it could not be sent (no socket, a failed send); True once
+        it is on the wire or waiting its turn.
+        """
+        message = _PendingConfigure(kind=kind, body=body, patient=patient)
+        if self._configure_inflight is not None or self._configure_unanswered:
+            self._configure_waiting[kind] = message
+            return True
+        return await self._send_configure(message)
+
+    async def _send_configure(self, message: _PendingConfigure) -> bool:
+        self._configure_inflight = message
+        if not await self._try_send_json({"type": "Configure", **message.body}):
+            # Never reached Flux: nothing was applied and no answer will come.
+            self._configure_inflight = None
+            await self._send_next_configure()
+            return False
+        self._configure_unanswered += 1
+        self._arm_configure_timeout()
+        return True
+
+    def _arm_configure_timeout(self) -> None:
+        self._cancel_configure_timeout()
+        self._configure_timeout = asyncio.create_task(self._configure_answer_timeout(self._configure_inflight))
+
+    async def _configure_answer_timeout(self, message: _PendingConfigure | None) -> None:
+        await asyncio.sleep(_CONFIGURE_ACK_TIMEOUT_SECS)
+        if self._configure_inflight is not message:
+            return
+        self._configure_timeout = None
+        logger.warning(
+            "dg_flux_configure_ack_timeout",
+            kind=message.kind if message is not None else None,
+            unanswered=self._configure_unanswered,
+        )
+        if message is None:
+            # Waiting only on answers to earlier messages. Stop waiting for them.
+            self._configure_abandoned += self._configure_unanswered
+            self._configure_unanswered = 0
+        else:
+            # Only this message can still answer late. Its answer stays counted,
+            # so it is not taken for the next message's; if Flux still has it
+            # pending, the next message is refused as busy and requeued.
+            self._configure_abandoned += max(0, self._configure_unanswered - 1)
+            self._configure_unanswered = min(self._configure_unanswered, 1)
+        self._configure_inflight = None
+        await self._send_next_configure(force=True)
+        if self._configure_inflight is None and self._configure_unanswered:
+            # Nothing else was sent: give the late answer one more window, then
+            # stop counting it, so a lost answer cannot hold the queue for good.
+            self._arm_configure_timeout()
+
+    async def _configure_answered(self, ok: bool, msg: dict[str, Any]) -> None:
+        """One ``ConfigureSuccess`` / ``ConfigureFailure``.
+
+        Answers carry no request id, so which message one belongs to is inferred:
+        Flux answers each Configure once, in order, and rejects one sent while
+        another is pending at once. The applied thresholds are read from the
+        success payload itself, so the recorded state does not depend on that
+        inference.
+        """
+        if ok:
+            self._apply_configure_success(msg)
+        busy = not ok and _configure_busy(msg)
+        message = self._configure_inflight
+        if busy and message is not None:
+            # The newest message was refused while an earlier one is still pending.
+            self._configure_unanswered = max(0, self._configure_unanswered - 1)
+            self._configure_inflight = None
+            self._requeue_configure(message)
+            if self._configure_unanswered:
+                self._arm_configure_timeout()
+            else:
+                self._cancel_configure_timeout()
+                await self._send_next_configure()
+            return
+        if self._configure_unanswered > 1 or (message is None and self._configure_unanswered):
+            # The late answer to a message whose wait timed out.
+            self._configure_unanswered -= 1
+            if message is None and not self._configure_unanswered:
+                self._cancel_configure_timeout()
+                await self._send_next_configure()
+            return
+        if message is not None and self._configure_abandoned:
+            # It may answer a message we stopped waiting for instead.
+            if ok and not _configure_matches(message, msg):
+                # A success reporting another config: the current message is still pending.
+                self._configure_abandoned -= 1
+                return
+            if not ok:
+                # A refusal says nothing about which message it was. Send the
+                # current one again after its own answer has had its window;
+                # repeating an update is harmless, losing one is not.
+                self._configure_abandoned -= 1
+                self._configure_inflight = None
+                self._requeue_configure(message)
+                self._arm_configure_timeout()
+                return
+        self._configure_unanswered = max(0, self._configure_unanswered - 1)
+        self._configure_inflight = None
+        self._cancel_configure_timeout()
+        if message is not None and message.kind == "thresholds":
+            if ok and not _configure_thresholds(msg):
+                self.patient_thresholds_live = message.patient
+            elif (
+                not ok
+                and not message.patient
+                and self.patient_thresholds_live
+                and message.attempts == 0
+                and "thresholds" not in self._configure_waiting
+            ):
+                # A rejected restore leaves the patient thresholds applied. Try once more.
+                self._configure_waiting["thresholds"] = dataclasses.replace(message, attempts=1)
+        await self._send_next_configure()
+
+    def _apply_configure_success(self, msg: dict[str, Any]) -> None:
+        thresholds = _configure_thresholds(msg)
+        eot = thresholds.get("eot_threshold")
+        if isinstance(eot, (int, float)):
+            self.patient_thresholds_live = float(eot) >= _PATIENT_EOT_THRESHOLD
+
+    def _requeue_configure(self, message: _PendingConfigure) -> None:
+        if message.kind in self._configure_waiting:
+            return
+        if message.attempts >= _CONFIGURE_MAX_ATTEMPTS:
+            logger.warning("dg_flux_configure_dropped", kind=message.kind, attempts=message.attempts)
+            return
+        self._configure_waiting[message.kind] = dataclasses.replace(message, attempts=message.attempts + 1)
+
+    async def _send_next_configure(self, *, force: bool = False) -> None:
+        if self._configure_inflight is not None or not self._configure_waiting:
+            return
+        if self._configure_unanswered and not force:
+            return
+        kind = next(iter(self._configure_waiting))
+        await self._send_configure(self._configure_waiting.pop(kind))
+
+    def _cancel_configure_timeout(self) -> None:
+        task, self._configure_timeout = self._configure_timeout, None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    def _reset_configure(self) -> None:
+        self._cancel_configure_timeout()
+        self._configure_inflight = None
+        self._configure_unanswered = 0
+        self._configure_abandoned = 0
+        self._configure_waiting.clear()
+
     async def close(self) -> None:
+        self._reset_configure()
         self._stop.set()
         if self._flusher and not self._flusher.done():
             self._flusher.cancel()
@@ -368,6 +600,8 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
 
         Already transcribed audio is left as it was. An empty list clears the
         terms. ``flux-general-en`` and ``flux-general-multi`` both accept this.
+        True once sent or queued, not once Flux applied it: a rejection is
+        only logged (``dg_flux_configure_failed``).
         """
         from .config import validate_keyterms
 
@@ -375,8 +609,8 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
         config = self._input_config
         if config is None or self._ws is None or self._stop.is_set():
             return False
-        self._patience_configure = False
-        await self._send_json({"type": "Configure", "keyterms": terms})
+        if not await self._configure("keyterms", {"keyterms": terms}):
+            return False
         self._input_config = config.model_copy(update={"keyterms": list(terms)})
         return True
 
@@ -388,7 +622,8 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
         ``[]`` clears it and the model goes back to auto-detect. Already
         transcribed audio is not reprocessed. ``flux-general-en`` rejects
         language hints, so this returns False there and the stored config is
-        what a later ``connect`` would use.
+        what a later ``connect`` would use. Like :meth:`update_keyterms`, True
+        means sent or queued, not applied.
         """
         config = self._input_config
         if config is None or self._ws is None or self._stop.is_set():
@@ -405,8 +640,7 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
             if tag is None or language_key(tag) not in FLUX_MULTI_LANGUAGES:
                 return False
             hint = tag
-        await self._send_json({"type": "Configure", "language_hints": [hint] if hint else []})
-        return True
+        return await self._configure("language_hints", {"language_hints": [hint] if hint else []})
 
     async def configure_turn(
         self,
@@ -415,15 +649,21 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
         eot_timeout_ms: int | None = None,
         eager_eot_threshold: float | None = None,
         patient: bool = False,
-    ) -> None:
+    ) -> bool:
         """Push Flux turn knobs mid-call (``Configure`` control message).
 
         Thresholds are nested under ``thresholds``, per Deepgram's Configure
         docs. Omitted keys are left unchanged on the socket. Values are
         clamped to the documented ranges (``eot_threshold`` 0.5–1.0,
         ``eager_eot_threshold`` 0.3–0.9 and ≤ ``eot_threshold`` when both are
-        sent, ``eot_timeout_ms`` 500–60000). ``patient`` is local: the matching
-        ``ConfigureSuccess`` sets :attr:`patient_thresholds_live`.
+        sent, ``eot_timeout_ms`` 500–60000). :attr:`patient_thresholds_live`
+        follows the ``eot_threshold`` a ``ConfigureSuccess`` reports as applied
+        (``patient`` is the fallback when it reports none); a rejection leaves
+        it as it was, and a rejected restore is retried once. Sent after Flux
+        answers any earlier ``Configure``; a newer call replaces one that is
+        still waiting. A send that fails or an answer that does not come
+        within a few seconds releases the queue. False when it could not be
+        sent; True when sent or queued.
 
         https://developers.deepgram.com/docs/flux/configure
         """
@@ -440,10 +680,8 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
             if eager >= 0.3:
                 thresholds["eager_eot_threshold"] = eager
         if not thresholds:
-            return
-        self._patient_pending = patient
-        self._patience_configure = True
-        await self._send_json({"type": "Configure", "thresholds": thresholds})
+            return True
+        return await self._configure("thresholds", {"thresholds": thresholds}, patient=patient)
 
     async def _handle_message(self, msg: dict[str, Any]) -> None:
         mt = msg.get("type", "")
@@ -494,12 +732,11 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
                 await self._queue.put(TranscriptEvent(type="resumed", text=text, confidence=confidence))
             return
         if mt == "ConfigureSuccess":
-            if self._patience_configure:
-                self.patient_thresholds_live = self._patient_pending
+            await self._configure_answered(True, msg)
             logger.info("dg_flux_configure_ok", patient=self.patient_thresholds_live)
             return
         if mt == "ConfigureFailure":
-            self.patient_thresholds_live = False
+            await self._configure_answered(False, msg)
             logger.warning(
                 "dg_flux_configure_failed",
                 description=msg.get("description") or msg.get("message") or msg.get("error"),

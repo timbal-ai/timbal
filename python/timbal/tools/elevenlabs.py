@@ -96,7 +96,10 @@ class ElevenLabsSpeechToText(Tool):
                 description="Audio/video file content as a base64 string. Use audio_file_path instead for large files.",
             ),
             filename: str | None = Field(None, description="Original filename, used to infer the media type (e.g. 'audio.mp3')."),
-            model_id: str = Field("scribe_v1", description="STT model to use, e.g. 'scribe_v1' or 'scribe_v1_experimental'."),
+            model_id: str = Field(
+                "scribe_v3",
+                description="STT model to use: 'scribe_v3' (default, most accurate), 'scribe_v2', 'scribe_v2_medical', or 'scribe_v1'.",
+            ),
             language_code: str | None = Field(None, description="ISO-639-1/3 language code to force (e.g. 'en', 'es'). Auto-detected if omitted."),
             tag_audio_events: bool = Field(True, description="Tag non-speech audio events such as (laughter) or (applause)."),
             diarize: bool = Field(False, description="Annotate which speaker said each word (speaker diarization)."),

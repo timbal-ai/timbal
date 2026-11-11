@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import sys
+import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
@@ -176,8 +177,26 @@ def test_unheard_suffix_keeps_only_the_rest() -> None:
 def test_a_pure_ack_is_not_a_new_request() -> None:
     assert false_interrupt_followup("")
     assert false_interrupt_followup("Yeah.")
+    assert false_interrupt_followup("Yeah. Okay.")
     assert false_interrupt_followup("d'acord")
     assert not false_interrupt_followup("What is the weather?")
+    assert not false_interrupt_followup("No, I meant how antibiotics work.")
+    assert not false_interrupt_followup("Okay. Let's go.")
+
+
+def test_a_second_ack_does_not_cut_audio_and_a_request_does() -> None:
+    session = VoiceSession(_agent(), MockSTT(), MockTTS(), audio_input=AudioInputConfig(language="en"))
+    session._is_speaking = True
+    assert session._pure_ack_keeps_the_reply("Yeah. Okay.") is True
+    assert session._pure_ack_keeps_the_reply("No, I meant how antibiotics work.") is False
+    session._is_speaking = False
+    session._last_assistant_active_at = time.monotonic() - 10
+    assert session._pure_ack_keeps_the_reply("Yeah.") is False
+    session._last_assistant_active_at = time.monotonic()
+    assert session._pure_ack_keeps_the_reply("Yeah. Okay.") is True
+    session._unheard_tail = "train rolled out."
+    session._unheard_tail_resumable = True
+    assert session._pure_ack_keeps_the_reply("Yeah.") is False
 
 
 async def test_backchannel_resumes_and_a_real_request_does_not() -> None:
@@ -202,6 +221,39 @@ async def test_backchannel_resumes_and_a_real_request_does_not() -> None:
     prompt = session.prompt_for_turn("You are a phone agent.").dynamic
     assert "SECRET-TAIL" not in prompt
     assert any(entry.role == "user" and entry.text == "What is the weather?" for entry in session._transcript)
+
+
+def test_a_request_that_starts_with_an_ignored_ack_is_not_a_replay() -> None:
+    session = VoiceSession(_agent(), MockSTT(), MockTTS(), audio_input=AudioInputConfig(language="en"))
+    session._settle_consumed_commit("Okay.")
+    assert session._is_replay_of_consumed("Okay.")
+    assert session._partial_extends_consumed("Okay")
+    assert not session._is_replay_of_consumed("Okay. What about order 1002?")
+    assert not session._partial_extends_consumed("Okay. What about order")
+
+
+async def test_a_patience_update_that_was_not_sent_is_tried_again() -> None:
+    session = VoiceSession(_agent(), MockSTT(), MockTTS(), audio_input=AudioInputConfig(language="en"))
+    calls: list[bool] = []
+
+    async def configure_turn(**kwargs) -> bool:
+        calls.append(kwargs["patient"])
+        return len(calls) > 1
+
+    session.stt.configure_turn = configure_turn  # type: ignore[attr-defined]
+    assert await session._send_flux_thresholds(eot_threshold=1.0, eot_timeout_ms=2500, patient=True) is False
+    assert await session._send_flux_thresholds(eot_threshold=1.0, eot_timeout_ms=2500, patient=True) is True
+    assert calls == [True, True]
+
+
+def test_the_ack_window_opens_when_the_reply_stops_playing() -> None:
+    # Nobody spoke during the reply, so no caller event refreshed the clock.
+    session = VoiceSession(_agent(), MockSTT(), MockTTS(), audio_input=AudioInputConfig(language="en"))
+    session._note_turn_audio(session.audio_output.sample_rate)  # half a second of PCM16
+    assert not session._assistant_active
+    assert session._pure_ack_keeps_the_reply("Yeah. Okay.")
+    session._last_assistant_active_at = time.monotonic() - 2.0
+    assert not session._pure_ack_keeps_the_reply("Yeah. Okay.")
 
 
 async def test_empty_commit_speaks_the_unheard_tail_without_the_model() -> None:

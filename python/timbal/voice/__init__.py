@@ -54,6 +54,7 @@ from .prompt import voice_prompt
 from .providers import (
     AudioInputConfig,
     AudioOutputConfig,
+    SpeakerSegment,
     SpeechToText,
     TextToSpeech,
     TranscriptEvent,
@@ -173,6 +174,7 @@ __all__ = [
     "SessionInterrupted",
     "SessionStarted",
     "SmartTurnEouModel",
+    "SpeakerSegment",
     "SpeechEouPredictor",
     "SpeechToText",
     "TextEouPredictor",

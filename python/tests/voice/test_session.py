@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
@@ -2616,6 +2617,71 @@ class TestStalePartialSweeper:
 
         assert session.transcript[0].role == "user"
         assert session.transcript[0].text == "What are you doing?"
+
+    async def test_ignored_acks_are_not_resurrected_by_the_sweeper(self) -> None:
+        """The live sequence: Yeah. then Yeah. Okay. are consumed while the
+        reply is still in the ear. The stale-partial watchdog must not turn
+        that caption into a model turn once the backchannel window closes.
+        The next real request runs once. The same words later are a new turn.
+        """
+        agent = Agent(name="t", model=TestModel(responses=["moon", "again"]), tools=[])
+        stt = DelayedMockSTT()
+        session = VoiceSession(agent=agent, stt=stt, tts=MockTTS(), turn_detector="provider")
+        session._stale_partial_poll_secs = 0.05
+        session._stale_partial_commit_secs = 0.25
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        def _user_texts() -> list[str]:
+            return [entry.text for entry in session.transcript if entry.role == "user"]
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            session._is_speaking = True
+            session._last_assistant_active_at = time.monotonic()
+            await stt.inject(TranscriptEvent(type="partial", text="Yeah."))
+            await stt.inject(TranscriptEvent(type="committed", text="Yeah."))
+            await stt.inject(TranscriptEvent(type="partial", text="Yeah. Okay."))
+            await stt.inject(TranscriptEvent(type="committed", text="Yeah. Okay."))
+            await asyncio.sleep(0.05)
+            # Trailing caption of the ack we already handled.
+            await stt.inject(TranscriptEvent(type="partial", text="Yeah. Okay."))
+            session._is_speaking = False
+            session._last_assistant_active_at = time.monotonic() - 10
+            await asyncio.sleep(0.8)
+            # The provider's late final of the same acknowledgement is not a new turn.
+            await stt.inject(TranscriptEvent(type="committed", text="Yeah. Okay."))
+            await asyncio.sleep(0.1)
+            assert _user_texts() == []
+            await stt.inject(TranscriptEvent(type="partial", text="Tell me about the moon."))
+            await stt.inject(TranscriptEvent(type="committed", text="Tell me about the moon."))
+            while _user_texts() != ["Tell me about the moon."]:
+                await asyncio.sleep(0.01)
+            while session._is_speaking:
+                await asyncio.sleep(0.01)
+            session._last_assistant_active_at = time.monotonic() - 10
+            # A later provider commit of the same acknowledgement is new speech.
+            await stt.inject(TranscriptEvent(type="partial", text="Yeah. Okay."))
+            await stt.inject(TranscriptEvent(type="committed", text="Yeah. Okay."))
+            while _user_texts() != ["Tell me about the moon.", "Yeah. Okay."]:
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+        assert _user_texts() == ["Tell me about the moon.", "Yeah. Okay."]
+        assert sum(isinstance(event, AgentTextDone) for event in events) == 2
 
     async def _run_churn_scenario(self, endpointer: object) -> tuple[_StuckPartialSTT, VoiceSession]:
         """Stranded partial while the provider keeps emitting *new* partials

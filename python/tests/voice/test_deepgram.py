@@ -171,7 +171,193 @@ class TestFluxEventMapping:
         assert stt.patient_thresholds_live is True
         await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
         await stt._handle_message({"type": "ConfigureFailure", "description": "nope"})
+        # Rejected: the patient thresholds are still what Flux applies.
+        assert stt.patient_thresholds_live is True
+
+    async def test_a_configure_waits_for_the_ack_of_the_one_in_flight(self) -> None:
+        # Flux rejects a second Configure before the first is acked. Live, the
+        # rejected one was the restore, and the socket stayed patient.
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        stt._input_config = AudioInputConfig(model="flux-general-multi")
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt.configure_turn(eot_threshold=0.9, eot_timeout_ms=2200, patient=True)
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt.update_keyterms(["Norte Market"])
+        assert len(stt._ws.sent) == 1
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is True
+        sent = [json.loads(raw) for raw in stt._ws.sent]
+        assert len(sent) == 2
+        assert sent[1]["thresholds"] == {"eot_threshold": 0.8, "eot_timeout_ms": 2000}
+        await stt._handle_message({"type": "ConfigureSuccess"})
         assert stt.patient_thresholds_live is False
+        sent = [json.loads(raw) for raw in stt._ws.sent]
+        assert sent[2] == {"type": "Configure", "keyterms": ["Norte Market"]}
+        await stt._handle_message({"type": "ConfigureFailure", "description": "nope"})
+        assert stt.patient_thresholds_live is False
+        assert len(stt._ws.sent) == 3
+
+    async def test_a_failed_send_does_not_block_later_configures(self) -> None:
+        class _BrokenOnceWs(_FakeWs):
+            broken = True
+
+            async def send(self, payload) -> None:
+                if self.broken:
+                    self.broken = False
+                    raise ConnectionError("socket gone")
+                await super().send(payload)
+
+        stt = DeepgramFluxSTT()
+        stt._ws = _BrokenOnceWs()
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        assert stt._configure_inflight is None
+        assert stt.patient_thresholds_live is False
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        assert [json.loads(raw)["thresholds"]["eot_threshold"] for raw in stt._ws.sent] == [0.8]
+
+    async def test_a_lost_ack_releases_the_queue(self, monkeypatch) -> None:
+        from timbal.voice import deepgram
+
+        monkeypatch.setattr(deepgram, "_CONFIGURE_ACK_TIMEOUT_SECS", 0.05)
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        assert len(stt._ws.sent) == 1
+        await asyncio.sleep(0.12)
+        assert len(stt._ws.sent) == 2
+        # Unknown whether the first one applied: the recorded state does not move.
+        assert stt.patient_thresholds_live is False
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is False
+        await stt.close()
+
+    async def test_a_late_answer_is_not_taken_for_the_next_update(self, monkeypatch) -> None:
+        # Reproduction from review: 80ms timeout, the old answer 20ms after the successor went out.
+        from timbal.voice import deepgram
+
+        monkeypatch.setattr(deepgram, "_CONFIGURE_ACK_TIMEOUT_SECS", 0.08)
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await asyncio.sleep(0.1)
+        assert len(stt._ws.sent) == 2
+        successor = stt._configure_inflight
+        await asyncio.sleep(0.02)
+        await stt._handle_message({"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 1.0}})
+        assert stt._configure_inflight is successor
+        assert stt._configure_timeout is not None
+        assert stt.patient_thresholds_live is True
+        await stt._handle_message({"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 0.8}})
+        assert stt._configure_inflight is None
+        assert stt.patient_thresholds_live is False
+        await stt.close()
+
+    async def test_an_answer_that_never_comes_does_not_hold_the_queue(self, monkeypatch) -> None:
+        # Reproduction from review: the first answer is lost, only the restore's arrives.
+        from timbal.voice import deepgram
+
+        monkeypatch.setattr(deepgram, "_CONFIGURE_ACK_TIMEOUT_SECS", 0.05)
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await asyncio.sleep(0.07)
+        assert len(stt._ws.sent) == 2
+        await stt._handle_message({"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 0.8}})
+        assert stt.patient_thresholds_live is False
+        await asyncio.sleep(0.15)
+        assert stt._configure_unanswered == 0
+        assert await stt.configure_turn(eot_threshold=0.9)
+        assert len(stt._ws.sent) == 3
+        assert json.loads(stt._ws.sent[-1])["thresholds"]["eot_threshold"] == 0.9
+        await stt.close()
+
+    async def _given_up_then_new_update(self, monkeypatch) -> DeepgramFluxSTT:
+        from timbal.voice import deepgram
+
+        monkeypatch.setattr(deepgram, "_CONFIGURE_ACK_TIMEOUT_SECS", 0.05)
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await asyncio.sleep(0.13)
+        assert stt._configure_unanswered == 0
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000)
+        assert len(stt._ws.sent) == 2
+        return stt
+
+    async def test_an_answer_after_both_windows_is_told_apart_by_its_config(self, monkeypatch) -> None:
+        # Reproduction from review: the old success arrives while a newer update is in flight.
+        stt = await self._given_up_then_new_update(monkeypatch)
+        current = stt._configure_inflight
+        await stt._handle_message({"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 1.0}})
+        assert stt._configure_inflight is current
+        assert stt._configure_timeout is not None
+        await stt._handle_message({"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 0.8}})
+        assert stt._configure_inflight is None
+        assert stt.patient_thresholds_live is False
+        await stt.close()
+
+    async def test_a_refusal_after_both_windows_sends_the_update_again(self, monkeypatch) -> None:
+        # Reproduction from review: the old failure must not drop the newer update.
+        stt = await self._given_up_then_new_update(monkeypatch)
+        await stt._handle_message({"type": "ConfigureFailure", "description": "invalid"})
+        await asyncio.sleep(0.07)
+        assert len(stt._ws.sent) == 3
+        assert json.loads(stt._ws.sent[-1])["thresholds"]["eot_threshold"] == 0.8
+        await stt.close()
+
+    async def test_a_refusal_while_another_is_pending_is_sent_again_after_it(self, monkeypatch) -> None:
+        from timbal.voice import deepgram
+
+        monkeypatch.setattr(deepgram, "_CONFIGURE_ACK_TIMEOUT_SECS", 0.08)
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await asyncio.sleep(0.1)
+        busy = "Too many pending `Configure` messages. Only one `Configure` message can be processed at a time."
+        await stt._handle_message({"type": "ConfigureFailure", "description": busy})
+        assert stt._configure_inflight is None
+        assert len(stt._ws.sent) == 2
+        await stt._handle_message({"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 1.0}})
+        assert stt.patient_thresholds_live is True
+        assert len(stt._ws.sent) == 3
+        assert json.loads(stt._ws.sent[-1])["thresholds"]["eot_threshold"] == 0.8
+        await stt._handle_message({"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 0.8}})
+        assert stt.patient_thresholds_live is False
+        assert stt._configure_unanswered == 0
+        await stt.close()
+
+    async def test_the_applied_thresholds_decide_patience(self) -> None:
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt._handle_message({"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 1.0}})
+        assert stt.patient_thresholds_live is True
+
+    async def test_configure_turn_reports_a_failed_send(self) -> None:
+        stt = DeepgramFluxSTT()
+        assert await stt.configure_turn(eot_threshold=1.0, patient=True) is False
+        stt._ws = _FakeWs()
+        assert await stt.configure_turn(eot_threshold=1.0, patient=True) is True
+
+    async def test_a_rejected_restore_stays_patient_and_retries_once(self) -> None:
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt._handle_message({"type": "ConfigureFailure", "description": "busy"})
+        assert stt.patient_thresholds_live is True
+        assert len(stt._ws.sent) == 3
+        assert json.loads(stt._ws.sent[-1])["thresholds"]["eot_threshold"] == 0.8
+        await stt._handle_message({"type": "ConfigureFailure", "description": "busy"})
+        assert stt.patient_thresholds_live is True
+        assert len(stt._ws.sent) == 3
+        await stt.close()
 
     async def test_empty_transcripts_skipped(self) -> None:
         stt = DeepgramFluxSTT()

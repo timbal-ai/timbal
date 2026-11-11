@@ -31,7 +31,7 @@ async def play(session, playback, microphone_chunks):
 
 `session.transcript` contains committed user and assistant entries with timestamps. Fillers are marked `filler=True`. At session end, the server sends `session_transcript` followed by `session_ended`. Transcript text reflects interruption handling and may contain only the heard prefix of a cancelled assistant reply. If the caller then produces an empty commit or only a pure acknowledgement, and the model had finished the reply, the session speaks the unplayed end without another model call and appends that text as its own assistant entry. A genuine next request does not add that entry and is not told to recite it. The heard prefix stays the interrupted assistant entry.
 
-The stored trace follows the same rule. For an interrupted turn, the agent run's output and the assistant message in its memory hold the heard prefix, marked `metadata["interrupted"] = True`; the output is empty and the memory message dropped when nothing was heard. The model call's span keeps the full generated reply, so you can compare what was said with what was heard.
+The stored trace follows the same rule. For an interrupted turn, the agent run's output and the assistant message in its memory hold the heard prefix, marked `metadata["interrupted"] = True`; the output is empty and the memory message dropped when nothing was heard. The model call's span keeps the full generated reply, so you can compare what was said with what was heard. Providers do not receive the metadata flag. A mid-sentence heard prefix is sent with ` [interrupted]` appended; a heard sentence is sent unchanged.
 
 ## Latency
 

@@ -179,6 +179,22 @@ def entity_capture(text: str) -> str | None:
     return None
 
 
+# A partial ending in one letter right after a space or comma, with nothing
+# after it: the provider's caption of a word still being said ("order t",
+# "Vámonos, v"), not a letter the caller spelled.
+_GROWING_LETTER = re.compile(r"(?<=[\s,])[^\W\d_]\Z")
+
+
+def entity_capture_partial(text: str) -> str | None:
+    """:func:`entity_capture` for a caption that is still growing.
+
+    The trailing letter of an unfinished word is ignored. A spelled sequence
+    ("R U I") still counts from its earlier letters, and the committed text
+    keeps the full rule, so "apellido J." still waits for the rest.
+    """
+    return entity_capture(_GROWING_LETTER.sub("", (text or "").rstrip()))
+
+
 def apply_entity_patience(
     decision: CommitDecision,
     text: str,

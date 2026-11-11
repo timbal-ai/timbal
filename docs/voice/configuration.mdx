@@ -12,7 +12,7 @@ Set `Agent(voice_config=...)` to configure sessions created by the server. Use a
 Set `stt_provider` and optionally `stt_model`. These are adapter IDs and speech model IDs, separate from the `provider/model` IDs used by `Agent.model`.
 
 - **`deepgram`** or **`deepgram-flux`** (default): defaults to `flux-general-multi`; requires `DEEPGRAM_API_KEY`. Flux reports native end-of-turn events, so the session uses `provider` turn detection. When `DEEPGRAM_API_KEY` is unset, each session falls back to `elevenlabs`.
-- **`elevenlabs`**: defaults to `scribe_v2_realtime`; requires `ELEVENLABS_API_KEY`.
+- **`elevenlabs`**: defaults to `scribe_v3_live` (Scribe v3 Live); requires `ELEVENLABS_API_KEY`. Set `stt_model` to `scribe_v2_realtime` to keep the previous model. See [ElevenLabs Scribe](#elevenlabs-scribe).
 - **`deepgram-nova`**: defaults to `nova-3`; requires `DEEPGRAM_API_KEY`. Select Nova explicitly or supply a `nova-*` model.
 - **`munsit`**: defaults to `munsit-en-ar`; requires `MUNSIT_API_KEY`. Reports native utterance boundaries.
 - **`openai`**: defaults to `gpt-transcribe`; requires `OPENAI_API_KEY`. Uses a transcription-only Realtime session with server VAD. It does not report native end-of-turn, so the session uses local turn detection when `timbal[voice]` is installed and lexical detection otherwise. Flux and Munsit are the adapters that force `provider` mode.
@@ -32,7 +32,7 @@ agent = Agent(
 )
 ```
 
-`keyterms` is a list of at most 100 plain phrases (a name, a brand, an acronym). Do not append a Nova weight such as `term:0.15`. Deepgram Flux and Nova-3, and ElevenLabs Scribe, send them when the socket connects. Flux can replace the whole list on that socket with `VoiceSession.set_keyterms`; an empty list clears it. The new list does not merge with the old one, and audio already transcribed is not rewritten. Nova and Scribe cannot replace terms after connect. OpenAI and Munsit reject `keyterms` at configuration time. A caller hello cannot set them. Each call copies the agent's list, so one session cannot change another's, and there is no voice handoff that would carry terms across agents.
+`keyterms` is a list of at most 100 plain phrases (a name, a brand, an acronym). Do not append a Nova weight such as `term:0.15`. Deepgram Flux and Nova-3, and ElevenLabs Scribe, send them when the socket connects. Flux can replace the whole list on that socket with `VoiceSession.set_keyterms`; an empty list clears it. The new list does not merge with the old one, and audio already transcribed is not rewritten. Nova and Scribe cannot replace terms after connect. Scribe takes at most 50 terms of 20 characters each on a call: an agent that sets `stt_provider="elevenlabs"` with more, or longer, fails to load, and a Flux agent that falls back to Scribe sends the terms that fit and logs `el_stt_keyterms_trimmed`. OpenAI and Munsit reject `keyterms` at configuration time. A caller hello cannot set them. Each call copies the agent's list, so one session cannot change another's, and there is no voice handoff that would carry terms across agents.
 
 `language` and `stt_languages` on `flux-general-multi` accept only English, Spanish, French, German, Hindi, Russian, Portuguese, Japanese, Italian, and Dutch (`en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, `nl`), including regional subtags such as `es-ES`. Catalan, Arabic, Chinese, and any other tag are rejected when the agent config is built. That is a startup check: a Flux agent that used to set `language` to `ca`, `ar`, or `zh` now fails to load instead of opening a socket Flux would reject. `stt_languages` replaces the single `language` hint for speech-to-text and is only for `flux-general-multi`. `flux-general-en` rejects a hint list. `set_language` still replaces the live hint list with one supported tag. These settings do not promise that a word will be recognized, and they do not make Flux recognize Catalan.
 
@@ -43,6 +43,51 @@ voice_config={"language": "es", "reply_language": "ca", "stt_provider": "deepgra
 ```
 
 Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable. A non-empty `keyterms` list cannot also set `keyterm`, `keyterms`, `keywords`, or `hotwords` in `stt_extra`. The agent fails to build if any of those keys is present, including when the value is `None`, `""`, or `[]`. Omit the key. An empty `keyterms` (left unset, `None`, or `[]`) does not conflict, and a `keyterm` that exists only in `stt_extra` is still passed through.
+
+### ElevenLabs Scribe
+
+`scribe_v3_live` is the default ElevenLabs model. `scribe_v2_realtime` is still served and takes the same settings, except the two marked below. Scribe options go in `stt_extra` and are sent as given:
+
+```python
+agent = Agent(
+    name="support",
+    model="openai/gpt-5.4-mini",
+    voice_config={
+        "stt_provider": "elevenlabs",
+        "language": "ca",
+        "stt_extra": {"diarize": True},
+    },
+)
+```
+
+- **`commit_strategy`**: `"vad"` (the default: Scribe commits after `vad_silence_threshold_secs` of silence), `"manual"`, or `"turn_prediction"` (Scribe v3 Live only). See [Scribe turn prediction](#scribe-turn-prediction) before choosing the last one.
+- **`vad_silence_threshold_secs`**: 1.2 by default here. Scribe accepts 0.192 to 3.0.
+- **`turn_commit_threshold`**: 0.75 on Scribe v3 Live. Commits when Scribe's turn probability reaches that score, without waiting out the silence. `0` or `None` turns it off. See [Scribe turn prediction](#scribe-turn-prediction).
+- **`diarize`**: Scribe v3 Live only. Each committed transcript is followed by a `TranscriptEvent` of type `diarized`, whose `speakers` list holds one `SpeakerSegment` (`speaker_id`, `text`, `start`, `end`) per run of words from the same speaker. `VoiceSession` ignores these events: they never start a turn and are not sent to the client. Read them from `stt.events()` in a [custom pipeline](/voice/custom-pipelines).
+- **`secondary_languages`**: other languages the caller may use, next to `language`.
+
+A setting the chosen model does not accept (`turn_prediction` or `diarize` on `scribe_v2_realtime`, an unknown model id) ends the session with the reason ElevenLabs gave, for example `STT fatal (invalid_request): The 'diarize' parameter is only supported by scribe_v3_live.`
+
+Scribe closes the session when a commit arrives with less than 0.3 seconds of audio since the previous one (`commit_throttled`). The session's endpointer and Scribe can reach the same boundary together, so the adapter does not send a commit within 0.4 seconds of the last one, its own or Scribe's, and logs `el_stt_commit_skipped`. A commit that crosses Scribe's on the wire can still be throttled. That ends the call with `STT fatal (commit_throttled)`.
+
+#### Scribe turn prediction
+
+Scribe v3 Live scores each interim transcript with the probability that the caller has finished. It arrives as `confidence` on `partial` transcript events, under every commit strategy.
+
+`commit_strategy="turn_prediction"` has Scribe commit when that score reaches about 0.9. The score is not adjustable. `vad_silence_threshold_secs` still applies as a ceiling: Scribe commits at that much silence whatever the score. At the default 1.2 seconds it behaves like `"vad"`, except that a finished question or sentence commits about half a second sooner. Raising the ceiling keeps a mid-sentence pause in one piece, and makes short answers slow: the score climbs slowly after "No." or "Okay.", which then take two to three seconds to commit. With the session's local turn detector, a ceiling of 2 or 3 seconds also let the session's commit and Scribe's collide. Keep the ceiling at 1.2 seconds when you use it.
+
+`turn_commit_threshold` applies a score of ours instead, and it is what a session uses by default. The adapter commits when a partial reaches it, and Scribe's silence ceiling stays as the backstop. The default is 0.75 on Scribe v3 Live with `commit_strategy="vad"`. `scribe_v2_realtime` sends no score, so nothing changes there. With `"manual"` it is off unless you set it, and with `"turn_prediction"` it is off: the two commits would collide, and an agent that sets both fails to load.
+
+```python
+voice_config={
+    "stt_provider": "elevenlabs",
+    "stt_extra": {"turn_commit_threshold": 0},  # off: commit on Scribe's VAD silence only
+}
+```
+
+In the replay harness, with the local turn detector, the default took median dead air from 1.36 to 1.02 seconds and passed every run, where the same sessions without it lost 7 of 156. That is two batches of synthetic audio, not a measurement on your calls.
+
+`turn_commit_partials` (default 1) asks for that many consecutive partials at or above the score with the same words. At 0.75 a caller is rarely cut off mid-sentence. At 0.6 it happens often enough to hear. An utterance Scribe scores low, such as a bare number, waits for the silence ceiling, so a higher ceiling makes those turns slower. Measurements are in `benchmarks/voice/README.md`.
 
 ## Speech providers
 
@@ -138,7 +183,7 @@ voice_config = {"language": "es", "reply_language": "follow"}
 
 `"follow"` is case-insensitive. On an agent config, a blank string is the same as unset. A malformed tag (`english`, a sentence, `en-`) raises `ValueError` when that config is built. A non-string raises `TypeError`. Accepted `reply_language` tags are two or three letters, an optional four-letter script, and an optional region: `en`, `es-ES`, `zh-Hans`, `es-419`, `ca`. That is the reply pin, not the Flux transcription list. A caller hello that sends a bad or blank `reply_language` does not raise: the value is dropped and the server's `reply_language` stays.
 
-Deepgram Flux applies a supported hint on the open socket. A `Configure` message with `language_hints: ["en"]` replaces a sticky hint; `language_hints: []` clears it and Flux goes back to auto-detect. Audio already transcribed is not reprocessed. On `flux-general-multi`, `set_language("ca")` raises `ValueError` before the socket or the stored hint changes. The previous hint, including an `stt_languages` list, stays. `reply_language` is not changed. `flux-general-en` does not accept a language hint: `set_language` does not retarget that socket, and the reply pin can still move when `reply_language` is unset. ElevenLabs Scribe, Deepgram Nova, and OpenAI transcription read the hint when the socket opens: `set_language` stores the tag for the next connection and does not retarget the open socket. Unless `reply_language` is set, the reply instruction uses that tag on the next turn. Munsit only sends `language=ar` (`ar` and a tag such as `ar-AE` both become `ar`). Any other tag is dropped (`munsit_stt_language_dropped`) and is not sent on the next connection.
+Deepgram Flux applies a supported hint on the open socket. A `Configure` message with `language_hints: ["en"]` replaces a sticky hint; `language_hints: []` clears it and Flux goes back to auto-detect. Audio already transcribed is not reprocessed. Flux processes one `Configure` at a time, so a hint, a keyterm list, or a turn-threshold change is sent after Flux acknowledges the previous message. A newer change of the same kind replaces one that is still waiting. On `flux-general-multi`, `set_language("ca")` raises `ValueError` before the socket or the stored hint changes. The previous hint, including an `stt_languages` list, stays. `reply_language` is not changed. `flux-general-en` does not accept a language hint: `set_language` does not retarget that socket, and the reply pin can still move when `reply_language` is unset. ElevenLabs Scribe, Deepgram Nova, and OpenAI transcription read the hint when the socket opens: `set_language` stores the tag for the next connection and does not retarget the open socket. Unless `reply_language` is set, the reply instruction uses that tag on the next turn. Munsit only sends `language=ar` (`ar` and a tag such as `ar-AE` both become `ar`). Any other tag is dropped (`munsit_stt_language_dropped`) and is not sent on the next connection.
 
 From a tool on the call, `current_voice_session()` is the live session. The tool is not registered for you. Add it only on agents that should be able to switch.
 
@@ -187,7 +232,7 @@ agent = Agent(
 )
 ```
 
-`set_language` returns true when the open transcriber accepted the hint. Unless `reply_language` is set, the reply instruction uses the new tag on the next turn. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. On Flux multilingual, a tag outside `en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, and `nl` raises `ValueError` the same way, before a `Configure` message is sent. `set_keyterms` replaces the whole list. It raises `ValueError` for a weighted phrase such as `term:0.15`, a blank phrase, more than 100 phrases, or a connection that cannot replace terms (Nova, Scribe, OpenAI, Munsit, or Flux with no open socket). The call's previous terms stay. The tools above return that error text instead of failing the turn. The reply line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
+`set_language` returns true when the open transcriber took the hint. On Flux, true means the `Configure` message was sent or queued, not that Flux applied it; a rejection is logged as `dg_flux_configure_failed`. `set_keyterms` reports the same way. Unless `reply_language` is set, the reply instruction uses the new tag on the next turn. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. On Flux multilingual, a tag outside `en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, and `nl` raises `ValueError` the same way, before a `Configure` message is sent. `set_keyterms` replaces the whole list. It raises `ValueError` for a weighted phrase such as `term:0.15`, a blank phrase, more than 100 phrases, or a connection that cannot replace terms (Nova, Scribe, OpenAI, Munsit, or Flux with no open socket). The call's previous terms stay. The tools above return that error text instead of failing the turn. The reply line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
 
 ## Speculative generation
 

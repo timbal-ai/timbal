@@ -32,6 +32,56 @@ def test_keyterms_reject_weights_blanks_and_the_101st_phrase() -> None:
         VoiceConfig(keyterms=[f"t{i}" for i in range(101)])
 
 
+def test_scribe_keyterm_limits_fail_an_elevenlabs_agent_at_config_time() -> None:
+    """Realtime Scribe takes 50 terms of 20 characters. Past that it closes the socket."""
+    fifty = [f"t{i}" for i in range(50)]
+    assert VoiceConfig(stt_provider="elevenlabs", keyterms=fifty).keyterms == fifty
+    with pytest.raises(ValueError, match="at most 50 keyterms"):
+        VoiceConfig(stt_provider="elevenlabs", keyterms=[*fifty, "one more"])
+    with pytest.raises(ValueError, match="at most 20 characters"):
+        VoiceConfig(stt_provider="elevenlabs", keyterms=["a phrase of twenty-five ch"])
+    # Flux has neither limit. If it falls back to Scribe, the adapter trims.
+    hundred = [f"a longer phrase number {i}" for i in range(100)]
+    assert VoiceConfig(keyterms=hundred).keyterms == hundred
+
+
+def test_scribe_turn_commit_threshold_is_checked_at_config_time() -> None:
+    ok = VoiceConfig(stt_provider="elevenlabs", stt_extra={"turn_commit_threshold": 0.75})
+    assert ok.stt_extra["turn_commit_threshold"] == 0.75
+    with pytest.raises(ValueError, match="not 'turn_prediction'"):
+        VoiceConfig(
+            stt_provider="elevenlabs",
+            stt_extra={"turn_commit_threshold": 0.75, "commit_strategy": "turn_prediction"},
+        )
+    assert VoiceConfig(stt_provider="elevenlabs", stt_extra={"turn_commit_threshold": 0}).stt_extra["turn_commit_threshold"] == 0
+    off = {"turn_commit_threshold": 0, "commit_strategy": "turn_prediction"}
+    assert VoiceConfig(stt_provider="elevenlabs", stt_extra=off).stt_extra == off
+    for bad in (-0.1, 1.5, "0.75", True):
+        with pytest.raises(ValueError, match="between 0 and 1"):
+            VoiceConfig(stt_provider="elevenlabs", stt_extra={"turn_commit_threshold": bad})
+
+
+async def test_session_ignores_a_diarized_transcript() -> None:
+    """Scribe v3 Live repeats each commit split by speaker. It is not a second turn."""
+    from timbal.voice.providers import SpeakerSegment, TranscriptEvent
+
+    from .test_session import _collect_events, _make_session
+
+    session, _, _ = _make_session(
+        stt_script=[
+            TranscriptEvent(type="committed", text="Hi there"),
+            TranscriptEvent(
+                type="diarized",
+                text="Hi there",
+                speakers=[SpeakerSegment(speaker_id="speaker_0", text="Hi there", start=0.1, end=0.6)],
+            ),
+        ],
+        responses=["Hello!", "A second reply would be a bug."],
+    )
+    await _collect_events(session)
+    assert [(entry.role, entry.text) for entry in session.transcript if entry.role == "user"] == [("user", "Hi there")]
+
+
 def test_reply_language_stays_independent_of_stt_hints() -> None:
     cfg = VoiceConfig(language="es", reply_language="follow", stt_languages=["es", "en"], keyterms=["Ana Ruiz"])
     assert cfg.reply_language == "follow"
@@ -145,8 +195,12 @@ async def test_flux_replaces_keyterms_and_does_not_touch_another_session() -> No
     assert agent_terms == ["Norte Market"]
     assert stt.patient_thresholds_live is True
     assert await stt.update_keyterms([])
-    assert json.loads(stt._ws.sent[-1]) == {"type": "Configure", "keyterms": []}
+    # Flux takes one Configure at a time: the clear goes out after the ack.
+    assert len(stt._ws.sent) == 1
     assert stt._input_config.keyterms == []
+    await stt._handle_message({"type": "ConfigureSuccess"})
+    assert stt.patient_thresholds_live is True
+    assert json.loads(stt._ws.sent[-1]) == {"type": "Configure", "keyterms": []}
 
 
 async def test_session_set_keyterms_copies_and_rejects_scribe() -> None:

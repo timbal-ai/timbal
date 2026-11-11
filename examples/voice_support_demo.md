@@ -82,6 +82,8 @@ Stop the old direct server first if it is still the process on port 4444. That p
 uv run --frozen python examples/voice_support_demo_livekit.py
 ```
 
+`--en` opens the playground on `examples/voice_support_demo_en.py::agent`: the same shop, tools, and voice settings, pinned to English, with a sectioned prompt and explicit tool descriptions.
+
 Check without opening the playground:
 
 ```bash

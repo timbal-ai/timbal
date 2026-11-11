@@ -8,7 +8,8 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 
 import pytest
-from timbal.types.content import TextContent, ToolUseContent
+from timbal.core.tool import Tool
+from timbal.types.content import TextContent, ToolResultContent, ToolUseContent
 from timbal.types.message import Message
 from timbal.voice import (
     CommitAction,
@@ -605,6 +606,82 @@ class TestCommitHangup:
         assert await session.commit_hangup() is True
         assert session._end_call_task is not None
 
+    async def test_repeated_alright_does_not_cancel_the_grace_window(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.35)
+        session._active_turn_user_text = "Adiós."
+
+        async def again() -> None:
+            await asyncio.sleep(0.05)
+            session._latest_partial_text = "Alright. Alright."
+            session._last_partial_at = time.monotonic()
+
+        session._last_commit_at = time.monotonic()
+        asyncio.create_task(again())
+        assert await session.commit_hangup() is True
+        assert session._end_call_task is not None
+
+    @pytest.mark.parametrize(
+        ("text", "asked", "hangs_up"),
+        [
+            ("Can you hang up?", "", True),
+            ("Bye, thank you.", "", True),
+            ("Yes, please hang up.", "", True),
+            ("¿Puedes colgar?", "", True),
+            ("Yes.", "Shall I end the call?", True),
+            ("Sí.", "¿Quiere que cuelgue?", True),
+            ("Cuelga, por favor.", "", True),
+            ("Okay you can hang up now, thanks.", "", True),
+            ("Yes.", "Anything else?", False),
+            ("Don't hang up yet.", "", False),
+            ("No cuelgues.", "", False),
+            ("Wait, one more thing. Bye.", "", False),
+            # Mentions of hanging up that are not a request.
+            ("I don't want to hang up.", "", False),
+            ("I don't want you to hang up.", "", False),
+            ("No quiero colgar.", "", False),
+            ("Did you hang up on me?", "", False),
+            ("No me cuelgues.", "", False),
+            # A yes that does not answer "shall I end the call?".
+            ("Yes.", "I won't hang up until you confirm the address.", False),
+            ("Vale.", "Puedo colgar o revisar el pedido.", False),
+            ("Sí.", "¿Cuelgo o reviso el pedido?", False),
+            ("Thanks.", "Shall I hang up?", False),
+            ("Yes.", "Shall I hang up if you're done?", False),
+            ("Sí.", "¿Quiere que cuelgue si ya terminó?", False),
+            ("Please end the call when I say so.", "", False),
+            ("Can you hang up and call me back?", "", False),
+            # Requests the trailing "the call" or an inner "please" must not hide.
+            ("End the call.", "", True),
+            ("End this call, please.", "", True),
+            ("Can you please hang up?", "", True),
+            ("¿Puedes colgar, por favor?", "", True),
+            ("Sí.", "Perfecto. ¿Quiere que cuelgue?", True),
+            ("Yes.", "Anything else? Shall I hang up?", True),
+            # An accented "sí" in the question is not the conditional "si".
+            ("Sí.", "¿Cuelgo, sí?", True),
+            ("Sí.", "¿Sí? ¿Quiere que cuelgue?", True),
+            ("Sí.", "Vols que pengi, si us plau?", True),
+            ("Sí, por favor.", "¿Quiere que cuelgue?", True),
+            ("Please.", "Shall I hang up?", True),
+            ("Sí.", "¿Quiere que cuelgue después de confirmar?", False),
+        ],
+    )
+    async def test_a_hangup_request_is_not_only_a_goodbye_phrase(self, text: str, asked: str, hangs_up: bool) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.05)
+        if asked:
+            session._transcript.append(TranscriptEntry(role="assistant", text=asked))
+        session._active_turn_user_text = text
+        session._last_commit_at = time.monotonic()
+        assert await session.commit_hangup() is hangs_up
+
+    @pytest.mark.parametrize("text", ["Thank you so much.", "Vamos, vámonos.", "Gracias."])
+    async def test_thanks_and_vamos_do_not_start_a_hangup(self, text: str) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.2)
+        session._active_turn_user_text = text
+        session._last_commit_at = time.monotonic()
+        assert await session.commit_hangup() is False
+        assert session._end_call_task is None
+
     async def test_a_later_commit_does_not_request_hangup(self) -> None:
         session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
         session._last_commit_at = time.monotonic()
@@ -652,6 +729,22 @@ class TestHangupUtterance:
             ("Espera, una cosa más.", "retract"),
             ("No, espera, todavía necesito ayuda.", "retract"),
             ("What's my order?", "retract"),
+            ("Alright. Alright.", "ack"),
+            ("Alright. Alright. Alright.", "ack"),
+            ("Yeah. Okay.", "ack"),
+            ("Thank you.", "ack"),
+            ("Thank you so much.", "retract"),
+            ("Vamos, vámonos.", "retract"),
+            ("No, I meant how antibiotics work.", "retract"),
+            ("Vale, gracias. Adiós.", "goodbye"),
+            ("vale gracias ad", "pending"),
+            ("ok thanks b", "pending"),
+            ("vale gracias espera", "retract"),
+            ("Ok, thanks, bye.", "goodbye"),
+            ("Thank you. Goodbye.", "goodbye"),
+            ("Vale, gracias.", "ack"),
+            ("Gracias, espera. Adiós.", "retract"),
+            ("Thank you so much, bye.", "retract"),
         ],
     )
     def test_kind(self, text: str, kind: str) -> None:
@@ -1220,5 +1313,180 @@ class TestHangupEventSequences:
         await _until(lambda: "Dime." in _texts(events))
         await asyncio.sleep(0.4)
         assert not session.closed
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
+
+
+async def _committing_end_call() -> str:
+    session = current_voice_session()
+    assert session is not None
+    if not await session.commit_hangup():
+        return "Do not hang up. Keep helping."
+    return "Ending the call."
+
+
+def _tool_results(messages: list[Message]) -> dict[str, str]:
+    return {
+        block.id: " ".join(c.text for c in block.content if isinstance(c, TextContent))
+        for message in messages
+        for block in message.content
+        if isinstance(block, ToolResultContent)
+    }
+
+
+def _stream_tool_calls_under_item_ids(session) -> None:
+    """Announce each tool call as a ToolUse delta under another id, before its final message.
+
+    OpenAI Responses streams ``fc_…`` and finishes with ``call_…``. Anthropic streams
+    a block index. TestModel streams nothing, so it never showed the mismatch.
+    """
+    from timbal.types.events.delta import DeltaEvent, ToolUse
+    from timbal.types.events.output import OutputEvent
+
+    inner = session.agent
+
+    class _Streaming:
+        def __getattr__(self, name: str):
+            return getattr(inner, name)
+
+        def __call__(self, **kwargs):
+            source = inner(**kwargs)
+
+            async def events():
+                async with aclosing(source):
+                    async for event in source:
+                        if isinstance(event, OutputEvent) and event.path.endswith(".llm"):
+                            for block in getattr(event.output, "content", None) or []:
+                                if isinstance(block, ToolUseContent):
+                                    yield DeltaEvent(
+                                        run_id=event.run_id,
+                                        path=event.path,
+                                        call_id=event.call_id,
+                                        item=ToolUse(id=f"fc_{block.id}", name=block.name, input=""),
+                                    )
+                        yield event
+
+            return events()
+
+    session.agent = _Streaming()
+
+
+class TestCommittedHangupEndsTheTurn:
+    """Once ``commit_hangup`` is True the model is not asked for another step."""
+
+    async def test_a_call_streamed_under_another_id_is_counted_once(self) -> None:
+        model = _Model(_tool_only(), "Goodbye.")
+        session, stt, _tts = _session(
+            model, tools=[Tool(name="end_call", handler=_committing_end_call)], hangup_grace_secs=0.05
+        )
+        _stream_tool_calls_under_item_ids(session)
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert len(model.calls) == 1
+        assert session._turn_tool_batch_inflight == 0
+
+    async def test_no_llm_call_after_the_hangup_tool_returns(self) -> None:
+        model = _Model(_tool_only(), "Goodbye.")
+        session, stt, tts = _session(
+            model, tools=[Tool(name="end_call", handler=_committing_end_call)], hangup_grace_secs=0.05
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert len(model.calls) == 1
+        assert tts.synthesized_texts.count("Goodbye.") == 1
+
+    async def test_a_refused_hangup_still_asks_the_model(self) -> None:
+        model = _Model(_tool_only(), "Claro, dígame.")
+        session, stt, _tts = _session(
+            model, tools=[Tool(name="end_call", handler=_committing_end_call)], hangup_grace_secs=0.05
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Vamos, vámonos."))
+        await _until(lambda: "Claro, dígame." in _texts(events))
+        assert not session.closed
+        assert len(model.calls) == 2
+        assert _tool_results(model.calls[1]) == {"c1": "Do not hang up. Keep helping."}
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
+
+    async def test_a_parallel_tool_finishes_before_the_turn_stops(self) -> None:
+        saved: list[str] = []
+
+        async def apply_pending() -> str:
+            await asyncio.sleep(0.25)
+            saved.append("ticket")
+            return "Saved."
+
+        both = Message(
+            role="assistant",
+            content=[
+                ToolUseContent(id="c1", name="end_call", input={}),
+                ToolUseContent(id="c2", name="apply_pending", input={}),
+            ],
+            stop_reason="tool_use",
+        )
+        model = _Model(both, "Goodbye.")
+        session, stt, _tts = _session(
+            model,
+            tools=[Tool(name="end_call", handler=_committing_end_call), apply_pending],
+            hangup_grace_secs=0.05,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert saved == ["ticket"]
+        assert len(model.calls) == 1
+
+    async def test_a_late_ack_after_the_commit_still_hangs_up(self) -> None:
+        # The quiet window already passed. Flux can deliver an "Alright." spoken
+        # during the farewell after that, in the last moment before teardown.
+        model = _Model(_tool_only(), "Adiós.")
+        session, stt, _tts = _session(
+            model, tools=[Tool(name="end_call", handler=_committing_end_call)], hangup_grace_secs=0.05
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await _until(lambda: session._end_call_task is not None)
+        await stt.inject(TranscriptEvent(type="committed", text="Alright. Alright."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert len(model.calls) == 1
+
+    async def test_an_ack_does_not_start_a_speculative_reply_while_hanging_up(self) -> None:
+        session, _stt, _tts = _session(_Model(), speculative_generation=True)
+        session._hangup_open = True
+        await session._maybe_start_speculative("Alright. Alright.", source="eager_eot")
+        assert session.speculative_generations_started == 0
+        await session._maybe_start_speculative("Espera, una cosa más.", source="eager_eot")
+        assert session.speculative_generations_started == 1
+        await session._discard_speculative(reason="test")
+
+    async def test_a_retract_after_the_commit_continues_from_the_tool_result(self) -> None:
+        model = _Model(_tool_only(), "Sure, what else?")
+        session, stt, _tts = _session(
+            model, tools=[Tool(name="end_call", handler=_committing_end_call)], hangup_grace_secs=0.05
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Bye."))
+        await _until(lambda: session._end_call_task is not None)
+        await stt.inject(TranscriptEvent(type="committed", text="Wait. One more thing."))
+        await _until(lambda: "Sure, what else?" in _texts(events))
+        await asyncio.sleep(0.6)
+        assert not session.closed
+        assert len(model.calls) == 2
+        history = model.calls[1]
+        assert _tool_results(history) == {"c1": "Ending the call."}
+        assert history[-1].role == "user" and "One more thing" in history[-1].collect_text()
         await stt.finish()
         await asyncio.wait_for(call, timeout=3.0)
