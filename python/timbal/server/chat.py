@@ -37,6 +37,8 @@ STORE_ENV = "TIMBAL_CHAT_STORE"
 DEFAULT_SESSION_TTL_S = 3600.0
 # An SSE comment this often keeps proxies from closing a quiet stream.
 KEEPALIVE_S = 15.0
+# How long a shutdown waits for a session restore already going before cancelling it.
+_SHUTDOWN_RESTORE_S = 5.0
 
 
 def _session_ttl() -> float:
@@ -102,8 +104,9 @@ async def _restore(request: Request, session_id: str) -> ChatSession | None:
     store = _store(request)
     if store is None:
         return None
+    agent = _agent(request)
     try:
-        return await _restore_once(request.app, _agent(request), store, session_id)
+        return await _restore_once(request.app, agent, store, session_id)
     except LookupError:
         return None
     except ValueError as e:
@@ -118,21 +121,46 @@ async def _restore(request: Request, session_id: str) -> ChatSession | None:
         ) from e
 
 
+def _app_sessions(app: Any) -> dict[str, ChatSession]:
+    sessions = getattr(app.state, "chat_sessions", None)
+    if sessions is None:
+        sessions = app.state.chat_sessions = {}
+    return sessions
+
+
 async def _restore_once(app: Any, agent: Any, store: ChatSessionStore, session_id: str) -> ChatSession:
-    """``ChatSession.from_store``, one at a time per id (requests and the startup retry share it), into the map."""
+    """The session restored from the store into this process's map, once per id: requests and the startup
+    retry share one restore, and a session the process already serves is returned as is (this process can
+    always renew its own lease, so a second ``from_store`` would make a second copy)."""
     state = app.state
+    current = _app_sessions(app).get(session_id)
+    if current is not None and not current.handed_off:
+        return current
+    if getattr(state, "chat_closing", False):
+        raise RuntimeError("The server is shutting down.")
     restoring: dict[str, asyncio.Task] = getattr(state, "chat_restoring", None) or {}
     state.chat_restoring = restoring
     task = restoring.get(session_id)
     if task is None:
-        task = restoring[session_id] = asyncio.ensure_future(ChatSession.from_store(agent, store, session_id))
-        task.add_done_callback(lambda _: restoring.pop(session_id, None))
-    session = await asyncio.shield(task)
-    sessions = getattr(state, "chat_sessions", None)
-    if sessions is None:
-        sessions = state.chat_sessions = {}
-    sessions.setdefault(session_id, session)
-    return sessions[session_id]
+        task = restoring[session_id] = asyncio.ensure_future(_restore_into(app, agent, store, session_id))
+        task.add_done_callback(lambda done: _restore_done(restoring, session_id, done))
+    # Shielded: a caller that goes away (a dropped request, the retry cancelled at shutdown) does not stop it.
+    return await asyncio.shield(task)
+
+
+async def _restore_into(app: Any, agent: Any, store: ChatSessionStore, session_id: str) -> ChatSession:
+    """One restore, whoever still waits for it: the session is in the map before this returns, so shutdown
+    (which waits for the restores in flight) finds it and closes it with the others."""
+    session = await ChatSession.from_store(agent, store, session_id)
+    _app_sessions(app)[session_id] = session
+    return session
+
+
+def _restore_done(restoring: dict[str, asyncio.Task], session_id: str, task: asyncio.Task) -> None:
+    if restoring.get(session_id) is task:
+        del restoring[session_id]
+    if not task.cancelled():
+        task.exception()  # retrieved: every caller may have gone away
 
 
 async def restore_chat_sessions(app: Any) -> list[str]:
@@ -140,15 +168,14 @@ async def restore_chat_sessions(app: Any) -> list[str]:
     that died with the last process), so they go on without waiting for a client. Returns their ids."""
     from ..core.agent import Agent
 
+    app.state.chat_closing = False
     runnable = getattr(app.state, "runnable", None)
     if not isinstance(runnable, Agent):
         return []
     store = app.state.chat_store = session_store_for(runnable)
     if store is None:
         return []
-    sessions = getattr(app.state, "chat_sessions", None)
-    if sessions is None:
-        sessions = app.state.chat_sessions = {}
+    sessions = _app_sessions(app)
     restored, skipped = [], []
     for session_id in await store.list_ids(with_work=True):
         if session_id in sessions:
@@ -236,11 +263,22 @@ async def _reap(sessions: dict[str, ChatSession]) -> None:
 async def close_chat_sessions(app: Any) -> None:
     """Close every session (server shutdown). Durable ones are kept for the next process, a turn this cuts
     recovered there."""
+    app.state.chat_closing = True  # no restore starts from here on
     retry = getattr(app.state, "chat_restore_retry", None)
     if retry is not None and not retry.done():
         retry.cancel()
         with contextlib.suppress(BaseException):
             await retry
+    # A restore already going is shielded from its callers: left alone, it would finish after this and its
+    # session keep running, unclosed, through the shutdown. Wait for it (its session is then in the map,
+    # closed below); one that takes too long is cancelled, which lets go of its lease and writes nothing.
+    restoring = [task for task in (getattr(app.state, "chat_restoring", None) or {}).values() if not task.done()]
+    if restoring:
+        _, slow = await asyncio.wait(restoring, timeout=_SHUTDOWN_RESTORE_S)
+        for task in slow:
+            task.cancel()
+        if slow:
+            await asyncio.gather(*slow, return_exceptions=True)
     sessions = getattr(app.state, "chat_sessions", None) or {}
     for session in list(sessions.values()):
         with contextlib.suppress(Exception):
@@ -251,21 +289,28 @@ async def close_chat_sessions(app: Any) -> None:
 _RETRY = {"Retry-After": "1"}
 
 
-async def _stored(session: ChatSession, undo: Any = None) -> None:
-    """``session.flush()`` for a route about to acknowledge a change: a failed write is a ``503``, a session
-    another process took a ``409``. ``undo`` takes the change back if no turn has taken it yet (returns True),
-    so the ``503`` means nothing was accepted and a retry cannot run it twice."""
+_TAKEN = "The request was taken (a turn has it), but it would not survive a restart: do not resend."
+
+
+async def _stored(session: ChatSession, mark: int, undo: Any = None, *, taken: str = _TAKEN) -> None:
+    """``session.flush()`` for a route about to acknowledge the change it made at ``mark`` (``session.mark()``,
+    taken right after it). A session another process took is a ``409``. When the store fails:
+
+    - the change itself is stored and a later one is what failed: returns, the acknowledgement holds;
+    - the store holds nothing of it and ``undo`` takes it back here too (returns True: no turn has taken it):
+      ``503`` with ``Retry-After``. Nothing was accepted, in memory or in the store, so a retry cannot run
+      it twice, whether or not this process lives to store anything again;
+    - a turn has it: ``503`` without ``Retry-After`` (``taken``)."""
     try:
         await session.flush()
     except SessionLeased as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except SessionNotStored as e:
+        if session.stored_since(mark):
+            return
         if undo is not None and undo():
             raise HTTPException(status_code=503, detail=f"{e}. Nothing was accepted: retry.", headers=_RETRY) from e
-        raise HTTPException(
-            status_code=503,
-            detail=f"{e}. The request was taken (a turn has it), but it would not survive a restart: do not resend.",
-        ) from e
+        raise HTTPException(status_code=503, detail=f"{e}. {taken}") from e
 
 
 def _jsonable(item: Any) -> Any:
@@ -341,11 +386,13 @@ async def create_session(request: Request) -> JSONResponse:
         await session.close()
         raise HTTPException(status_code=503, detail=f"Could not load the run the session continues: {e}") from e
     session.persist()
+    mark = session.mark()
     try:
         await session.flush()
     except (SessionNotStored, SessionLeased) as e:
-        await session.close()  # never acknowledged: nothing of it stays
-        raise HTTPException(status_code=503, detail=f"{e}. No session was opened: retry.", headers=_RETRY) from e
+        if isinstance(e, SessionLeased) or not session.stored_since(mark):
+            await session.close()  # never acknowledged: nothing of it stays
+            raise HTTPException(status_code=503, detail=f"{e}. No session was opened: retry.", headers=_RETRY) from e
     sessions[session.id] = session
     return _json(session.state(), status_code=201)
 
@@ -365,6 +412,14 @@ async def delete_session(request: Request, session_id: str) -> JSONResponse:
     session = await _session(request, session_id)
     _sessions(request).pop(session_id, None)
     await session.close()
+    if session.close_error is not None:
+        # Closed here, but the store still holds it as open: the next request would restore it. A retry
+        # restores it and deletes again.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Chat session {session_id!r} was closed but not removed from the store: {session.close_error}",
+            headers=_RETRY,
+        )
     return _json({"closed": True})
 
 
@@ -379,12 +434,16 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
         raise HTTPException(status_code=400, detail="'text' must be a string.")
     busy = session.busy
     try:
-        event = session.send(text, mode=mode)
+        # The message is only queued here: 'now' and 'interrupt' cut the running turn once it is stored, so a
+        # 503 that says nothing was accepted has not cut anything either.
+        event = session.send(text, mode=mode, defer_cut=True)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    await _stored(session, lambda: session.withdraw(event.id))  # durable: the 202 means it survives a restart
+    mark = session.mark()
+    await _stored(session, mark, lambda: session.withdraw(event.id))  # the 202 means it survives a restart
+    session.cut_for(event, mode)
     return _json(
         {"message": {**event.receipt(), "text": event.text}, "mode": mode or session.busy_mode, "busy": busy},
         status_code=202,
@@ -415,7 +474,7 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    await _stored(session, lambda: session.withdraw(wake_id))
+    await _stored(session, session.mark(), lambda: session.withdraw(wake_id))
     return _json({"wake_id": wake_id, "busy": session.busy}, status_code=202)
 
 
@@ -423,7 +482,12 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
 async def interrupt_session(request: Request, session_id: str) -> JSONResponse:
     session = await _session(request, session_id)
     interrupted = session.interrupt()
-    await _stored(session)
+    if interrupted:
+        await _stored(
+            session,
+            session.mark(),
+            taken="The session was interrupted, but its state could not be stored: it would not survive a restart.",
+        )
     return _json({"interrupted": interrupted})
 
 
@@ -440,7 +504,7 @@ async def resume_session(request: Request, session_id: str) -> JSONResponse:
     except (RuntimeError, ValueError) as e:
         # Not waiting for an answer (yet), or an id already answered differently.
         raise HTTPException(status_code=409, detail=str(e)) from e
-    await _stored(session, lambda: session.withdraw_answers(values))
+    await _stored(session, session.mark(), lambda: session.withdraw_answers(values))
     return _json({"resumed": True}, status_code=202)
 
 

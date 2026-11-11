@@ -99,6 +99,8 @@ class _Wake:
     id: str = field(default_factory=lambda: uuid7(as_type="hex"))  # type: ignore[arg-type]
     kind: str = WAKE_KIND
     trigger: dict[str, Any] | None = None
+    # The pending wakes of the same key this one replaced: put back if it is withdrawn. Not stored.
+    replaced: list["_Wake"] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -408,6 +410,12 @@ class ChatSession:
         self._in_flight: dict[str, Any] | None = None
         # The latest failed snapshot write (cleared by the next good one): flush() reports it.
         self._save_error: Exception | None = None
+        # Set by close() when the store could neither mark the session closed nor drop its row (a restore
+        # would bring it back): the error.
+        self.close_error: Exception | None = None
+        # Changes made (every _persist) and how many of them the last good write covers: stored_since().
+        self._changes = 0
+        self._stored_changes = 0
         # from_store() is still settling the stored state: no turn may start before it is done.
         self._hold_worker = False
 
@@ -431,8 +439,12 @@ class ChatSession:
     def store(self) -> BackgroundTaskStore:
         return self._store
 
-    def send(self, text: str, *, mode: SendMode | None = None) -> SessionEvent:
-        """Post a user message (see the class docstring for ``mode``); returns its receipt at once."""
+    def send(self, text: str, *, mode: SendMode | None = None, defer_cut: bool = False) -> SessionEvent:
+        """Post a user message (see the class docstring for ``mode``); returns its receipt at once.
+
+        ``defer_cut``: ``now`` and ``interrupt`` only queue the message; the caller cuts the running turn
+        with :meth:`cut_for` once the message is stored (a route that may still answer "not accepted").
+        """
         if self.closed:
             raise RuntimeError("The chat session is closed.")
         mode = mode or self.busy_mode
@@ -448,11 +460,24 @@ class ChatSession:
         self._record("message", event_id=event.id, text=event.text, mode=mode, busy=busy)
         self._watch(event)
         self._ensure_worker()
-        if mode == "interrupt":
-            self.interrupt()
-        elif mode == "now" and busy and self._turn_context is not None and self._turn_context._cut is not None:
-            self._turn_context._cut.set()
+        if not defer_cut:
+            self.cut_for(event, mode)
         return event
+
+    def cut_for(self, event: SessionEvent, mode: SendMode | None = None) -> bool:
+        """Cut the running turn for a message sent with ``defer_cut`` (``mode`` as it was sent): ``interrupt``
+        cancels it, ``now`` cuts the answer being streamed. Nothing (False) for the other modes, and once a
+        turn has taken the message: the cut was for what ran before it, not for its own answer."""
+        mode = mode or self.busy_mode
+        # Still queued: not taken by a turn that is about to start either (its receipt is pending until then).
+        if self.closed or not any(pending.id == event.id for pending in self._store.pending_events()):
+            return False
+        if mode == "interrupt":
+            return self.interrupt()
+        if mode == "now" and self.busy and self._turn_context is not None and self._turn_context._cut is not None:
+            self._turn_context._cut.set()
+            return True
+        return False
 
     def wake(
         self,
@@ -479,11 +504,12 @@ class ChatSession:
             raise ValueError("A wake needs non-empty text.")
         policy = _check_tool_policy(tool_policy)
         key = (key or "").strip() or None
-        if key is not None:
-            for old in [wake for wake in self._wakes if wake.key == key]:
-                self._wakes.remove(old)
-                self._record("wake_superseded", wake_id=old.id, key=key)
-        wake = _Wake(text=text, key=key, tool_policy=policy, silent_ok=silent_ok)
+        replaced = [wake for wake in self._wakes if wake.key == key] if key is not None else []
+        for old in replaced:
+            self._wakes.remove(old)
+            old.replaced = []  # one level: what it replaced is gone for good once it is replaced itself
+            self._record("wake_superseded", wake_id=old.id, key=key)
+        wake = _Wake(text=text, key=key, tool_policy=policy, silent_ok=silent_ok, replaced=replaced)
         self._wakes.append(wake)
         self.last_activity = time.monotonic()
         self._record("wake", wake_id=wake.id, text=text, key=key, tool_policy=_describe_policy(policy))
@@ -516,12 +542,33 @@ class ChatSession:
         if not withdrawn:
             wake = next((wake for wake in self._wakes if wake.id == work_id), None)
             if wake is not None:
-                self._wakes.remove(wake)
-                self._record("wake_withdrawn", wake_id=wake.id)
+                # The wakes it replaced come back in its place: as if it had never been sent.
+                at = self._wakes.index(wake)
+                self._wakes[at : at + 1] = wake.replaced
+                self._record("wake_withdrawn", wake_id=wake.id, restored=[old.id for old in wake.replaced])
                 withdrawn = True
+            else:
+                # Replaced by a newer wake of its key before its sender knew it was stored: it must not come
+                # back if that one is withdrawn too.
+                for newer in self._wakes:
+                    kept = [old for old in newer.replaced if old.id != work_id]
+                    if len(kept) != len(newer.replaced):
+                        newer.replaced, withdrawn = kept, True
         if withdrawn:
             self._persist()
         return withdrawn
+
+    def mark(self) -> int:
+        """A point in the session's changes, for :meth:`stored_since`: take it right after making one."""
+        return self._changes
+
+    def stored_since(self, mark: int) -> bool:
+        """Whether the store holds the session as of ``mark`` or later (always, when it is not durable).
+
+        After a :meth:`flush` that raised: True means the caller's own change is stored and a later one is
+        what failed; False means the store holds nothing of it.
+        """
+        return self._session_store is None or self._stored_changes >= mark
 
     def withdraw_answers(self, values: dict[str, Any]) -> bool:
         """Take back answers sent with :meth:`resume` that no turn has taken yet; False once one has."""
@@ -683,9 +730,9 @@ class ChatSession:
         """
         # The lease first, then the row: read before it, a previous owner could still write (and let go)
         # in between, and this process would serve an older state than the store holds.
-        await session_store.acquire_lease(session_id, PROCESS_OWNER)
         session: ChatSession | None = None
         try:
+            await session_store.acquire_lease(session_id, PROCESS_OWNER)
             snapshot = await session_store.load(session_id)
             if snapshot is None or snapshot.closed:
                 raise LookupError(f"No stored chat session {session_id!r}.")
@@ -713,15 +760,20 @@ class ChatSession:
             if session._parked and session._last_context is None:
                 session._last_context = await session._load_run(session.head)
             parked_trace = session._last_context._trace if session._parked and session._last_context else None
+            last_policy = snapshot.last_options.get("tool_policy")
             session._last_options = _TurnOptions(
-                # A callable's parked turn resumes with the tools its agents were offered (by path).
-                tool_policy=_load_policy(snapshot.last_options.get("tool_policy"), parked_trace),
+                # Only a resume of a parked turn uses them. A callable's resumes with the tools its agents
+                # were offered (by path); not parked, nothing will run under it (no tools, no warning).
+                tool_policy=_load_policy(last_policy, parked_trace)
+                if session._parked or last_policy != "custom"
+                else frozenset(),
                 silence=bool(snapshot.last_options.get("silence")),
                 # A parked wake or recovery turn is resumed without steering, as it ran.
                 steer=snapshot.last_options.get("steer", True) is not False,
             )
         except BaseException:
             # Nothing was written: the stored state stays as it was, for the next attempt (or another process).
+            # Cancelled included (a server shutting down): the lease is let go, also one still being taken.
             if session is not None:
                 session._lost = True  # stores nothing while it lets go of the task store
                 with contextlib.suppress(BaseException):
@@ -733,7 +785,14 @@ class ChatSession:
         session._persist()
         session._lease_task = asyncio.get_running_loop().create_task(session._renew_lease())
         session._hold_worker = False
-        if session._wakes or session._resume is not None or session._store.pending_events():
+        if session.parked and any(
+            event.source == "user" and event.announce == "interrupt" for event in session._store.pending_events()
+        ):
+            # An 'interrupt' message is stored before it cuts anything: if the process died in between, the
+            # question it was to abandon still waits. Abandon it now (nothing to do if that was stored too).
+            session._interrupt_now()
+        # _work: something arrived while the worker was held (a finished background task, an event).
+        if session._wakes or session._resume is not None or session._store.pending_events() or session._work.is_set():
             session._work.set()
             session._ensure_worker()
         return session
@@ -1208,6 +1267,7 @@ class ChatSession:
 
     def _persist(self) -> None:
         """Queue a snapshot save: saves run one at a time, in order, a burst coalescing into one."""
+        self._changes += 1
         if self._session_store is None or self._lost:
             return
         self._dirty = True
@@ -1223,6 +1283,7 @@ class ChatSession:
         assert store is not None
         while self._dirty and not self._lost:
             self._dirty = False
+            covers = self._changes
             snapshot = self._snapshot()
             try:
                 self._version = await store.save(snapshot, expect_version=self._version, owner=PROCESS_OWNER)
@@ -1234,7 +1295,7 @@ class ChatSession:
                 self._dirty, self._save_error = True, e
                 logger.error("chat_session_save_failed", session_id=self.id, error=str(e))
                 return
-            self._save_error = None
+            self._save_error, self._stored_changes = None, covers
             if not self._leased and not self.closed:
                 try:
                     await store.acquire_lease(self.id, PROCESS_OWNER)
@@ -1276,9 +1337,11 @@ class ChatSession:
         lease, self._lease_task = self._lease_task, None
         if lease is not None and not lease.done() and lease is not asyncio.current_task():
             lease.cancel()
+        closed_stored = True
         try:
             await self.flush()
         except SessionNotStored as e:
+            closed_stored = False
             logger.error("chat_session_close_not_stored", session_id=self.id, error=str(e))
         except SessionLeased:
             pass
@@ -1291,6 +1354,10 @@ class ChatSession:
                 await store.release_lease(self.id, PROCESS_OWNER)
         except Exception as e:
             logger.error("chat_session_close_store_failed", session_id=self.id, error=str(e))
+            if not self._keep and not closed_stored:
+                # The row is still there and does not say closed: a restore would bring the session back.
+                # (Stored as closed, a row that could not be deleted is never restored.)
+                self.close_error = e
 
     def _approved_calls(self, values: dict[str, Any]) -> list[str]:
         """The gated calls a resume lets run, as the recovery notice names them."""

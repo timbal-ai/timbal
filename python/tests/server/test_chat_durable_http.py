@@ -14,20 +14,35 @@ from timbal.state.chat_store import PROCESS_OWNER, SessionSnapshot, SqliteChatSe
 
 AGENT = textwrap.dedent(
     """
-    import os
+    import asyncio, os
     from pathlib import Path
-    from timbal import Agent
+    from timbal import Agent, Tool
     from timbal.core.test_model import TestModel
     from timbal.state.tracing.providers import SqliteTracingProvider
+    from timbal.types.content import ToolUseContent
+    from timbal.types.message import Message
+
+    DIR = Path(os.environ["E2E_DIR"])
+
+    async def wait() -> str:
+        while (DIR / "hang").exists():  # a tool that runs for as long as the test wants a turn busy
+            await asyncio.sleep(0.02)
+        return "waited"
 
     def handler(messages):
         text = next((m.collect_text() for m in reversed(messages) if m.role == "user"), "")
+        if messages[-1].role == "tool":
+            return "done"
+        if text == "wait":
+            return Message(role="assistant", content=[ToolUseContent(id="w1", name="wait", input={})],
+                           stop_reason="tool_use")
         return f"echo: {text}"
 
     agent = Agent(
         name="agent",
         model=TestModel(handler=handler),
-        tracing_provider=SqliteTracingProvider.configured(_path=Path(os.environ["E2E_DIR"]) / "timbal.db"),
+        tools=[Tool(name="wait", handler=wait)],
+        tracing_provider=SqliteTracingProvider.configured(_path=DIR / "timbal.db"),
     )
     """
 )
@@ -166,31 +181,114 @@ def test_a_session_still_closing_is_restored_only_once_its_close_is_done(client,
 
 
 def test_a_message_that_could_not_be_stored_is_a_503_and_not_kept(client, monkeypatch):
-    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    # A long collect window: no turn takes the message before the route answers, so the route can take it back.
+    session_id = client.post("/chat/sessions", json={"collect_window": 30}).json()["session_id"]
 
-    async def down(*_args, **_kwargs):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(client.app.state.chat_store, "save", down)
-    # collect: no turn takes it before the route answers, so the route can take it back.
+    monkeypatch.setattr(client.app.state.chat_store, "save", _down)
     response = client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi", "mode": "collect"})
     assert response.status_code == 503 and response.headers["retry-after"] == "1"
     assert "Nothing was accepted" in response.json()["detail"]
     monkeypatch.undo()
     state = client.get(f"/chat/sessions/{session_id}").json()
     assert state["pending"] == []
-    time.sleep(1.3)  # past the collect window: still no turn
+    assert client.app.state.chat_sessions[session_id]._store.pending_events() == []  # nothing left to run
     assert client.get(f"/chat/sessions/{session_id}").json()["turns"] == 0
 
 
-def test_startup_retries_a_session_whose_old_lease_had_not_run_out(tmp_path, monkeypatch):
-    """A replacement starting before its predecessor's lease expires restores the session once it does."""
+async def _down(*_args, **_kwargs):
+    raise OSError("disk full")
+
+
+@pytest.mark.parametrize("mode", ["interrupt", "now"])
+def test_a_503_for_a_cutting_message_has_not_cut_the_turn(client, monkeypatch, tmp_path, mode):
+    """'Nothing was accepted' must be true of the running turn too: no cancel, no cut, before the store has it."""
+    (tmp_path / "hang").touch()
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "wait"})
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not client.get(f"/chat/sessions/{session_id}").json()["busy"]:
+        time.sleep(0.02)
+    running = client.get(f"/chat/sessions/{session_id}").json()["run_id"]
+    assert running
+
+    monkeypatch.setattr(client.app.state.chat_store, "save", _down)
+    response = client.post(f"/chat/sessions/{session_id}/messages", json={"text": "stop", "mode": mode})
+    assert response.status_code == 503 and response.headers["retry-after"] == "1", response.text
+    monkeypatch.undo()
+    state = client.get(f"/chat/sessions/{session_id}").json()
+    assert state["busy"] and state["run_id"] == running and state["pending"] == []
+    (tmp_path / "hang").unlink()
+    assert wait_turns(client, session_id, 1)["last_status"]["code"] == "success"  # it ran to its end, uncut
+
+
+def test_a_message_the_store_already_holds_is_acknowledged_when_a_later_write_fails(client, monkeypatch):
+    """The 503 is for a change the store does not hold. Taking back one it does would leave it there for a
+    restart to run, next to the client's retry."""
+    session_id = client.post("/chat/sessions", json={"collect_window": 3}).json()["session_id"]
+    session, store = client.app.state.chat_sessions[session_id], client.app.state.chat_store
+    real_save, calls = store.save, []
+
+    async def save(snapshot, *, expect_version, owner=None):
+        if calls:
+            raise OSError("disk full")
+        calls.append(1)
+        version = await real_save(snapshot, expect_version=expect_version, owner=owner)
+        session._persist()  # a later change: its write, and the retry of it, fail
+        return version
+
+    monkeypatch.setattr(store, "save", save)
+    response = client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi", "mode": "collect"})
+    assert response.status_code == 202, response.text
+    event_id = response.json()["message"]["event_id"]
+    assert [e["id"] for e in client.portal.call(store.load, session_id).pending] == [event_id]
+    assert [p["event_id"] for p in session.pending_messages()] == [event_id]  # not taken back
+    monkeypatch.undo()
+    assert wait_turns(client, session_id, 1, timeout=20)["last_status"]["code"] == "success"
+
+
+def test_a_delete_the_store_did_not_take_is_a_503_and_a_retry_finishes_it(client, monkeypatch):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    store = client.app.state.chat_store
+    monkeypatch.setattr(store, "save", _down)
+    monkeypatch.setattr(store, "delete", _down)
+    response = client.delete(f"/chat/sessions/{session_id}")
+    assert response.status_code == 503 and response.headers["retry-after"] == "1"
+    monkeypatch.undo()
+    assert client.portal.call(store.load, session_id) is not None  # still there, open: it would come back
+    assert client.delete(f"/chat/sessions/{session_id}").json() == {"closed": True}
+    assert client.portal.call(store.load, session_id) is None
+
+
+def test_a_session_this_process_serves_is_never_restored_a_second_time(client, monkeypatch):
+    """The startup retry and a request can both ask: this process renews its own lease, so nothing else stops
+    a second copy."""
+    from timbal.server.chat import _restore_once
+
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    session = client.app.state.chat_sessions[session_id]
+
+    async def never(_cls, *_args, **_kwargs):
+        raise AssertionError("restored a session this process already serves")
+
+    monkeypatch.setattr(ChatSession, "from_store", classmethod(never))
+    app = client.app
+    again = client.portal.call(_restore_once, app, app.state.runnable, app.state.chat_store, session_id)
+    assert again is session
+
+
+OLD_OWNER = "old-host:1:x"  # another host's: alive for as long as its lease has not run out
+
+
+def _seed_leased_session(tmp_path, monkeypatch):
+    """A stored session with a message waiting, leased by a predecessor on another host for a minute: startup
+    skips it however slow the runner is, and retries every 0.1 s. The test ends the old lease when it wants."""
     (tmp_path / "agent.py").write_text(AGENT)
     monkeypatch.setenv("E2E_DIR", str(tmp_path))
     monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
     monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
-    monkeypatch.setattr(SqliteChatSessionStore, "lease_ttl_s", 0.3)
+    monkeypatch.setattr(SqliteChatSessionStore, "lease_ttl_s", 0.3)  # the server's: a retry every 0.1 s
     store = SqliteChatSessionStore(tmp_path / "timbal.db")
+    store.lease_ttl_s = 60.0  # this instance's: how long the predecessor's lease lasts
     message = {
         "id": "m1",
         "text": "hi",
@@ -202,13 +300,52 @@ def test_startup_retries_a_session_whose_old_lease_had_not_run_out(tmp_path, mon
 
     async def seed():
         await store.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None)
-        await store.acquire_lease("s1", "old-host:1:x")  # another host's: alive until it expires
+        await store.acquire_lease("s1", OLD_OWNER)
 
     asyncio.run(seed())
+    return store
+
+
+def _lease_owner(store, session_id):
+    def query(conn):
+        return conn.execute("SELECT lease_owner FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone()
+
+    return asyncio.run(store._run(query))[0]
+
+
+def test_shutdown_waits_for_a_restore_in_flight_and_closes_its_session(tmp_path, monkeypatch):
+    """A restore the cancelled startup retry was waiting for still finishes: its session must be closed with
+    the others (kept, its lease let go), not left running through the shutdown."""
+    store = _seed_leased_session(tmp_path, monkeypatch)
+    real_restore, restored = ChatSession.from_store.__func__, []
+
+    async def slow_restore(cls, *args, **kwargs):
+        session = await real_restore(cls, *args, **kwargs)
+        restored.append(session)
+        await asyncio.sleep(0.5)  # shutdown comes while the restore is still going
+        return session
+
+    monkeypatch.setattr(ChatSession, "from_store", classmethod(slow_restore))
+    with TestClient(create_app()) as client:
+        assert not restored  # skipped at startup
+        client.portal.call(client.app.state.chat_store.release_lease, "s1", OLD_OWNER)  # the old lease ends
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not restored:
+            time.sleep(0.02)
+        assert restored
+    (session,) = restored
+    assert session.closed and session.handed_off
+    assert _lease_owner(store, "s1") is None  # let go for the next process
+
+
+def test_startup_retries_a_session_whose_old_lease_had_not_run_out(tmp_path, monkeypatch):
+    """A replacement starting before its predecessor's lease expires restores the session once it does."""
+    _seed_leased_session(tmp_path, monkeypatch)
     with TestClient(create_app()) as client:
         sessions = client.app.state.chat_sessions
         assert "s1" not in sessions  # skipped at startup: the lease was still live
-        deadline = time.monotonic() + 5
+        client.portal.call(client.app.state.chat_store.release_lease, "s1", OLD_OWNER)  # ...and now it ends
+        deadline = time.monotonic() + 10
         while time.monotonic() < deadline and not (sessions.get("s1") and sessions["s1"].turns == 1):
             time.sleep(0.05)
         assert sessions.get("s1") is not None and sessions["s1"].turns == 1

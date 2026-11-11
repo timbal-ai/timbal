@@ -104,7 +104,12 @@ A run is one turn. A chat session is a conversation that stays open while its tu
 | `GET /chat/sessions/{id}/log?after=&wait_ms=` | The same log as JSON pages, long-polled. |
 | `GET` / `DELETE /chat/sessions/{id}` | State (`busy`, `parked`, `head`, `pending`, pending approvals while parked) / close. |
 
-On a durable session a `201` / `202` means the change is stored and survives a restart. When the store fails, the route answers `503`: with `Retry-After` when it took the change back first (a message or wake no turn has taken yet, answers no turn has used, a session never opened), so a retry cannot run it twice; without it when a turn already has the change (it runs, but would not survive a restart: do not resend). `409` when another process took the session meanwhile.
+On a durable session a `201` / `202` means the change is stored and survives a restart. When the store fails, the route answers `503`:
+
+- **with `Retry-After`** when the store holds nothing of the change and the route took it back here too (a message or wake no turn has taken yet, answers no turn has used, a session never opened). Nothing was accepted, so a retry cannot run it twice. A message sent with `now` or `interrupt` has not cut the running turn either: the cut happens once the message is stored.
+- **without it** when a turn already has the change (it runs, but would not survive a restart: do not resend), or for `/interrupt` (the turn was interrupted; that state is not stored).
+
+A change the store already holds is acknowledged as usual, even if a later write failed. `DELETE` answers `503` with `Retry-After` when the store could neither mark the session closed nor remove it (it would come back); a retry finishes it. `409` when another process took the session meanwhile.
 
 **Modes** for a message sent while a turn runs (`busy_mode` when the body names none, default `steer`):
 

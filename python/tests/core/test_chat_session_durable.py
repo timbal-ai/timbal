@@ -782,7 +782,8 @@ class TestRestoreSafety:
         async def down(*_args, **_kwargs):
             raise OSError("disk full")
 
-        async with ChatSession(make_agent(provider, Gate(released=True)), session_store=store) as session:
+        agent = make_agent(provider, Gate(released=True))
+        async with ChatSession(agent, session_store=store, collect_window=30) as session:
             monkeypatch.setattr(store, "save", down)
             event = session.send("later", mode="collect")  # held by the collect window: no turn takes it yet
             with pytest.raises(SessionNotStored, match="disk full"):
@@ -923,3 +924,120 @@ class TestRestoreSafety:
             await ChatSession.from_store(other, store, session.id)
         assert calls == ["lease", "load"]
         await store.acquire_lease(session.id, "elsewhere:1:x")  # the failed attempt holds nothing
+
+
+class TestAcknowledgement:
+    """What a caller may tell its client after flush() raised: stored, taken back, or neither."""
+
+    async def test_stored_since_tells_a_stored_change_from_one_the_store_never_got(self, db, monkeypatch):
+        provider, store = db
+
+        async def down(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        agent = make_agent(provider, Gate(released=True))
+        async with ChatSession(agent, session_store=store, collect_window=30) as session:
+            first = session.send("one", mode="collect")
+            stored = session.mark()
+            await session.flush()
+            monkeypatch.setattr(store, "save", down)
+            second = session.send("two", mode="collect")
+            lost = session.mark()
+            with pytest.raises(SessionNotStored):
+                await session.flush()
+            # The first message is in the store; a later change is what failed. Only the second is not.
+            assert session.stored_since(stored) and not session.stored_since(lost)
+            assert [e["id"] for e in (await store.load(session.id)).pending] == [first.id]
+            assert session.withdraw(second.id)
+            monkeypatch.undo()
+            await session.flush()
+            assert [e["id"] for e in (await store.load(session.id)).pending] == [first.id]
+
+    @pytest.mark.parametrize("mode", ["interrupt", "now"])
+    async def test_a_deferred_cut_leaves_the_turn_alone_until_asked(self, db, mode):
+        provider, store = db
+        gate = Gate()
+        async with ChatSession(make_agent(provider, gate), session_store=store) as session:
+            session.send("start")
+            await asyncio.wait_for(gate.entered.wait(), 3)
+            running, context = session.run_id, session._turn_context
+            event = session.send("stop", mode=mode, defer_cut=True)
+            await asyncio.sleep(0.05)
+            assert session.busy and session.run_id == running and not context._cut.is_set()
+            assert session.withdraw(event.id)  # the caller could not store it: nothing was cut
+            assert session.cut_for(event, mode) is False
+            assert session.busy and session.run_id == running and not context._cut.is_set()
+
+            again = session.send("stop", mode=mode, defer_cut=True)
+            assert session.cut_for(again, mode) is True  # stored: now it cuts
+            if mode == "now":
+                assert context._cut.is_set()
+            gate.release.set()
+            if mode == "interrupt":  # the turn is cancelled, the message gets the next one
+                finished = await records(session, "turn_finished", 2)
+                assert finished[0]["status"]["code"] == "cancelled"
+            else:  # 'now' joins the running turn
+                await records(session, "turn_finished", 1)
+            assert root_outputs(session)[-1].output.collect_text() == "echo: stop"
+
+    async def test_a_cut_is_not_applied_to_the_turn_that_took_the_message(self, db):
+        provider, store = db
+        gate = Gate()
+        async with ChatSession(make_agent(provider, gate), session_store=store) as session:
+            event = session.send("start", mode="interrupt", defer_cut=True)
+            await asyncio.wait_for(gate.entered.wait(), 3)  # its own turn runs by the time it is stored
+            assert session.cut_for(event, "interrupt") is False
+            assert session.busy
+            gate.release.set()
+            (finished,) = await records(session, "turn_finished", 1)
+            assert finished["status"]["code"] == "success"
+
+    async def test_a_withdrawn_wake_puts_back_the_one_it_replaced(self, db):
+        provider, store = db
+        async with ChatSession(make_agent(provider, Gate(released=True)), session_store=store) as session:
+            first = session.wake("first", key="k")
+            second = session.wake("second", key="k")
+            assert [wake.id for wake in session._wakes] == [second]
+            assert session.withdraw(second)
+            assert [wake.id for wake in session._wakes] == [first]
+            # One the sender of which never heard back, replaced meanwhile: gone for good once withdrawn.
+            third = session.wake("third", key="k")
+            assert session.withdraw(first) and session.withdraw(third)
+            assert session._wakes == []
+
+    async def test_a_stored_interrupt_message_abandons_the_question_after_a_restart(self, db):
+        """The message is stored before it cuts anything: a restart in between must still apply it."""
+        provider, store = db
+        charge = Charge(released=True)
+        session, _ = await parked(provider, store, charge)
+        session.send("never mind", mode="interrupt", defer_cut=True)  # stored; the process dies before the cut
+        await session.flush()
+        await session.close(keep=True)
+
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        finished = await records(restored, "turn_finished", 2, after=after_restore(restored))
+        assert finished[0]["status"]["code"] == "cancelled"
+        assert root_outputs(restored)[-1].output.collect_text() == "echo: never mind"
+        assert charge.gate.calls == 0
+        await restored.close()
+
+    async def test_work_arriving_during_a_restore_starts_the_worker_afterwards(self, db, monkeypatch):
+        provider, store = db
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        await crash(session)
+        provider.crashed = False
+        real_recover = ChatSession._recover
+
+        async def a_notice_arrives(self, in_flight):
+            result = await real_recover(self, in_flight)
+            self._wakes.clear()  # nothing left but what arrived while the worker was held
+            self._work_arrived()
+            return result
+
+        monkeypatch.setattr(ChatSession, "_recover", a_notice_arrives)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
+        assert restored._worker is not None
+        await restored.close()

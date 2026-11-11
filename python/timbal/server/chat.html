@@ -370,6 +370,7 @@
     m.row.classList.remove("waiting");
     const turn = S.turns[record.run_id];
     if (record.state === "superseded") { m.badge.className = "badge superseded"; m.badge.textContent = "superseded"; return; }
+    if (record.state === "withdrawn") { m.badge.className = "badge superseded"; m.badge.textContent = "not sent"; return; }
     if (!turn) { m.badge.className = "badge"; m.badge.textContent = "delivered"; return; }
     if (turn.eventIds.includes(record.event_id)) {
       m.badge.className = "badge started"; m.badge.textContent = `started turn ${turn.n}`;
@@ -591,6 +592,9 @@
         break;
       case "wake_superseded":
         note("⏰ an older wake with the same key was replaced", "wake");
+        break;
+      case "wake_withdrawn":
+        note("⏰ a wake could not be stored and was taken back", "warn");
         break;
       case "closed":
         note("session closed", "warn");
