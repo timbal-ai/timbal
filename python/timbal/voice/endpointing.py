@@ -33,9 +33,11 @@ import asyncio
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+from .predictive_eou import prediction_is_complete
 
 if TYPE_CHECKING:
     from .vad import SileroVad
@@ -173,6 +175,11 @@ class VadEndpointer:
         # real mic energy (hallucination veto for barge-ins).
         self._recent_speech: deque[float] = deque()
         self._last_frame_at = 0.0
+        # Opt-in during-speech prediction. None keeps the silence-then-score path.
+        self._predictor: Any = None
+        self._resume_pending = False
+        self.last_predictive = False
+        """True when the commit just sent used the short during-speech confirmation."""
 
     _SPEECH_HISTORY_SECS = 3.0
     """How far back :meth:`speech_secs_in_window` can look."""
@@ -197,6 +204,16 @@ class VadEndpointer:
         self._commit = commit
         self._should_commit = should_commit
         self._text_score = text_score
+
+    def attach_predictor(self, predictor: Any) -> None:
+        """Use a during-speech :class:`~timbal.voice.predictive_eou.SpeechEouPredictor`.
+
+        With one attached, a pause is scored as it starts and a confident
+        agreement confirms at ``predictor.eager_silence_secs`` instead of
+        waiting out :attr:`min_delay_secs`. A disagreement keeps this class's
+        normal floor, anchored so the commit does not move earlier.
+        """
+        self._predictor = predictor
 
     async def start(self, *, sample_rate: int) -> None:
         """Load Silero (downloading/instantiating off the event loop) and arm.
@@ -235,27 +252,50 @@ class VadEndpointer:
         for p in probs:
             if p >= self.speech_threshold:
                 self._recent_speech.append(now)
+                leaving_pause = self._silence_run > 0.0
                 self._speech_run += _FRAME_SECS
                 self._silence_run = 0.0
+                if leaving_pause:
+                    self._resume_pending = True
                 # Real resumed speech invalidates a pending endpoint: the user
                 # was not done. (Two-frame debounce; see SPEECH_RESUME_SECS.)
                 if self._speech_run >= self.SPEECH_RESUME_SECS:
                     self._cancel_pending()
+                    if self._resume_pending:
+                        self._resume_pending = False
+                        if self._predictor is not None:
+                            self._predictor.on_speech_resumed()
                 self._utterance_speech += _FRAME_SECS
                 if self._utterance_speech >= self.min_speech_secs:
                     self._utterance_active = True
+                if self._predictor is not None and self._utterance_speech > 0.0:
+                    self._predictor.note_speech()
             else:
                 self._silence_run += _FRAME_SECS
                 self._speech_run = 0.0
+                if (
+                    self._predictor is not None
+                    and self._utterance_active
+                    and self._silence_run >= self._predictor.predict_silence_secs
+                ):
+                    self._predictor.kick_audio()
+                # Predictive mode arms at the short confirmation, while the
+                # caller may still resume. The task itself decides whether
+                # that pause is a turn; an unconfident score waits out the
+                # normal floor. Without a predictor this is stop_silence.
+                arm_at = self.stop_silence_secs
+                if self._predictor is not None:
+                    arm_at = min(arm_at, self._predictor.eager_silence_secs)
+                if self._silence_run >= arm_at and self._utterance_active:
+                    # Consume the utterance: one endpoint attempt per speech-stop.
+                    logger.debug(
+                        "vad_speech_stop",
+                        utterance_secs=round(self._utterance_speech, 2),
+                        predictive=self._predictor is not None and arm_at < self.stop_silence_secs,
+                    )
+                    self._utterance_active = False
+                    self._spawn_pending()
                 if self._silence_run >= self.stop_silence_secs:
-                    if self._utterance_active:
-                        # Consume the utterance: one endpoint attempt per speech-stop.
-                        logger.debug(
-                            "vad_speech_stop",
-                            utterance_secs=round(self._utterance_speech, 2),
-                        )
-                        self._utterance_active = False
-                        self._spawn_pending()
                     # Real silence ends the utterance either way — sub-threshold
                     # blips that never reached min_speech must not accumulate
                     # across separate noises into a phantom utterance.
@@ -308,43 +348,73 @@ class VadEndpointer:
 
     async def _run_endpoint(self) -> None:
         try:
+            self.last_predictive = False
             if not self._should_commit():
                 logger.debug("vad_endpoint_skipped", reason="session_gate")
                 return
             t0 = time.monotonic()
-            p = await self._score()
+            silence_at_arm = self._silence_run
+            signals = None
+            if self._predictor is not None:
+                signals = await self._predictor.signals()
+            early = signals is not None and prediction_is_complete(signals)
             p_text: float | None = None
-            if self._text_score is not None:
-                try:
-                    p_text = await self._text_score()
-                except Exception as e:
-                    logger.warning("vad_text_score_failed", error=str(e))
-                    p_text = None
-            driver = "audio"
-            if p is None:
-                # No audio EOU (text-only detector, or not enough buffered
-                # signal). Size the delay from the text score instead of
-                # skipping: the mapping only needs a P(complete), and refusing
-                # to commit here leaves the turn waiting on the provider's own
-                # debounce — 7.5s on a spoken account number under Nova.
-                if p_text is None:
-                    logger.debug("vad_endpoint_skipped", reason="no_eou_score")
-                    return
-                p, driver = p_text, "text"
-            delay = endpointing_delay(
-                p,
-                min_delay=self.min_delay_secs,
-                max_delay=self.max_delay_secs,
-                curve=self.delay_curve,
-            )
             text_bumped = False
-            # Only a bump when text is the *second* opinion. With text driving,
-            # the incomplete case is already priced into the delay above, and
-            # applying the floor again would double-count it.
-            if driver == "audio" and p_text is not None and p_text < self.TEXT_INCOMPLETE_THRESHOLD:
-                bumped = max(delay, self.text_incomplete_delay_secs)
-                text_bumped = bumped > delay
-                delay = bumped
+            if early:
+                assert signals is not None and signals.p_audio is not None
+                p = signals.p_audio
+                p_text = signals.p_text
+                driver = "predictive"
+                delay = 0.0
+            else:
+                if signals is not None and signals.audio_fresh:
+                    p = signals.p_audio
+                else:
+                    p = await self._score()
+                if signals is not None and signals.text_fresh:
+                    p_text = signals.p_text
+                elif self._text_score is not None:
+                    try:
+                        p_text = await self._text_score()
+                    except Exception as e:
+                        logger.warning("vad_text_score_failed", error=str(e))
+                        p_text = None
+                driver = "audio"
+                if p is None:
+                    # No audio EOU (text-only detector, or not enough buffered
+                    # signal). Size the delay from the text score instead of
+                    # skipping: the mapping only needs a P(complete), and refusing
+                    # to commit here leaves the turn waiting on the provider's own
+                    # debounce — 7.5s on a spoken account number under Nova.
+                    if p_text is None:
+                        logger.debug("vad_endpoint_skipped", reason="no_eou_score")
+                        return
+                    p, driver = p_text, "text"
+                delay = endpointing_delay(
+                    p,
+                    min_delay=self.min_delay_secs,
+                    max_delay=self.max_delay_secs,
+                    curve=self.delay_curve,
+                )
+                # Only a bump when text is the *second* opinion. With text driving,
+                # the incomplete case is already priced into the delay above, and
+                # applying the floor again would double-count it.
+                if driver == "audio" and p_text is not None and p_text < self.TEXT_INCOMPLETE_THRESHOLD:
+                    bumped = max(delay, self.text_incomplete_delay_secs)
+                    text_bumped = bumped > delay
+                    delay = bumped
+            if early:
+                assert self._predictor is not None
+                heard = max(self._silence_run, silence_at_arm + (time.monotonic() - t0))
+                remaining = self._predictor.eager_silence_secs - heard
+            elif self._predictor is not None:
+                # Armed before stop_silence. Count silence already heard, and
+                # the wall time of the score when frames did not advance, so
+                # an unconfident pause still commits at stop + delay.
+                heard = max(self._silence_run, silence_at_arm + (time.monotonic() - t0))
+                remaining = self.stop_silence_secs + delay - heard
+            else:
+                remaining = delay - (time.monotonic() - t0)
             # INFO on purpose: fires once per speech-stop and is the whole
             # observable behaviour of the endpointing fast path.
             logger.info(
@@ -355,8 +425,8 @@ class VadEndpointer:
                 score_ms=round((time.monotonic() - t0) * 1000, 1),
                 p_text=round(p_text, 3) if p_text is not None else None,
                 text_incomplete_bump=text_bumped,
+                predictive=early,
             )
-            remaining = delay - (time.monotonic() - t0)
             if remaining > 0:
                 await asyncio.sleep(remaining)
             if self._closed or not self._should_commit():
@@ -367,7 +437,8 @@ class VadEndpointer:
                 logger.debug("vad_endpoint_skipped", reason="commit_interval")
                 return
             self._last_commit_sent_at = now
-            logger.info("vad_endpoint_commit", p=round(p, 3))
+            self.last_predictive = early
+            logger.info("vad_endpoint_commit", p=round(p, 3), predictive=early)
             await self._commit()
         except asyncio.CancelledError:
             raise
