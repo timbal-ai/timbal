@@ -43,6 +43,7 @@ The stored trace follows the same rule. For an interrupted turn, the agent run's
 - `turn_total_ms`, `llm_total_ms`, and `tts_total_ms`: turn and stage durations.
 - `interrupted`, `heard_bytes`, and `playback_acks_received`: interruption and playback evidence.
 - `filler_spoken` and `filler_count`: whether a latency-masking phrase was spoken. When present, first-audio latency can measure the filler rather than the substantive answer.
+- `hesitations`: how many hesitation sounds the session added to the turn's speech (`voice_config["hesitation"]`): at most one at the start of the turn and one after each tool call. A sound the model wrote itself is not counted. A sound is counted when it is added to the text for the voice, so a turn cut before any audio played can still report one.
 - `event`: true when the turn was started by a session event or an announced background result, not by the caller.
 - `vad_endpointed`: whether Silero endpointing forced the commit.
 - `predictive_endpoint`: whether that commit used a during-speech end-of-turn prediction. It is true only when `vad_endpointed` is also true.

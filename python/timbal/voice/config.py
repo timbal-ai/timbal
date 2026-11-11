@@ -324,6 +324,104 @@ class FillerConfig(BaseModel):
         return [p.strip() for p in v if p.strip()] or None
 
 
+DEFAULT_HESITATION_RATE = 0.15
+"""What ``hesitation=True`` selects."""
+
+HESITATION_OPENER_MAX_CHARS = 24
+HESITATION_OPENERS_MAX = 24
+_HESITATION_OPENER_ENDINGS = (",", "...", "…")
+
+
+def _clean_hesitation_openers(openers: list[str]) -> list[str]:
+    kept: list[str] = []
+    for opener in openers:
+        opener = opener.strip()
+        if not opener:
+            continue
+        if len(opener) > HESITATION_OPENER_MAX_CHARS:
+            raise ValueError(f"a hesitation opener is a sound, at most {HESITATION_OPENER_MAX_CHARS} characters")
+        if not opener[0].isalpha():
+            raise ValueError(f"a hesitation opener must start with a letter: {opener!r}")
+        if not opener.endswith(_HESITATION_OPENER_ENDINGS):
+            # Without it the voice reads the sound as the reply's first word.
+            raise ValueError(f"a hesitation opener must end with a comma or an ellipsis: {opener!r}")
+        if opener not in kept:
+            kept.append(opener)
+    if len(kept) > HESITATION_OPENERS_MAX:
+        raise ValueError(f"at most {HESITATION_OPENERS_MAX} hesitation openers per language")
+    return kept
+
+
+class HesitationConfig(BaseModel):
+    """A hesitation sound at the opening of some replies ("Eh... son diez con sesenta").
+
+    Off unless set. The sound goes into the text sent to the voice and nowhere
+    else: reply deltas, the transcript and the model's memory keep the model's
+    words, and an interrupted reply is cut to the words the caller heard,
+    without the sound. Only the first segment spoken at the start of a turn or
+    after a tool call can get one. Greetings, fillers, idle prompts and fixed
+    fallback lines never do. See :mod:`timbal.voice.hesitation` for the rules.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rate: float = Field(default=DEFAULT_HESITATION_RATE, ge=0.0, le=1.0, allow_inf_nan=False)
+    """Chance that a reply opening gets a sound, from 0 (off) to 1. It applies
+    to openings that can take one: they start with a letter, their first
+    clause has three words or more, and the model has not hesitated on its
+    own. The opening after a hesitated one is always left clean, so the share
+    that gets a sound is at most ``rate``, and ``rate / (1 + rate)`` when
+    every opening of the call can take one: 0.13 for 0.15, every other one
+    for 1."""
+    openers: list[str] | dict[str, list[str]] | None = None
+    """The sounds, written the way the voice should read them and ending with
+    a comma or an ellipsis: ``"eh..."`` pauses longer than ``"eh,"``. A list
+    serves every language. A dict is keyed like ``FillerConfig.phrases``
+    (``"es"``, ``"en"``, region dropped, ``"*"`` for any other). A language
+    without an entry uses ``timbal.voice.hesitation.DEFAULT_OPENERS`` (``es``,
+    ``en``, ``ca``); one that is in neither gets no hesitation. The language
+    is the one the reply is pinned to (``reply_language``, else ``language``).
+    With neither set, or ``reply_language="follow"``, only ``"*"`` or a list
+    is used."""
+    seed: int | None = None
+    """Fix the random draws. Unset draws differently on every call."""
+
+    @field_validator("rate", mode="before")
+    @classmethod
+    def _rate_not_bool(cls, v: Any) -> Any:
+        # ``True`` is an int. A JSON ``true`` must not become 1.0.
+        if isinstance(v, bool):
+            raise ValueError("must be a number, not a boolean")
+        return v
+
+    @field_validator("openers")
+    @classmethod
+    def _clean_openers(cls, v: list[str] | dict[str, list[str]] | None) -> list[str] | dict[str, list[str]] | None:
+        if v is None:
+            return None
+        if isinstance(v, dict):
+            merged: dict[str, list[str]] = {}
+            for k, sounds in v.items():
+                if key := language_key(k):
+                    merged.setdefault(key, []).extend(sounds)
+            cleaned = {k: _clean_hesitation_openers(sounds) for k, sounds in merged.items()}
+            return {k: sounds for k, sounds in cleaned.items() if sounds} or None
+        return _clean_hesitation_openers(v) or None
+
+    @property
+    def enabled(self) -> bool:
+        return self.rate > 0
+
+
+def coerce_hesitation(value: Any) -> Any:
+    """``True`` is :data:`DEFAULT_HESITATION_RATE` and ``False`` is off. Anything else passes through."""
+    if value is True:
+        return {"rate": DEFAULT_HESITATION_RATE}
+    if value is False:
+        return None
+    return value
+
+
 DEFAULT_GREETING_SYSTEM_PROMPT = (
     "You are about to speak first on a live call: the other person has said nothing yet and is "
     "waiting to hear who this is. Reply with ONLY the words to say out loud — one or two short "
@@ -581,6 +679,7 @@ _OPTIONAL_VOICE_BLOCKS = {
     "user_idle": UserIdleConfig,
     "ambient": AmbientAudioConfig,
     "filler": FillerConfig,
+    "hesitation": HesitationConfig,
     "recording": RecordingConfig,
     "events": VoiceEventsConfig,
     "speculative_generation": SpeculativeGeneration,
@@ -799,6 +898,11 @@ class VoiceConfig(BaseModel):
     filler: FillerConfig | None = None
     """Empty/unset → no override. Use ``{"enabled": true}`` to enable default fillers,
     or ``{"enabled": false}`` to explicitly disable inherited fillers."""
+    hesitation: HesitationConfig | None = None
+    """A hesitation sound at the opening of some replies. ``None`` (default),
+    ``False`` and ``{}`` add none. ``True`` is ``{"rate": 0.15}``
+    (:data:`DEFAULT_HESITATION_RATE`). Server-side: a caller hello cannot set
+    it. See :class:`HesitationConfig`."""
     user_idle: UserIdleConfig | None = None
     """None → wait for the user forever. ``{}`` is unset. See :class:`UserIdleConfig`."""
     greeting: GreetingConfig | None = None
@@ -893,6 +997,11 @@ class VoiceConfig(BaseModel):
     @classmethod
     def _coerce_greeting(cls, v: Any) -> Any:
         return coerce_greeting(v)
+
+    @field_validator("hesitation", mode="before")
+    @classmethod
+    def _coerce_hesitation(cls, v: Any) -> Any:
+        return coerce_hesitation(v)
 
     @field_validator("speculative_generation", mode="before")
     @classmethod
