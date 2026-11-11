@@ -410,8 +410,18 @@ async def get_session(request: Request, session_id: str) -> JSONResponse:
 @router.delete("/sessions/{session_id}")
 async def delete_session(request: Request, session_id: str) -> JSONResponse:
     session = await _session(request, session_id)
-    _sessions(request).pop(session_id, None)
-    await session.close()
+    sessions = _sessions(request)
+    try:
+        # In the map until it is closed and gone from the store: a request meanwhile finds it closed (404),
+        # not a gap through which to restore the row that is still there.
+        await session.close()
+        await session.wait_closed()  # a close already going (ownership lost) is this one: wait for its end
+    finally:
+        if sessions.get(session_id) is session:
+            del sessions[session_id]
+    if session.lost:
+        # Another process took it before this copy noticed: nothing was deleted, it goes on there.
+        raise HTTPException(status_code=409, detail=f"Chat session {session_id!r} is served by another process.")
     if session.close_error is not None:
         # Closed here, but the store still holds it as open: the next request would restore it. A retry
         # restores it and deletes again.

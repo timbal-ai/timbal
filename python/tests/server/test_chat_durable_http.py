@@ -351,6 +351,48 @@ def test_startup_retries_a_session_whose_old_lease_had_not_run_out(tmp_path, mon
         assert sessions.get("s1") is not None and sessions["s1"].turns == 1
 
 
+def test_a_session_being_deleted_is_not_restored_meanwhile(client):
+    """Until its row is gone the session stays in the map, closed: a request then is a 404, not a restore of
+    the row that is still there."""
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    session = client.app.state.chat_sessions[session_id]
+
+    async def a_worker_slow_to_stop():
+        async def worker():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(1.0)  # its cleanup: close() waits here, the row still open in the store
+
+        if session._worker is not None:
+            session._worker.cancel()
+        session._worker = asyncio.get_running_loop().create_task(worker())
+
+    client.portal.call(a_worker_slow_to_stop)
+    with ThreadPoolExecutor(1) as pool:
+        deleting = pool.submit(client.delete, f"/chat/sessions/{session_id}")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not session.closed:
+            time.sleep(0.01)
+        assert session.closed
+        assert client.get(f"/chat/sessions/{session_id}").status_code == 404
+        assert deleting.result(10).json() == {"closed": True}
+    assert client.get(f"/chat/sessions/{session_id}").status_code == 404
+    assert session_id not in client.app.state.chat_sessions
+    assert client.portal.call(client.app.state.chat_store.load, session_id) is None
+
+
+def test_deleting_a_session_another_process_took_is_a_409(client):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    store = client.app.state.chat_store
+    client.portal.call(store.release_lease, session_id, PROCESS_OWNER)  # lapsed, before this copy noticed...
+    client.portal.call(store.acquire_lease, session_id, "elsewhere:1:x")  # ...and another worker has it
+    response = client.delete(f"/chat/sessions/{session_id}")
+    assert response.status_code == 409 and "another process" in response.json()["detail"]
+    stored = client.portal.call(store.load, session_id)
+    assert stored is not None and not stored.closed  # it goes on there
+
+
 def test_delete_removes_it_for_good(client):
     session_id = client.post("/chat/sessions", json={}).json()["session_id"]
     assert client.delete(f"/chat/sessions/{session_id}").json() == {"closed": True}

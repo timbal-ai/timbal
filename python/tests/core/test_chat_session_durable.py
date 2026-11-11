@@ -6,7 +6,7 @@ import pytest
 from timbal import Agent, Tool
 from timbal.core.chat_session import ChatSession
 from timbal.core.test_model import TestModel
-from timbal.state import set_call_id, set_parent_call_id, set_run_context
+from timbal.state import RunContext, set_call_id, set_parent_call_id, set_run_context
 from timbal.state.background import forget_idle_background_store
 from timbal.state.chat_store import (
     PROCESS_OWNER,
@@ -634,21 +634,56 @@ class TestRestore:
         assert "Started but not confirmed (each may or may not have run): work({})." in notice
         await restored.close()
 
-    async def test_a_turn_that_died_before_saving_anything_is_queued_again(self, db):
+    async def test_a_turn_that_asked_for_tools_and_left_no_trace_is_not_run_again(self, db):
+        """A provider that saves a run at its end (or in the background) holds nothing of a turn cut mid-tool.
+        The session stored that the model had asked for tools before any ran: the input is not queued again."""
         provider, store = db
         provider.crashed = True  # no trace of the dead turn ever lands
         gate = Gate()
         session = ChatSession(make_agent(provider, gate), session_store=store)
-        sent = session.send("start")
+        session.send("start")
         await asyncio.wait_for(gate.entered.wait(), 3)
+        assert (await store.load(session.id)).in_flight["dispatched"] is True  # stored before the tool ran
         await crash(session)
         provider.crashed = False
+
+        again = Gate(released=True)
+        restored = await ChatSession.from_store(make_agent(provider, again), store, session.id)
+        assert restored.state()["pending"] == []
+        notice = restored._wakes[0].text
+        assert 'It was answering: "start".' in notice and "not recorded before the restart" in notice
+        (started,) = await records(restored, "turn_started", 1, after=restored.log.forgotten_through)
+        assert started["trigger"]["kind"] == "recovery"
+        (finished,) = await records(restored, "turn_finished", 1, after=restored.log.forgotten_through)
+        assert finished["status"]["code"] == "success"
+        assert root_outputs(restored)[0].output.collect_text() == "recovered"
+        assert again.calls == 0  # the tool was not run a second time
+        await restored.close()
+
+    async def test_a_turn_that_died_before_asking_for_a_tool_is_queued_again(self, db):
+        provider, store = db
+        provider.crashed = True  # no trace of the dead turn ever lands
+        thinking = asyncio.Event()
+
+        async def before_the_model() -> None:
+            thinking.set()
+            await asyncio.sleep(30)  # the process dies here: started, the model not called yet
+
+        agent = Agent(
+            name="agent", model=TestModel(handler=handler), pre_hook=before_the_model, tracing_provider=provider
+        )
+        session = ChatSession(agent, session_store=store)
+        sent = session.send("hello")
+        await asyncio.wait_for(thinking.wait(), 3)
+        await crash(session)
+        provider.crashed = False
+        assert "dispatched" not in (await store.load(session.id)).in_flight
 
         restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
         assert [p["event_id"] for p in restored.state()["pending"]] == [sent.id]
         (finished,) = await records(restored, "turn_finished", 1, after=restored.log.forgotten_through)
         assert finished["status"]["code"] == "success"
-        assert root_outputs(restored)[0].output.collect_text() == "done"
+        assert root_outputs(restored)[0].output.collect_text() == "echo: hello"
         await restored.close()
 
     async def test_a_turn_cut_by_shutdown_is_recovered_too(self, db):
@@ -1041,3 +1076,306 @@ class TestAcknowledgement:
         restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
         assert restored._worker is not None
         await restored.close()
+
+
+class TestWriteAheadOfTurns:
+    """A turn runs only once the store holds that it took its input, and its tools only once the store holds
+    that the model asked for some."""
+
+    async def test_a_turn_waits_for_the_store_to_hold_its_start(self, db):
+        provider, store = db
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_store=store, collect_window=0.05)
+        sent = session.send("start", mode="collect")
+        await session.flush()  # acknowledged: stored as pending
+        hold, real_save = asyncio.Event(), store.save
+
+        async def slow_save(snapshot, *, expect_version, owner=None):
+            await hold.wait()  # the write that says a turn took the message is slow
+            return await real_save(snapshot, expect_version=expect_version, owner=owner)
+
+        store.save = slow_save
+        await asyncio.sleep(0.3)  # the collect window is over: the worker took the message
+        stored = await store.load(session.id)
+        assert [e["id"] for e in stored.pending] == [sent.id] and stored.in_flight is None
+        assert gate.calls == 0 and session.turns == 0  # nothing ran: a restart now runs the message once
+        hold.set()
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        stored = await store.load(session.id)
+        assert stored.pending == [] and stored.in_flight["run_id"] == session.run_id
+        gate.release.set()
+        await records(session, "turn_finished", 1)
+        await session.close()
+
+    async def test_a_turn_whose_start_cannot_be_stored_does_not_run_and_is_tried_again(self, db, monkeypatch):
+        import timbal.core.chat_session as chat_session_module
+
+        monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.01)
+        provider, store = db
+        gate = Gate(released=True)
+        session = ChatSession(make_agent(provider, gate), session_store=store, collect_window=0.05)
+        sent = session.send("start", mode="collect")
+        await session.flush()
+        real_save = store.save
+
+        async def down(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        store.save = down
+        failed = await records(session, "turn_failed", 2)
+        assert {f["reason"] for f in failed} == {"not_stored"}
+        assert gate.calls == 0 and session.turns == 0
+        assert [p["event_id"] for p in session.pending_messages()] == [sent.id]  # handed back
+        store.save = real_save  # the store is back: no new message needed
+        (finished,) = await records(session, "turn_finished", 1)
+        assert finished["status"]["code"] == "success" and gate.calls == 1
+        await session.close()
+
+    async def test_answers_to_a_parked_turn_are_kept_when_its_resume_cannot_be_stored(self, db, monkeypatch):
+        import timbal.core.chat_session as chat_session_module
+
+        monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.01)
+        provider, store = db
+        charge = Charge(released=True)
+        session, approval = await parked(provider, store, charge)
+        await session.flush()
+        real_save = store.save
+
+        async def down(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        store.save = down
+        session.resume({approval.approval_id: True})
+        await records(session, "turn_failed", 1)
+        assert charge.gate.calls == 0 and session.parked
+        store.save = real_save
+        finished = await records(session, "turn_finished", 2)
+        assert finished[-1]["status"]["code"] == "success" and charge.gate.calls == 1
+        await session.close()
+
+    async def test_no_tool_runs_before_the_store_holds_that_the_model_asked_for_one(self, db, monkeypatch):
+        import timbal.core.chat_session as chat_session_module
+
+        monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.01)
+        provider, store = db
+        gate = Gate(released=True)
+        session = ChatSession(make_agent(provider, gate), session_store=store)
+        real_save, down = store.save, [True]
+
+        async def save(snapshot, *, expect_version, owner=None):
+            if down and (snapshot.in_flight or {}).get("dispatched"):
+                raise OSError("disk full")  # exactly the write that says tools were asked for
+            return await real_save(snapshot, expect_version=expect_version, owner=owner)
+
+        store.save = save
+        session.send("start")
+        await records(session, "turn_started", 1)
+        await asyncio.sleep(0.2)
+        assert gate.calls == 0 and session.busy  # the model asked for `work`; it is held, not dropped
+        assert not (await store.load(session.id)).in_flight.get("dispatched")
+        down.clear()
+        (finished,) = await records(session, "turn_finished", 1)
+        assert finished["status"]["code"] == "success" and gate.calls == 1
+        await session.close()
+
+    def test_the_notice_for_tool_calls_the_trace_does_not_show(self):
+        from timbal.core.chat_session import _recovery_notice
+
+        notice = _recovery_notice([], [], asked=["pay the invoice"], unrecorded=True)
+        assert 'It was answering: "pay the invoice".' in notice
+        assert "not recorded before the restart" in notice and "No tool call had run yet" not in notice
+        assert "No tool call had run yet." in _recovery_notice([], [])
+
+
+class TestStoredWithTheSession:
+    async def test_an_event_posted_through_the_task_store_is_stored(self, db):
+        provider, store = db
+        async with ChatSession(make_agent(provider, Gate(released=True)), session_store=store) as session:
+            session.persist()
+            await session.flush()
+            event = session.store.post_event("the user opened the billing page", source="client", announce="silent")
+            await session.flush()
+            assert [e["id"] for e in (await store.load(session.id)).pending] == [event.id]
+            await session.close(keep=True)
+            restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
+            assert [e.id for e in restored.store.pending_events()] == [event.id]
+            await restored.close()
+
+    async def test_turn_arguments_come_back_and_those_a_snapshot_cannot_hold_are_asked_for(self, db):
+        provider, store = db
+        agent = make_agent(provider, Gate(released=True))
+        session = ChatSession(agent, session_store=store, max_tokens=37)
+        session.send("hi")
+        await records(session, "turn_finished", 1)
+        await session.close(keep=True)
+        restored = await ChatSession.from_store(agent, store, session.id)
+        assert restored._kwargs == {"max_tokens": 37}
+        restored.send("again")
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        trace = await RunContext(tracing_provider=provider)._get_parent_trace(restored.head)
+        llm = next(span for span in trace.values() if span.path == "agent.llm")
+        assert llm.input["max_tokens"] == 37  # the restored turn ran with it
+        await restored.close()
+
+        def chooser() -> str:
+            return "x"
+
+        other = ChatSession(agent, session_store=store, max_tokens=37, chooser=chooser)
+        other.persist()
+        await other.flush()
+        await other.close(keep=True)
+        with pytest.raises(ValueError, match="chooser"):
+            await ChatSession.from_store(agent, store, other.id)
+        again = await ChatSession.from_store(agent, store, other.id, chooser=chooser)  # the lease was let go
+        assert again._kwargs == {"max_tokens": 37, "chooser": chooser}
+        await again.close()
+
+    async def test_the_stored_wake_survives_replacements_that_were_never_stored(self, db):
+        provider, store = db
+        gate = Gate()
+        async with ChatSession(make_agent(provider, gate), session_store=store) as session:
+            session.send("start")  # busy: wakes wait
+            await asyncio.wait_for(gate.entered.wait(), 3)
+            first = session.wake("first", key="k")
+            await session.flush()
+            real_save = store.save
+
+            async def down(*_args, **_kwargs):
+                raise OSError("disk full")
+
+            for order in ("second-then-third", "third-then-second"):
+                store.save = down
+                second = session.wake("second", key="k")
+                third = session.wake("third", key="k")
+                with pytest.raises(SessionNotStored):
+                    await session.flush()
+                for wake_id in (second, third) if order == "second-then-third" else (third, second):
+                    assert session.withdraw(wake_id)
+                assert [wake.id for wake in session._wakes] == [first], order
+                store.save = real_save
+                await session.flush()
+                assert [wake["id"] for wake in (await store.load(session.id)).wakes] == [first], order
+            gate.release.set()
+
+
+def steering_agent(provider, first, second):
+    """``start`` calls ``first``; a message steered in after it calls ``second``."""
+
+    def model(messages):
+        text = last_user_text(messages)
+        if "cut off by a server restart" in text:
+            return "recovered"
+        results = sum(1 for message in messages if message.role == "tool")
+        if messages[-1].role == "tool":
+            return "done"
+        if "start" in text and not results:
+            return tool_call("first", "call-first")
+        if "also" in text and results == 1:
+            return tool_call("second", "call-second")
+        return f"echo: {text}"
+
+    return Agent(
+        name="agent",
+        model=TestModel(handler=model),
+        tools=[Tool(name="first", handler=first.work), Tool(name="second", handler=second.work)],
+        tracing_provider=provider,
+    )
+
+
+class TestSteeredMessages:
+    """A message steered into a running turn is no longer pending: it stays with the turn in the snapshot."""
+
+    async def _steered_then_crashed(self, provider, store, *, trace_until_steered):
+        first, second = Gate(), Gate()
+        session = ChatSession(steering_agent(provider, first, second), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(first.entered.wait(), 3)
+        if not trace_until_steered:
+            provider.crashed = True  # what is stored of the run from here on never lands
+        also = session.send("also", mode="steer")
+        first.release.set()
+        await asyncio.wait_for(second.entered.wait(), 3)  # the turn took the steered message and went on
+        await session.flush()
+        stored = await store.load(session.id)
+        assert stored.pending == []
+        assert [(e["text"], e.get("steered", False)) for e in stored.in_flight["events"]] == [
+            ("start", False),
+            ("also", True),
+        ]
+        await crash(session)
+        provider.crashed = False
+        return session, also
+
+    async def test_one_the_stored_run_does_not_show_goes_back_in_the_queue(self, db):
+        provider, store = db
+        session, also = await self._steered_then_crashed(provider, store, trace_until_steered=False)
+        agent = steering_agent(provider, Gate(released=True), Gate(released=True))
+        restored = await ChatSession.from_store(agent, store, session.id)
+        assert [p["event_id"] for p in restored.state()["pending"]] == [also.id]
+        started = await records(restored, "turn_started", 2, after=after_restore(restored))
+        await records(restored, "turn_finished", 2, after=after_restore(restored))
+        assert [s["trigger"]["kind"] for s in started] == ["recovery", "user_message"]
+        await restored.close()
+
+    async def test_one_the_stored_run_shows_is_not_answered_twice(self, db):
+        provider, store = db
+        session, _ = await self._steered_then_crashed(provider, store, trace_until_steered=True)
+        agent = steering_agent(provider, Gate(released=True), Gate(released=True))
+        restored = await ChatSession.from_store(agent, store, session.id)
+        assert restored.state()["pending"] == []
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        await restored.close()
+
+    async def test_the_recovery_of_a_run_with_no_trace_is_told_about_it(self, db):
+        provider, store = db
+        provider.crashed = True  # nothing of the run is ever stored
+        session, _ = await self._steered_then_crashed(provider, store, trace_until_steered=True)
+        agent = steering_agent(provider, Gate(released=True), Gate(released=True))
+        restored = await ChatSession.from_store(agent, store, session.id)
+        assert 'It was answering: "start"; "also".' in restored._wakes[0].text
+        assert restored.state()["pending"] == []
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        await restored.close()
+
+    async def test_an_app_event_steered_in_stays_with_the_turn_too(self, db):
+        provider, store = db
+        first, second = Gate(), Gate()
+        session = ChatSession(steering_agent(provider, first, second), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(first.entered.wait(), 3)
+        event = session.store.post_event("also: the invoice was paid elsewhere", lane="next")
+        first.release.set()
+        await asyncio.wait_for(second.entered.wait(), 3)
+        await session.flush()
+        stored = await store.load(session.id)
+        assert stored.pending == []
+        assert [(e["id"], e.get("steered", False)) for e in stored.in_flight["events"]][1:] == [(event.id, True)]
+        second.release.set()
+        await records(session, "turn_finished", 1)
+        await session.close()
+
+
+class TestLeaseRunsOut:
+    async def test_a_session_that_cannot_renew_its_lease_for_a_whole_lease_stops(self, db):
+        """Its lease has run out and another process may hold the session: it must not go on acting."""
+        provider, store = db
+        store.lease_ttl_s = 0.15
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        await session.flush()
+        version = (await store.load(session.id)).version
+
+        async def unreachable(*_args, **_kwargs):
+            raise OSError("store unreachable")
+
+        store.acquire_lease = unreachable
+        for _ in range(100):
+            if session.closed:
+                break
+            await asyncio.sleep(0.02)
+        assert session.closed and session.lost
+        await session.wait_closed()
+        assert not session.busy  # its turn was cut with it
+        assert (await store.load(session.id)).version == version  # and it wrote nothing more

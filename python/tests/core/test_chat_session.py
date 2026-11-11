@@ -770,7 +770,7 @@ class TestRobustness:
         attempts = []
         async with ChatSession(make_agent(Gate())) as session:
 
-            async def broken_pump(_context, _kwargs, followup, trigger, _in_flight):
+            async def broken_pump(_context, _kwargs, followup, trigger, _in_flight, _mark):
                 attempts.append(trigger["kind"])
                 if followup is not None:
                     followup.release()
@@ -795,7 +795,7 @@ class TestRobustness:
         attempts = []
         async with ChatSession(make_agent(Gate())) as session:
 
-            async def broken_pump(_context, _kwargs, followup, trigger, _in_flight):
+            async def broken_pump(_context, _kwargs, followup, trigger, _in_flight, _mark):
                 attempts.append(trigger["kind"])
                 if len(attempts) == 3:
                     session.send("also this")  # new work while the third attempt runs

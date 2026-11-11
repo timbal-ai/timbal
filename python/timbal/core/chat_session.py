@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import math
 import os
 import time
@@ -33,8 +34,8 @@ from ..state.chat_store import (
     SnapshotConflict,
 )
 from ..types.approval import Cancel
-from ..types.content import TextContent
-from ..types.events import OutputEvent
+from ..types.content import TextContent, ToolUseContent
+from ..types.events import OutputEvent, StartEvent
 from ..types.message import RUNTIME_SOURCE, Message
 from .session_scheduler import Followup, SessionScheduler, is_parked, user_batch
 from .tool_policy import ToolPaths as _ToolPaths  # noqa: F401 — re-exported for callers and tests
@@ -99,8 +100,11 @@ class _Wake:
     id: str = field(default_factory=lambda: uuid7(as_type="hex"))  # type: ignore[arg-type]
     kind: str = WAKE_KIND
     trigger: dict[str, Any] | None = None
-    # The pending wakes of the same key this one replaced: put back if it is withdrawn. Not stored.
+    # The pending wakes of the same key this one replaced: put back if it is withdrawn. Not stored. Kept
+    # until this wake is itself stored (``mark``, see ChatSession.stored_since): from then on it is what
+    # a withdrawn replacement of it puts back.
     replaced: list["_Wake"] = field(default_factory=list)
+    mark: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -270,16 +274,50 @@ def _tool_calls(context: RunContext) -> tuple[list[str], list[str]]:
     return completed, unconfirmed
 
 
-def _recovery_notice(completed: list[str], unconfirmed: list[str]) -> str:
+def _recovery_notice(
+    completed: list[str], unconfirmed: list[str], *, asked: list[str] | None = None, unrecorded: bool = False
+) -> str:
+    """``asked``: what the dead turn was answering, when nothing of it is stored (the model cannot read it in
+    the history). ``unrecorded``: it had asked for tool calls the stored trace does not show."""
     lines = [_RECOVERY_HEADER]
+    if asked:
+        lines.append("It was answering: " + "; ".join(json.dumps(_brief(text, 500)) for text in asked) + ".")
     if completed:
         lines.append("Completed before the restart: " + "; ".join(completed) + ".")
     if unconfirmed:
         lines.append("Started but not confirmed (each may or may not have run): " + "; ".join(unconfirmed) + ".")
-    if not completed and not unconfirmed:
+    if unrecorded:
+        lines.append(
+            "It had asked for tool calls that were not recorded before the restart: each may or may not have run."
+        )
+    elif not completed and not unconfirmed:
         lines.append("No tool call had run yet.")
     lines.append(_RECOVERY_ADVICE)
     return "\n".join(lines)
+
+
+def _split_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Turn arguments as a snapshot can hold them, and the names of those it cannot (not JSON: a callable,
+    a model class): :meth:`ChatSession.from_store` asks for these again."""
+    stored, unstored = {}, []
+    for name, value in kwargs.items():
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError):
+            unstored.append(name)
+        else:
+            stored[name] = value
+    return stored, sorted(unstored)
+
+
+def _dispatches(event: Any) -> bool:
+    """Whether a turn's event means work with side effects is about to run: a model call that asks for tools
+    (the agent runs them once this event is consumed), or a tool, step or sub-agent starting without one (a
+    slash command, a resumed approval)."""
+    if isinstance(event, OutputEvent) and event.path.endswith(".llm"):
+        content = getattr(event.output, "content", None) or []
+        return any(isinstance(block, ToolUseContent) and not block.is_server_tool_use for block in content)
+    return isinstance(event, StartEvent) and event.parent_call_id is not None and not event.path.endswith(".llm")
 
 
 class ChatSession:
@@ -375,6 +413,7 @@ class ChatSession:
         self.last_activity = time.monotonic()
         self._agent = agent
         self._kwargs = kwargs
+        self._stored_kwargs, self._unstored_kwargs = _split_kwargs(kwargs)
         self._durability = durability
         self._providers: dict[tuple[type, str], type] = {}
         store = store_for_run(parent_id) if parent_id is not None else None
@@ -418,6 +457,12 @@ class ChatSession:
         self._stored_changes = 0
         # from_store() is still settling the stored state: no turn may start before it is done.
         self._hold_worker = False
+        # Turns in a row the store would not record the start of: they did not run (see _write_ahead).
+        self._store_failures = 0
+        # The restorable events last seen queued: one arriving through the task store is stored at once.
+        self._queued_events: tuple[str, ...] = ()
+        # App and client events still queued that the session follows until a turn takes them (_work_arrived).
+        self._followed_events: set[str] = set()
 
     # -- Public API -------------------------------------------------------------
 
@@ -507,12 +552,16 @@ class ChatSession:
         replaced = [wake for wake in self._wakes if wake.key == key] if key is not None else []
         for old in replaced:
             self._wakes.remove(old)
-            old.replaced = []  # one level: what it replaced is gone for good once it is replaced itself
+            if self.stored_since(old.mark):
+                old.replaced = []  # stored: it is what comes back, and what it replaced is gone for good
+            # Not stored yet (its sender may still be told it was not accepted): it keeps what it replaced,
+            # so the last stored wake of the key survives however many replacements of it fail.
             self._record("wake_superseded", wake_id=old.id, key=key)
         wake = _Wake(text=text, key=key, tool_policy=policy, silent_ok=silent_ok, replaced=replaced)
         self._wakes.append(wake)
         self.last_activity = time.monotonic()
         self._record("wake", wake_id=wake.id, text=text, key=key, tool_policy=_describe_policy(policy))
+        wake.mark = self._changes
         self._work.set()
         self._ensure_worker()
         return wake.id
@@ -549,14 +598,21 @@ class ChatSession:
                 withdrawn = True
             else:
                 # Replaced by a newer wake of its key before its sender knew it was stored: it must not come
-                # back if that one is withdrawn too.
-                for newer in self._wakes:
-                    kept = [old for old in newer.replaced if old.id != work_id]
-                    if len(kept) != len(newer.replaced):
-                        newer.replaced, withdrawn = kept, True
+                # back if that one is withdrawn too. What it had replaced takes its place.
+                withdrawn = self._drop_replaced(self._wakes, work_id)
         if withdrawn:
             self._persist()
         return withdrawn
+
+    def _drop_replaced(self, holders: list[_Wake], wake_id: str) -> bool:
+        for holder in holders:
+            for at, old in enumerate(holder.replaced):
+                if old.id == wake_id:
+                    holder.replaced[at : at + 1] = old.replaced
+                    return True
+            if self._drop_replaced(holder.replaced, wake_id):
+                return True
+        return False
 
     def mark(self) -> int:
         """A point in the session's changes, for :meth:`stored_since`: take it right after making one."""
@@ -667,6 +723,12 @@ class ChatSession:
         return state
 
     @property
+    def lost(self) -> bool:
+        """Another process took the session (its lease, or a newer snapshot): this copy stopped without
+        writing over it, and what it was asked last may not have been stored."""
+        return self._lost
+
+    @property
     def handed_off(self) -> bool:
         """This process no longer serves the session, but its store still holds it: another process took it,
         or it was closed with ``keep``. A server drops such an object and restores the session from the store."""
@@ -740,7 +802,15 @@ class ChatSession:
                 raise ValueError(
                     f"Chat session {session_id!r} belongs to agent {snapshot.agent!r}, not {agent.name!r}."
                 )
-            config = {**snapshot.config, **kwargs}
+            config = dict(snapshot.config)
+            turn_kwargs = config.pop("kwargs", None) or {}
+            missing = sorted(set(config.pop("kwargs_unstored", None) or ()) - set(kwargs))
+            if missing:
+                raise ValueError(
+                    f"Chat session {session_id!r} runs its turns with arguments a snapshot cannot hold "
+                    f"({', '.join(missing)}): pass them to from_store() again."
+                )
+            config = {**turn_kwargs, **config, **kwargs}
             session = cls(agent, parent_id=snapshot.head, session_id=session_id, session_store=session_store, **config)
             # Queuing the stored events would start the worker: not before the dead turn is settled (its recovery
             # goes first, and a turn finishing meanwhile would store a snapshot without it).
@@ -869,10 +939,26 @@ class ChatSession:
 
     def _work_arrived(self) -> None:
         self._work.set()
+        if self.closed:
+            return
+        # An app or client event is queued by the task store (post_event), not by a method of the session.
+        # Task progress is not restored, so it is left alone.
+        restorable = [event for event in self._store.pending_events() if event.task_id is None]
+        for event in restorable:
+            if event.source != "user" and event.id not in self._followed_events:
+                # Followed until a turn takes it: steered into a running one, it stays with that turn.
+                self._followed_events.add(event.id)
+                event.on_settle(self._event_settled)
+        if not self._hold_worker:
+            # Stored like a message, or a restart loses it before the turn it was for. Not while from_store()
+            # settles the stored state (it stores once, at its end).
+            queued = tuple(event.id for event in restorable)
+            if queued != self._queued_events:
+                self._queued_events = queued
+                self._persist()
         # An event or a finished task can be the session's first work: nothing else started the worker.
-        if not self.closed:
-            with contextlib.suppress(RuntimeError):
-                self._ensure_worker()
+        with contextlib.suppress(RuntimeError):
+            self._ensure_worker()
 
     async def _serve(self) -> None:
         try:
@@ -896,6 +982,14 @@ class ChatSession:
         scheduler = self._scheduler
         while not self.closed:
             self._work.clear()
+            if self._store_failures:
+                # The store would not record the last turn's start, so it did not run. Again once the store
+                # may be back (it holds acknowledged work: not only when something new arrives), sooner when
+                # something does (that got stored, or will be refused).
+                delay = _TURN_RETRY_DELAY_S * 2 ** (min(self._store_failures, 8) - 1)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._work.wait(), min(delay, _RESTORE_RETRY_MAX_S))
+                self._work.clear()
             if self._turn_failures >= _MAX_TURN_FAILURES:
                 # The same work failed before it started, time after time (a broken model setup, a store
                 # that is down): try again when new work arrives, not in a loop. The failed attempt handing
@@ -1087,7 +1181,9 @@ class ChatSession:
             # back by recovery (nothing of it stored), or here, below, if this process sees it end first.
             self._in_flight = in_flight
             self._persist()
-            turn = asyncio.get_running_loop().create_task(self._pump(context, kwargs, followup, trigger, in_flight))
+            turn = asyncio.get_running_loop().create_task(
+                self._pump(context, kwargs, followup, trigger, in_flight, self.mark())
+            )
             self._turn, self._turn_context = turn, context
             try:
                 await asyncio.wait({turn})
@@ -1104,7 +1200,21 @@ class ChatSession:
         output = None
         if not turn.cancelled():
             error = turn.exception()
-            if error is not None:
+            if isinstance(error, SessionNotStored):
+                # Its start could not be stored: it did not run (_write_ahead). Its work is handed back (below,
+                # and by _pump), answers to a parked turn included, and the worker tries again.
+                self._store_failures += 1
+                logger.warning("chat_session_turn_not_stored", session_id=self.id, run_id=context.id, error=str(error))
+                self._record(
+                    "turn_failed",
+                    run_id=context.id,
+                    error=str(error),
+                    reason="not_stored",
+                    attempt=self._store_failures,
+                )
+                if resume is not None and self._resume is None and not self.closed:
+                    self._resume = resume
+            elif error is not None:
                 logger.error("chat_session_turn_failed", session_id=self.id, run_id=context.id, error=str(error))
                 self._turn_failures += 1
                 self._record("turn_failed", run_id=context.id, error=str(error), attempt=self._turn_failures)
@@ -1145,14 +1255,23 @@ class ChatSession:
         followup: Followup | None,
         trigger: dict[str, Any],
         in_flight: dict[str, Any],
+        mark: int,
     ) -> OutputEvent | None:
-        """Run one turn on its own task (so it can be cut) and copy its events into the log."""
+        """Run one turn on its own task (so it can be cut) and copy its events into the log.
+
+        Written ahead, on a durable session: the turn does not start before the store holds that it took its
+        input (``mark``), and no tool runs before the store holds that the model asked for some. A restart
+        can then tell a turn that never ran (its input is queued again) from one that may have acted (a
+        read-only recovery turn), whatever the trace provider had saved by then.
+        """
         set_run_context(context)
         set_call_id(None)
         set_parent_call_id(None)
         output: OutputEvent | None = None
         started = False
         try:
+            await self._write_ahead(mark)
+            self._store_failures = 0
             async with aclosing(self._agent(**kwargs)) as stream:
                 async for event in stream:
                     if not started:
@@ -1165,12 +1284,37 @@ class ChatSession:
                         if followup is not None:
                             followup.started(context)
                     self.log.put_nowait(event)
+                    if not in_flight.get("dispatched") and _dispatches(event):
+                        # The agent is suspended at this event: it runs the tools once the next one is asked
+                        # for. Held here until the store has the mark, however long the store takes.
+                        in_flight["dispatched"] = True
+                        self._persist()
+                        await self._write_ahead(self.mark(), wait=True)
                     if isinstance(event, OutputEvent) and event.run_id == context.id and event.parent_call_id is None:
                         output = event
         finally:
             if not started and followup is not None:
                 followup.release()
         return output
+
+    async def _write_ahead(self, mark: int, *, wait: bool = False) -> None:
+        """Return once the store holds the session as of ``mark`` (at once when it is not durable).
+
+        When the store fails: raises :class:`SessionNotStored`, or with ``wait`` keeps trying (the caller is
+        cancelled by an interrupt or a close). :class:`SessionLeased` when another process took the session.
+        """
+        delay = _TURN_RETRY_DELAY_S
+        while self._session_store is not None:
+            try:
+                await self.flush()
+                return
+            except SessionNotStored:
+                if self.stored_since(mark):
+                    return
+                if not wait:
+                    raise
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _RESTORE_RETRY_MAX_S)
 
     # -- Log ----------------------------------------------------------------------
 
@@ -1241,6 +1385,10 @@ class ChatSession:
                 "allow_silence": self.allow_silence,
                 "durability": self._durability,
                 "on_dead_turn": self.on_dead_turn,
+                # The arguments every turn runs with (max_tokens=...): a restored session keeps them. Those a
+                # snapshot cannot hold are named, and from_store() asks for them again.
+                "kwargs": self._stored_kwargs,
+                "kwargs_unstored": self._unstored_kwargs,
             },
             head=self.head,
             turns=self.turns,
@@ -1296,6 +1444,9 @@ class ChatSession:
                 logger.error("chat_session_save_failed", session_id=self.id, error=str(e))
                 return
             self._save_error, self._stored_changes = None, covers
+            for wake in self._wakes:
+                if wake.replaced and wake.mark <= covers:
+                    wake.replaced = []  # stored: withdrawing a later replacement puts this one back
             if not self._leased and not self.closed:
                 try:
                     await store.acquire_lease(self.id, PROCESS_OWNER)
@@ -1308,17 +1459,24 @@ class ChatSession:
     async def _renew_lease(self) -> None:
         store = self._session_store
         assert store is not None
+        renewed = time.monotonic()
         while not self.closed and not self._lost:
             await asyncio.sleep(store.lease_ttl_s / 3)
             if self.closed:
                 return
             try:
                 await store.acquire_lease(self.id, PROCESS_OWNER)
+                renewed = time.monotonic()
             except SessionLeased as e:
                 self._lose(str(e))
                 return
             except Exception as e:
                 logger.warning("chat_session_lease_renewal_failed", session_id=self.id, error=str(e))
+                if time.monotonic() - renewed >= store.lease_ttl_s:
+                    # Not renewed for a whole lease: it has run out, and another process may hold the session
+                    # by now without this one being able to tell. Going on would be two owners acting.
+                    self._lose(f"the lease could not be renewed for {store.lease_ttl_s:g} s: {e}")
+                    return
 
     def _lose(self, reason: str) -> None:
         """Another process serves this session now: stop, without writing over its state."""
@@ -1445,8 +1603,11 @@ class ChatSession:
             self.last_status = _status_dict(root.status)
             self._last_context = context if self._parked else None
             return "finished"
-        if root is None:
-            # Died before its first save: nothing it did is known. Its input goes back in the queue.
+        dispatched = bool(in_flight.get("dispatched"))
+        if root is None and (not dispatched or in_flight.get("resume") is not None):
+            # Nothing of it is stored and it had not asked for a tool (that is stored before any runs, see
+            # _pump): it did nothing. Its input goes back in the queue. A resume is answered again instead
+            # (its approvals stay claimed).
             self._scheduler.head = in_flight.get("parent_id")
             self._restore_events(in_flight.get("events") or [])
             if in_flight.get("wake") is not None:
@@ -1454,12 +1615,39 @@ class ChatSession:
             if in_flight.get("resume") is not None:
                 return self._recover_resume(in_flight, run_id)
             return "requeued"
-        self._scheduler.head = run_id
-        self._parked = False
+        if root is None:
+            # It had asked for tools and no trace of it is stored (a provider that saves at the end of a run,
+            # or in the background): they may have run. Its input is not run again; the recovery turn is told
+            # what it was answering, since no stored run holds it.
+            self._scheduler.head = in_flight.get("parent_id")
+            asked = [event.get("text") or "" for event in in_flight.get("events") or []]
+            if in_flight.get("wake") is not None:
+                asked.append(in_flight["wake"].get("text") or "")
+            notice = _recovery_notice([], [], asked=[text for text in asked if text], unrecorded=True)
+        else:
+            self._scheduler.head = run_id
+            self._parked = False
+            # A message steered into it that its stored memory does not show (saved before it joined) would be
+            # lost with it: back in the queue, for a turn of its own after the recovery.
+            memory = root.memory if isinstance(root.memory, list) else []
+            seen = "\n".join(
+                block.get("text") or ""
+                for message in memory
+                if isinstance(message, dict) and message.get("role") == "user"
+                for block in _blocks(message, "text")
+            )
+            self._restore_events(
+                [
+                    event
+                    for event in in_flight.get("events") or []
+                    if event.get("steered") and (event.get("text") or "") not in seen
+                ]
+            )
+            completed, unconfirmed = _tool_calls(context)
+            # Asked for tools the stored trace does not show (saved before that step): say so, not "none ran".
+            notice = _recovery_notice(completed, unconfirmed, unrecorded=dispatched and not (completed or unconfirmed))
         if self.on_dead_turn == "drop":
             return "dropped"
-        completed, unconfirmed = _tool_calls(context)
-        notice = _recovery_notice(completed, unconfirmed)
         if self.on_dead_turn == "notify":
             # Rides with the next turn: it does not start one.
             self._store.post_event(notice, key=RECOVERY_KIND, announce="silent")
@@ -1480,8 +1668,28 @@ class ChatSession:
     def _watch(self, event: SessionEvent) -> None:
         if self.closed:
             return
-        event.on_settle(
-            lambda settled: self._record(
-                "message_settled", event_id=settled.id, state=settled.state, run_id=settled.run_id
-            )
-        )
+        event.on_settle(self._settled)
+
+    def _settled(self, event: SessionEvent) -> None:
+        self._keep_with_turn(event)
+        self._record("message_settled", event_id=event.id, state=event.state, run_id=event.run_id)
+
+    def _event_settled(self, event: SessionEvent) -> None:
+        self._followed_events.discard(event.id)
+        if self._keep_with_turn(event) and not self.closed:
+            self._persist()
+
+    def _keep_with_turn(self, event: SessionEvent) -> bool:
+        """An event steered into the running turn is no longer pending, and until that run's trace is stored
+        it is nowhere else: kept with the turn (``in_flight.events``), so a restart puts it back or tells the
+        recovery turn about it. False for one the turn started with (already there) or that went elsewhere."""
+        flight = self._in_flight
+        if (
+            event.state != "delivered"
+            or flight is None
+            or event.run_id != flight.get("run_id")
+            or any(taken.get("id") == event.id for taken in flight["events"])
+        ):
+            return False
+        flight["events"].append({**event.to_dict(), "steered": True})
+        return True
