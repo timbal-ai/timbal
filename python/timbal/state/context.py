@@ -4,6 +4,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -26,6 +27,11 @@ def _get_logger():
     import structlog
 
     return structlog.get_logger("timbal.state.context")
+
+
+# What a run without resume values holds. Read-only and shared by every context: a call
+# installs a new mapping (``Runnable._stream``), nothing ever writes into one in place.
+_NO_RESUME_VALUES: MappingProxyType[str, Any] = MappingProxyType({})
 
 
 class _NoDefault:
@@ -228,10 +234,13 @@ class RunContext(BaseModel):
     #       let through on that call's span too (``timbal.core.tool_policy``)
     #   _silence_token: str | None — a root agent whose final answer is exactly this
     #       marks its span ``metadata.silent`` (a turn the runtime started may stay quiet)
-    #   _resume_values: dict — active resume values keyed by id, supplied via
-    #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
-    #       approval gate (value normalized to ``ApprovalResolution``) or a
-    #       suspension_id for a ``suspend()`` call (value is arbitrary).
+    #   _resume_values: read-only mapping — active resume values keyed by id,
+    #       supplied via ``resume=`` to fulfill a paused run. The id is an approval_id
+    #       for an approval gate (value normalized to ``ApprovalResolution``) or a
+    #       suspension_id for a ``suspend()`` call (value is arbitrary). A
+    #       ``MappingProxyType``: the call that brings values installs a new mapping
+    #       and puts the previous one back, so writing into one in place would outlive
+    #       that call (an approval decision staying on the context).
     #   _used_resume_ids: set — resume ids that matched a gate or ``suspend()``
     #       during this run; used to warn about unrecognized resume values.
     #   _invoked_by: dict | None — ``{"run_id", "call_id"}`` of the call whose
@@ -335,7 +344,7 @@ class RunContext(BaseModel):
             # Captured once per run so off-loop emit() can marshal onto it.
             # None until the first Runnable._stream on this context.
             _loop=None,
-            _resume_values={},
+            _resume_values=_NO_RESUME_VALUES,
             _used_resume_ids=set(),
             _invoked_by=None,
             _live_background=0,
