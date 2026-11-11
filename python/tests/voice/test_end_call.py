@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 
+import pytest
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
 from timbal.voice import (
@@ -13,6 +15,7 @@ from timbal.voice import (
     CommitDecision,
     HeuristicTurnDetector,
     SessionStarted,
+    TranscriptEntry,
     TranscriptEvent,
     TurnState,
     VoiceSessionEvent,
@@ -241,4 +244,319 @@ class TestEndCall:
         session, _stt, _tts = _session(_Model())
         await session.close()
         session.end_call()
+        assert session._end_call_task is None
+
+    async def test_grace_off_hangs_up_as_soon_as_the_goodbye_is_heard(self) -> None:
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(
+            _hangs_up_with(GOODBYE),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=0,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Vale, vamos a terminar."))
+        await _until(lambda: GOODBYE in _texts(events))
+        tracker.playing = False
+        await asyncio.wait_for(call, timeout=session.END_CALL_TAIL_SECS + 1.2)
+        assert session.closed
+
+    async def test_grace_silence_then_hangup(self) -> None:
+        tracker = FakePlaybackTracker()
+        grace = 0.45
+        session, stt, _tts = _session(
+            _hangs_up_with(GOODBYE),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=grace,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Vale, vamos a terminar."))
+        await _until(lambda: GOODBYE in _texts(events))
+        tracker.playing = False
+        # Past the playback tail, still inside the confirmation window.
+        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.15)
+        assert not session.closed, "hung up before hangup_grace_secs elapsed"
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+
+    async def test_commit_during_grace_cancels_hangup(self) -> None:
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(
+            _hangs_up_with(GOODBYE, "Dime."),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=1.0,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await _until(lambda: GOODBYE in _texts(events))
+        tracker.playing = False
+        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.2)
+        assert not session.closed, "closed before the retraction could land"
+        await stt.inject(TranscriptEvent(type="committed", text="espera"))
+        await _until(lambda: "Dime." in _texts(events))
+        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.4)
+        assert not session.closed
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
+
+    async def test_partial_during_grace_cancels_without_a_phrase_list(self) -> None:
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(
+            _hangs_up_with(GOODBYE),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=1.2,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Goodbye."))
+        await _until(lambda: GOODBYE in _texts(events))
+        tracker.playing = False
+        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.35)
+        assert not session.closed
+        # Not a configured retraction word — any non-echo speech cancels.
+        await stt.inject(TranscriptEvent(type="partial", text="hold on"))
+        await _until(lambda: session._end_call_task is None)
+        assert not session.closed
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
+
+    async def test_echo_of_the_goodbye_during_grace_still_hangs_up(self) -> None:
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(
+            _hangs_up_with(GOODBYE),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=0.4,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await _until(lambda: GOODBYE in _texts(events))
+        tracker.playing = False
+        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.1)
+        await stt.inject(TranscriptEvent(type="partial", text="hasta luego"))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+
+    async def test_vad_speech_during_grace_cancels_even_after_it_stops(self) -> None:
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(
+            _hangs_up_with(GOODBYE),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=1.2,
+        )
+        endpointer = _FakeEndpointer(speech_secs=0.0)
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        session._endpointer = endpointer  # type: ignore[assignment]
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await _until(lambda: GOODBYE in _texts(events))
+        tracker.playing = False
+        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.35)
+        assert not session.closed
+        endpointer.speech_secs = 0.4
+        await _until(lambda: session._end_call_task is None)
+        assert not session.closed
+        endpointer.speech_secs = 0.0
+        await asyncio.sleep(0.3)
+        assert not session.closed
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
+
+    async def test_tool_grace_overrides_a_session_that_hangs_up_immediately(self) -> None:
+        async def end_call_later() -> str:
+            session = current_voice_session()
+            assert session is not None
+            session.end_call(grace_secs=0.8)
+            return "ok"
+
+        tracker = FakePlaybackTracker()
+        model = _Model(
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="c1", name="end_call_later", input={})],
+                stop_reason="tool_use",
+            ),
+            GOODBYE,
+        )
+        session, stt, _tts = _session(model, tools=[end_call_later], tracker=tracker)
+        assert session.hangup_grace_secs == 0
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await _until(lambda: GOODBYE in _texts(events))
+        tracker.playing = False
+        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.25)
+        assert not session.closed
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+
+    async def test_tool_can_hang_up_immediately_when_the_session_waits(self) -> None:
+        async def end_call_now() -> str:
+            session = current_voice_session()
+            assert session is not None
+            session.end_call(grace_secs=0)
+            return "ok"
+
+        tracker = FakePlaybackTracker()
+        model = _Model(
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="c1", name="end_call_now", input={})],
+                stop_reason="tool_use",
+            ),
+            GOODBYE,
+        )
+        session, stt, _tts = _session(
+            model,
+            tools=[end_call_now],
+            tracker=tracker,
+            hangup_grace_secs=2.0,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await _until(lambda: GOODBYE in _texts(events))
+        tracker.playing = False
+        await asyncio.wait_for(call, timeout=session.END_CALL_TAIL_SECS + 1.2)
+        assert session.closed
+
+    async def test_vad_in_the_unanchored_lookback_does_not_abort_grace(self) -> None:
+        """Energy the 0.5s lookback already holds must not skip the window.
+
+        A short follow-up only fills the anchored window once it has been open
+        for a moment. Aborting on the first unanchored sample used to drop it.
+        """
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        session._end_call_grace_secs = 1.0
+
+        class LengthGated:
+            def speech_secs_in_window(self, window_secs: float) -> float:
+                return 0.2 if window_secs >= 0.12 else 0.0
+
+        session._endpointer = LengthGated()  # type: ignore[assignment]
+        assert await session._end_call_grace(0.0)
+        assert not session.closed
+
+    async def test_pre_grace_vad_still_waits_out_the_window(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.3)
+        session._end_call_grace_secs = 0.3
+
+        class OnlyUnanchored:
+            def speech_secs_in_window(self, window_secs: float) -> float:
+                return 0.4 if window_secs >= 0.45 else 0.0
+
+        session._endpointer = OnlyUnanchored()  # type: ignore[assignment]
+        started = time.monotonic()
+        assert not await session._end_call_grace(0.0)
+        assert time.monotonic() - started >= 0.25
+        assert not session.closed
+
+    def _arm_grace(self, session) -> None:
+        session._end_call_grace_secs = session.hangup_grace_secs
+
+    def test_vad_during_the_playback_tail_is_not_a_retraction(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        self._arm_grace(session)
+        session._endpointer = _FakeEndpointer(speech_secs=0.4)  # type: ignore[assignment]
+        # 0.2s into the 0.4s tail: this energy is leftover goodbye, not a new turn.
+        assert not session._cancel_hangup_for_speech(0.0, time.monotonic() - 0.2)
+
+    def test_vad_that_continues_past_the_tail_cancels(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        self._arm_grace(session)
+        session._endpointer = _FakeEndpointer(speech_secs=0.4)  # type: ignore[assignment]
+        since = time.monotonic() - (session.END_CALL_TAIL_SECS + 0.2)
+        assert session._cancel_hangup_for_speech(0.0, since)
+
+    def test_echo_that_aged_out_of_the_tail_does_not_cancel(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        self._arm_grace(session)
+
+        class AgedOut:
+            def speech_secs_in_window(self, window_secs: float) -> float:
+                # Still inside a 0.5s lookback, gone from a window that starts at the tail.
+                return 0.4 if window_secs >= 0.35 else 0.0
+
+        session._endpointer = AgedOut()  # type: ignore[assignment]
+        since = time.monotonic() - (session.END_CALL_TAIL_SECS + 0.05)
+        assert not session._cancel_hangup_for_speech(0.0, since)
+
+    def test_a_partial_during_the_tail_still_cancels(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        self._arm_grace(session)
+        session._transcript.append(TranscriptEntry(role="assistant", text=GOODBYE))
+        session._endpointer = _FakeEndpointer(speech_secs=0.4)  # type: ignore[assignment]
+        session._latest_partial_text = "hold on"
+        session._last_partial_at = time.monotonic()
+        assert session._cancel_hangup_for_speech(0.0, time.monotonic() - 0.2)
+        session._latest_partial_text = "hasta luego"
+        session._last_partial_at = time.monotonic()
+        assert not session._cancel_hangup_for_speech(0.0, time.monotonic() - 0.2)
+
+    async def test_vad_after_the_goodbye_cancels_without_a_commit(self) -> None:
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(
+            _hangs_up_with(GOODBYE),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=1.2,
+        )
+
+        class LengthGated:
+            def speech_secs_in_window(self, window_secs: float) -> float:
+                return 0.25 if window_secs >= 0.15 else 0.0
+
+            def push(self, _chunk: bytes) -> None:
+                pass
+
+            def notify_committed(self) -> None:
+                pass
+
+            async def close(self) -> None:
+                pass
+
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await _until(lambda: GOODBYE in _texts(events))
+        tracker.playing = False
+        session._endpointer = LengthGated()  # type: ignore[assignment]
+        await _until(lambda: session._end_call_task is None)
+        assert not session.closed
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
+
+    def test_bad_grace_does_not_start_a_hangup(self) -> None:
+        session, _stt, _tts = _session(_Model())
+        with pytest.raises(ValueError):
+            session.end_call(grace_secs=-1)
+        assert session._end_call_task is None
+        with pytest.raises((TypeError, ValueError)):
+            session.end_call(grace_secs=True)  # type: ignore[arg-type]
         assert session._end_call_task is None
