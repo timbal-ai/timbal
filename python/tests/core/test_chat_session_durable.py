@@ -1,6 +1,7 @@
 """Durable chat sessions: the session layer stored ahead of every change, restored after a restart or a crash."""
 
 import asyncio
+import copy
 
 import pytest
 from timbal import Agent, Tool
@@ -132,6 +133,16 @@ async def records(session, kind, count, timeout=5.0, after=0):
     return found
 
 
+async def until(condition, timeout=30.0):
+    """Wait for ``condition()``. The budget is for a slow machine: one where it never holds fails here."""
+
+    async def poll():
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
 async def ended_unsettled(session, timeout=30.0):
     """The turn's run has ended and the session still holds the turn: its trace is not stored yet."""
 
@@ -140,6 +151,19 @@ async def ended_unsettled(session, timeout=30.0):
             await asyncio.sleep(0.005)
 
     await asyncio.wait_for(ended(), timeout)
+
+
+def held_before_its_turn(session) -> asyncio.Event:
+    """Keep the session's worker from taking a turn until the returned event is set: what a test does in
+    between (store its message, break the store) then comes before the turn on any machine."""
+    go, real_admit = asyncio.Event(), session._admit
+
+    async def admit():
+        await go.wait()
+        await real_admit()
+
+    session._admit = admit
+    return go
 
 
 def root_outputs(session):
@@ -369,13 +393,12 @@ class TestEdges:
         await session.flush()
         session._lease_task.cancel()  # this process stalls past its lease...
         await asyncio.sleep(0.2)
+        store.lease_ttl_s = 60  # (the other host's lease must not run out before this one looks, on a slow disk)
         await store.acquire_lease(session.id, "elsewhere:1:x")  # ...and another host takes the session
+        store.lease_ttl_s = 0.15
         version = (await store.load(session.id)).version
         session._lease_task = asyncio.get_running_loop().create_task(session._renew_lease())
-        for _ in range(50):
-            if session.closed:
-                break
-            await asyncio.sleep(0.02)
+        await until(lambda: session.closed)
         assert session.closed and session.state()["durable"] is False
         assert (await store.load(session.id)).version == version  # not written over
 
@@ -392,10 +415,7 @@ class TestEdges:
         await store.acquire_lease(session.id, "elsewhere:1:x")
         version = (await store.load(session.id)).version
         session.wake("ping", key="p")
-        for _ in range(50):
-            if session.closed:
-                break
-            await asyncio.sleep(0.02)
+        await until(lambda: session.closed)
         assert session.closed and session.handed_off
         assert (await store.load(session.id)).version == version  # the new owner's version still stands
 
@@ -438,10 +458,7 @@ class TestEdges:
         foreign.turns = 99
         await store.save(foreign, expect_version=foreign.version)
         session.wake("ping", key="p")
-        for _ in range(50):
-            if session.closed:
-                break
-            await asyncio.sleep(0.02)
+        await until(lambda: session.closed)
         assert session.closed
         assert (await store.load(session.id)).turns == 99
 
@@ -731,10 +748,7 @@ class TestRestore:
 
         session._pump = pump
         session.send("pay")
-        for _ in range(250):
-            if closing:
-                break
-            await asyncio.sleep(0.02)
+        await until(lambda: closing)
         await closing[0]
         stored = await store.load(session.id)
         assert stored.in_flight is None and stored.parked and stored.turns == 1
@@ -942,10 +956,7 @@ class TestRestoreSafety:
 
         session._pump = slow_start
         first = session.send("first")
-        for _ in range(100):
-            if session._in_flight is not None:
-                break
-            await asyncio.sleep(0.01)
+        await until(lambda: session._in_flight is not None)
         session.send("second", mode="followup")
         await session.flush()
         snapshot = await store.load(session.id)
@@ -1187,17 +1198,22 @@ class TestWriteAheadOfTurns:
     async def test_a_turn_waits_for_the_store_to_hold_its_start(self, db):
         provider, store = db
         gate = Gate()
-        session = ChatSession(make_agent(provider, gate), session_store=store, collect_window=0.05)
-        sent = session.send("start", mode="collect")
+        session = ChatSession(make_agent(provider, gate), session_store=store)
+        go = held_before_its_turn(session)
+        sent = session.send("start")
         await session.flush()  # acknowledged: stored as pending
-        hold, real_save = asyncio.Event(), store.save
+        hold, reached, real_save = asyncio.Event(), asyncio.Event(), store.save
 
         async def slow_save(snapshot, *, expect_version, owner=None):
-            await hold.wait()  # the write that says a turn took the message is slow
+            if snapshot.in_flight is not None:  # the write that says a turn took the message is slow
+                reached.set()
+                await hold.wait()
             return await real_save(snapshot, expect_version=expect_version, owner=owner)
 
         store.save = slow_save
-        await asyncio.sleep(0.3)  # the collect window is over: the worker took the message
+        go.set()
+        await asyncio.wait_for(reached.wait(), 30)  # the worker took the message
+        await asyncio.sleep(0.1)  # and nothing goes on while that write is out
         stored = await store.load(session.id)
         assert [e["id"] for e in stored.pending] == [sent.id] and stored.in_flight is None
         assert gate.calls == 0 and session.turns == 0  # nothing ran: a restart now runs the message once
@@ -1215,8 +1231,9 @@ class TestWriteAheadOfTurns:
         monkeypatch.setattr(chat_session_module, "_TURN_RETRY_DELAY_S", 0.01)
         provider, store = db
         gate = Gate(released=True)
-        session = ChatSession(make_agent(provider, gate), session_store=store, collect_window=0.05)
-        sent = session.send("start", mode="collect")
+        session = ChatSession(make_agent(provider, gate), session_store=store)
+        go = held_before_its_turn(session)
+        sent = session.send("start")
         await session.flush()
         real_save = store.save
 
@@ -1224,6 +1241,7 @@ class TestWriteAheadOfTurns:
             raise OSError("disk full")
 
         store.save = down
+        go.set()
         failed = await records(session, "turn_failed", 2)
         assert {f["reason"] for f in failed} == {"not_stored"}
         assert gate.calls == 0 and session.turns == 0
@@ -1279,6 +1297,19 @@ class TestWriteAheadOfTurns:
         (finished,) = await records(session, "turn_finished", 1)
         assert finished["status"]["code"] == "success" and gate.calls == 1
         await session.close()
+
+    async def test_a_snapshot_does_not_change_after_it_was_taken(self, db):
+        """A store may serialize a snapshot after its first await. The turn goes on meanwhile: what is written
+        must be what the save was asked to hold, not a later state (the tool calls the model asked for since)."""
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        taken = {"run_id": "r1", "parent_id": None, "trigger": {"kind": "user_message"}, "events": [], "wake": None}
+        session._in_flight = copy.deepcopy(taken)
+        snapshot = session._snapshot()
+        session._in_flight["dispatched"] = [{"id": "call-1", "name": "work", "input": "{}"}]
+        session._in_flight["events"].append({"id": "later"})
+        session._in_flight["trigger"]["kind"] = "resume"
+        assert snapshot.in_flight == taken
 
     def test_the_notice_for_tool_calls_the_trace_does_not_show(self):
         from timbal.core.chat_session import _recovery_notice
@@ -1489,10 +1520,7 @@ class TestLeaseRunsOut:
             raise OSError("store unreachable")
 
         store.acquire_lease = unreachable
-        for _ in range(100):
-            if session.closed:
-                break
-            await asyncio.sleep(0.02)
+        await until(lambda: session.closed)
         assert session.closed and session.lost
         await session.wait_closed()
         assert not session.busy  # its turn was cut with it
@@ -1563,10 +1591,7 @@ class TestRecordedToolCalls:
 
         session._pump = never_starts
         session.resume({approval.approval_id: True})
-        for _ in range(100):
-            if session._in_flight is not None:
-                break
-            await asyncio.sleep(0.01)
+        await until(lambda: session._in_flight is not None)
         await session.flush()
         assert (await store.load(session.id)).in_flight["resume"] and charge.gate.calls == 0
         await crash(session)
@@ -1977,10 +2002,7 @@ class TestFoundByTheCrashSweeps:
 
         session._pump = pump
         session.send("pay")
-        for _ in range(250):
-            if closing:
-                break
-            await asyncio.sleep(0.02)
+        await until(lambda: closing)
         await closing[0]
         assert taken == [True]
 

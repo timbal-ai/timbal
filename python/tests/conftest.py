@@ -13,6 +13,41 @@ def pytest_configure(config):
     """Configure pytest with global settings."""
     # Load environment variables
     load_dotenv(override=True)
+    if os.environ.get("TIMBAL_TEST_SLOW_IO"):
+        _slow_storage(float(os.environ["TIMBAL_TEST_SLOW_IO"]))
+
+
+def _slow_storage(delay: float) -> None:
+    """Opt-in (``TIMBAL_TEST_SLOW_IO=<seconds>``): every chat-session store read/write and every SQLite/JSONL
+    trace save waits ``delay`` first, like the disk of a loaded CI runner. A test that only passes because
+    storage is fast on the machine it was written on fails here, not on Windows a week later.
+    ``TIMBAL_TEST_SLOW_IO_JITTER=1`` waits a random time in [0, delay] instead (orderings vary too;
+    ``TIMBAL_TEST_SLOW_IO_SEED`` picks the sequence)."""
+    import asyncio
+    import functools
+    import random
+
+    from timbal.state.chat_store import SqliteChatSessionStore
+    from timbal.state.tracing.providers import JsonlTracingProvider, SqliteTracingProvider
+
+    jitter = os.environ.get("TIMBAL_TEST_SLOW_IO_JITTER") == "1"
+    rng = random.Random(int(os.environ.get("TIMBAL_TEST_SLOW_IO_SEED", "0")))
+
+    def slowed(cls, name):
+        real = cls.__dict__[name]
+        inner = real.__func__ if isinstance(real, classmethod) else real
+
+        @functools.wraps(inner)
+        async def wrapped(*args, **kwargs):
+            await asyncio.sleep(rng.uniform(0, delay) if jitter else delay)
+            return await inner(*args, **kwargs)
+
+        setattr(cls, name, classmethod(wrapped) if isinstance(real, classmethod) else wrapped)
+
+    slowed(SqliteChatSessionStore, "save")
+    slowed(SqliteChatSessionStore, "load")
+    slowed(SqliteTracingProvider, "_store")
+    slowed(JsonlTracingProvider, "_store")
 
 
 @pytest.fixture(scope="session")

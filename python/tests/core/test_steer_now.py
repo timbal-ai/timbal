@@ -54,6 +54,16 @@ async def records(session, kind, count, timeout=5.0):
     return found
 
 
+async def until(condition, timeout=30.0):
+    """Wait for ``condition()``. The budget is for a slow machine: one where it never holds fails here."""
+
+    async def poll():
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
 async def memory_of(session):
     events, _ = session.log.peek()
     root = [e for e in events if isinstance(e, OutputEvent) and e.parent_call_id is None and e.path == "agent"][-1]
@@ -158,10 +168,7 @@ class TestToolCut:
             await asyncio.wait_for(probe.started["search"].wait(), 2)
             await asyncio.wait_for(probe.started["charge"].wait(), 2)
             session.send("stop searching", mode="now")
-            for _ in range(50):
-                if "search" in probe.ended:
-                    break
-                await asyncio.sleep(0.02)
+            await until(lambda: "search" in probe.ended)
             assert probe.ended == {"search": "cancelled"}  # cut at once; charge still running
             probe.release.set()
             await records(session, "turn_finished", 1)

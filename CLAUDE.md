@@ -772,6 +772,7 @@ async with OTelExporter(endpoint="http://localhost:4318") as exporter:
 - All async tests use `pytest-asyncio` (mode=AUTO — no `@pytest.mark.asyncio` needed if configured)
 - Use `TestModel` to avoid API calls in unit tests
 - `tmp_path` pytest fixture for file-based provider tests
+- No fixed sleeps or tick counts for "X has happened by now": wait for the state (an event, `until(...)`, `records(...)`), and install a fault before the step it must catch, not in a time window after it. `TIMBAL_TEST_SLOW_IO=0.08 uv run pytest <files>` (`python/tests/conftest.py`; `_JITTER=1`, `_SEED=`) delays every chat-session store read/write and SQLite/JSONL trace save, which is how a slow CI runner breaks such a test: run the session tests under it (also at 0.25 and with jitter) after changing them
 - Test classes group related tests: `TestProviderName`, `TestFeature`
 - `python/tests/guardrails/conftest.py` provides `StreamingTestModel`, which streams real
   `TextDelta`/`ThinkingDelta`/`ToolUse` items through the router — use it whenever a test

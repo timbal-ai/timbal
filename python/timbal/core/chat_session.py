@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import copy
 import functools
 import json
 import math
@@ -1602,7 +1603,9 @@ class ChatSession:
                 "silence": self._last_options.silence,
                 "steer": self._last_options.steer,
             },
-            in_flight=self._in_flight,
+            # A copy: the turn goes on adding to it ("dispatched", "stopped") while a save is out, and a store
+            # that serializes after its first await would write a later state than the one it was handed.
+            in_flight=copy.deepcopy(self._in_flight),
             # Progress of a background task dies with the task (process-local): not worth restoring.
             pending=[event.to_dict() for event in self._store.pending_events() if event.task_id is None],
             wakes=[wake.to_dict() for wake in self._wakes],
