@@ -2039,3 +2039,172 @@ class TestFoundByTheCrashSweeps:
         assert not restored.parked and restored.state().get("pending_approvals") is None
         assert charge.gate.calls == 0  # nothing is left to approve, and the gated tool never ran
         await restored.close()
+
+
+class HeldAtItsEnd(SqliteTracingProvider):
+    """Parks one save of a run that has ended (its last one), so a test can cut the run right there. ``landed``:
+    the write is made first, as when the cut reaches the run while the write is on its way back."""
+
+    hold = False
+    landed = False
+    entered: asyncio.Event | None = None
+
+    @classmethod
+    async def _store(cls, run_context):
+        root = run_context.root_span()
+        if cls.hold and root is not None and root.t1 is not None:
+            cls.hold = False
+            if cls.landed:
+                await super()._store(run_context)
+            cls.entered.set()
+            await asyncio.Event().wait()
+        await super()._store(run_context)
+
+
+class TestAStopThatReachesATurnAtItsEdges:
+    """Found on a slow CI machine, then by stopping the session inside each of its writes (the sweeps): a cut
+    that lands in a run's last save, after it ended on a question, or before a turn has done anything."""
+
+    @staticmethod
+    def held(tmp_path, *, landed=False):
+        provider = HeldAtItsEnd.configured(
+            _path=tmp_path / "timbal.db", hold=True, landed=landed, entered=asyncio.Event()
+        )
+        return provider, SqliteChatSessionStore(tmp_path / "timbal.db")
+
+    @pytest.mark.parametrize("how", ["interrupt()", "an interrupt message"])
+    async def test_in_the_last_save_of_a_run_that_ended_on_a_question(self, tmp_path, how):
+        """The run has ended waiting for an approval and is storing that when the stop cancels it: no OUTPUT
+        reaches the session. It is not a turn that never ran. It ended parked, and the stop is about its
+        question; left as the head with nobody having settled it, the next turn would ask for the approval
+        again, and granting it would run the tool."""
+        provider, store = self.held(tmp_path)
+        charge = Charge(released=True)
+        session = ChatSession(gated_agent(provider, charge), session_store=store)
+        session.send("pay")
+        await asyncio.wait_for(provider.entered.wait(), 5)
+        assert session.busy and not session.parked
+        if how == "interrupt()":
+            assert session.interrupt() is True
+        else:
+            session.send("never mind", mode="interrupt")
+        expected = 2 if how == "interrupt()" else 3  # the parked turn, the one that cancels it (, the message)
+        finished = await records(session, "turn_finished", expected)
+        assert finished[0]["parked"] is True and finished[1]["status"]["code"] == "cancelled"
+        assert [o.status.reason for o in root_outputs(session)][0] == "approval_required"  # its end is in the log
+        assert not session.parked and session.state().get("pending_approvals") is None
+        assert charge.gate.calls == 0
+        if how != "interrupt()":
+            assert root_outputs(session)[-1].output.collect_text() == "echo: never mind"
+        stored = await session._load_run(finished[0]["run_id"])
+        assert stored.root_span().t1 is not None  # the save that was cut was made again
+        await session.close()
+
+    async def test_and_the_process_dies_before_the_turn_is_settled(self, tmp_path):
+        """The stop is stored with the turn when it is taken: the process that restores the session finds a
+        run that ended on a question, and a turn its user had stopped."""
+        provider, store = self.held(tmp_path, landed=True)
+        charge = Charge(released=True)
+        session = ChatSession(gated_agent(provider, charge), session_store=store)
+        real_trace_stored = session._trace_stored
+
+        async def no_further(context):
+            await real_trace_stored(context)
+            await asyncio.Event().wait()  # the process ends before the turn is settled
+
+        session._trace_stored = no_further
+        session.send("pay")
+        await asyncio.wait_for(provider.entered.wait(), 5)
+        assert session.interrupt() is True
+        await session.flush()  # what the route waits for before it says so
+        assert (await store.load(session.id)).in_flight["stopped"] is True
+        await kill(session)
+
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert finished["status"]["code"] == "cancelled"
+        assert not restored.parked and restored.state().get("pending_approvals") is None
+        assert charge.gate.calls == 0
+        await restored.close()
+
+    async def test_before_a_resume_has_used_its_answers(self, db):
+        """The approval was given and the turn that acts on it is cut before it starts: the answers are not
+        used, and the session would be parked on the same question again. The stop came last: abandoned."""
+        provider, store = db
+        charge = Charge(released=True)
+        session, approval = await parked(provider, store, charge)
+        await session.flush()
+        real_save, held, entered = store.save, asyncio.Event(), asyncio.Event()
+
+        async def save(snapshot, **kwargs):
+            if snapshot.in_flight is not None and not entered.is_set():
+                entered.set()
+                await held.wait()  # the turn waits for this write before it starts
+            return await real_save(snapshot, **kwargs)
+
+        store.save = save
+        session.resume({approval.approval_id: True})
+        await asyncio.wait_for(entered.wait(), 5)
+        assert session.interrupt() is True
+        held.set()
+        finished = await records(session, "turn_finished", 2)
+        assert finished[1]["status"]["code"] == "cancelled"
+        assert not session.parked and session.state().get("pending_approvals") is None
+        assert charge.gate.calls == 0
+        await session.close()
+
+    async def test_before_the_turn_has_resolved_its_input(self, db, monkeypatch):
+        """A turn stopped that early stores no memory, and stored no input either: the message it was to
+        answer was gone from the conversation. It is stored as it was given, and the next turn reads it."""
+        provider, store = db
+        seen = []
+
+        def model(messages):
+            seen.append([m.collect_text() for m in messages if m.role == "user"])
+            return handler(messages)
+
+        session = ChatSession(gated_agent(provider, Charge(released=True), model_handler=model), session_store=store)
+        session.send("one")
+        await records(session, "turn_finished", 1)
+        load_session, entered = RunContext.get_session, asyncio.Event()
+
+        async def held_session(ctx, *args, **kwargs):
+            if not entered.is_set():
+                entered.set()
+                await asyncio.Event().wait()
+            return await load_session(ctx, *args, **kwargs)
+
+        monkeypatch.setattr(RunContext, "get_session", held_session)
+        session.send("two")
+        await asyncio.wait_for(entered.wait(), 5)
+        assert session.interrupt() is True
+        finished = await records(session, "turn_finished", 2)
+        assert finished[1]["status"] == {"code": "cancelled", "reason": "interrupted", "message": ""}
+        session.send("three")
+        await records(session, "turn_finished", 3)
+        assert seen[-1] == ["one", "two", "three"]
+        await session.close()
+
+    async def test_before_the_turns_task_has_run_at_all(self, db):
+        """The stop lands between the turn's task being created and its first step: none of its code runs, its
+        own cleanup included. The message it had taken goes back in the queue, as for any turn that never
+        started; it used to be gone."""
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        real_pump, taken = session._pump, []
+
+        def pump(*args, **kwargs):
+            turn = real_pump(*args, **kwargs)
+            if not taken:
+                # Queued ahead of the first step of the task this coroutine is about to be wrapped in.
+                taken.append(None)
+                asyncio.get_running_loop().call_soon(lambda: taken.__setitem__(0, session.interrupt()))
+            return turn
+
+        session._pump = pump
+        session.send("hello")
+        finished = await records(session, "turn_finished", 1)
+        assert taken == [True]
+        assert finished[0]["status"]["code"] == "success"
+        assert root_outputs(session)[-1].output.collect_text() == "echo: hello"
+        await session.close()

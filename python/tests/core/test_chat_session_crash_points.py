@@ -29,6 +29,7 @@ import contextlib
 
 import pytest
 from timbal import Agent, Tool
+from timbal.core.agent import _is_pause
 from timbal.core.chat_session import ChatSession
 from timbal.core.test_model import TestModel
 from timbal.state import background, set_call_id, set_parent_call_id, set_run_context, suspend
@@ -66,6 +67,8 @@ class Fault:
     - ``"close"``: the process shuts down in order from there (``close(keep=True)``); its writes land.
     - ``"store"`` / ``"trace"``: that store fails for ``length`` writes, and the process lives on.
     - ``"taken"``: another process takes the session over just before that write to the session store.
+    - ``"stop"``: the user stops the session (``interrupt()``) just as that write is made, from inside it: a
+      trace save is cut where it stands, which no amount of waiting in a scenario hits on purpose.
 
     ``then=(kind, after)``: an outage that the process does not outlive. It dies (``"die"``) or shuts down
     (``"close"``) ``after`` writes into it.
@@ -79,12 +82,15 @@ class Fault:
         self.closing: asyncio.Future | None = None
         self.taken: int | None = None  # the version the other process left the row at
         self.session = None
+        self.stop = None  # what a "stop" fault calls: the client's stop()
 
     def write(self) -> bool:
         """Count a write. False: the process is dead (the caller stops with its task)."""
         if self.dead:
             return False
         self.writes += 1
+        if self.kind == "stop" and self.writes - 1 == self.at and self.stop is not None:
+            self.stop()
         if self.at is not None and self.writes > self.at and not self.gone.is_set():
             kind = self.kind
             if self.then is not None and self.writes > self.at + self.then[1]:
@@ -331,6 +337,8 @@ class Client:
         self.acked: dict[str, str] = {}  # event id -> text
         self.acked_wakes: list[str] = []
         self.must_not_run: set[str] = set()  # tools an acknowledged stop has ruled out
+        self.approved = False  # the client has said yes to what the session asked
+        fault.stop = self.stop
 
     async def stored(self) -> bool:
         """``session.flush()`` as a route awaits it. False: the process died first, or the store refused."""
@@ -360,6 +368,16 @@ class Client:
             if self._alive():
                 self.session.withdraw(event.id)  # as the route does before its 503
         return False
+
+    def stop(self) -> None:
+        """Stop the session as ``POST .../interrupt`` does. Once a turn has started (a message no turn has
+        taken yet is still queued, and a stop leaves the queue alone), a stop that is taken rules out the
+        gated tool, unless its user has already said yes to it: that call is on its way, and a stop that
+        arrives while it is being started may find it started."""
+        session = self.session
+        if self._alive() and session.turns and self.calls["charge"] == 0 and session.interrupt():
+            if not self.approved:
+                self.must_not_run.add("charge")
 
     async def wake(self, text, key=None) -> None:
         if not self._alive():
@@ -402,6 +420,7 @@ class Client:
         if not values or not self._alive():
             return False
         with contextlib.suppress(RuntimeError, ValueError):
+            self.approved = True
             self.session.resume(values)
             mark = self.session.mark()
             if not (await self.stored() or not self._alive() or self.session.stored_since(mark)):
@@ -562,11 +581,26 @@ SCENARIOS = {
 
 
 async def history(session):
-    context = await session._load_run(session.head)
-    root = context.root_span() if context is not None else None
-    return [
-        m for m in (root.memory if root is not None and isinstance(root.memory, list) else []) if isinstance(m, dict)
-    ]
+    """The conversation as the next turn will read it: the head run's memory, or, when that run was cut before
+    it assembled one, the memory of the last run that did, continued with the prompts of the cut ones by the
+    agent's own rule (``Agent._previous_memory``: a run that continues a paused one adds no prompt)."""
+    cut, memory, status, run_id = [], [], None, session.head
+    while run_id is not None:
+        context = await session._load_run(run_id)
+        root = context.root_span() if context is not None else None
+        if root is None:
+            break
+        if isinstance(root.memory, list):
+            memory, status = [m for m in root.memory if isinstance(m, dict)], root.status
+            break
+        cut.append(root)
+        run_id = context.parent_id
+    for root in reversed(cut):
+        prompt = root.input.get("prompt") if isinstance(root.input, dict) else None
+        if isinstance(prompt, dict) and not _is_pause(status):
+            memory.append(prompt)
+        status = root.status
+    return memory
 
 
 def texts(message):
@@ -745,6 +779,15 @@ async def test_a_second_crash_during_the_recovery_loses_and_repeats_nothing(tmp_
             except AssertionError as error:
                 failures.append(str(error).splitlines()[0])
     assert not failures, f"{len(failures)} of {points} double crash points:\n" + "\n".join(failures)
+
+
+@pytest.mark.parametrize("durability", ["sync", "end"])
+@pytest.mark.parametrize("scenario", sorted(SCENARIOS))
+async def test_a_stop_at_any_write_holds_and_loses_nothing(tmp_path, scenario, durability):
+    """The user stops the session at each of its writes, from inside the write: the cut reaches a turn in the
+    middle of a save (its last one, when it has just ended on a question), or one that is only starting."""
+    failures, points = await sweep(tmp_path, scenario, durability, "stop")
+    assert not failures, f"{len(failures)} of {points} stops:\n" + "\n".join(failures)
 
 
 @pytest.mark.parametrize("end", ["die", "close"])

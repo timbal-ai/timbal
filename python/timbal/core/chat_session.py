@@ -247,6 +247,31 @@ def _ended_by_itself(turn: asyncio.Task) -> bool:
     return output is not None and not _was_cut(output.status)
 
 
+def _ended_output(context: RunContext) -> OutputEvent | None:
+    """The outcome of a run that ended without its OUTPUT reaching the caller: the root span is closed just
+    before the run's last save, and the event is sent after it. None for a run that had not ended."""
+    root = context.root_span()
+    if root is None or root.t1 is None:
+        return None
+    output = OutputEvent(
+        run_id=context.id,
+        parent_run_id=context.parent_id,
+        path=root.path,
+        call_id=root.call_id,
+        parent_call_id=root.parent_call_id,
+        input=root.input,
+        status=root.status,
+        output=root.output,
+        error=root.error,
+        t0=root.t0,
+        t1=root.t1,
+        usage=dict(root.usage),
+        metadata=root.metadata,
+    )
+    output._input_dump, output._output_dump = root._input_dump, root._output_dump
+    return output
+
+
 def _ended_parked(turn: asyncio.Task) -> bool:
     """A turn's task whose run ended waiting on an approval or a question."""
     return _ended_by_itself(turn) and is_parked(turn.result().status)
@@ -472,6 +497,7 @@ class ChatSession:
         self._restore_from = parent_id
         self._restoring: asyncio.Task | None = None
         self._interrupt_on_restore = False
+        self._save_cut = False
         # Durable sessions (session_store=): a snapshot written ahead of every change.
         self._session_store = session_store
         self._version: int | None = None
@@ -687,6 +713,12 @@ class ChatSession:
         turn = self._turn
         if turn is not None and not turn.done():
             self._record("interrupt", run_id=self.run_id)
+            if self._in_flight is not None:
+                # Kept with the turn: the cut may reach a run that has just ended on a question (during its
+                # last save), or a resume that never got to use its answers. Either leaves the session
+                # parked, and the stop then means that question (_run_turn, or _recover after a restart).
+                self._in_flight["stopped"] = True
+                self._persist()
             turn.cancel()
             return True
         reason = "The user moved on before answering."
@@ -1296,9 +1328,19 @@ class ChatSession:
         finally:
             self._turn = None
             scheduler.turn_finished()
-            if turn is None and followup is not None:
+            if followup is not None:
+                # Handed back unless a run started with it (then this does nothing). Here as well as in the
+                # turn's own task: one cancelled before its first step never runs any of its code.
                 followup.release()
         self._settle_turn(turn, context, resume, wake)
+        if in_flight.get("stopped") and self.parked and self._last_context is not None:
+            # The stop was taken while this turn ran, and the session is parked all the same: the run had
+            # just ended on a question when the cut reached it, or it was a resume cut before it used its
+            # answers. The stop is about that question now, as it is on a parked session.
+            pending = self._cancel_pending(self._last_context, "The user moved on before answering.")
+            if pending:
+                self._record("interrupt", run_id=self._last_context.id, abandoned=pending)
+                self._persist()
         if stopping:
             raise asyncio.CancelledError
 
@@ -1397,6 +1439,19 @@ class ChatSession:
                     self.log.put_nowait(event)
                     if isinstance(event, OutputEvent) and event.run_id == context.id and event.parent_call_id is None:
                         output = event
+        except asyncio.CancelledError:
+            # Cut (an interrupt, a close) when the run was already over: right after its OUTPUT, or during
+            # its last save, before the event was sent. It ended as its root span says, not as a turn that
+            # never ran: taken for one, its run would stay the head with nobody having settled it, and the
+            # next turn would pick up the tool calls it left waiting (a question its user had just stopped).
+            if output is None and started:
+                output = _ended_output(context)
+                if output is not None:
+                    self._save_cut = True
+                    context.__dict__["_trace_unsaved"] = True  # until _trace_stored has saved it again
+                    self.log.put_nowait(output)
+            if output is None:
+                raise
         finally:
             if not started and followup is not None:
                 followup.release()
@@ -1412,6 +1467,10 @@ class ChatSession:
         wait (it runs on the worker): an interrupt has nothing to cut in a turn that has ended.
         """
         delay = _TURN_RETRY_DELAY_S
+        if self._save_cut:
+            # The run's own last save was cut, not refused: again at once.
+            self._save_cut = False
+            await context._save_trace(barrier=True)
         while context.__dict__.get("_trace_unsaved"):
             logger.warning("chat_session_trace_not_stored", session_id=self.id, run_id=context.id)
             await asyncio.sleep(delay)
@@ -1737,6 +1796,9 @@ class ChatSession:
             self._parked = is_parked(root.status)
             self.last_status = _status_dict(root.status)
             self._last_context = context if self._parked else None
+            if self._parked and in_flight.get("stopped"):
+                # Its user stopped it as it ended on this question (interrupt() said so): abandoned.
+                self._cancel_pending(context, "The user moved on before answering.")
             # The snapshots that said it took them (a steered message, most of all) may never have been
             # written: what its memory shows is not pending any more.
             self._shown_events = _shown_events(root)

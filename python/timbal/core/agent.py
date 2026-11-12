@@ -127,6 +127,11 @@ DEFAULT_STEER_BLOCKED_NOTICE = (
 """Runtime message that stands in for a steered user message an input guardrail blocked."""
 
 DEFAULT_STEERED_TOOL_RESULT = "[Interrupted] Stopped before it finished: the user sent a new message."
+# For a call of an interrupted batch that has no result at all: nobody saw how it ended.
+INTERRUPTED_TOOL_RESULT = (
+    "[Interrupted] The turn was cut before this call's result was recorded. It may have run: "
+    "check before running it again."
+)
 """Tool result for a call a 'now' message cut (``ChatSession.send(mode="now")``)."""
 # How long a 'now' cut waits before taking the messages, so a burst of them becomes one cut.
 NOW_COALESCE_SECS = 0.25
@@ -1050,6 +1055,33 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         }
                     )
                 )
+        # A batch cut when only some of its calls had a result (a "now" cut answers the calls still running
+        # and waits for the ones finishing; results of a resumed batch are recorded one by one): the tool_use
+        # message is not the last one, and the rest of its calls have nothing. Left so, this turn would take
+        # them for calls waiting to be run (_find_pending_tool_uses) and run them, a second time for one that
+        # had finished when the cut came. They are answered here, next to the results that were recorded.
+        unanswered = self._find_pending_tool_uses(memory)
+        if unanswered:
+            asked = max(
+                i
+                for i, message in enumerate(memory)
+                if message.role == "assistant" and any(c is unanswered[0] for c in message.content)
+            )
+            after = asked + 1
+            while after < len(memory) and memory[after].role == "tool":
+                after += 1
+            memory.insert(
+                after,
+                Message.validate(
+                    {
+                        "role": "tool",
+                        "content": [
+                            {"type": "tool_result", "id": call.id, "content": INTERRUPTED_TOOL_RESULT}
+                            for call in unanswered
+                        ],
+                    }
+                ),
+            )
 
     async def resolve_memory(self) -> None:
         """Resolve conversation memory from previous agent trace."""
