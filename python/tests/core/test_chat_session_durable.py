@@ -132,6 +132,16 @@ async def records(session, kind, count, timeout=5.0, after=0):
     return found
 
 
+async def ended_unsettled(session, timeout=30.0):
+    """The turn's run has ended and the session still holds the turn: its trace is not stored yet."""
+
+    async def ended():
+        while session._turn is None or not session._turn.done():
+            await asyncio.sleep(0.005)
+
+    await asyncio.wait_for(ended(), timeout)
+
+
 def root_outputs(session):
     return [
         event
@@ -1889,7 +1899,7 @@ class TestFoundByTheCrashSweeps:
         session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
         session.send("hi")
         await records(session, "turn_started", 1)
-        await asyncio.sleep(0.2)  # the turn has ended; its last save keeps failing
+        await ended_unsettled(session)  # the turn has ended; its last save keeps failing
         if how == "interrupt()":
             assert session.interrupt() is False  # nothing to cut, and it left no question
         else:
@@ -1933,7 +1943,7 @@ class TestFoundByTheCrashSweeps:
         session = ChatSession(gated_agent(provider, charge), session_store=store)
         session.send("pay")
         await records(session, "turn_started", 1)
-        await asyncio.sleep(0.2)  # the turn has ended on the approval; its last save keeps failing
+        await ended_unsettled(session)  # the turn has ended on the approval; its last save keeps failing
         assert session.busy and not session.parked
         if how == "interrupt()":
             assert session.interrupt() is True
@@ -2012,7 +2022,7 @@ class TestFoundByTheCrashSweeps:
         session._trace_stored = stored_and_no_further
         session.send("pay")
         await records(session, "turn_started", 1)
-        await asyncio.sleep(0.2)  # the turn has ended on the approval; its last save keeps failing
+        await ended_unsettled(session)  # the turn has ended on the approval; its last save keeps failing
         run_id = session.run_id
         assert session.interrupt() is True
         await session.flush()  # what the route waits for before it says so

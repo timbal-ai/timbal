@@ -1070,18 +1070,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             after = asked + 1
             while after < len(memory) and memory[after].role == "tool":
                 after += 1
-            memory.insert(
-                after,
+            # One message per call, as results are recorded: Chat Completions sends one result per tool message.
+            memory[after:after] = [
                 Message.validate(
                     {
                         "role": "tool",
-                        "content": [
-                            {"type": "tool_result", "id": call.id, "content": INTERRUPTED_TOOL_RESULT}
-                            for call in unanswered
-                        ],
+                        "content": [{"type": "tool_result", "id": call.id, "content": INTERRUPTED_TOOL_RESULT}],
                     }
-                ),
-            )
+                )
+                for call in unanswered
+            ]
 
     async def resolve_memory(self) -> None:
         """Resolve conversation memory from previous agent trace."""
