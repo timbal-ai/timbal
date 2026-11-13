@@ -198,17 +198,46 @@ def test_a_graceful_restart_keeps_queued_messages(workdir):
         server.stop()
 
 
-def test_two_workers_on_one_file_never_run_a_session_twice(workdir):
+SLOW_AGENT = AGENT.replace(
+    'tracing_provider=SqliteTracingProvider.configured(_path=DIR / "timbal.db"),',
+    'tracing_provider=SlowSaves.configured(_path=DIR / "timbal.db"),',
+).replace(
+    "agent = Agent(",
+    textwrap.dedent(
+        """
+        class SlowSaves(SqliteTracingProvider):
+            @classmethod
+            async def _store(cls, run_context):
+                await asyncio.sleep(0.2)
+                await super()._store(run_context)
+
+        agent = Agent("""
+    ),
+    1,
+)
+
+
+@pytest.mark.parametrize("busy_mode", ["followup", "steer"])
+def test_two_workers_on_one_file_never_run_a_session_twice(workdir, busy_mode):
     """A request that reaches the worker not serving the session gets a 409 (another live process holds it),
-    never a second copy of the session: one turn per message, whichever worker took it."""
-    server = Server(workdir, workers=2).start()
+    never a second copy of the session: every accepted message is delivered once, whichever worker took it.
+
+    ``followup`` gives each message a turn of its own, so the turn count must match exactly. Under ``steer`` (the
+    server's default) a message that arrives while a turn runs joins it, so turns can only be fewer."""
+    # Slow trace saves keep each turn running while the next message arrives, so ``steer`` really folds them.
+    (workdir / "slow_agent.py").write_text(SLOW_AGENT)
+    server = Server(workdir, workers=2, agent_file="slow_agent.py").start()
     try:
-        session_id = httpx.post(f"{server.url}/chat/sessions", json={}).json()["session_id"]
+        session_id = httpx.post(f"{server.url}/chat/sessions", json={"busy_mode": busy_mode}).json()["session_id"]
+        base = f"{server.url}/chat/sessions/{session_id}"
         codes = []
+        accepted_ids = []
 
         def send():
-            response = httpx.post(f"{server.url}/chat/sessions/{session_id}/messages", json={"text": f"m{len(codes)}"})
+            response = httpx.post(f"{base}/messages", json={"text": f"m{len(codes)}"})
             codes.append(response.status_code)
+            if response.status_code == 202:
+                accepted_ids.append(response.json()["message"]["event_id"])
             return response.status_code
 
         for _ in range(12):
@@ -218,17 +247,40 @@ def test_two_workers_on_one_file_never_run_a_session_twice(workdir):
         until(lambda: 202 in codes or send() == 202, timeout=30, what="a message to reach the session's worker")
         assert set(codes) <= {202, 409}
         accepted = codes.count(202)
+        assert len(accepted_ids) == accepted
 
-        def settled():
-            for _ in range(10):
-                response = httpx.get(f"{server.url}/chat/sessions/{session_id}")
+        def from_the_session_worker(path, **params):
+            for _ in range(10):  # the other worker answers 409
+                response = httpx.get(f"{base}{path}", params=params)
                 if response.status_code == 200:
-                    state = response.json()
-                    return state if state["turns"] == accepted and not state["busy"] and not state["pending"] else None
+                    return response.json()
             return None
 
-        state = until(settled, what="every accepted message to run once")
-        assert state["turns"] == accepted
+        def idle():
+            state = from_the_session_worker("")
+            return state if state and not state["busy"] and not state["pending"] else None
+
+        def delivered():
+            log = from_the_session_worker("/log", after=0)
+            if log is None:
+                return None
+            ids = [
+                e["data"]["event_id"]
+                for e in log["events"]
+                if isinstance(e["data"], dict)
+                and e["data"].get("kind") == "message_settled"
+                and e["data"].get("state") == "delivered"
+            ]
+            return ids if len(ids) >= accepted else None
+
+        state = until(idle, what="the session to go idle")
+        ids = until(delivered, what="every accepted message to be delivered")
+        assert sorted(ids) == sorted(accepted_ids)  # each once: none lost, none run twice
+        state = from_the_session_worker("")
+        if busy_mode == "followup":
+            assert state["turns"] == accepted
+        else:
+            assert 1 <= state["turns"] <= accepted
     finally:
         server.stop()
 
