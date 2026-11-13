@@ -34,6 +34,7 @@ from ..state.chat_store import (
     SessionSnapshot,
     SnapshotConflict,
     process_owner,
+    storable,
 )
 from ..types.approval import ApprovalResolution, Cancel
 from ..types.content import TextContent
@@ -125,7 +126,7 @@ class _Wake:
             text=data["text"],
             key=data.get("key"),
             tool_policy=_load_policy(data.get("tool_policy")),
-            silent_ok=data.get("silent_ok", True),
+            silent_ok=bool(data.get("silent_ok", True)),
             id=data["id"],
             kind=data.get("kind", WAKE_KIND),
             trigger=data.get("trigger"),
@@ -214,17 +215,20 @@ def _dump_prompt(prompt: Any) -> Any:
         return prompt
     try:
         dumped = _dump_sync(prompt)
-        json.dumps(dumped)
-        return dumped
     except (_NeedsAsync, TypeError, ValueError):
-        if isinstance(prompt, Message):
-            role, text = prompt.role, prompt.collect_text()
-        elif isinstance(prompt, dict):
-            role = prompt.get("role") if isinstance(prompt.get("role"), str) else "user"
-            text = "".join(block.get("text") or "" for block in _blocks(prompt, "text"))
-        else:
-            role, text = "user", str(prompt)
-        return {"role": role, "content": [{"type": "text", "text": text}]}
+        dumped = None
+    # `storable`: the snapshot's own encoder, so what passes here cannot fail the write (NaN in a caller's
+    # metadata passes a plain json.dumps and would then fail every save of the session, not only this one).
+    if dumped is not None and storable(dumped):
+        return dumped
+    if isinstance(prompt, Message):
+        role, text = prompt.role, prompt.collect_text()
+    elif isinstance(prompt, dict):
+        role = prompt.get("role") if isinstance(prompt.get("role"), str) else "user"
+        text = "".join(block["text"] for block in _blocks(prompt, "text") if isinstance(block.get("text"), str))
+    else:
+        role, text = "user", str(prompt)
+    return {"role": role, "content": [{"type": "text", "text": text}]}
 
 
 def _load_prompt(stored: Any) -> Any:
@@ -249,8 +253,8 @@ def _stored_answer(value: Any) -> Any:
     try:
         # allow_nan=False: NaN and Infinity are not JSON (Python writes and reads them all the same).
         carried = json.loads(json.dumps(value, allow_nan=False))
-    except (TypeError, ValueError) as error:
-        raise TypeError(str(error)) from None
+    except (TypeError, ValueError, RecursionError) as error:
+        raise TypeError(str(error) or type(error).__name__) from None
     if carried != value:
         # JSON takes it and hands back something else (a tuple as a list, a number key as text).
         raise TypeError(f"{type(value).__name__} does not come back from JSON as it went in")
@@ -468,12 +472,10 @@ def _split_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     a model class): :meth:`ChatSession.from_store` asks for these again."""
     stored, unstored = {}, []
     for name, value in kwargs.items():
-        try:
-            json.dumps(value, allow_nan=False)  # as the snapshot is written
-        except (TypeError, ValueError):
-            unstored.append(name)
-        else:
+        if storable(value):
             stored[name] = value
+        else:
+            unstored.append(name)
     return stored, sorted(unstored)
 
 
@@ -558,10 +560,11 @@ class ChatSession:
         self.id: str = session_id or uuid7(as_type="hex")  # type: ignore[assignment]
         self.busy_mode: SendMode = busy_mode
         self.on_dead_turn: OnDeadTurn = on_dead_turn
-        self.collect_window = collect_window
+        # As what they mean, whatever number or truth value the caller passed: a snapshot holds them.
+        self.collect_window = float(collect_window)
         self._turn_failures = 0
         self._attempted: set[Any] = set()
-        self.allow_silence = allow_silence
+        self.allow_silence = bool(allow_silence)
         self.log = BackgroundEventLog(max_events=max_log_events, max_bytes=max_log_bytes)
         self.closed = False
         self._parked = False
@@ -713,6 +716,8 @@ class ChatSession:
         text = text.strip() if isinstance(text, str) else ""
         if not text:
             raise ValueError("A wake needs non-empty text.")
+        if key is not None and not isinstance(key, str):
+            raise TypeError("key must be a string or None")
         policy = _check_tool_policy(tool_policy)
         key = (key or "").strip() or None
         replaced = [wake for wake in self._wakes if wake.key == key] if key is not None else []
@@ -723,7 +728,7 @@ class ChatSession:
             # Not stored yet (its sender may still be told it was not accepted): it keeps what it replaced,
             # so the last stored wake of the key survives however many replacements of it fail.
             self._record("wake_superseded", wake_id=old.id, key=key)
-        wake = _Wake(text=text, key=key, tool_policy=policy, silent_ok=silent_ok, replaced=replaced)
+        wake = _Wake(text=text, key=key, tool_policy=policy, silent_ok=bool(silent_ok), replaced=replaced)
         self._wakes.append(wake)
         self.last_activity = time.monotonic()
         self._record("wake", wake_id=wake.id, text=text, key=key, tool_policy=_describe_policy(policy))

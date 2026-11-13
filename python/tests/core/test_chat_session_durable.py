@@ -17,6 +17,7 @@ from timbal.state.chat_store import (
     SnapshotConflict,
     SqliteChatSessionStore,
     process_owner,
+    storable,
 )
 from timbal.state.tracing.providers import SqliteTracingProvider
 from timbal.types.approval import ApprovalResolution, Cancel
@@ -2805,6 +2806,49 @@ class TestASnapshotThatCannotBeWritten:
         assert (await store.load(session.id)).version > before.version
         await session.close()
 
+    @pytest.mark.parametrize(
+        "value",
+        [float("nan"), float("inf"), float("-inf"), object(), {1, 2}, b"raw", (1, 2), "ok", 1.5, None, {"a": [1]}],
+        ids=repr,
+    )
+    def test_the_check_and_the_write_use_one_encoder(self, value):
+        """``storable`` is what the session asks before it keeps a value; ``to_json`` is what writes it. They
+        must agree on every value, or one the check let through fails every save after it."""
+        snapshot = SessionSnapshot(session_id="s", agent="agent", config={"kwargs": {"x": value}})
+        try:
+            snapshot.to_json()
+            written = True
+        except (TypeError, ValueError):
+            written = False
+        assert storable(value) is written
+
+    async def test_awkward_settings_are_stored_as_what_they_mean(self, db):
+        """Values a caller may pass where a bool or a number is meant (a numpy scalar, a Fraction): the
+        session works with them live, so it must store itself with them too."""
+        from fractions import Fraction
+
+        provider, store = db
+        gate = Gate()
+        agent = make_agent(provider, gate)
+        session = ChatSession(agent, session_store=store, allow_silence=Fraction(1), collect_window=Fraction(1, 2))
+        session.send("start")  # a turn runs, so the wake below stays queued
+        await asyncio.wait_for(gate.entered.wait(), 30)
+        session.wake("heartbeat", silent_ok=Fraction(1))
+        await session.flush()
+        snapshot = await store.load(session.id)
+        assert snapshot.config["allow_silence"] is True and snapshot.config["collect_window"] == 0.5
+        assert [wake["silent_ok"] for wake in snapshot.wakes] == [True]
+        await session.close()
+
+    async def test_a_wake_key_that_is_not_text_is_refused(self, db):
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        for key in (5, ["a"], {"k": 1}):
+            with pytest.raises(TypeError, match="key"):
+                session.wake("heartbeat", key=key)
+        assert session._wakes == []
+        await session.close()
+
     async def test_a_turn_argument_json_cannot_carry_is_asked_for_again(self, db):
         """NaN is one more value a snapshot cannot hold: named as unstored, like a callable, so the session
         still saves and ``from_store`` asks for the argument again."""
@@ -2823,9 +2867,12 @@ class TestASnapshotThatCannotBeWritten:
         "prompt",
         [
             Message(role="user", content=[TextContent(text="pay")], metadata={"seen": {1, 2}}),
+            Message(role="user", content=[TextContent(text="pay")], metadata={"score": float("nan")}),
+            Message(role="user", content=[TextContent(text="pay")], metadata={"score": float("inf")}),
             {"role": "user", "content": [{"type": "text", "text": "pay"}], "metadata": {"at": object()}},
+            {"role": "user", "content": [{"type": "text", "text": "pay"}], "metadata": {"score": float("-inf")}},
         ],
-        ids=["a message", "a stored prompt"],
+        ids=["a message", "a message with NaN", "a message with Infinity", "a stored prompt", "one with Infinity"],
     )
     async def test_a_prompt_json_cannot_carry_whole_is_kept_as_its_text(self, db, prompt):
         """The last prompt is re-sent with a resume and dropped by the agent: metadata JSON cannot carry (a

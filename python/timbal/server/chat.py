@@ -500,6 +500,8 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
     text = body.get("text")
     if not isinstance(text, str):
         raise HTTPException(status_code=400, detail="'text' must be a string.")
+    if body.get("key") is not None and not isinstance(body["key"], str):
+        raise HTTPException(status_code=400, detail="'key' must be a string or null.")
     policy = body.get("tool_policy", "read_only")
     if policy is not None and not (policy == "read_only" or isinstance(policy, list)):
         raise HTTPException(status_code=400, detail="'tool_policy' must be 'read_only', a list of tool names, or null.")

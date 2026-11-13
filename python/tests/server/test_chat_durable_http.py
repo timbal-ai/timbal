@@ -502,6 +502,14 @@ def test_an_answer_json_cannot_carry_is_a_400_and_the_question_stays_open(client
     assert not state["parked"] and state["last_status"]["code"] == "success"
 
 
+def test_a_wake_key_that_is_not_text_is_a_400(client):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    for key in (5, ["a"], {"k": 1}):
+        refused = client.post(f"/chat/sessions/{session_id}/wake", json={"text": "heartbeat", "key": key})
+        assert refused.status_code == 400 and "key" in refused.json()["detail"]
+    assert client.get(f"/chat/sessions/{session_id}").json()["wakes"] == []
+
+
 def _reap_idle_sessions(client, monkeypatch):
     """What the server does when a session is created, with every idle session past its time."""
     monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "0.01")

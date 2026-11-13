@@ -32,6 +32,7 @@ __all__ = [  # ``PROCESS_OWNER`` is still readable (module __getattr__), for cod
     "SessionSnapshot",
     "SnapshotConflict",
     "SqliteChatSessionStore",
+    "storable",
 ]
 
 _OWNER: tuple[int, str] | None = None
@@ -124,6 +125,26 @@ class SnapshotConflict(RuntimeError):
     """The stored snapshot is not the version this owner last wrote: another owner took the session."""
 
 
+def _encode(value: Any) -> str:
+    """The one JSON encoding a snapshot is written with. No ``default=`` (a value JSON cannot carry is not
+    written as its ``str()``) and no NaN or Infinity (Python would write them; no other JSON reader takes them)."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
+def storable(value: Any) -> bool:
+    """Whether a snapshot can hold ``value`` as it is.
+
+    The test a session applies to what its callers hand it (answers, turn arguments, a prompt) before it keeps
+    it. It is the encoder :meth:`SessionSnapshot.to_json` writes with, so the two cannot disagree: a value this
+    lets through never fails a save, and with it every save after it.
+    """
+    try:
+        _encode(value)
+    except (TypeError, ValueError, RecursionError):
+        return False
+    return True
+
+
 @dataclass
 class SessionSnapshot:
     session_id: str
@@ -155,7 +176,7 @@ class SessionSnapshot:
         value (an approval that is no longer one), and nothing would say so. The session checks what callers
         hand it before it takes it (answers, turn arguments), so a save does not get here with one; if one
         does, the save fails, is reported and retried, and what it held is never acknowledged as stored."""
-        return json.dumps(asdict(self), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        return _encode(asdict(self))
 
     @classmethod
     def from_json(cls, raw: str) -> SessionSnapshot:
