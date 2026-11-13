@@ -2240,3 +2240,148 @@ class TestAStopThatReachesATurnAtItsEdges:
         assert finished[0]["status"]["code"] == "success"
         assert root_outputs(session)[-1].output.collect_text() == "echo: hello"
         await session.close()
+
+
+class TestAStopStoredWithATurnThatNeverRan:
+    """A stop reaches a resume before any of its calls ran, and the process dies before the session settles
+    the turn (live, settling turns the stop into a cancel answer). The snapshot holds the answers and the
+    stop: whoever restores it must honour the stop, not the answers."""
+
+    def _dies_before_settling(self, session):
+        """The process ends where the worker would settle the cut turn: what the stop left in the snapshot
+        (``in_flight.stopped``) is all a restore has to go on."""
+        settling = asyncio.Event()
+
+        def settle(*_args, **_kwargs):
+            settling.set()
+            raise asyncio.CancelledError  # the worker stops here, as a dying process does
+
+        session._settle_turn = settle
+        return settling
+
+    async def _stopped_resume(self, provider, store, charge):
+        session, approval = await parked(provider, store, charge)
+        reached = asyncio.Event()
+
+        async def pump(_context, _kwargs, _followup, _trigger, _in_flight, mark):
+            # The store holds that the turn took the answers; the turn stops here, before the agent runs,
+            # so none of the batch's calls was dispatched.
+            await session._write_ahead(mark)
+            reached.set()
+            await asyncio.Event().wait()
+
+        session._pump = pump
+        session.resume({approval.approval_id: True})
+        await asyncio.wait_for(reached.wait(), 30)
+        return session, approval
+
+    async def test_a_stop_of_a_resume_that_dispatched_nothing_outlives_the_process(self, db):
+        provider, store = db
+        charge = Charge(released=True)
+        session, approval = await self._stopped_resume(provider, store, charge)
+        settling = self._dies_before_settling(session)
+
+        assert session.interrupt() is True  # the user stops it before anything of it ran
+        await asyncio.wait_for(settling.wait(), 30)
+        await session.flush()  # the stop is stored (what the route waits for before it says so)
+        in_flight = (await store.load(session.id)).in_flight
+        assert in_flight["stopped"] is True and in_flight["resume"] and not in_flight.get("dispatched")
+        await kill(session)
+
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert finished["status"]["code"] == "cancelled"
+        assert charge.gate.calls == 0  # the answers went with the turn the user stopped
+        assert not restored.parked and restored.state().get("pending_approvals") is None
+        await restored.close()
+
+    async def test_without_the_stop_the_same_turn_runs_again(self, db):
+        """The control: a crash alone replays the answers — none of the calls they were for had started."""
+        provider, store = db
+        charge = Charge(released=True)
+        session, _ = await self._stopped_resume(provider, store, charge)
+        self._dies_before_settling(session)
+        await session.flush()
+        await kill(session)
+
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert charge.gate.calls == 1  # the user approved it and nothing said otherwise
+        await restored.close()
+
+
+class TestARecoveryTurnStaysWithinTheDeadTurnsPolicy:
+    """A turn that ran under a narrow tool policy dies. The recovery turn that follows it is read-only, and
+    read-only alone is wider than what the dead turn was allowed: it stays within both."""
+
+    def _agent(self, provider, gate, ran, calls_on_recovery):
+        def model(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            if "cut off by a server restart" in last_user_text(messages):
+                return tool_call(calls_on_recovery, "call-recovery")
+            return tool_call("lookup", "call-lookup")
+
+        async def lookup() -> str:
+            ran["lookup"] += 1
+            return await gate.work()
+
+        async def other_lookup() -> str:
+            ran["other_lookup"] += 1
+            return "other"
+
+        return Agent(
+            name="agent",
+            model=TestModel(handler=model),
+            tools=[
+                Tool(name="lookup", handler=lookup, read_only=True),
+                Tool(name="other_lookup", handler=other_lookup, read_only=True),
+            ],
+            tracing_provider=provider,
+        )
+
+    async def _died_under(self, db, policy, calls_on_recovery):
+        """A wake under ``policy`` dies with its tool running; the recovery turn calls ``calls_on_recovery``."""
+        provider, store = db
+        ran = {"lookup": 0, "other_lookup": 0}
+        session = ChatSession(self._agent(provider, Gate(), ran, calls_on_recovery), session_store=store)
+        session.wake("check the balance", tool_policy=policy, silent_ok=True)
+        await until(lambda: ran["lookup"] == 1)  # the wake's own tool is running: its call is stored
+        await crash(session)
+        provider.crashed = False
+        agent = self._agent(provider, Gate(released=True), ran, calls_on_recovery)
+        restored = await ChatSession.from_store(agent, store, session.id)
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        await restored.close()
+        return ran
+
+    async def test_it_cannot_call_a_read_only_tool_the_dead_turn_was_not_allowed(self, db):
+        ran = await self._died_under(db, ["lookup"], "other_lookup")
+        assert ran["other_lookup"] == 0  # read-only, but outside the wake's allowlist
+
+    async def test_it_can_still_call_the_ones_it_was(self, db):
+        ran = await self._died_under(db, ["lookup", "other_lookup"], "other_lookup")
+        assert ran["other_lookup"] == 1  # allowed there and read-only: the recovery turn may use it
+
+
+class TestOlderSnapshots:
+    async def test_a_turn_stored_before_its_policy_was_recovers_read_only(self, db):
+        """`in_flight.tool_policy` is new: a snapshot written without it recovers as it did before."""
+        provider, store = db
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 30)
+        await crash(session)
+        provider.crashed = False
+
+        snapshot = await store.load(session.id)
+        assert snapshot.in_flight.pop("tool_policy", "missing") is None  # a user turn: no policy of its own
+        await store.save(snapshot, expect_version=snapshot.version)
+
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
+        (started,) = await records(restored, "turn_started", 1, after=after_restore(restored))
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        # The recovery turn ran (read-only, as before the field existed) and the wake is spent.
+        assert started["trigger"]["kind"] == "recovery" and restored._wakes == []
+        await restored.close()

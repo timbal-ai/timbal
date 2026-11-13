@@ -227,8 +227,8 @@ class RunContext(BaseModel):
     #   _steering: bool | None — the channel that started this run asks its root agent to
     #       take ``lane="next"`` session events between steps (``Agent.steering=None``),
     #       or, False, forbids it for this turn whatever the agent says (a wake)
-    #   _tool_policy: "read_only" | Collection[str] | Callable | None — narrows the
-    #       tools every agent in this run offers its model (``Agent._tool_allowed``)
+    #   _tool_policy: "read_only" | Collection[str] | Callable | ReadOnlyWithin | None — narrows
+    #       the tools every agent in this run offers its model (``Agent._tool_allowed``)
     #   _tool_policy_origin: (RunContext, call_id) | None — for a run started inside a call
     #       under a callable policy, the outermost such call: its agents note what the policy
     #       let through on that call's span too (``timbal.core.tool_policy``)

@@ -67,11 +67,35 @@ def session_store_for(agent: Any) -> ChatSessionStore | None:
         # SQLAlchemy's form: sqlite:///relative.db, sqlite:////absolute/path.db
         if not raw.startswith("sqlite:///") or len(raw) == len("sqlite:///"):
             raise RuntimeError(f"{STORE_ENV} must be 'memory' or 'sqlite:///path/to.db', got {raw!r}")
+        _require_durable_traces(agent)
         return SqliteChatSessionStore(raw[len("sqlite:///") :])
     provider = getattr(agent, "tracing_provider", None)
     if isinstance(provider, type) and issubclass(provider, SqliteTracingProvider) and provider._path is not None:
         return SqliteChatSessionStore(provider._path, synchronous=provider.synchronous)
     return None
+
+
+def _require_durable_traces(agent: Any) -> None:
+    """A session store that outlives the process is of no use with traces that do not.
+
+    A restored session reads its conversation — and the approval a parked one waits on — from the trace of
+    its last run. With process-local traces a restart leaves the snapshot pointing at runs nobody can read:
+    the session comes back durable, with no history and a question that cannot be answered. Said here,
+    before any work is accepted, instead of being found after the restart.
+    """
+    from ..state.context import RunContext
+
+    # The agent's setting as runs resolve it (TRACING_UNSET: auto-detected from the platform config).
+    provider = RunContext(tracing_provider=getattr(agent, "tracing_provider", None))._tracing_provider
+    if provider is not None and getattr(provider, "durable", True):
+        return
+    name = provider.__name__ if provider is not None else "no tracing provider"
+    raise RuntimeError(
+        f"{STORE_ENV} keeps chat sessions across restarts, but this agent's traces do not ({name}): a "
+        f"restored session would have no history and no pending approval to answer. Give the agent a durable "
+        f"tracing_provider (SqliteTracingProvider, JsonlTracingProvider, PlatformTracingProvider), or set "
+        f"{STORE_ENV}=memory."
+    )
 
 
 def _store(request: Request) -> ChatSessionStore | None:
@@ -244,14 +268,17 @@ def _agent(request: Request) -> Any:
 
 
 async def _reap(sessions: dict[str, ChatSession]) -> None:
-    """Let go of sessions idle for longer than the TTL (never one with a turn running). A durable one is kept
-    in its store: the next request for it restores it."""
+    """Let go of sessions idle for longer than the TTL (never one with a turn running or due to start one).
+    A durable one is kept in its store: the next request for it restores it."""
     ttl = _session_ttl()
     if ttl <= 0:
         return
     now = time.monotonic()
     for session_id, session in list(sessions.items()):
-        if session.closed or (not session.busy and now - session.last_activity > ttl):
+        # `due`, not just `busy`: a session collecting a message (or waiting out a backoff) is neither busy
+        # nor idle. Let go of it and nothing runs that message until a request asks for the session again,
+        # which for an acknowledged message may be never.
+        if session.closed or (not session.busy and not session.due and now - session.last_activity > ttl):
             # Closed before it leaves the map: a request meanwhile finds it handed off and waits, instead of
             # restoring a second copy while this one still holds the session's task store.
             await session.close(keep=True)

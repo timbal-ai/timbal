@@ -435,7 +435,71 @@ def test_the_store_choice(tmp_path, monkeypatch):
     monkeypatch.setenv("TIMBAL_CHAT_STORE", "memory")
     assert session_store_for(sqlite_agent) is None
     monkeypatch.setenv("TIMBAL_CHAT_STORE", f"sqlite:///{tmp_path}/s.db")
-    assert session_store_for(memory_agent).path == tmp_path / "s.db"  # four slashes: absolute
+    assert session_store_for(sqlite_agent).path == tmp_path / "s.db"  # four slashes: absolute
     monkeypatch.setenv("TIMBAL_CHAT_STORE", "postgres://x")
     with pytest.raises(RuntimeError, match="TIMBAL_CHAT_STORE"):
         session_store_for(memory_agent)
+
+
+def test_a_session_with_a_collected_message_is_not_reaped(client, monkeypatch):
+    """A session collecting a message is not busy, but a turn for it is due: reaping it would leave the
+    message acknowledged and never run (nobody asks for the session again)."""
+    store = client.app.state.chat_store
+    session_id = client.post("/chat/sessions", json={"collect_window": 1.0}).json()["session_id"]
+    hang = _hang_file()
+    hang.touch()
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "wait"})
+    _until(lambda: client.get(f"/chat/sessions/{session_id}").json()["busy"], "the first turn to run")
+    collected = client.post(f"/chat/sessions/{session_id}/messages", json={"text": "second", "mode": "collect"})
+    assert collected.status_code == 202
+    hang.unlink()
+    wait_turns(client, session_id, 1)  # the first turn is over; the collected message waits out its window
+
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "0.01")
+    time.sleep(0.05)
+    client.post("/chat/sessions", json={})  # creating a session reaps idle ones
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "3600")
+    assert session_id in client.app.state.chat_sessions, "reaped with a turn due"
+
+    # Read the store, not the session: a GET would restore it and run the message, hiding the loss.
+    _until(
+        lambda: (client.portal.call(store.load, session_id)).turns == 2,
+        "the collected message to run without anyone asking for the session",
+        timeout=20,
+    )
+    assert not client.portal.call(store.load, session_id).pending
+
+
+def _hang_file():
+    import os
+    from pathlib import Path
+
+    return Path(os.environ["E2E_DIR"]) / "hang"
+
+
+def _until(condition, what, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def test_a_store_that_outlives_traces_that_do_not_is_refused(tmp_path, monkeypatch):
+    """Sessions kept across restarts need traces kept across restarts: the conversation, and the question a
+    parked session waits on, live in the trace. With process-local traces a restored session has neither."""
+    from timbal import Agent
+    from timbal.core.test_model import TestModel
+    from timbal.state.tracing.providers import InMemoryTracingProvider, SqliteTracingProvider
+
+    memory_agent = Agent(name="a", model=TestModel(), tracing_provider=InMemoryTracingProvider)
+    sqlite_agent = Agent(
+        name="a", model=TestModel(), tracing_provider=SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+    )
+    monkeypatch.setenv("TIMBAL_CHAT_STORE", f"sqlite:///{tmp_path}/s.db")
+    with pytest.raises(RuntimeError, match="InMemoryTracingProvider"):
+        session_store_for(memory_agent)
+    assert session_store_for(sqlite_agent).path == tmp_path / "s.db"  # four slashes: absolute
+    monkeypatch.setenv("TIMBAL_CHAT_STORE", "memory")
+    assert session_store_for(memory_agent) is None  # asked for process-local sessions: nothing to keep

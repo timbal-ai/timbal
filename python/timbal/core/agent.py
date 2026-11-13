@@ -86,7 +86,7 @@ from .runnable import Runnable, RunnableLike
 from .session_scheduler import record_delivery
 from .skill import ReadSkill, Skill
 from .tool import Tool
-from .tool_policy import READ_ONLY_POLICY, describe_tool_policy
+from .tool_policy import READ_ONLY_POLICY, ReadOnlyWithin, describe_tool_policy
 from .tool_result_offload import (
     LEGACY_READ_OFFLOADED_NAMES,
     LocalOffloadStore,
@@ -1752,9 +1752,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         ``"read_only"``: tools declared ``read_only`` (MCP: ``readOnlyHint``) and the agent's
         own readers. A collection of names: those tools. A callable: ``policy(tool)``.
+        ``ReadOnlyWithin``: read-only, and only what the policy it narrows allowed.
         """
         if policy == READ_ONLY_POLICY:
             return bool(getattr(tool, "read_only", False)) or tool.name in _READ_ONLY_BUILTINS
+        if isinstance(policy, ReadOnlyWithin):
+            return Agent._tool_allowed(tool, READ_ONLY_POLICY) and policy.allows(tool)
         if callable(policy):
             return bool(policy(tool))
         return tool.name in policy

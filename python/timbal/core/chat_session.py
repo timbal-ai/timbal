@@ -40,10 +40,10 @@ from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.message import RUNTIME_SOURCE, Message
 from .session_scheduler import Followup, SessionScheduler, is_parked, user_batch
+from .tool_policy import ReadOnlyWithin, read_only_within, restore_tool_policy
 from .tool_policy import ToolPaths as _ToolPaths  # noqa: F401 — re-exported for callers and tests
 from .tool_policy import allowed_tool_paths as _allowed_tool_paths  # noqa: F401
 from .tool_policy import describe_tool_policy as _describe_policy
-from .tool_policy import restore_tool_policy
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -166,6 +166,8 @@ def _store_policy(policy: Any) -> Any:
     """A tool policy as a snapshot holds it. A callable cannot be stored: it is ``"custom"`` (see _load_policy)."""
     if policy is None or policy == "read_only":
         return policy
+    if isinstance(policy, ReadOnlyWithin):
+        return policy.to_stored()
     if callable(policy):
         return "custom"
     return sorted(policy)
@@ -180,6 +182,8 @@ def _load_policy(stored: Any, trace: Any = None) -> Any:
             logger.warning("chat_session_policy_restored_empty", detail="a callable tool_policy restores with no tools")
             return frozenset()
         return restore_tool_policy("custom", trace)
+    if isinstance(stored, dict):
+        return ReadOnlyWithin.from_stored(stored)
     return frozenset(stored) if isinstance(stored, list) else stored
 
 
@@ -521,9 +525,10 @@ class ChatSession:
         self._stored_changes = 0
         # from_store() is still settling the stored state: no turn may start before it is done.
         self._hold_worker = False
-        # Set by _recover: the parked question a dead resume was acting on is to be abandoned (from_store), and
-        # the events the dead run's stored memory shows (taken by it, whatever an older snapshot says).
-        self._abandon_parked = False
+        # Set by _recover: why the parked question a dead resume was acting on is to be abandoned
+        # (from_store), and the events the dead run's stored memory shows (taken by it, whatever an older
+        # snapshot says).
+        self._abandon_parked: str | None = None
         self._shown_events: set[str] = set()
         # Turns in a row the store would not record the start of: they did not run (see _write_ahead).
         self._store_failures = 0
@@ -828,6 +833,21 @@ class ChatSession:
         return state
 
     @property
+    def due(self) -> bool:
+        """Work the session will start a turn for by itself: answers to its parked question, a wake, a
+        message (one still collecting included), an event or a finished background task.
+
+        A parked question is not due: it waits for its user, not for the session. False here means a caller
+        may let the session go (a durable one is kept in its store) without leaving work nothing will run.
+        """
+        if self._resume is not None:
+            return True
+        if self.parked:
+            return False
+        store = self._store
+        return bool(self._wakes or store.pending_events() or store.pending_completions())
+
+    @property
     def lost(self) -> bool:
         """Another process took the session (its lease, or a newer snapshot): this copy stopped without
         writing over it, and what it was asked last may not have been stored."""
@@ -939,7 +959,7 @@ class ChatSession:
             if session._parked and session._last_context is None:
                 session._last_context = await session._load_run(session.head)
             if session._abandon_parked:
-                session._abandon_question("The server restarted while the answer to this was being acted on.")
+                session._abandon_question(session._abandon_parked)
             parked_trace = session._last_context._trace if session._parked and session._last_context else None
             last_policy = snapshot.last_options.get("tool_policy")
             session._last_options = _TurnOptions(
@@ -1284,6 +1304,8 @@ class ChatSession:
                 "trigger": trigger,
                 "events": [event.to_dict() for event in followup.events] if followup is not None else [],
                 "wake": wake.to_dict() if wake is not None else None,
+                # What this turn was allowed: a recovery turn after it may read, and no further than it could.
+                "tool_policy": _store_policy(options.tool_policy),
             }
             if resume is not None:
                 in_flight["resume"] = _dump_resume(resume)
@@ -1823,7 +1845,13 @@ class ChatSession:
                 self._wakes.insert(0, _Wake.from_dict(in_flight["wake"]))
             if resumed:
                 self._parked = True
-                self._resume = _load_resume(in_flight["resume"])
+                if in_flight.get("stopped"):
+                    # Its user stopped this resume before any of its calls ran, and the process died before
+                    # the session could turn that into a cancel (_run_turn does, live). The answers go with
+                    # the turn and the question is abandoned, as a stop on a parked session abandons it.
+                    self._abandon_parked = "The user moved on before answering."
+                else:
+                    self._resume = _load_resume(in_flight["resume"])
             return "requeued"
         if root is None:
             # It may have acted and no trace of it is stored (a provider that saves at the end of a run, or
@@ -1839,7 +1867,7 @@ class ChatSession:
                 # whatever followed them: a claimed approval protects its own call, not the tool that
                 # asked the question, nor the ones the model called next. The question is abandoned instead.
                 self._parked = True
-                self._abandon_parked = True
+                self._abandon_parked = "The server restarted while the answer to this was being acted on."
                 approved = in_flight.get("approved") or []
                 unconfirmed = [*approved, *(call for call in unconfirmed if call not in approved)]
             notice = _recovery_notice(
@@ -1868,7 +1896,11 @@ class ChatSession:
             _Wake(
                 text=notice,
                 key=RECOVERY_KIND,
-                tool_policy="read_only",
+                # Read-only, and no further than the dead turn itself was allowed: a turn that reports on a
+                # run under a narrow policy must not reach past it, however read-only what it reaches is.
+                tool_policy=read_only_within(
+                    _load_policy(in_flight.get("tool_policy"), context._trace if context is not None else None)
+                ),
                 silent_ok=True,
                 kind=RECOVERY_KIND,
                 trigger={"kind": RECOVERY_KIND, "dead_run_id": run_id, "cut": cut or "crash"},
