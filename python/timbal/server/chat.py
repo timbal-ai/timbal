@@ -538,6 +538,9 @@ async def resume_session(request: Request, session_id: str) -> JSONResponse:
         raise HTTPException(status_code=400, detail="'resume' must be a non-empty object.")
     try:
         session.resume(values)
+    except TypeError as e:
+        # An answer the session store cannot hold (the body parser lets NaN and Infinity through).
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except (RuntimeError, ValueError) as e:
         # Not waiting for an answer (yet), or an id already answered differently.
         raise HTTPException(status_code=409, detail=str(e)) from e

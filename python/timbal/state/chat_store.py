@@ -150,7 +150,11 @@ class SessionSnapshot:
     version: int = 0
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False, separators=(",", ":"), default=str)
+        """TypeError for a value JSON cannot carry. Not written as its ``str()``: read back, that is a different
+        value (an approval that is no longer one), and nothing would say so. The session checks what callers
+        hand it before it takes it (answers, turn arguments), so a save does not get here with one; if one
+        does, the save fails, is reported and retried, and what it held is never acknowledged as stored."""
+        return json.dumps(asdict(self), ensure_ascii=False, separators=(",", ":"))
 
     @classmethod
     def from_json(cls, raw: str) -> SessionSnapshot:

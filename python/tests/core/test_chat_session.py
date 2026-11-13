@@ -1677,3 +1677,109 @@ class TestLogCursors:
         stream = log.subscribe(0)
         assert [await stream.__anext__() for _ in range(3)] == [BACKGROUND_LOG_GAPPED, "b", "c"]
         await stream.aclose()
+
+
+async def until(condition, timeout=30.0):
+    """Wait for ``condition()``. The budget is for a slow machine: one where it never holds fails here."""
+
+    async def poll():
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
+class TestDue:
+    """``ChatSession.due``: work the session will start a turn for by itself. Whoever lets go of an idle
+    session (the server's reaper) must not let go of one that is due, and need not keep one that is not:
+    it follows what starts a turn (the announce policy), not what merely sits in the queue."""
+
+    def _builder(self, release, *, announce=None):
+        async def build() -> str:
+            await release.wait()
+            return "built"
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "Started the build."
+            prompt = next(m for m in reversed(messages) if m.role == "user")
+            return "The build is done." if prompt.is_runtime() else tool_call("build")
+
+        return Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="build", handler=build, background_mode="always", background_announce=announce)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+
+    async def test_a_running_background_tool_that_will_announce_is_due(self):
+        release = asyncio.Event()
+        async with ChatSession(self._builder(release)) as session:
+            session.send("build it")
+            await records(session, "turn_finished", 1)
+            assert session.store.running_count() == 1 and not session.busy
+            assert not session.store.pending_events() and not session.store.pending_completions()
+            assert session.due  # nothing is queued yet, and its result will start a turn
+            release.set()
+            started = await records(session, "turn_started", 2)
+            await records(session, "turn_finished", 2)
+            assert started[1]["trigger"]["kind"] == "background_completion"
+            assert not session.due  # reported: the session owes nothing more
+
+    async def test_a_running_background_tool_that_stays_silent_is_not(self):
+        release = asyncio.Event()
+        async with ChatSession(self._builder(release, announce="silent")) as session:
+            session.send("build it")
+            await records(session, "turn_finished", 1)
+            assert session.store.running_count() == 1
+            assert not session.due  # its result rides with the next turn: it starts none
+            release.set()
+            await until(lambda: session.store.pending_completions())
+            assert not session.due and not session.busy and session.turns == 1
+
+    async def test_a_silent_event_is_not_due_and_one_that_asks_for_a_turn_is(self):
+        async with ChatSession(make_agent(Gate())) as session:
+            session.store.post_event("FYI: the cache is warm.", announce="silent")
+            await asyncio.sleep(0)  # the worker has seen it
+            assert session.store.pending_events() and not session.due
+            session.store.post_event("Deploy 42 finished.")
+            assert session.due
+            await records(session, "turn_finished", 1)
+            assert not session.store.pending_events() and not session.due  # the turn took both
+
+    async def test_a_wake_is_due(self):
+        gate = Gate()
+        async with ChatSession(make_agent(gate)) as session:
+            session.send("start")
+            await asyncio.wait_for(gate.entered.wait(), 30)
+            session.wake("heartbeat")
+            assert session.busy and session.due  # held behind the running turn, and the session's to run
+            gate.release.set()
+            await records(session, "turn_finished", 2)
+            assert not session.due
+
+    async def test_queued_answers_are_due_and_a_parked_question_is_not(self):
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            prompt = next(m for m in reversed(messages) if m.role == "user")
+            return "nothing to report" if prompt.is_runtime() else tool_call("charge")
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: "charged", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent) as session:
+            session.send("pay")
+            await records(session, "turn_finished", 1)
+            approval = next(e for e in session.log.peek()[0] if isinstance(e, ApprovalEvent))
+            assert session.parked and not session.due  # it waits for its user, not for the session
+            session.wake("heartbeat")
+            session.store.post_event("Deploy 42 finished.")
+            assert not session.due  # nothing runs past a parked question: neither a wake nor an event
+            session.resume({approval.approval_id: True})
+            assert session.due  # the answers are the session's to act on
+            await records(session, "turn_finished", 3)  # the resume, the event, the wake
+            assert not session.parked and not session.due

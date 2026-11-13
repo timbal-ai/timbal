@@ -19,7 +19,8 @@ from timbal.state.chat_store import (
     process_owner,
 )
 from timbal.state.tracing.providers import SqliteTracingProvider
-from timbal.types.content import ToolUseContent
+from timbal.types.approval import ApprovalResolution, Cancel
+from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.events import ApprovalEvent, OutputEvent
 from timbal.types.message import Message
 
@@ -498,6 +499,15 @@ class TestStores:
             await store.save(snapshot, expect_version=version)
         loaded = await store.load("s1")
         assert loaded.head == "r2" and loaded.version == version + 1
+
+    def test_a_snapshot_never_stores_a_value_as_its_text(self):
+        """A value JSON cannot carry fails the write. Written as its ``str()`` it would read back as another
+        value, with nothing to say so."""
+        snapshot = SessionSnapshot(session_id="s", agent="agent", resume={"a1": ApprovalResolution(approved=True)})
+        with pytest.raises(TypeError):
+            snapshot.to_json()
+        snapshot.resume = {"a1": ApprovalResolution(approved=True).model_dump(mode="json")}
+        assert SessionSnapshot.from_json(snapshot.to_json()).resume == snapshot.resume
 
     async def test_a_save_with_an_owner_needs_the_lease(self, store):
         version = await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
@@ -996,10 +1006,10 @@ class TestRestoreSafety:
         provider, store = flaky_db
         real_recover = ChatSession._recover
 
-        async def work_arrives_meanwhile(self, in_flight):
+        async def work_arrives_meanwhile(self, *args):
             # A background task finishing, or an event, while the dead turn's trace is still being read.
             self._work_arrived()
-            return await real_recover(self, in_flight)
+            return await real_recover(self, *args)
 
         monkeypatch.setattr(ChatSession, "_recover", work_arrives_meanwhile)
         gate = Gate()
@@ -1179,8 +1189,8 @@ class TestAcknowledgement:
         provider.crashed = False
         real_recover = ChatSession._recover
 
-        async def a_notice_arrives(self, in_flight):
-            result = await real_recover(self, in_flight)
+        async def a_notice_arrives(self, *args):
+            result = await real_recover(self, *args)
             self._wakes.clear()  # nothing left but what arrived while the worker was held
             self._work_arrived()
             return result
@@ -2310,16 +2320,52 @@ class TestAStopStoredWithATurnThatNeverRan:
         await restored.close()
 
 
+async def stored_before_the_turns_policy_was(store, session_id):
+    """Rewrite the stored session as the format before ``in_flight.tool_policy`` wrote it: the turn's policy
+    only in its wake (``in_flight.wake.tool_policy``) and in the saved options (``last_options``)."""
+    snapshot = await store.load(session_id)
+    assert "tool_policy" in snapshot.in_flight
+    del snapshot.in_flight["tool_policy"]
+    await store.save(snapshot, expect_version=snapshot.version)
+
+
+async def recovery_turn(restored, timeout=30.0):
+    """Wait for the restored session's recovery turn to end: its ``turn_started`` record."""
+
+    async def follow():
+        run_id = None
+        async for item in restored.events(after_restore(restored)):
+            if not isinstance(item, dict):
+                continue
+            if item.get("kind") == "turn_started" and item["trigger"]["kind"] == "recovery":
+                run_id, started = item["run_id"], item
+            elif item.get("kind") == "turn_finished" and item["run_id"] == run_id:
+                return started
+
+    return await asyncio.wait_for(follow(), timeout)
+
+
+def prompt_of(session, run_id):
+    (output,) = [output for output in root_outputs(session) if output.run_id == run_id]
+    return Message.validate(output.input["prompt"]).collect_text()
+
+
+OLDER = pytest.mark.parametrize("older", [False, True], ids=["policy stored with the turn", "older snapshot"])
+
+
 class TestARecoveryTurnStaysWithinTheDeadTurnsPolicy:
     """A turn that ran under a narrow tool policy dies. The recovery turn that follows it is read-only, and
-    read-only alone is wider than what the dead turn was allowed: it stays within both."""
+    read-only alone is wider than what the dead turn was allowed: it stays within both. Also for a session
+    stored before the turn's policy was kept with it (``older``): the wake and the saved options still say."""
 
-    def _agent(self, provider, gate, ran, calls_on_recovery):
+    def _agent(self, provider, gate, ran, plan):
+        """``plan``: the tool each recovery turn calls, in order (shared across restores)."""
+
         def model(messages):
             if messages[-1].role == "tool":
                 return "done"
             if "cut off by a server restart" in last_user_text(messages):
-                return tool_call(calls_on_recovery, "call-recovery")
+                return tool_call(plan.pop(0), f"call-recovery-{len(messages)}")
             return tool_call("lookup", "call-lookup")
 
         async def lookup() -> str:
@@ -2330,38 +2376,129 @@ class TestARecoveryTurnStaysWithinTheDeadTurnsPolicy:
             ran["other_lookup"] += 1
             return "other"
 
+        async def confirm() -> str:
+            ran["confirm"] += 1
+            return await gate.work()
+
         return Agent(
             name="agent",
             model=TestModel(handler=model),
             tools=[
                 Tool(name="lookup", handler=lookup, read_only=True),
                 Tool(name="other_lookup", handler=other_lookup, read_only=True),
+                Tool(name="confirm", handler=confirm, read_only=True, requires_approval=True),
             ],
             tracing_provider=provider,
         )
 
-    async def _died_under(self, db, policy, calls_on_recovery):
-        """A wake under ``policy`` dies with its tool running; the recovery turn calls ``calls_on_recovery``."""
+    async def _died_under(self, db, policy, calls_on_recovery, *, older=False):
+        """A wake under ``policy`` dies with its tool running; the recovery turn calls ``calls_on_recovery``.
+        What ran, and the recovery turn's prompt."""
         provider, store = db
-        ran = {"lookup": 0, "other_lookup": 0}
-        session = ChatSession(self._agent(provider, Gate(), ran, calls_on_recovery), session_store=store)
+        ran = {"lookup": 0, "other_lookup": 0, "confirm": 0}
+        plan = [calls_on_recovery]
+        session = ChatSession(self._agent(provider, Gate(), ran, plan), session_store=store)
         session.wake("check the balance", tool_policy=policy, silent_ok=True)
         await until(lambda: ran["lookup"] == 1)  # the wake's own tool is running: its call is stored
         await crash(session)
         provider.crashed = False
-        agent = self._agent(provider, Gate(released=True), ran, calls_on_recovery)
+        if older:
+            await stored_before_the_turns_policy_was(store, session.id)
+        agent = self._agent(provider, Gate(released=True), ran, plan)
         restored = await ChatSession.from_store(agent, store, session.id)
-        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        started = await recovery_turn(restored)
+        prompt = prompt_of(restored, started["run_id"])
         await restored.close()
-        return ran
+        return ran, prompt
 
-    async def test_it_cannot_call_a_read_only_tool_the_dead_turn_was_not_allowed(self, db):
-        ran = await self._died_under(db, ["lookup"], "other_lookup")
+    @OLDER
+    async def test_it_cannot_call_a_read_only_tool_the_dead_turn_was_not_allowed(self, db, older):
+        ran, _ = await self._died_under(db, ["lookup"], "other_lookup", older=older)
         assert ran["other_lookup"] == 0  # read-only, but outside the wake's allowlist
 
-    async def test_it_can_still_call_the_ones_it_was(self, db):
-        ran = await self._died_under(db, ["lookup", "other_lookup"], "other_lookup")
+    @OLDER
+    async def test_it_can_still_call_the_ones_it_was(self, db, older):
+        ran, _ = await self._died_under(db, ["lookup", "other_lookup"], "other_lookup", older=older)
         assert ran["other_lookup"] == 1  # allowed there and read-only: the recovery turn may use it
+
+    @OLDER
+    async def test_a_callable_policy_does_not_come_back_wider(self, db, older):
+        ran, _ = await self._died_under(db, lambda tool: tool.name == "lookup", "other_lookup", older=older)
+        assert ran["other_lookup"] == 0  # a callable is not stored: what it let through is, at most
+
+    @OLDER
+    async def test_an_unrestricted_wake_recovers_read_only(self, db, older):
+        ran, prompt = await self._died_under(db, None, "other_lookup", older=older)
+        assert ran["other_lookup"] == 1 and "can only read" in prompt
+
+    @OLDER
+    async def test_it_is_told_it_can_only_read(self, db, older):
+        """Narrowed or not, the recovery turn is read-only, and says so: a model that is not told looks for
+        a way around the tools it does not see."""
+        _, prompt = await self._died_under(db, ["lookup"], "lookup", older=older)
+        assert "can only read" in prompt
+
+    @OLDER
+    async def test_a_dead_resume_of_a_parked_wake_keeps_the_wakes_policy(self, db, older):
+        """The turn in flight is the *resume* of a wake that had parked: it has no wake of its own
+        (``in_flight.wake`` is None), only the options the session kept for it."""
+        provider, store = db
+        ran = {"lookup": 0, "other_lookup": 0, "confirm": 0}
+        plan = ["other_lookup"]
+
+        def asks_first(agent):
+            agent.model = TestModel(
+                handler=lambda messages: (
+                    "done"
+                    if messages[-1].role == "tool"
+                    else tool_call(plan.pop(0), "call-recovery")
+                    if "cut off by a server restart" in last_user_text(messages)
+                    else tool_call("confirm", "call-confirm")
+                )
+            )
+            return agent
+
+        session = ChatSession(asks_first(self._agent(provider, Gate(), ran, plan)), session_store=store)
+        session.wake("check the balance", tool_policy=["confirm", "lookup"], silent_ok=True)
+        await records(session, "turn_finished", 1)
+        approval = next(e for e in session.log.peek()[0] if isinstance(e, ApprovalEvent))
+        assert session.parked
+        session.resume({approval.approval_id: True})
+        await until(lambda: ran["confirm"] == 1)  # the approved call is running
+        in_flight = (await store.load(session.id)).in_flight
+        assert in_flight["wake"] is None and in_flight["resume"]
+        await crash(session)
+        provider.crashed = False
+        if older:
+            await stored_before_the_turns_policy_was(store, session.id)
+
+        agent = asks_first(self._agent(provider, Gate(released=True), ran, plan))
+        restored = await ChatSession.from_store(agent, store, session.id)
+        await recovery_turn(restored)
+        assert ran["other_lookup"] == 0 and ran["confirm"] == 1  # outside the wake's allowlist; nothing re-run
+        await restored.close()
+
+    async def test_a_second_crash_does_not_widen_it(self, db):
+        """The recovery turn dies too. The one after it reports on a turn that was read-only *within* the
+        first one's policy, and stays there."""
+        provider, store = db
+        ran = {"lookup": 0, "other_lookup": 0, "confirm": 0}
+        plan = ["lookup", "other_lookup"]
+        session = ChatSession(self._agent(provider, Gate(), ran, plan), session_store=store)
+        session.wake("check the balance", tool_policy=["lookup"], silent_ok=True)
+        await until(lambda: ran["lookup"] == 1)
+        await crash(session)
+        provider.crashed = False
+
+        second = await ChatSession.from_store(self._agent(provider, Gate(), ran, plan), store, session.id)
+        await until(lambda: ran["lookup"] == 2)  # the recovery turn's own (allowed) call is running
+        await crash(second)
+        provider.crashed = False
+
+        third = await ChatSession.from_store(self._agent(provider, Gate(released=True), ran, plan), store, session.id)
+        await recovery_turn(third)
+        assert plan == [] and ran["other_lookup"] == 0
+        await third.close()
 
 
 class TestOlderSnapshots:
@@ -2376,8 +2513,8 @@ class TestOlderSnapshots:
         provider.crashed = False
 
         snapshot = await store.load(session.id)
-        assert snapshot.in_flight.pop("tool_policy", "missing") is None  # a user turn: no policy of its own
-        await store.save(snapshot, expect_version=snapshot.version)
+        assert snapshot.in_flight["tool_policy"] is None  # a user turn: no policy of its own
+        await stored_before_the_turns_policy_was(store, session.id)
 
         restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
         (started,) = await records(restored, "turn_started", 1, after=after_restore(restored))
@@ -2385,3 +2522,294 @@ class TestOlderSnapshots:
         # The recovery turn ran (read-only, as before the field existed) and the wake is spent.
         assert started["trigger"]["kind"] == "recovery" and restored._wakes == []
         await restored.close()
+
+
+async def worker_gone(session):
+    """The process is about to die between storing what it was told and acting on it: from here on its
+    worker takes nothing, so what a test sends next is stored and never run by this process."""
+    session._hold_worker = True
+    worker, session._worker = session._worker, None
+    if worker is not None:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+def priced_agent(provider, charged):
+    """``charge(amount)`` behind an approval; the model always asks for 5."""
+
+    def model(messages):
+        if messages[-1].role == "tool":
+            return "done"
+        call = ToolUseContent(id=f"call-{len(messages)}", name="charge", input={"amount": 5})
+        return Message(role="assistant", content=[call], stop_reason="tool_use")
+
+    def charge(amount: int) -> str:
+        charged.append(amount)
+        return f"charged {amount}"
+
+    return Agent(
+        name="agent",
+        model=TestModel(handler=model),
+        tools=[Tool(name="charge", handler=charge, requires_approval=True)],
+        tracing_provider=provider,
+    )
+
+
+async def parked_on_a_price(provider, store, charged):
+    session = ChatSession(priced_agent(provider, charged), session_store=store)
+    session.send("pay")
+    await records(session, "turn_finished", 1)
+    approval = next(e for e in session.log.peek()[0] if isinstance(e, ApprovalEvent))
+    return session, approval
+
+
+# Every form the approval gate takes, and what the tool then does with the model's charge(amount=5).
+ANSWERS = [
+    pytest.param(lambda: True, [5], "success", id="True"),
+    pytest.param(lambda: {"approved": True, "override_input": {"amount": 9}}, [9], "success", id="a JSON object"),
+    pytest.param(lambda: ApprovalResolution(approved=True), [5], "success", id="ApprovalResolution"),
+    pytest.param(
+        lambda: ApprovalResolution(approved=True, override_input={"amount": 7}, approver_id="ana", comment="ok"),
+        [7],
+        "success",
+        id="ApprovalResolution with an input override",
+    ),
+    pytest.param(lambda: ApprovalResolution(approved=False, reason="too much"), [], "success", id="a typed decline"),
+    pytest.param(lambda: Cancel(reason="closed the dialog"), [], "cancelled", id="Cancel"),
+    pytest.param(lambda: {"type": "timbal.cancel", "reason": "closed"}, [], "cancelled", id="a JSON cancel"),
+]
+
+
+class TestAnswersAreStoredAsTheGateReadsThem:
+    """``resume()`` takes what ``resume=`` takes: booleans, JSON objects, ``ApprovalResolution``, ``Cancel``.
+    A durable session stores the answers twice (queued, then with the turn that took them); whichever copy
+    a restart finds must mean to the approval gate what the caller said."""
+
+    @pytest.mark.parametrize("answer, charged_after, status", ANSWERS)
+    async def test_an_answer_stored_and_not_yet_taken(self, db, answer, charged_after, status):
+        provider, store = db
+        charged: list[int] = []
+        session, approval = await parked_on_a_price(provider, store, charged)
+        await worker_gone(session)
+        session.resume({approval.approval_id: answer()})
+        await session.flush()  # acknowledged: the store holds it
+        assert (await store.load(session.id)).resume is not None
+        await kill(session)
+
+        restored = await ChatSession.from_store(priced_agent(provider, charged), store, session.id)
+        (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert finished["status"]["code"] == status and charged == charged_after
+        assert not restored.parked
+        await restored.close()
+
+    @pytest.mark.parametrize("answer, charged_after, status", ANSWERS)
+    async def test_an_answer_a_turn_took_and_died_before_using(self, db, answer, charged_after, status):
+        """The other copy: the turn took the answers, the store holds that, and none of its calls had started.
+        The answers go back in the queue from ``in_flight.resume``."""
+        provider, store = db
+        charged: list[int] = []
+        session, approval = await parked_on_a_price(provider, store, charged)
+        reached = asyncio.Event()
+
+        async def pump(_context, _kwargs, _followup, _trigger, _in_flight, mark):
+            await session._write_ahead(mark)
+            reached.set()
+            await asyncio.Event().wait()  # the process dies before the agent runs
+
+        session._pump = pump
+        session.resume({approval.approval_id: answer()})
+        await asyncio.wait_for(reached.wait(), 30)
+        await session.flush()
+        stored = await store.load(session.id)
+        assert stored.resume is None and stored.in_flight["resume"] is not None
+        await kill(session)
+
+        restored = await ChatSession.from_store(priced_agent(provider, charged), store, session.id)
+        (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert finished["status"]["code"] == status and charged == charged_after
+        await restored.close()
+
+    async def test_a_typed_approval_is_stored_as_the_json_object_the_gate_accepts(self, db):
+        provider, store = db
+        session, approval = await parked_on_a_price(provider, store, [])
+        await worker_gone(session)
+        answer = ApprovalResolution(
+            approved=True, scope="session", override_input={"amount": 7}, approver_id="ana", comment="fine"
+        )
+        session.resume({approval.approval_id: answer})
+        await session.flush()
+        stored = (await store.load(session.id)).resume[approval.approval_id]
+        # Not its repr: a JSON object, every field kept, and the same decision when the gate reads it back.
+        assert isinstance(stored, dict) and ApprovalResolution.model_validate(stored) == answer
+        assert stored["decided_at"] == answer.decided_at  # the decision's own time, not the restore's
+        await kill(session)
+
+    async def test_dont_ask_again_survives_the_restart(self, db):
+        provider, store = db
+        charged: list[int] = []
+        session, approval = await parked_on_a_price(provider, store, charged)
+        await worker_gone(session)
+        session.resume({approval.approval_id: ApprovalResolution(approved=True, scope="session")})
+        await session.flush()
+        await kill(session)
+
+        restored = await ChatSession.from_store(priced_agent(provider, charged), store, session.id)
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        restored.send("pay again")
+        (_, second) = await records(restored, "turn_finished", 2, after=after_restore(restored))
+        # scope="session" was kept: the second charge is not asked about.
+        assert second["status"]["code"] == "success" and not restored.parked and charged == [5, 5]
+        await restored.close()
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            object(),
+            {"approved": True, "metadata": {"seen": {1, 2}}},
+            {"approved": True, "metadata": {"at": object()}},
+            {"approved": True, "metadata": {"pair": (1, 2)}},
+            {"approved": True, "metadata": {1: "one"}},
+            {"approved": True, "metadata": {"ratio": float("nan")}},
+            ApprovalResolution(approved=True, metadata={"by": object()}),
+        ],
+        ids=[
+            "an object",
+            "a set inside",
+            "an object inside",
+            "a tuple inside",
+            "a number key",
+            "NaN",
+            "a typed approval holding an object",
+        ],
+    )
+    async def test_an_answer_the_store_cannot_hold_is_refused_not_stored_as_text(self, db, answer):
+        provider, store = db
+        charged: list[int] = []
+        session, approval = await parked_on_a_price(provider, store, charged)
+        with pytest.raises(TypeError, match="cannot be stored"):
+            session.resume({approval.approval_id: answer})
+        # Refused whole: nothing queued, the question still open, and a storable answer goes through.
+        assert session._resume is None and session.parked
+        await session.flush()
+        assert (await store.load(session.id)).resume is None
+        session.resume({approval.approval_id: True})
+        await records(session, "turn_finished", 2)
+        assert charged == [5]
+        await session.close()
+
+    async def test_a_session_without_a_store_takes_typed_answers_as_before(self, db):
+        provider, _ = db
+        charged: list[int] = []
+        session, approval = await parked_on_a_price(provider, None, charged)
+        session.resume({approval.approval_id: ApprovalResolution(approved=True, override_input={"amount": 3})})
+        await records(session, "turn_finished", 2)
+        assert charged == [3]
+        await session.close()
+
+    async def test_the_same_answer_sent_again_after_a_restore_is_not_a_conflict(self, db):
+        provider, store = db
+        charged: list[int] = []
+        session, approval = await parked_on_a_price(provider, store, charged)
+        await worker_gone(session)
+        answer = ApprovalResolution(approved=True)
+        session.resume({approval.approval_id: answer})
+        await session.flush()
+        await kill(session)
+
+        restored = await ChatSession.from_store(priced_agent(provider, charged), store, session.id)
+        restored.resume({approval.approval_id: answer})  # a caller that did not hear back, trying again
+        with pytest.raises(ValueError, match="Already answered differently"):
+            restored.resume({approval.approval_id: ApprovalResolution(approved=False)})
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert charged == [5]
+        await restored.close()
+
+    async def test_an_answer_can_be_taken_back_after_a_restore(self, db):
+        """What the route does when it cannot confirm an answer was stored: the answer it withdraws is the
+        one it sent, also once the queued copy has been through the store."""
+        provider, store = db
+        charged: list[int] = []
+        session, approval = await parked_on_a_price(provider, store, charged)
+        await worker_gone(session)
+        answer = ApprovalResolution(approved=True)
+        session.resume({approval.approval_id: answer})
+        await session.flush()
+        await kill(session)
+
+        restored = await ChatSession.from_store(priced_agent(provider, charged), store, session.id)
+        assert restored.withdraw_answers({approval.approval_id: ApprovalResolution(approved=False)}) is False
+        assert restored.withdraw_answers({"another-id": answer}) is False
+        assert restored.withdraw_answers({approval.approval_id: answer}) is True
+        await restored.flush()
+        assert (await store.load(session.id)).resume is None and restored.parked and charged == []
+        await restored.close()
+
+    @pytest.mark.parametrize(
+        "answer, approves",
+        [
+            (True, True),
+            ({"approved": True}, True),
+            (ApprovalResolution(approved=True), True),
+            (False, False),
+            ({"approved": False}, False),
+            (ApprovalResolution(approved=False), False),
+            (Cancel(reason="no"), False),
+            ({"type": "timbal.cancel"}, False),
+            ({}, False),
+        ],
+        ids=repr,
+    )
+    async def test_the_recovery_notice_names_a_call_only_when_the_answer_approves_it(self, db, answer, approves):
+        """``in_flight.approved``: the gated calls a dead resume had been told to run. A typed approval is
+        one; a cancel sent as JSON is not."""
+        provider, store = db
+        session, approval = await parked_on_a_price(provider, store, [])
+        calls = session._approved_calls({approval.approval_id: answer})
+        assert [call.split("(")[0] for call in calls] == (["charge"] if approves else [])
+        await session.close()
+
+
+class TestASnapshotThatCannotBeWritten:
+    async def test_it_is_reported_and_retried_never_stored_as_something_else(self, db):
+        """The backstop behind the checks at the door: state JSON cannot carry fails its save. The caller
+        waiting on it is told (``SessionNotStored``), the store keeps the last good state, and the next save
+        goes through once the state can be written."""
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hello")
+        await records(session, "turn_finished", 1)
+        await session.flush()
+        before = await store.load(session.id)
+
+        good, session.last_status = session.last_status, {"code": object()}
+        session.persist()
+        with pytest.raises(SessionNotStored):
+            await session.flush()
+        assert (await store.load(session.id)).to_json() == before.to_json()
+
+        session.last_status = good
+        await session.flush()  # the write that failed, once more
+        assert (await store.load(session.id)).version > before.version
+        await session.close()
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            Message(role="user", content=[TextContent(text="pay")], metadata={"seen": {1, 2}}),
+            {"role": "user", "content": [{"type": "text", "text": "pay"}], "metadata": {"at": object()}},
+        ],
+        ids=["a message", "a stored prompt"],
+    )
+    async def test_a_prompt_json_cannot_carry_whole_is_kept_as_its_text(self, db, prompt):
+        """The last prompt is re-sent with a resume and dropped by the agent: metadata JSON cannot carry (a
+        session continuing a caller's own run) must not stop the session from storing itself."""
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hello")
+        await records(session, "turn_finished", 1)
+        session._last_prompt = prompt
+        session.persist()
+        await session.flush()
+        stored = (await store.load(session.id)).last_prompt
+        assert Message.validate(stored).collect_text() == "pay"  # stored at all: the flush went through
+        await session.close()

@@ -35,7 +35,7 @@ from ..state.chat_store import (
     SnapshotConflict,
     process_owner,
 )
-from ..types.approval import Cancel
+from ..types.approval import ApprovalResolution, Cancel
 from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.message import RUNTIME_SOURCE, Message
@@ -187,25 +187,88 @@ def _load_policy(stored: Any, trace: Any = None) -> Any:
     return frozenset(stored) if isinstance(stored, list) else stored
 
 
+def _stored_turn_policy(in_flight: dict[str, Any], last_options: dict[str, Any] | None) -> Any:
+    """The policy the turn in flight ran under, as stored (for :func:`_load_policy`).
+
+    Kept with the turn (``in_flight.tool_policy``). A snapshot written before it was holds the same policy
+    in two other places: the wake the turn ran for, and the options saved for a resume of the turn
+    (``last_options``, set and stored in the same step as the turn itself, so they are this turn's, also when
+    it is the resume of a parked wake and has no wake of its own). Never "no policy" because the new field is
+    missing: that would let the recovery turn reach every read-only tool, whatever the dead turn was allowed.
+    """
+    if "tool_policy" in in_flight:
+        return in_flight["tool_policy"]
+    wake = in_flight.get("wake")
+    if isinstance(wake, dict) and "tool_policy" in wake:
+        return wake["tool_policy"]
+    return (last_options or {}).get("tool_policy")
+
+
 def _dump_prompt(prompt: Any) -> Any:
+    """A turn's prompt as a snapshot holds it: always JSON. One that JSON cannot carry whole (files, metadata
+    from a caller's own run) is kept as its text: a resume only needs the turn to have a prompt, and the agent
+    drops it. Never a reason for a save to fail."""
     from ..utils.serialization import _dump_sync, _NeedsAsync
 
     if prompt is None or isinstance(prompt, str):
         return prompt
     try:
-        return _dump_sync(prompt)
-    except _NeedsAsync:  # files: a resume only needs the turn to have a prompt, the agent drops it
-        return {"role": prompt.role, "content": [{"type": "text", "text": prompt.collect_text()}]}
+        dumped = _dump_sync(prompt)
+        json.dumps(dumped)
+        return dumped
+    except (_NeedsAsync, TypeError, ValueError):
+        if isinstance(prompt, Message):
+            role, text = prompt.role, prompt.collect_text()
+        elif isinstance(prompt, dict):
+            role = prompt.get("role") if isinstance(prompt.get("role"), str) else "user"
+            text = "".join(block.get("text") or "" for block in _blocks(prompt, "text"))
+        else:
+            role, text = "user", str(prompt)
+        return {"role": role, "content": [{"type": "text", "text": text}]}
 
 
 def _load_prompt(stored: Any) -> Any:
     return Message.validate(stored) if isinstance(stored, dict) else stored
 
 
+def _stored_answer(value: Any) -> Any:
+    """One resume value as a snapshot holds it: JSON that means the same to the gate that reads it back.
+
+    ``Cancel`` and ``ApprovalResolution`` have a JSON form of their own (an approval's is the object the
+    approval gate accepts over HTTP, every field kept: scope, input overrides, who decided and when). Anything
+    else must be JSON already, and come back from it unchanged. TypeError otherwise: written as text (its
+    ``str()``), an answer would come back from a restart as something the gate cannot read, and an approved
+    call would silently not run.
+    """
+    if isinstance(value, Cancel):
+        return {"$cancel": value.reason}
+    try:
+        if isinstance(value, ApprovalResolution):
+            return value.model_dump(mode="json")
+        # allow_nan=False: NaN and Infinity are not JSON (Python writes and reads them all the same).
+        carried = json.loads(json.dumps(value, allow_nan=False))
+    except (TypeError, ValueError) as error:  # pydantic's serialization error is a ValueError
+        raise TypeError(str(error).splitlines()[0]) from None
+    if carried != value:
+        # JSON takes it and hands back something else (a tuple as a list, a number key as text).
+        raise TypeError(f"{type(value).__name__} does not come back from JSON as it went in")
+    return value
+
+
 def _dump_resume(values: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Answers to a parked turn as a snapshot holds them. TypeError for one it cannot hold."""
     if values is None:
         return None
-    return {key: {"$cancel": value.reason} if isinstance(value, Cancel) else value for key, value in values.items()}
+    stored = {}
+    for key, value in values.items():
+        try:
+            stored[key] = _stored_answer(value)
+        except TypeError as error:
+            raise TypeError(
+                f"The answer to {key!r} cannot be stored ({error}): a durable session takes what JSON can "
+                "carry, an ApprovalResolution or a Cancel."
+            ) from None
+    return stored
 
 
 def _load_resume(stored: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -215,6 +278,31 @@ def _load_resume(stored: dict[str, Any] | None) -> dict[str, Any] | None:
         key: Cancel(reason=value["$cancel"]) if isinstance(value, dict) and "$cancel" in value else value
         for key, value in stored.items()
     }
+
+
+def _same_answer(one: Any, other: Any) -> bool:
+    """The same answer, also when one of the two has been through the store (a typed approval comes back as
+    its JSON object)."""
+    if one == other:
+        return True
+    try:
+        return _stored_answer(one) == _stored_answer(other)
+    except TypeError:
+        return False
+
+
+def _approves(value: Any) -> bool:
+    """Whether a resume value lets the gated call it answers run, as the approval gate reads it."""
+    if value is True:
+        return True
+    if isinstance(value, ApprovalResolution):
+        return value.approved
+    if isinstance(value, dict) and not Cancel.matches(value):
+        try:
+            return ApprovalResolution.model_validate(value).approved
+        except ValueError:  # not a decision the gate accepts: it runs nothing
+            return False
+    return False
 
 
 def _status_dict(status: Any) -> dict[str, Any] | None:
@@ -705,7 +793,9 @@ class ChatSession:
     def withdraw_answers(self, values: dict[str, Any]) -> bool:
         """Take back answers sent with :meth:`resume` that no turn has taken yet; False once one has."""
         queued = self._resume
-        if queued is None or any(queued.get(key) != value for key, value in values.items()):
+        if queued is None or any(
+            key not in queued or not _same_answer(queued[key], value) for key, value in values.items()
+        ):
             return False
         rest = {key: value for key, value in queued.items() if key not in values}
         self._resume = rest or None
@@ -778,7 +868,12 @@ class ChatSession:
         return self._parked and context is not None and self._scheduler.head == context.id
 
     def resume(self, values: dict[str, Any]) -> None:
-        """Answer the parked turn: ``{approval_id: ...}`` / ``{interaction_id: value}``, as for ``resume=``."""
+        """Answer the parked turn: ``{approval_id: ...}`` / ``{interaction_id: value}``, as for ``resume=``.
+
+        A durable session stores the answers before a turn takes them, so it takes what a snapshot can hold:
+        JSON values (as over HTTP), :class:`~timbal.types.approval.ApprovalResolution` and
+        :class:`~timbal.types.approval.Cancel`. TypeError for anything else, with nothing queued.
+        """
         if self.closed:
             raise RuntimeError("The chat session is closed.")
         if self.busy:
@@ -788,8 +883,14 @@ class ChatSession:
         if not self.parked and not self._restore_pending():
             # Before restore() has finished, the answers wait for it: dropped if the run is not parked after all.
             raise RuntimeError("No turn of this session is waiting for an answer.")
+        if self._session_store is not None:
+            # Before anything is queued: an answer the store cannot hold is refused here, to its caller, not
+            # accepted and then lost (or written as text) by a save in the background.
+            _dump_resume(values)
         queued = self._resume or {}
-        conflicts = sorted(key for key, value in values.items() if key in queued and queued[key] != value)
+        conflicts = sorted(
+            key for key, value in values.items() if key in queued and not _same_answer(queued[key], value)
+        )
         if conflicts:
             raise ValueError(f"Already answered differently: {', '.join(conflicts)}.")
         # Answers sent before the worker takes them go together (two approvals of one parked turn).
@@ -834,18 +935,23 @@ class ChatSession:
 
     @property
     def due(self) -> bool:
-        """Work the session will start a turn for by itself: answers to its parked question, a wake, a
-        message (one still collecting included), an event or a finished background task.
+        """Work the session will start a turn for by itself: answers to its parked question, a wake, and
+        whatever its scheduler would start one for — a message (one still collecting included), an event or
+        a finished background task whose announce policy asks for a turn, and a background task still
+        running whose result will.
 
-        A parked question is not due: it waits for its user, not for the session. False here means a caller
-        may let the session go (a durable one is kept in its store) without leaving work nothing will run.
+        What only rides with the next turn (a silent event, the result of a silent task) is not due: it
+        starts nothing. Neither is a parked question: it waits for its user, not for the session. False here
+        means a caller may let the session go (a durable one is kept in its store) without leaving work
+        nothing will run.
         """
         if self._resume is not None:
             return True
         if self.parked:
             return False
-        store = self._store
-        return bool(self._wakes or store.pending_events() or store.pending_completions())
+        # The scheduler's own test for "a turn may still come" (it ends the worker's wait on it): the same
+        # announce policy decides here, so the two cannot disagree about a session that is still owed a turn.
+        return bool(self._wakes) or self._scheduler.may_need_turn()
 
     @property
     def lost(self) -> bool:
@@ -952,7 +1058,7 @@ class ChatSession:
             if snapshot.in_flight is not None:
                 # First: the messages a dead turn took were sent before anything still pending, and go back
                 # ahead of it.
-                recovered = await session._recover(snapshot.in_flight)
+                recovered = await session._recover(snapshot.in_flight, snapshot.last_options)
             # Not the ones the dead run's stored memory shows: it took them, and the snapshot that would have
             # said so was never written.
             session._restore_events([event for event in snapshot.pending if event["id"] not in session._shown_events])
@@ -1244,7 +1350,8 @@ class ChatSession:
             )
             # A recovery notice carries its own header (it is the runtime's, not a scheduled wake).
             text = wake.text if wake.kind == RECOVERY_KIND else f"{_WAKE_HEADER}\n\n{wake.text}"
-            if wake.tool_policy == "read_only":
+            if wake.tool_policy == "read_only" or isinstance(wake.tool_policy, ReadOnlyWithin):
+                # Narrowed (a recovery turn after a restricted one) it is read-only all the same.
                 text += f"\n\n{_READ_ONLY_NOTE}"
             prompt = Message(
                 role="user",
@@ -1308,7 +1415,9 @@ class ChatSession:
                 "tool_policy": _store_policy(options.tool_policy),
             }
             if resume is not None:
-                in_flight["resume"] = _dump_resume(resume)
+                # Only a durable session reads these back (after a restart). One without a store takes any
+                # value its tools understand, storable or not.
+                in_flight["resume"] = _dump_resume(resume) if self._session_store is not None else {}
                 in_flight["approved"] = self._approved_calls(resume)
             # Stored from now, not from the turn's first event: what it took (messages, a wake, answers) is no
             # longer pending, and a restart before that event would lose it. A turn that never started is put
@@ -1766,9 +1875,7 @@ class ChatSession:
             return []
         calls = []
         for approval in self._last_context.pending_approvals():
-            value = values.get(approval["approval_id"])
-            approved = value is True or (isinstance(value, dict) and value.get("approved", True) is not False)
-            if approved:
+            if _approves(values.get(approval["approval_id"])):
                 name = approval.get("path", "?").rsplit(".", 1)[-1]
                 calls.append(f"{name}({_brief(approval.get('input'), 80)})")
         return calls
@@ -1806,8 +1913,9 @@ class ChatSession:
         loaded._trace = trace
         return loaded
 
-    async def _recover(self, in_flight: dict[str, Any]) -> str:
-        """Settle the turn that was running when the session was last stored (see :meth:`from_store`)."""
+    async def _recover(self, in_flight: dict[str, Any], last_options: dict[str, Any] | None = None) -> str:
+        """Settle the turn that was running when the session was last stored (see :meth:`from_store`).
+        ``last_options``: the snapshot's, which an older one needs to tell what the turn was allowed."""
         run_id = in_flight["run_id"]
         self._in_flight = None
         context = await self._load_run(run_id)
@@ -1899,7 +2007,10 @@ class ChatSession:
                 # Read-only, and no further than the dead turn itself was allowed: a turn that reports on a
                 # run under a narrow policy must not reach past it, however read-only what it reaches is.
                 tool_policy=read_only_within(
-                    _load_policy(in_flight.get("tool_policy"), context._trace if context is not None else None)
+                    _load_policy(
+                        _stored_turn_policy(in_flight, last_options),
+                        context._trace if context is not None else None,
+                    )
                 ),
                 silent_ok=True,
                 kind=RECOVERY_KIND,

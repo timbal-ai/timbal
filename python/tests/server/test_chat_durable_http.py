@@ -29,19 +29,28 @@ AGENT = textwrap.dedent(
             await asyncio.sleep(0.02)
         return "waited"
 
+    async def build() -> str:
+        while (DIR / "hang-build").exists():  # detached: the turn that started it ends, this goes on
+            await asyncio.sleep(0.02)
+        return "built"
+
     def handler(messages):
         text = next((m.collect_text() for m in reversed(messages) if m.role == "user"), "")
         if messages[-1].role == "tool":
             return "done"
-        if text == "wait":
-            return Message(role="assistant", content=[ToolUseContent(id="w1", name="wait", input={})],
+        if text in ("wait", "build", "charge"):
+            return Message(role="assistant", content=[ToolUseContent(id=f"{text}1", name=text, input={})],
                            stop_reason="tool_use")
         return f"echo: {text}"
 
     agent = Agent(
         name="agent",
         model=TestModel(handler=handler),
-        tools=[Tool(name="wait", handler=wait)],
+        tools=[
+            Tool(name="wait", handler=wait),
+            Tool(name="build", handler=build, background_mode="always"),
+            Tool(name="charge", handler=lambda: "charged", requires_approval=True),
+        ],
         tracing_provider=SqliteTracingProvider.configured(_path=DIR / "timbal.db"),
     )
     """
@@ -467,6 +476,82 @@ def test_a_session_with_a_collected_message_is_not_reaped(client, monkeypatch):
         "the collected message to run without anyone asking for the session",
         timeout=20,
     )
+    assert not client.portal.call(store.load, session_id).pending
+
+
+def test_an_answer_json_cannot_carry_is_a_400_and_the_question_stays_open(client):
+    """The body parser lets ``NaN`` through, and a snapshot cannot hold it: refused to its sender, not a 500,
+    and not accepted and then lost."""
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "charge"})
+    _until(lambda: client.get(f"/chat/sessions/{session_id}").json()["parked"], "the turn to ask for approval")
+    (approval,) = client.get(f"/chat/sessions/{session_id}").json()["pending_approvals"]
+    approval_id = approval["approval_id"]
+
+    refused = client.post(
+        f"/chat/sessions/{session_id}/resume",
+        content=f'{{"resume": {{"{approval_id}": {{"approved": true, "metadata": {{"ratio": NaN}}}}}}}}',
+        headers={"content-type": "application/json"},
+    )
+    assert refused.status_code == 400 and "cannot be stored" in refused.json()["detail"]
+    assert client.get(f"/chat/sessions/{session_id}").json()["parked"]
+
+    answered = client.post(f"/chat/sessions/{session_id}/resume", json={"resume": {approval_id: True}})
+    assert answered.status_code == 202
+    state = wait_turns(client, session_id, 2)
+    assert not state["parked"] and state["last_status"]["code"] == "success"
+
+
+def _reap_idle_sessions(client, monkeypatch):
+    """What the server does when a session is created, with every idle session past its time."""
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "0.01")
+    time.sleep(0.05)
+    client.post("/chat/sessions", json={})
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "3600")
+
+
+def test_a_session_whose_background_tool_is_still_running_is_not_reaped(client, monkeypatch):
+    """Nothing is queued while a detached tool runs, yet the session owes a turn: the tool's result starts
+    one. Reaped meanwhile, the result lands in a session nobody serves and its turn never runs."""
+    store = client.app.state.chat_store
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    hang = _hang_file().with_name("hang-build")
+    hang.touch()
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "build"})
+    state = wait_turns(client, session_id, 1)  # the turn that started the tool is over; the tool is not
+    assert not state["busy"] and not state["pending"]
+
+    _reap_idle_sessions(client, monkeypatch)
+    assert session_id in client.app.state.chat_sessions, "reaped with a background tool still to report"
+
+    hang.unlink()
+    # Read the store, not the session: a GET would restore a reaped one, hiding the loss.
+    _until(
+        lambda: (client.portal.call(store.load, session_id)).turns == 2,
+        "the tool's result to get its turn without anyone asking for the session",
+        timeout=20,
+    )
+
+
+def test_a_session_holding_only_a_silent_event_is_reaped_and_keeps_it(client, monkeypatch):
+    """The other way round: a silent event starts no turn, so it must not keep an idle session in memory
+    for ever. Let go, the session keeps the event in its store, for the turn that next runs."""
+    store = client.app.state.chat_store
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi"})
+    wait_turns(client, session_id, 1)
+    session = client.app.state.chat_sessions[session_id]
+    client.portal.call(lambda: session.store.post_event("FYI: the cache is warm.", announce="silent"))
+    _until(lambda: len(client.portal.call(store.load, session_id).pending) == 1, "the event to be stored")
+
+    _reap_idle_sessions(client, monkeypatch)
+    assert session_id not in client.app.state.chat_sessions, "kept for an event that starts nothing"
+    snapshot = client.portal.call(store.load, session_id)
+    assert [event["text"] for event in snapshot.pending] == ["FYI: the cache is warm."] and snapshot.turns == 1
+
+    # It rides with the next turn of the restored session.
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hello"})
+    wait_turns(client, session_id, 2)
     assert not client.portal.call(store.load, session_id).pending
 
 
