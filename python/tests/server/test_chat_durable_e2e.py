@@ -250,7 +250,8 @@ def test_two_workers_on_one_file_never_run_a_session_twice(workdir, busy_mode):
         assert len(accepted_ids) == accepted
 
         def from_the_session_worker(path, **params):
-            for _ in range(10):  # the other worker answers 409
+            # The other worker answers 409, and the OS may hand it every one of these: only call this from `until`.
+            for _ in range(10):
                 response = httpx.get(f"{base}{path}", params=params)
                 if response.status_code == 200:
                     return response.json()
@@ -273,10 +274,9 @@ def test_two_workers_on_one_file_never_run_a_session_twice(workdir, busy_mode):
             ]
             return ids if len(ids) >= accepted else None
 
-        state = until(idle, what="the session to go idle")
+        state = until(idle, what="the session to go idle")  # every message taken: the turn count is final
         ids = until(delivered, what="every accepted message to be delivered")
         assert sorted(ids) == sorted(accepted_ids)  # each once: none lost, none run twice
-        state = from_the_session_worker("")
         if busy_mode == "followup":
             assert state["turns"] == accepted
         else:
