@@ -242,13 +242,15 @@ def _stored_answer(value: Any) -> Any:
     """
     if isinstance(value, Cancel):
         return {"$cancel": value.reason}
+    if isinstance(value, ApprovalResolution):
+        # Its fields as they are, checked like any other answer below. Not pydantic's JSON mode: that writes
+        # NaN and Infinity as null (an input override silently changed) and a set as a list.
+        value = value.model_dump()
     try:
-        if isinstance(value, ApprovalResolution):
-            return value.model_dump(mode="json")
         # allow_nan=False: NaN and Infinity are not JSON (Python writes and reads them all the same).
         carried = json.loads(json.dumps(value, allow_nan=False))
-    except (TypeError, ValueError) as error:  # pydantic's serialization error is a ValueError
-        raise TypeError(str(error).splitlines()[0]) from None
+    except (TypeError, ValueError) as error:
+        raise TypeError(str(error)) from None
     if carried != value:
         # JSON takes it and hands back something else (a tuple as a list, a number key as text).
         raise TypeError(f"{type(value).__name__} does not come back from JSON as it went in")
@@ -467,7 +469,7 @@ def _split_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     stored, unstored = {}, []
     for name, value in kwargs.items():
         try:
-            json.dumps(value)
+            json.dumps(value, allow_nan=False)  # as the snapshot is written
         except (TypeError, ValueError):
             unstored.append(name)
         else:

@@ -508,6 +508,11 @@ class TestStores:
             snapshot.to_json()
         snapshot.resume = {"a1": ApprovalResolution(approved=True).model_dump(mode="json")}
         assert SessionSnapshot.from_json(snapshot.to_json()).resume == snapshot.resume
+        # NaN and Infinity are not JSON either, though Python would write them: refused the same way.
+        for not_json in (float("nan"), float("inf")):
+            snapshot.resume = {"a1": {"approved": True, "metadata": {"ratio": not_json}}}
+            with pytest.raises(ValueError):
+                snapshot.to_json()
 
     async def test_a_save_with_an_owner_needs_the_lease(self, store):
         version = await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
@@ -2670,7 +2675,11 @@ class TestAnswersAreStoredAsTheGateReadsThem:
             {"approved": True, "metadata": {"pair": (1, 2)}},
             {"approved": True, "metadata": {1: "one"}},
             {"approved": True, "metadata": {"ratio": float("nan")}},
+            {"approved": True, "override_input": {"amount": float("inf")}},
             ApprovalResolution(approved=True, metadata={"by": object()}),
+            ApprovalResolution(approved=True, metadata={"ratio": float("nan")}),
+            ApprovalResolution(approved=True, override_input={"amount": float("inf")}),
+            ApprovalResolution(approved=True, metadata={"seen": {1, 2}}),
         ],
         ids=[
             "an object",
@@ -2679,7 +2688,11 @@ class TestAnswersAreStoredAsTheGateReadsThem:
             "a tuple inside",
             "a number key",
             "NaN",
+            "Infinity",
             "a typed approval holding an object",
+            "a typed approval holding NaN",
+            "a typed approval overriding an input with Infinity",
+            "a typed approval holding a set",
         ],
     )
     async def test_an_answer_the_store_cannot_hold_is_refused_not_stored_as_text(self, db, answer):
@@ -2791,6 +2804,20 @@ class TestASnapshotThatCannotBeWritten:
         await session.flush()  # the write that failed, once more
         assert (await store.load(session.id)).version > before.version
         await session.close()
+
+    async def test_a_turn_argument_json_cannot_carry_is_asked_for_again(self, db):
+        """NaN is one more value a snapshot cannot hold: named as unstored, like a callable, so the session
+        still saves and ``from_store`` asks for the argument again."""
+        provider, store = db
+        agent = make_agent(provider, Gate(released=True))
+        session = ChatSession(agent, session_store=store, max_tokens=64, temperature=float("nan"))
+        session.persist()
+        await session.flush()
+        config = (await store.load(session.id)).config
+        assert config["kwargs"] == {"max_tokens": 64} and config["kwargs_unstored"] == ["temperature"]
+        await session.close(keep=True)
+        with pytest.raises(ValueError, match="temperature"):
+            await ChatSession.from_store(agent, store, session.id)
 
     @pytest.mark.parametrize(
         "prompt",
