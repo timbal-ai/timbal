@@ -208,6 +208,10 @@ class TestAgentTimeout:
     @pytest.mark.parametrize("wrapper", ["direct", "agent", "workflow"])
     async def test_parallel_tools_are_closed_before_timeout_output_after_slow_consumer(self, wrapper):
         """Expiry between events must join child tasks before reporting timeout."""
+        # The deadline must outlast everything before the first tool event (two model calls and the spawns,
+        # for the nested wrappers): at 0.2 s a loaded runner got there too late, and the run timed out
+        # before the path under test was reached. The consumer then holds that event past the deadline.
+        deadline = 1.0
         release = asyncio.Event()
         both_started = asyncio.Event()
         started: set[str] = set()
@@ -245,7 +249,7 @@ class TestAgentTimeout:
                 ]
             ),
             tools=[streaming],
-            timeout=0.2 if wrapper == "direct" else None,
+            timeout=deadline if wrapper == "direct" else None,
         )
         if wrapper != "direct":
             child = Workflow(name="worker").step(agent, prompt="go") if wrapper == "workflow" else agent
@@ -254,7 +258,7 @@ class TestAgentTimeout:
                 name="fanout",
                 model=TestModel(responses=[_tool_call("worker", child_input), "Done."]),
                 tools=[child],
-                timeout=0.2,
+                timeout=deadline,
             )
         stream = agent(prompt="go")
         delayed = False
@@ -263,11 +267,11 @@ class TestAgentTimeout:
         try:
             async for event in stream:
                 if not delayed and isinstance(event, DeltaEvent) and event.path.endswith(".streaming"):
-                    await asyncio.wait_for(both_started.wait(), timeout=1.0)
+                    await asyncio.wait_for(both_started.wait(), timeout=deadline)
                     delayed = True
                     # The deadline expires while the consumer holds an event,
                     # not while the handler is being awaited.
-                    await asyncio.sleep(0.25)
+                    await asyncio.sleep(deadline + 0.25)
                 if isinstance(event, OutputEvent) and event.path == "fanout":
                     assert event.status.code == "timeout"
                     closed_at_timeout = set(closed)
