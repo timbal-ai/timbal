@@ -225,7 +225,9 @@ def test_a_session_without_a_store_goes_on_when_its_traces_are_refused(tmp_path,
         assert client.get("/chat/meta").json()["durable"] is False
         session_id = open_session(client)
         for message in ("one", "two"):
-            assert client.post(f"/chat/sessions/{session_id}/messages", json={"text": message}).status_code == 202
+            # followup: a turn of its own each (steered, the second may join the first, and one turn ends)
+            sent = client.post(f"/chat/sessions/{session_id}/messages", json={"text": message, "mode": "followup"})
+            assert sent.status_code == 202
         items = read_log(client, session_id, until_kind="turn_finished", count=2, timeout=20)
         finished = [item for _, item in items if item.get("kind") == "turn_finished"]
         assert [turn["status"]["code"] for turn in finished] == ["success", "success"]

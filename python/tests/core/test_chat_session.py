@@ -1794,10 +1794,16 @@ class Unreachable(InMemoryTracingProvider):
 
 
 @pytest.fixture
-def refusing_platform(monkeypatch):
-    """The real platform provider against a platform that turns every request down for good (403)."""
+async def refusing_platform(monkeypatch):
+    """The real platform provider against a platform that turns every request down for good (403).
+
+    Runs it could not store stay with the provider and with the buffered uploads for a later flush (process
+    state): all of it is put back as it was, or the next server shutdown in this process would try to send
+    them for real.
+    """
     from timbal.errors import PlatformError
     from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+    from timbal.state.tracing import uploads
     from timbal.state.tracing.providers.platform import PlatformTracingProvider
 
     async def refused(*_args, **_kwargs):
@@ -1809,11 +1815,36 @@ def refusing_platform(monkeypatch):
         auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t2_test"),
         subject=PlatformSubject(org_id="1", app_id="2"),
     )
-    yield PlatformTracingProvider.configured(platform_config=config)
-    for task in PlatformTracingProvider._retries.values():
-        task.cancel()
-    for state in ("_caps", "_delta_runs", "_recent", "_flights", "_unsaved", "_retries"):
-        getattr(PlatformTracingProvider, state).clear()
+    kept = (
+        "_caps",
+        "_delta_runs",
+        "_keepalives",
+        "_recent",
+        "_saving",
+        "_flights",
+        "_unsaved",
+        "_own_snapshots",
+        "_retries",
+        "_oversized",
+    )
+    before = {name: dict(getattr(PlatformTracingProvider, name)) for name in kept}
+    buffered = uploads._reset_for_tests()
+    try:
+        yield PlatformTracingProvider.configured(platform_config=config)
+    finally:
+        left = [run.task for run in uploads._RUNS.values() if run.task is not None]
+        left += [task for task in PlatformTracingProvider._retries.values() if task not in before["_retries"].values()]
+        for keepalive in PlatformTracingProvider._keepalives.values():
+            keepalive.cancel()
+        for task in left:
+            task.cancel()
+        await asyncio.gather(*left, return_exceptions=True)
+        uploads._RUNS.clear()
+        uploads._RUNS.update(buffered)
+        for name in kept:
+            state = getattr(PlatformTracingProvider, name)
+            state.clear()
+            state.update(before[name])
 
 
 class TestTracesThatCannotBeStored:
