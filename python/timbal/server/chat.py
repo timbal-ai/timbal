@@ -12,6 +12,7 @@ session another worker (or an earlier process) held is a 404.
 import asyncio
 import contextlib
 import json
+import math
 import os
 import time
 from collections.abc import AsyncGenerator
@@ -34,6 +35,8 @@ _HTML_PATH = Path(__file__).parent / "chat.html"
 
 SESSION_TTL_ENV = "TIMBAL_CHAT_SESSION_TTL_S"
 STORE_ENV = "TIMBAL_CHAT_STORE"
+STORE_TIMEOUT_ENV = "TIMBAL_CHAT_STORE_TIMEOUT_S"
+DEFAULT_STORE_TIMEOUT_S = 10.0
 DEFAULT_SESSION_TTL_S = 3600.0
 # An SSE comment this often keeps proxies from closing a quiet stream.
 KEEPALIVE_S = 15.0
@@ -50,6 +53,18 @@ def _session_ttl() -> float:
         return float(raw) if raw else DEFAULT_SESSION_TTL_S
     except ValueError:
         return DEFAULT_SESSION_TTL_S
+
+
+def _store_timeout() -> float | None:
+    """How long a chat route waits for the session store (``TIMBAL_CHAT_STORE_TIMEOUT_S``, default 10 s; 0 or
+    less: no limit). A store that fails is told at once; one that hangs (a stalled network mount) says
+    nothing, and without a limit the request, and every later one for that session, would wait with it."""
+    raw = os.environ.get(STORE_TIMEOUT_ENV)
+    try:
+        timeout = float(raw) if raw else DEFAULT_STORE_TIMEOUT_S
+    except ValueError:
+        timeout = DEFAULT_STORE_TIMEOUT_S
+    return timeout if math.isfinite(timeout) and timeout > 0 else None
 
 
 def _sessions(request: Request) -> dict[str, ChatSession]:
@@ -132,8 +147,19 @@ async def _restore(request: Request, session_id: str) -> ChatSession | None:
     if store is None:
         return None
     agent = _agent(request)
+    timeout = _store_timeout()
     try:
-        return await _restore_once(request.app, agent, store, session_id)
+        # The restore itself is shielded (_restore_once): a request that stops waiting leaves it going, and
+        # the session is there for the next one once the store answers.
+        return await asyncio.wait_for(_restore_once(request.app, agent, store, session_id), timeout)
+    except TimeoutError as e:
+        logger.error("chat_session_restore_timeout", session_id=session_id, timeout_s=timeout)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Chat session {session_id!r} could not be restored: the session store did not answer "
+            f"within {timeout:g} s.",
+            headers=_RETRY,
+        ) from e
     except LookupError:
         return None
     except ValueError as e:
@@ -220,7 +246,7 @@ async def restore_chat_sessions(app: Any) -> list[str]:
         )
         app.state.chat_discovery = asyncio.get_running_loop().create_task(_discover_later(app, runnable, store))
         return []
-    return await _restore_discovered(app, runnable, store, session_ids)
+    return await _restore_discovered(app, runnable, store, session_ids, timeout=_STARTUP_DISCOVERY_S)
 
 
 async def _discover_later(app: Any, agent: Any, store: ChatSessionStore) -> None:
@@ -233,7 +259,8 @@ async def _discover_later(app: Any, agent: Any, store: ChatSessionStore) -> None
         delay = next(delays, delay)
         await asyncio.sleep(delay)
         try:
-            session_ids = await store.list_ids(with_work=True)
+            # Bounded like the first look: an attempt that gets no answer is given up, and the next one made.
+            session_ids = await asyncio.wait_for(store.list_ids(with_work=True), _STARTUP_DISCOVERY_S)
         except Exception as e:
             error = str(e) or type(e).__name__
             if error != said:  # once per cause, not once per attempt for as long as the store is away
@@ -245,17 +272,31 @@ async def _discover_later(app: Any, agent: Any, store: ChatSessionStore) -> None
         return
 
 
-async def _restore_discovered(app: Any, runnable: Any, store: ChatSessionStore, session_ids: list[str]) -> list[str]:
+async def _restore_discovered(
+    app: Any, runnable: Any, store: ChatSessionStore, session_ids: list[str], *, timeout: float | None = None
+) -> list[str]:
+    """Bring back the sessions ``session_ids`` names. ``timeout``: how long to wait for each (startup, which
+    must not wait on a store that has stopped answering)."""
     sessions = _app_sessions(app)
     restored, skipped = [], []
+    stalled = False
     for session_id in session_ids:
         if session_id in sessions:
             continue
         if getattr(app.state, "chat_closing", False):
             break
+        if stalled:
+            skipped.append(session_id)  # the store stopped answering: not one wait per session
+            continue
         try:
-            await _restore_once(app, runnable, store, session_id)
+            await asyncio.wait_for(_restore_once(app, runnable, store, session_id), timeout)
             restored.append(session_id)
+        except TimeoutError:
+            # Its restore goes on (shielded) and puts the session in the map if the store comes back; the
+            # retry below sees to the others.
+            logger.error("chat_session_restore_timeout", session_id=session_id, timeout_s=timeout)
+            stalled = True
+            skipped.append(session_id)
         except SessionLeased:
             skipped.append(session_id)  # another worker serves it, or a predecessor's lease has not run out yet
         except (LookupError, ValueError):
@@ -323,6 +364,7 @@ async def _reap(sessions: dict[str, ChatSession]) -> None:
     if ttl <= 0:
         return
     now = time.monotonic()
+    timeout = _store_timeout()
     for session_id, session in list(sessions.items()):
         # `due`, not just `busy`: a session collecting a message (or waiting out a backoff) is neither busy
         # nor idle. Let go of it and nothing runs that message until a request asks for the session again,
@@ -330,8 +372,10 @@ async def _reap(sessions: dict[str, ChatSession]) -> None:
         if session.closed or (not session.busy and not session.due and now - session.last_activity > ttl):
             # Closed before it leaves the map: a request meanwhile finds it handed off and waits, instead of
             # restoring a second copy while this one still holds the session's task store.
-            await session.close(keep=True)
+            await session.close(keep=True, store_timeout=timeout)
             await session.wait_closed()
+            if session.close_timed_out:
+                timeout = 0.0  # the store is not answering: the others are let go without waiting for it
             if sessions.get(session_id) is session:
                 sessions.pop(session_id)
 
@@ -357,9 +401,12 @@ async def close_chat_sessions(app: Any) -> None:
         if slow:
             await asyncio.gather(*slow, return_exceptions=True)
     sessions = getattr(app.state, "chat_sessions", None) or {}
+    timeout = _store_timeout()
     for session in list(sessions.values()):
         with contextlib.suppress(Exception):
-            await session.close(keep=True)
+            await session.close(keep=True, store_timeout=timeout)
+        if session.close_timed_out:
+            timeout = 0.0  # the store is not answering: one wait for it, not one per session
     sessions.clear()
 
 
@@ -367,27 +414,43 @@ _RETRY = {"Retry-After": "1"}
 
 
 _TAKEN = "The request was taken (a turn has it), but it would not survive a restart: do not resend."
+_UNCONFIRMED = (
+    "The request was taken, but the store has not confirmed it, so it may not survive a restart: do not resend."
+)
 
 
 async def _stored(session: ChatSession, mark: int, undo: Any = None, *, taken: str = _TAKEN) -> None:
     """``session.flush()`` for a route about to acknowledge the change it made at ``mark`` (``session.mark()``,
-    taken right after it). A session another process took is a ``409``. When the store fails:
+    taken right after it). A session another process took is a ``409``. When the store fails, or does not
+    answer within :func:`_store_timeout`:
 
     - the change itself is stored and a later one is what failed: returns, the acknowledgement holds;
-    - the store holds nothing of it and ``undo`` takes it back here too (returns True: no turn has taken it):
-      ``503`` with ``Retry-After``. Nothing was accepted, in memory or in the store, so a retry cannot run
-      it twice, whether or not this process lives to store anything again;
+    - the store did not answer and a write that holds the change is still out: ``503`` without
+      ``Retry-After``, the change kept. That write may land at any time (or already has), so taking the
+      change back and asking for a retry could run it twice;
+    - no write holds it and ``undo`` takes it back here too (returns True: no turn has taken it): ``503`` with
+      ``Retry-After``. Nothing was accepted, in memory or in the store, so a retry cannot run it twice,
+      whether or not this process lives to store anything again;
     - a turn has it: ``503`` without ``Retry-After`` (``taken``)."""
+    timeout = _store_timeout()
     try:
-        await session.flush()
+        # flush() waits on the session's save loop without owning it: stopping the wait stops no write.
+        await asyncio.wait_for(session.flush(), timeout)
     except SessionLeased as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    except SessionNotStored as e:
+    except (SessionNotStored, TimeoutError) as e:
         if session.stored_since(mark):
             return
+        hung = isinstance(e, TimeoutError)
+        why = f"The session store did not answer within {timeout:g} s" if hung else str(e)
+        if hung:
+            logger.error("chat_session_store_timeout", session_id=session.id, timeout_s=timeout)
+            if session.may_be_stored(mark):
+                detail = taken if taken is not _TAKEN else _UNCONFIRMED
+                raise HTTPException(status_code=503, detail=f"{why}. {detail}") from e
         if undo is not None and undo():
-            raise HTTPException(status_code=503, detail=f"{e}. Nothing was accepted: retry.", headers=_RETRY) from e
-        raise HTTPException(status_code=503, detail=f"{e}. {taken}") from e
+            raise HTTPException(status_code=503, detail=f"{why}. Nothing was accepted: retry.", headers=_RETRY) from e
+        raise HTTPException(status_code=503, detail=f"{why}. {taken}") from e
 
 
 def _jsonable(item: Any) -> Any:
@@ -464,12 +527,17 @@ async def create_session(request: Request) -> JSONResponse:
         raise HTTPException(status_code=503, detail=f"Could not load the run the session continues: {e}") from e
     session.persist()
     mark = session.mark()
+    timeout = _store_timeout()
     try:
-        await session.flush()
-    except (SessionNotStored, SessionLeased) as e:
+        await asyncio.wait_for(session.flush(), timeout)
+    except (SessionNotStored, SessionLeased, TimeoutError) as e:
         if isinstance(e, SessionLeased) or not session.stored_since(mark):
-            await session.close()  # never acknowledged: nothing of it stays
-            raise HTTPException(status_code=503, detail=f"{e}. No session was opened: retry.", headers=_RETRY) from e
+            hung = isinstance(e, TimeoutError)
+            why = f"The session store did not answer within {timeout:g} s" if hung else str(e)
+            # Never acknowledged: nothing of it stays here. With a store that hangs the close does not wait
+            # for it again; a row its first write may still leave is one nobody was given the id of.
+            await session.close(store_timeout=0.0 if hung else timeout)
+            raise HTTPException(status_code=503, detail=f"{why}. No session was opened: retry.", headers=_RETRY) from e
     sessions[session.id] = session
     return _json(session.state(), status_code=201)
 
@@ -491,7 +559,7 @@ async def delete_session(request: Request, session_id: str) -> JSONResponse:
     try:
         # In the map until it is closed and gone from the store: a request meanwhile finds it closed (404),
         # not a gap through which to restore the row that is still there.
-        await session.close()
+        await session.close(store_timeout=_store_timeout())
         await session.wait_closed()  # a close already going (ownership lost) is this one: wait for its end
     finally:
         if sessions.get(session_id) is session:

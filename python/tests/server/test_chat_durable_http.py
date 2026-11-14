@@ -386,6 +386,18 @@ def test_a_trace_store_that_cannot_be_opened_does_not_stop_the_server(tmp_path, 
         assert refused.status_code == 503 and client.get("/chat/sessions").json() == []
 
 
+def _close_database(path):
+    """Close this process's connection to the SQLite file at ``path`` (the write-ahead log is folded into it)."""
+    from pathlib import Path
+
+    from timbal.state.tracing.providers import sqlite as sqlite_module
+
+    resolved = str(Path(path).resolve())
+    with sqlite_module._DATABASES_LOCK:
+        for key in [key for key in sqlite_module._DATABASES if key[0] == resolved]:
+            sqlite_module._DATABASES.pop(key).conn.close()
+
+
 def test_sessions_with_work_are_found_once_the_store_is_back(tmp_path, monkeypatch):
     """Startup could not look, so it keeps looking: a session with a message waiting is brought back when the
     store answers again, without a client asking for it."""
@@ -406,6 +418,7 @@ def test_sessions_with_work_are_found_once_the_store_is_back(tmp_path, monkeypat
     staging.mkdir()
     seeded = SqliteChatSessionStore(staging / "timbal.db")
     asyncio.run(seeded.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None))
+    _close_database(staging / "timbal.db")  # Windows does not rename a folder with a file open in it
     with TestClient(create_app()) as client:
         sessions = client.app.state.chat_sessions
         assert sessions == {}
@@ -413,6 +426,43 @@ def test_sessions_with_work_are_found_once_the_store_is_back(tmp_path, monkeypat
         # not an empty one a moment before the session is written (it looks once the store answers).
         staging.rename(mount)
         _until(lambda: sessions.get("s1") is not None and sessions["s1"].turns == 1, "the session to be found")
+
+
+def test_the_search_gives_up_a_look_that_gets_no_answer(tmp_path, monkeypatch):
+    """The store does not fail, it says nothing: the look at startup, and the first one after it, never
+    return. Each is given up after its bound and the next one made, so the session is found when the store
+    answers again."""
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "_STARTUP_DISCOVERY_S", 0.2)
+    monkeypatch.setattr(chat_module, "_DISCOVERY_RETRY_S", (0.05,))
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    message = {
+        "id": "m1",
+        "text": "hi",
+        "source": "user",
+        "lane": "later",
+        "mode": "followup",
+        "posted_at": time.time(),
+    }
+    seeded = SqliteChatSessionStore(tmp_path / "timbal.db")
+    asyncio.run(seeded.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None))
+    real, looks = SqliteChatSessionStore.list_ids, []
+
+    async def list_ids(store, **kwargs):
+        looks.append(1)
+        if len(looks) <= 2:
+            await asyncio.Event().wait()
+        return await real(store, **kwargs)
+
+    monkeypatch.setattr(SqliteChatSessionStore, "list_ids", list_ids)
+    with TestClient(create_app()) as client:
+        sessions = client.app.state.chat_sessions
+        _until(lambda: sessions.get("s1") is not None and sessions["s1"].turns == 1, "the session to be found")
+    assert len(looks) >= 3
 
 
 def test_shutdown_stops_the_search_for_sessions(tmp_path, monkeypatch):
@@ -697,3 +747,211 @@ def test_a_store_that_outlives_traces_that_do_not_is_refused(tmp_path, monkeypat
     assert session_store_for(sqlite_agent).path == tmp_path / "s.db"  # four slashes: absolute
     monkeypatch.setenv("TIMBAL_CHAT_STORE", "memory")
     assert session_store_for(memory_agent) is None  # asked for process-local sessions: nothing to keep
+
+
+# -- A session store that hangs (does not fail) -------------------------------------------------------------------
+
+
+class HungStore:
+    """Make the session store hang, not fail: while ``hung`` is set, every store call waits (a stalled network
+    mount). The calls go through once it is cleared. A threading event: the app runs on the client's loop."""
+
+    CALLS = ("save", "load", "list_ids", "acquire_lease", "release_lease", "delete")
+
+    def __init__(self, monkeypatch, timeout_s="0.3"):
+        import threading
+
+        self.hung = threading.Event()
+        monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", timeout_s)
+        for name in self.CALLS:
+            monkeypatch.setattr(SqliteChatSessionStore, name, self._stalled(getattr(SqliteChatSessionStore, name)))
+
+    def _stalled(self, real):
+        async def call(store, *args, **kwargs):
+            while self.hung.is_set():
+                await asyncio.sleep(0.01)
+            return await real(store, *args, **kwargs)
+
+        return call
+
+
+# Well under a hang, well over the 0.3 s the routes are given here: a slow runner still fits.
+PROMPT_S = 8.0
+
+
+def _timed(request):
+    started = time.monotonic()
+    response = request()
+    return response, time.monotonic() - started
+
+
+def _stored_snapshot(client, session_id):
+    return client.portal.call(client.app.state.chat_store.load, session_id)
+
+
+def test_a_message_sent_to_a_hung_store_is_answered_and_runs_once(client, monkeypatch):
+    """The store neither takes the message nor refuses it. The route answers within its bound; the write it
+    started may still land, so the message is kept and its sender told not to send it again. When the store
+    is back the message is stored and runs: once."""
+    store = HungStore(monkeypatch)
+    session_id = client.post("/chat/sessions", json={"busy_mode": "followup"}).json()["session_id"]
+    store.hung.set()
+    sent, took = _timed(lambda: client.post(f"/chat/sessions/{session_id}/messages", json={"text": "one"}))
+    assert sent.status_code == 503 and took < PROMPT_S
+    assert "Retry-After" not in sent.headers and "do not resend" in sent.json()["detail"]
+
+    # A second one, while the first write is still out: that write cannot hold it, so it is taken back whole.
+    again, took = _timed(lambda: client.post(f"/chat/sessions/{session_id}/messages", json={"text": "two"}))
+    assert again.status_code == 503 and took < PROMPT_S
+    assert again.headers["Retry-After"] and "Nothing was accepted" in again.json()["detail"]
+    # "two" is gone. "one" is kept: still queued, or already taken by a turn that waits for the store.
+    pending = client.get(f"/chat/sessions/{session_id}").json()["pending"]
+    assert [message["text"] for message in pending] in ([], ["one"])
+
+    store.hung.clear()
+    state = wait_turns(client, session_id, 1)
+    assert not state["pending"]
+    log = client.get(f"/chat/sessions/{session_id}/log", params={"after": 0}).json()["events"]
+    delivered = [
+        e["data"]["event_id"]
+        for e in log
+        if e["data"].get("kind") == "message_settled" and e["data"].get("state") == "delivered"
+    ]
+    assert len(delivered) == 1  # "one", once; "two" never ran
+    prompts = [
+        e["data"]["input"]["prompt"]
+        for e in log
+        if e["data"].get("type") == "OUTPUT" and e["data"].get("path") == "agent"
+    ]
+    assert len(prompts) == 1 and "one" in str(prompts[0]) and "two" not in str(prompts[0])
+    _until(lambda: _stored_snapshot(client, session_id).turns == 1, "the turn to be stored")
+    assert not _stored_snapshot(client, session_id).pending
+
+
+def test_a_wake_and_an_answer_sent_to_a_hung_store(client, monkeypatch):
+    store = HungStore(monkeypatch)
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "charge"})
+    _until(lambda: client.get(f"/chat/sessions/{session_id}").json()["parked"], "the turn to ask for approval")
+    (approval,) = client.get(f"/chat/sessions/{session_id}").json()["pending_approvals"]
+    answer = {"resume": {approval["approval_id"]: True}}
+
+    store.hung.set()
+    resumed, took = _timed(lambda: client.post(f"/chat/sessions/{session_id}/resume", json=answer))
+    assert resumed.status_code == 503 and took < PROMPT_S and "Retry-After" not in resumed.headers
+    woken, took = _timed(lambda: client.post(f"/chat/sessions/{session_id}/wake", json={"text": "heartbeat"}))
+    assert woken.status_code == 503 and took < PROMPT_S
+    assert woken.headers["Retry-After"]  # after the write that is out: taken back
+    assert client.get(f"/chat/sessions/{session_id}").json()["wakes"] == []
+
+    store.hung.clear()
+    state = wait_turns(client, session_id, 2)  # the answer was kept and is used; no wake runs
+    assert not state["parked"] and state["last_status"]["code"] == "success" and state["wakes"] == []
+
+
+def test_an_interrupt_with_a_hung_store_still_cuts_the_turn(client, monkeypatch):
+    store = HungStore(monkeypatch)
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    hang = _hang_file()
+    hang.touch()
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "wait"})
+    _until(lambda: client.get(f"/chat/sessions/{session_id}").json()["busy"], "the turn to run")
+    store.hung.set()
+    interrupted, took = _timed(lambda: client.post(f"/chat/sessions/{session_id}/interrupt"))
+    assert interrupted.status_code == 503 and took < PROMPT_S
+    assert "interrupted" in interrupted.json()["detail"]
+    hang.unlink()
+    store.hung.clear()
+    state = wait_turns(client, session_id, 1)
+    assert state["last_status"]["code"] == "cancelled"
+
+
+def test_opening_a_session_on_a_hung_store(client, monkeypatch):
+    store = HungStore(monkeypatch)
+    idle = client.post("/chat/sessions", json={}).json()["session_id"]
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "0.01")  # the idle one is reaped first: that waits too
+    time.sleep(0.05)
+    store.hung.set()
+    opened, took = _timed(lambda: client.post("/chat/sessions", json={}))
+    assert opened.status_code == 503 and took < 2 * PROMPT_S and opened.headers["Retry-After"]
+    assert idle not in client.app.state.chat_sessions and len(client.app.state.chat_sessions) == 0
+
+    store.hung.clear()
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "3600")
+    assert client.post("/chat/sessions", json={}).status_code == 201
+    assert client.get(f"/chat/sessions/{idle}").status_code == 200  # still in the store: restored
+
+
+def test_deleting_a_session_on_a_hung_store(client, monkeypatch):
+    store = HungStore(monkeypatch)
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    store.hung.set()
+    deleted, took = _timed(lambda: client.delete(f"/chat/sessions/{session_id}"))
+    assert deleted.status_code == 503 and took < PROMPT_S and deleted.headers["Retry-After"]
+
+    store.hung.clear()
+    assert client.delete(f"/chat/sessions/{session_id}").json() == {"closed": True}  # the retry finishes it
+    assert client.get(f"/chat/sessions/{session_id}").status_code == 404
+
+
+def test_asking_for_a_session_on_a_hung_store(client, monkeypatch):
+    store = HungStore(monkeypatch)
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    forget(client, session_id)
+    store.hung.set()
+    asked, took = _timed(lambda: client.get(f"/chat/sessions/{session_id}"))
+    assert asked.status_code == 503 and took < PROMPT_S and asked.headers["Retry-After"]
+    store.hung.clear()
+    _until(lambda: client.get(f"/chat/sessions/{session_id}").status_code == 200, "the session to come back")
+
+
+def test_a_server_with_a_hung_store_still_stops(tmp_path, monkeypatch):
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    store = HungStore(monkeypatch)
+    started = time.monotonic()
+    with TestClient(create_app()) as client:
+        for _ in range(3):
+            assert client.post("/chat/sessions", json={}).status_code == 201
+        store.hung.set()
+        leaving = time.monotonic()
+    # Three sessions, one bound: the first close finds the store away, the others do not wait for it again.
+    assert time.monotonic() - leaving < PROMPT_S, f"shutdown took {time.monotonic() - leaving:.1f}s"
+    assert time.monotonic() - started < 3 * PROMPT_S
+
+
+def test_a_server_starts_with_a_store_that_hangs(tmp_path, monkeypatch):
+    """Not an error, a silence: listing the stored sessions, or bringing one back, never answers. The server
+    starts within its bound and brings the session back once the store does."""
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "_STARTUP_DISCOVERY_S", 0.3)
+    monkeypatch.setattr(chat_module, "_DISCOVERY_RETRY_S", (0.05,))
+    monkeypatch.setattr(SqliteChatSessionStore, "lease_ttl_s", 0.3)  # the restore retry: every 0.1 s
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    message = {
+        "id": "m1",
+        "text": "hi",
+        "source": "user",
+        "lane": "later",
+        "mode": "followup",
+        "posted_at": time.time(),
+    }
+    seeded = SqliteChatSessionStore(tmp_path / "timbal.db")
+    asyncio.run(seeded.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None))
+
+    store = HungStore(monkeypatch)
+    store.hung.set()
+    started = time.monotonic()
+    with TestClient(create_app()) as client:
+        assert time.monotonic() - started < PROMPT_S
+        assert client.get("/healthcheck").status_code == 204
+        sessions = client.app.state.chat_sessions
+        assert "s1" not in sessions
+        store.hung.clear()
+        _until(lambda: sessions.get("s1") is not None and sessions["s1"].turns == 1, "the session to come back")

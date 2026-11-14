@@ -616,6 +616,10 @@ class ChatSession:
         # Changes made (every _persist) and how many of them the last good write covers: stored_since().
         self._changes = 0
         self._stored_changes = 0
+        # How many changes the write that is out right now covers (None: none is): may_be_stored().
+        self._saving: int | None = None
+        # close(store_timeout=) gave up waiting for the store.
+        self.close_timed_out = False
         # from_store() is still settling the stored state: no turn may start before it is done.
         self._hold_worker = False
         # Set by _recover: why the parked question a dead resume was acting on is to be abandoned
@@ -797,6 +801,16 @@ class ChatSession:
         """
         return self._session_store is None or self._stored_changes >= mark
 
+    def may_be_stored(self, mark: int) -> bool:
+        """Whether the store holds the session as of ``mark``, or a write that covers it is still out.
+
+        For a caller that stopped waiting for :meth:`flush` (a store that hangs, not one that fails): False
+        means no write holds the change, so taking it back leaves nothing of it anywhere. True means the
+        write may land at any time, or already has: taking the change back and telling its sender to try
+        again could run it twice.
+        """
+        return self.stored_since(mark) or (self._saving is not None and self._saving >= mark)
+
     def withdraw_answers(self, values: dict[str, Any]) -> bool:
         """Take back answers sent with :meth:`resume` that no turn has taken yet; False once one has."""
         queued = self._resume
@@ -972,12 +986,17 @@ class ChatSession:
         or it was closed with ``keep``. A server drops such an object and restores the session from the store."""
         return self._session_store is not None and (self._lost or (self.closed and self._keep))
 
-    async def close(self, *, keep: bool = False) -> None:
+    async def close(self, *, keep: bool = False, store_timeout: float | None = None) -> None:
         """Stop the session: the running turn is cancelled, the store let go. Detached children keep running.
 
         A durable session's snapshot is deleted, unless ``keep``: this process is going away (shutdown, an idle
         session let go), and :meth:`from_store` brings the session back. A turn this cuts is then recovered there
         like one that died with its process.
+
+        ``store_timeout``: how long to wait for the session store (its last write, the delete, letting the
+        lease go). A store that hangs would hold the close for as long. Past it the session is closed here
+        all the same and the store is left as it stands (:attr:`close_timed_out`; without ``keep`` also
+        :attr:`close_error`, since the row may still say the session is open). None waits.
         """
         if self.closed:
             return
@@ -1000,9 +1019,28 @@ class ChatSession:
             forget_idle_background_store(self._store)
             self._record("closed", kept=keep)
             self.log.close()
-            await self._settle_store()
+            self._stop_lease()
+            if store_timeout is None:
+                await self._settle_store()
+            else:
+                try:
+                    await asyncio.wait_for(self._settle_store(), max(store_timeout, 0))
+                except TimeoutError:
+                    self._store_did_not_answer(store_timeout)
         finally:
             self._close_done.set()
+
+    def _store_did_not_answer(self, waited: float) -> None:
+        """The close stopped waiting for the store: nothing more is written from here."""
+        self.close_timed_out = True
+        logger.error("chat_session_close_store_timeout", session_id=self.id, timeout_s=waited, kept=self._keep)
+        saver = self._saver
+        if saver is not None and not saver.done():
+            # This object is done: a write that came back later would only be followed by more of them.
+            saver.cancel()
+        if not self._keep:
+            # The row may still say the session is open (a restore would bring it back): its caller is told.
+            self.close_error = TimeoutError(f"the session store did not answer within {waited:g} s")
 
     async def wait_closed(self) -> None:
         """Until :meth:`close` has finished (one already called, or the one losing ownership starts). Restore a
@@ -1231,7 +1269,7 @@ class ChatSession:
                 # may be back (it holds acknowledged work: not only when something new arrives), sooner when
                 # something does (that got stored, or will be refused).
                 delay = _TURN_RETRY_DELAY_S * 2 ** (min(self._store_failures, 8) - 1)
-                with contextlib.suppress(asyncio.TimeoutError):
+                with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._work.wait(), min(delay, _RESTORE_RETRY_MAX_S))
                 self._work.clear()
             if self._turn_failures >= _MAX_TURN_FAILURES:
@@ -1798,16 +1836,24 @@ class ChatSession:
             covers = self._changes
             created = self._version is None
             snapshot = self._snapshot()
+            self._saving = covers
             try:
                 self._version = await store.save(snapshot, expect_version=self._version, owner=process_owner())
             except SnapshotConflict as e:
+                self._saving = None
                 self._lose(str(e))
                 return
             except Exception as e:
                 # Kept dirty: the next change (or flush()) retries; flush() reports it, and does not hang.
+                self._saving = None
                 self._dirty, self._save_error = True, e
                 logger.error("chat_session_save_failed", session_id=self.id, error=str(e))
                 return
+            except BaseException:
+                # Cancelled with the write out (a close that stopped waiting for the store): whether it
+                # lands is not known, and this session is not there to see it.
+                self._saving = None
+                raise
             if created:
                 # Inserted with this process's lease, in the same write (ChatSessionStore.save): the row never
                 # exists without an owner, and there is no second write that could fail and leave it so.
@@ -1819,14 +1865,15 @@ class ChatSession:
                     self._lose(str(e))
                     return
                 except Exception as e:
-                    # Like a failed write: not counted as stored, tried again with the next one.
+                    # Like a failed write: not counted as stored, tried again with the next one. (The row
+                    # is written all the same: `_saving` still says so.)
                     self._dirty, self._save_error = True, e
                     logger.error("chat_session_lease_failed", session_id=self.id, error=str(e))
                     return
                 self._leased = True
             if self._leased and self._lease_task is None and not self.closed:
                 self._lease_task = asyncio.get_running_loop().create_task(self._renew_lease())
-            self._save_error, self._stored_changes = None, covers
+            self._save_error, self._stored_changes, self._saving = None, covers, None
             for wake in self._wakes:
                 if wake.replaced and wake.mark <= covers:
                     wake.replaced = []  # stored: withdrawing a later replacement puts this one back
@@ -1840,17 +1887,20 @@ class ChatSession:
             if self.closed:
                 return
             try:
-                await store.acquire_lease(self.id, process_owner())
+                # Bounded: a store that hangs is one that did not renew. Waited for without limit, the lease
+                # would run out while this copy still believed it held the session.
+                await asyncio.wait_for(store.acquire_lease(self.id, process_owner()), store.lease_ttl_s / 3)
                 renewed = time.monotonic()
             except SessionLeased as e:
                 self._lose(str(e))
                 return
             except Exception as e:
-                logger.warning("chat_session_lease_renewal_failed", session_id=self.id, error=str(e))
+                error = str(e) or type(e).__name__
+                logger.warning("chat_session_lease_renewal_failed", session_id=self.id, error=error)
                 if time.monotonic() - renewed >= store.lease_ttl_s:
                     # Not renewed for a whole lease: it has run out, and another process may hold the session
                     # by now without this one being able to tell. Going on would be two owners acting.
-                    self._lose(f"the lease could not be renewed for {store.lease_ttl_s:g} s: {e}")
+                    self._lose(f"the lease could not be renewed for {store.lease_ttl_s:g} s: {error}")
                     return
 
     def _lose(self, reason: str) -> None:
@@ -1862,14 +1912,21 @@ class ChatSession:
         if not self.closed:
             asyncio.get_running_loop().create_task(self.close(keep=True))
 
+    def _stop_lease(self) -> None:
+        lease, self._lease_task = self._lease_task, None
+        if lease is not None and not lease.done() and lease is not asyncio.current_task():
+            lease.cancel()
+
     async def _settle_store(self) -> None:
         """After close: the last state stored (kept) or the row gone, and the lease let go."""
         store = self._session_store
         if store is None:
             return
-        lease, self._lease_task = self._lease_task, None
-        if lease is not None and not lease.done() and lease is not asyncio.current_task():
-            lease.cancel()
+        self._stop_lease()
+        if self._lost:
+            # Another process serves it: nothing here is written, so there is nothing to wait for either
+            # (a write still out is this copy's last, and is refused or superseded by the owner's).
+            return
         closed_stored = True
         try:
             await self.flush()

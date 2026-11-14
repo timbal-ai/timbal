@@ -108,9 +108,19 @@ def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
     key = (str(Path(path).resolve()), mode)
     with _DATABASES_LOCK:
         db = _DATABASES.get(key)
-        if db is None or not db.alive():  # the file was deleted under us: don't write to the old inode
-            db = _DATABASES[key] = _Database(Path(path), mode)
+    if db is not None and db.alive():  # not alive: the file was deleted under us, don't write to the old inode
         return db
+    # Opened outside the registry's lock, which every database of the process goes through: a file that
+    # cannot be opened now (a stalled mount) holds up its own callers, not those of every other file.
+    opened = _Database(Path(path), mode)
+    with _DATABASES_LOCK:
+        current = _DATABASES.get(key)
+        if current is not None and current is not db:
+            # Another thread opened it meanwhile: one connection per file, theirs.
+            opened.conn.close()
+            return current
+        _DATABASES[key] = opened
+        return opened
 
 
 class SqliteTracingProvider(TracingProvider):

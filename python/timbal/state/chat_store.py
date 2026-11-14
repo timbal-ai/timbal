@@ -15,8 +15,10 @@ import asyncio
 import json
 import os
 import socket
+import threading
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -283,6 +285,96 @@ class InMemoryChatSessionStore(ChatSessionStore):
             self._rows[session_id] = (row[0], None, 0.0)
 
 
+class _StoreThread:
+    """The one thread a SQLite file's session-store calls run on.
+
+    Not the event loop's shared pool (``asyncio.to_thread``). A store that hangs (a stalled mount) keeps
+    whichever thread called it, and callers that stop waiting leave those threads behind: on the shared
+    pool they add up until nothing else in the process gets a thread, and they hold the process open at
+    exit. Here at most one thread is ever stuck per file, it is a daemon, and a call whose caller stopped
+    waiting before it began is not run at all.
+
+    Calls run in the order they were made. The thread ends after ``IDLE_S`` with nothing to do and is
+    started again by the next call.
+    """
+
+    IDLE_S = 30.0
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._jobs: deque[tuple[Any, asyncio.AbstractEventLoop, asyncio.Future, threading.Event]] = deque()
+        self._wake = threading.Condition()
+        self._running = False
+
+    async def call(self, fn: Any) -> Any:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        abandoned = threading.Event()
+        # Set on the loop when the caller is cancelled (a timeout, a close), read by the thread before it starts.
+        future.add_done_callback(lambda done: abandoned.set() if done.cancelled() else None)
+        with self._wake:
+            self._jobs.append((fn, loop, future, abandoned))
+            if self._running:
+                self._wake.notify()
+            else:
+                self._running = True
+                threading.Thread(target=self._work, name=self._name, daemon=True).start()
+        return await future
+
+    def _work(self) -> None:
+        while True:
+            with self._wake:
+                while not self._jobs:
+                    if not self._wake.wait(self.IDLE_S) and not self._jobs:
+                        self._running = False
+                        return
+                fn, loop, future, abandoned = self._jobs.popleft()
+            if abandoned.is_set():
+                continue
+            try:
+                outcome = (True, fn())
+            except BaseException as error:
+                outcome = (False, error)
+            try:
+                loop.call_soon_threadsafe(_deliver, future, outcome)
+            except RuntimeError:
+                pass  # the loop is closed: nobody is waiting for this
+
+
+def _deliver(future: asyncio.Future, outcome: tuple[bool, Any]) -> None:
+    if future.done():
+        return  # its caller stopped waiting while it ran
+    ok, value = outcome
+    if ok:
+        future.set_result(value)
+    else:
+        future.set_exception(value)
+
+
+_STORE_THREADS: dict[str, _StoreThread] = {}
+_STORE_THREADS_LOCK = threading.Lock()
+
+
+def _store_thread(path: Path) -> _StoreThread:
+    key = str(path.resolve())
+    with _STORE_THREADS_LOCK:
+        thread = _STORE_THREADS.get(key)
+        if thread is None:
+            thread = _STORE_THREADS[key] = _StoreThread(f"timbal-chat-store:{path.name}")
+        return thread
+
+
+def _forget_store_threads() -> None:
+    """In a forked child: the parent's threads did not come along, and a lock one of them held stays held."""
+    global _STORE_THREADS_LOCK
+    _STORE_THREADS.clear()
+    _STORE_THREADS_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_store_threads)
+
+
 class SqliteChatSessionStore(ChatSessionStore):
     """Snapshots in the ``chat_sessions`` table of a SQLite file, next to
     :class:`~timbal.state.tracing.providers.SqliteTracingProvider`'s runs (same connection when it is the
@@ -303,7 +395,8 @@ class SqliteChatSessionStore(ChatSessionStore):
             with db.lock:
                 return fn(db.conn)
 
-        return await asyncio.to_thread(locked)
+        # On the file's own thread (_StoreThread), never the loop's shared pool.
+        return await _store_thread(self.path).call(locked)
 
     async def load(self, session_id: str) -> SessionSnapshot | None:
         def query(conn):

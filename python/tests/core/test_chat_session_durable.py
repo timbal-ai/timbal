@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+from typing import Any
 
 import pytest
 from timbal import Agent, Tool
@@ -2887,3 +2888,190 @@ class TestASnapshotThatCannotBeWritten:
         stored = (await store.load(session.id)).last_prompt
         assert Message.validate(stored).collect_text() == "pay"  # stored at all: the flush went through
         await session.close()
+
+
+def hang(store):
+    """Make ``store`` hang (not fail) until the returned event is set: its writes and its lease calls wait."""
+    back = asyncio.Event()
+
+    def stalled(real):
+        async def call(*args, **kwargs):
+            await back.wait()
+            return await real(*args, **kwargs)
+
+        return call
+
+    for name in ("save", "delete", "acquire_lease", "release_lease"):
+        setattr(store, name, stalled(getattr(store, name)))
+    return back
+
+
+class TestAStoreThatHangs:
+    """A store that neither takes a write nor refuses it (a stalled network mount). Nothing here may wait
+    for it without a limit when the caller set one, and what was told to a sender must hold whenever the
+    write finally lands."""
+
+    async def _idle_session(self, db):
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hello")
+        await records(session, "turn_finished", 1)
+        await session.flush()
+        return session, store
+
+    @pytest.mark.parametrize("keep", [True, False])
+    async def test_a_close_given_a_limit_does_not_wait_past_it(self, db, keep):
+        session, store = await self._idle_session(db)
+        before = await store.load(session.id)
+        back = hang(store)
+        await asyncio.wait_for(session.close(keep=keep, store_timeout=0.2), 30)
+        assert session.closed and session.close_timed_out
+        # Kept: the row stands as it was, for a restore. Not kept: the caller is told the row may still be open.
+        assert (session.close_error is None) is keep
+        assert session.handed_off is keep
+        await until(lambda: session._saver is None or session._saver.done())  # nothing of it writes later
+        back.set()
+        assert (await store.load(session.id)).version == before.version
+
+    async def test_a_close_without_a_limit_waits_as_before(self, db):
+        session, store = await self._idle_session(db)
+        back = hang(store)
+        closing = asyncio.ensure_future(session.close(keep=True))
+        await asyncio.sleep(0.2)
+        assert not closing.done() and not session.close_timed_out
+        back.set()
+        await asyncio.wait_for(closing, 30)
+        assert (await store.load(session.id)).closed is False
+
+    async def test_a_change_is_known_to_be_in_the_write_that_is_out_or_not(self, db):
+        """What a route that stopped waiting needs to know: a change in the write that is out may land (keep
+        it, do not ask for a retry); one made after that write started cannot have (safe to take back)."""
+        session, store = await self._idle_session(db)
+        held = held_before_its_turn(session)  # no turn takes the messages: this is about the queue
+        assert session.may_be_stored(session.mark()) and session.stored_since(session.mark())
+        back = hang(store)
+        first = session.send("one", mode="followup")
+        in_the_write = session.mark()
+        await asyncio.sleep(0.05)  # the save loop has taken its snapshot and is waiting on the store
+        second = session.send("two", mode="followup")
+        after_it = session.mark()
+        assert not session.stored_since(in_the_write) and session.may_be_stored(in_the_write)
+        assert not session.stored_since(after_it) and not session.may_be_stored(after_it)
+        assert session.withdraw(second.id) is True
+
+        back.set()
+        await session.flush()
+        stored = await store.load(session.id)
+        assert [event["id"] for event in stored.pending] == [first.id]  # "two" never reached the store
+        assert session.stored_since(in_the_write) and session.may_be_stored(after_it)
+        held.set()
+        await records(session, "turn_finished", 2)
+        await session.close()
+
+    async def test_a_lease_the_store_does_not_renew_is_given_up(self, db):
+        """A renewal that gets no answer is one that did not happen. After a whole lease without one, another
+        process may hold the session: this copy stops, as it does when renewals fail."""
+        provider, store = db
+        store.lease_ttl_s = 0.3
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hello")
+        await records(session, "turn_finished", 1)
+        await session.flush()
+        hang(store)
+        await asyncio.wait_for(session.wait_closed(), 30)
+        assert session.lost and session.handed_off
+
+    def test_opening_one_file_does_not_hold_up_another(self, tmp_path, monkeypatch):
+        """The registry of open databases has one lock for the whole process. A file that cannot be opened
+        now (its mount has stalled) must not hold it: every other file's saves go through it too."""
+        import sqlite3
+        import threading
+
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        opening, release, opened = threading.Event(), threading.Event(), threading.Event()
+        real = sqlite3.connect
+
+        def connect(path, *args, **kwargs):
+            if "stalled" in str(path):
+                opening.set()
+                release.wait(30)
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite_module.sqlite3, "connect", connect)
+        stalled = threading.Thread(target=sqlite_module.database, args=(tmp_path / "stalled.db",), daemon=True)
+        stalled.start()
+        assert opening.wait(30)
+        healthy = threading.Thread(
+            target=lambda: (sqlite_module.database(tmp_path / "healthy.db"), opened.set()), daemon=True
+        )
+        healthy.start()
+        try:
+            assert opened.wait(10), "a file that could not be opened held up another one"
+        finally:
+            release.set()
+            stalled.join(30)
+            healthy.join(30)
+
+    async def test_a_hung_call_keeps_one_thread_of_its_own(self, tmp_path):
+        """Callers that stop waiting for a hung store must not leave a thread behind each: on the loop's shared
+        pool they add up until nothing else in the process gets one. The store's calls run on one thread
+        per file, a daemon, and a call nobody waits for any more is not run when its turn comes."""
+        import threading
+
+        store = SqliteChatSessionStore(tmp_path / "one-thread-of-its-own.db")
+        await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
+        stuck, release = threading.Event(), threading.Event()
+        ran: list[Any] = []
+
+        def hangs(_conn):
+            stuck.set()
+            release.wait(30)
+            ran.append("first")
+
+        first = asyncio.ensure_future(store._run(hangs))
+        await until(stuck.is_set)
+        for attempt in range(48):  # more than the shared pool has threads
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(store._run(lambda _conn, attempt=attempt: ran.append(attempt)), 0.01)
+        kept = asyncio.ensure_future(store._run(lambda _conn: ran.append("kept")))
+        try:
+            # The shared pool is free: with 48 abandoned calls stuck on it, this would never get a thread.
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 10) == "free"
+            mine = [t for t in threading.enumerate() if t.name == "timbal-chat-store:one-thread-of-its-own.db"]
+            assert len(mine) == 1 and mine[0].daemon  # one, and it does not hold the process open at exit
+        finally:
+            release.set()
+        await asyncio.wait_for(asyncio.gather(first, kept), 30)
+        assert ran == ["first", "kept"]  # in order, and none of the abandoned ones
+
+    async def test_the_stores_thread_ends_when_idle_and_comes_back(self, tmp_path, monkeypatch):
+        import threading
+
+        from timbal.state import chat_store
+
+        monkeypatch.setattr(chat_store._StoreThread, "IDLE_S", 0.05)
+        store = SqliteChatSessionStore(tmp_path / "idle-thread.db")
+        await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
+
+        def alive():
+            return [t for t in threading.enumerate() if t.name == "timbal-chat-store:idle-thread.db"]
+
+        await until(lambda: not alive())
+        assert (await store.load("s1")).session_id == "s1"  # started again by the next call
+        assert await store.list_ids() == ["s1"]
+
+    async def test_a_session_that_lost_ownership_closes_without_waiting_for_the_store(self, db):
+        """Another process serves it: this copy writes nothing more, so it has nothing to wait for. A server
+        waits for this close before it restores the session (``wait_closed``)."""
+        session, store = await self._idle_session(db)
+        hang(store)
+        session.send("one", mode="followup")  # a write is out, and will not come back
+        await asyncio.sleep(0.05)
+        session._lose("another process took the session")
+        await asyncio.wait_for(session.wait_closed(), 30)
+        assert session.closed and session.lost and session.handed_off
+        saver = session._saver
+        if saver is not None and not saver.done():
+            saver.cancel()
+            await asyncio.gather(saver, return_exceptions=True)
