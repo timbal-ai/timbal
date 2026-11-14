@@ -66,6 +66,11 @@ from .config import (
     language_key,
     omit_empty_voice_blocks,
 )
+from .entity_patience import (
+    FLUX_PATIENCE_EOT_THRESHOLD,
+    apply_entity_patience,
+    entity_capture,
+)
 from .events import (
     AgentApproval,
     AgentInteraction,
@@ -124,6 +129,18 @@ DEFAULT_TURN_TIMEOUT_FALLBACK = "Sorry, I lost that for a moment. Could you say 
 _current_voice_session: contextvars.ContextVar[VoiceSession | None] = contextvars.ContextVar(
     "timbal_voice_session", default=None
 )
+
+
+def _extra_float(extra: dict, key: str, default: float | None) -> float | None:
+    if key not in extra or extra[key] is None:
+        return default
+    try:
+        value = float(extra[key])
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(value):
+        return default
+    return value
 
 
 def current_voice_session() -> VoiceSession | None:
@@ -318,6 +335,8 @@ class VoiceSession:
         recorder: CallRecorder | None = None,
         session_id: str | None = None,
         hold_timeout_secs: float = 1.5,
+        entity_patience: bool = False,
+        entity_patience_secs: float = 2.5,
         tool_beat_secs: float | None = None,
         turn_timeout_secs: float = DEFAULT_TURN_TIMEOUT_SECS,
         turn_timeout_fallback: str | None = DEFAULT_TURN_TIMEOUT_FALLBACK,
@@ -353,6 +372,18 @@ class VoiceSession:
         # a per-decision override. Heuristic/provider never HOLD, so this is inert
         # unless an opt-in detector (local / lexical) is used.
         self.hold_timeout_secs = hold_timeout_secs
+        # Opt-in. Off → commits and Flux eager behave exactly as before.
+        self.entity_patience = bool(entity_patience)
+        if not math.isfinite(entity_patience_secs) or entity_patience_secs <= 0:
+            raise ValueError("entity_patience_secs must be finite and > 0")
+        self.entity_patience_secs = float(entity_patience_secs)
+        self._entity_kind: str | None = None
+        self._flux_patience_sent = False
+        self._flux_eager_dirty = False
+        extra = self.audio_input.extra if isinstance(self.audio_input.extra, dict) else {}
+        self._flux_eot_threshold = float(_extra_float(extra, "eot_threshold", 0.8) or 0.8)
+        self._flux_eot_timeout_ms = int(_extra_float(extra, "eot_timeout_ms", 2000.0) or 2000)
+        self._flux_eager_eot_threshold = _extra_float(extra, "eager_eot_threshold", None)
         if tool_beat_secs is not None and (not math.isfinite(tool_beat_secs) or tool_beat_secs < 0):
             raise ValueError("tool_beat_secs must be finite and non-negative")
         self.tool_beat_secs = tool_beat_secs
@@ -1609,6 +1640,7 @@ class VoiceSession:
                     elif text:
                         self._last_partial_at = time.monotonic()
                         self._latest_partial_text = text
+                        await self._sync_entity_patience(text)
                     decision = await self.turn_detector.on_partial(text, self._turn_state())
                     if decision is PartialDecision.BARGE_IN and self._vad_vetoes_barge_in(text):
                         # Hallucinated multi-word partials during TTS (no mic
@@ -1670,6 +1702,132 @@ class VoiceSession:
             holding=holding,
         )
 
+    async def configure_endpointing(
+        self,
+        *,
+        eot_threshold: float | None = None,
+        eot_timeout_ms: int | None = None,
+        eager_eot_threshold: float | None = None,
+    ) -> None:
+        """Raise or restore Flux end-of-turn knobs on the live socket.
+
+        Sends Deepgram's ``Configure`` message when the STT adapter implements
+        ``configure_turn`` (Flux). Other adapters ignore it. Use this for a
+        hesitation-heavy stretch (higher ``eot_threshold``, longer
+        ``eot_timeout_ms``). The same keys in ``stt_extra`` set them at
+        connect time.
+
+        While an entity capture is open, the values are remembered and applied
+        when the capture ends. The capture itself keeps Flux at
+        ``eot_threshold`` 1.0 (natural end-of-turn suppressed) and a silence
+        backstop of at least ``entity_patience_secs``, and eager events stay
+        dropped until then. Deepgram cannot unset eager mid-call; patience
+        ignores ``EagerEndOfTurn`` locally instead.
+
+        https://developers.deepgram.com/docs/flux/configure
+        """
+        if eot_threshold is not None:
+            self._flux_eot_threshold = float(eot_threshold)
+        if eot_timeout_ms is not None:
+            self._flux_eot_timeout_ms = int(eot_timeout_ms)
+        if eager_eot_threshold is not None:
+            self._flux_eager_eot_threshold = float(eager_eot_threshold)
+            self._flux_eager_dirty = True
+        if self._entity_kind is not None:
+            await self._push_flux_patience(active=True, force=True)
+            return
+        # Eager must stay ≤ eot_threshold. Sending the current threshold with
+        # it lets the adapter clamp instead of letting Flux reject the message.
+        send_eot = eot_threshold is not None or eager_eot_threshold is not None
+        await self._send_flux_thresholds(
+            eot_threshold=self._flux_eot_threshold if send_eot else None,
+            eot_timeout_ms=self._flux_eot_timeout_ms if eot_timeout_ms is not None else None,
+            eager_eot_threshold=self._flux_eager_eot_threshold if eager_eot_threshold is not None else None,
+            patient=False,
+        )
+        if eager_eot_threshold is not None:
+            self._flux_eager_dirty = False
+
+    async def _sync_entity_patience(self, text: str) -> None:
+        """Track an open entity and match Flux / the VAD floor to it.
+
+        No-op when ``entity_patience`` is off, so partials and commits are
+        untouched. ``text`` empty means the capture is over (turn started).
+        """
+        if not self.entity_patience:
+            return
+        kind = entity_capture(text) if text else None
+        self._entity_kind = kind
+        if self._endpointer is not None:
+            self._endpointer.patience_floor_secs = self.entity_patience_secs if kind else None
+        try:
+            self.stt.eager_suppressed = kind is not None
+        except Exception:
+            logger.debug("entity_patience_eager_flag_failed")
+        await self._push_flux_patience(active=kind is not None)
+
+    async def _push_flux_patience(self, *, active: bool, force: bool = False) -> None:
+        if not force and active == self._flux_patience_sent:
+            return
+        if active:
+            timeout_ms = max(int(round(self.entity_patience_secs * 1000)), int(self._flux_eot_timeout_ms))
+            ok = await self._send_flux_thresholds(
+                eot_threshold=max(self._flux_eot_threshold, FLUX_PATIENCE_EOT_THRESHOLD),
+                eot_timeout_ms=timeout_ms,
+                patient=True,
+            )
+        else:
+            ok = await self._send_flux_thresholds(
+                eot_threshold=self._flux_eot_threshold,
+                eot_timeout_ms=int(self._flux_eot_timeout_ms),
+                eager_eot_threshold=self._flux_eager_eot_threshold if self._flux_eager_dirty else None,
+                patient=False,
+            )
+            if ok:
+                self._flux_eager_dirty = False
+        if not ok:
+            return
+        self._flux_patience_sent = active
+        if not callable(getattr(self.stt, "configure_turn", None)):
+            logger.info("entity_patience", active=active, kind=self._entity_kind)
+            return
+        logger.info(
+            "entity_patience",
+            active=active,
+            kind=self._entity_kind,
+            eot_threshold=FLUX_PATIENCE_EOT_THRESHOLD if active else self._flux_eot_threshold,
+            eot_timeout_ms=(
+                max(int(round(self.entity_patience_secs * 1000)), int(self._flux_eot_timeout_ms))
+                if active
+                else int(self._flux_eot_timeout_ms)
+            ),
+        )
+
+    async def _send_flux_thresholds(
+        self,
+        *,
+        eot_threshold: float | None,
+        eot_timeout_ms: int | None,
+        eager_eot_threshold: float | None = None,
+        patient: bool,
+    ) -> bool:
+        configure = getattr(self.stt, "configure_turn", None)
+        if not callable(configure):
+            return True
+        if eot_threshold is None and eot_timeout_ms is None and eager_eot_threshold is None:
+            return True
+        try:
+            await configure(
+                eot_threshold=eot_threshold,
+                eot_timeout_ms=eot_timeout_ms,
+                eager_eot_threshold=eager_eot_threshold,
+                patient=patient,
+            )
+        except Exception as e:
+            logger.warning("entity_patience_configure_failed", error=str(e))
+            return False
+        return True
+
     def _cancel_hold(self) -> None:
         if self._hold_task is not None and not self._hold_task.done():
             self._hold_task.cancel()
@@ -1687,6 +1845,12 @@ class VoiceSession:
         # stretch the hold (they otherwise floor every expiry at the grace
         # window instead of ``timeout_secs``).
         anchor = self._commit_event_at if self._commit_event_at > 0 else time.monotonic()
+        # Flux has no local VAD, so the grace below would never see "the caller
+        # resumed" and a dictation hold would expire between digit groups.
+        # A *longer* partial is new speech; a repeated caption of the same
+        # fragment is not, and must not pin the hold open.
+        entity_hold = self.entity_patience and entity_capture(text) is not None
+        held_text = text
 
         async def _expire() -> None:
             me = asyncio.current_task()
@@ -1695,6 +1859,21 @@ class VoiceSession:
                 vad_extended_secs = 0.0
                 while True:
                     await asyncio.sleep(remaining)
+                    if entity_hold:
+                        since_entity_partial = time.monotonic() - self._last_partial_at
+                        partial = self._latest_partial_text
+                        if (
+                            self._last_partial_at > anchor
+                            and since_entity_partial < self.entity_patience_secs
+                            and len(partial) > len(held_text)
+                        ):
+                            remaining = self.entity_patience_secs - since_entity_partial
+                            logger.debug(
+                                "stt_hold_extended_entity",
+                                remaining=round(remaining, 3),
+                                timeout_secs=timeout_secs,
+                            )
+                            continue
                     # Never fire mid-utterance: a *new* STT partial since the
                     # commit means the user resumed speaking, and their commit
                     # is about to merge with / supersede this hold. Require
@@ -1793,6 +1972,11 @@ class VoiceSession:
     ) -> None:
         """Record ``final_text`` and start an agent turn.
 
+        The patience window has closed (the entity finished, or the hold
+        timed out), so Flux eager and the conversational end-of-turn knobs
+        come back before this reply — the next utterance is not still "in" the
+        number that just committed.
+
         Caller is responsible for ``interrupt()`` / clearing ``_cancel_turn``
         when an in-flight reply must be stopped first (HOLD expiry is usually
         idle; CONTINUE/NEW_TURN paths interrupt before calling this).
@@ -1802,6 +1986,7 @@ class VoiceSession:
             # _closed checks and here; never start an agent turn after close().
             logger.debug("stt_turn_dropped_session_closed", text_preview=final_text[:80])
             return
+        await self._sync_entity_patience("")
         self._turn_vad_endpointed = vad_endpointed
         self._turn_stt_latency = self._pending_stt_latency
         self._pending_stt_latency = None
@@ -1926,6 +2111,14 @@ class VoiceSession:
             **_trace_debug_fields(),
         )
         decision = await self.turn_detector.on_committed(text, state)
+        decision = apply_entity_patience(
+            decision,
+            text,
+            state,
+            enabled=self.entity_patience,
+            hold_secs=self.entity_patience_secs,
+            provider_patience_live=bool(getattr(self.stt, "patient_thresholds_live", False)),
+        )
         # The detector await yields to the event loop (local audio EOU runs on
         # the executor; a cold model load can take seconds) and close() may land
         # in that window — the server calls it the moment the client
@@ -1985,6 +2178,7 @@ class VoiceSession:
             # Detector returns the full utterance to hold (refine/merge already applied).
             timeout = decision.hold_timeout_secs if decision.hold_timeout_secs is not None else self.hold_timeout_secs
             await self._arm_hold(final_text, timeout)
+            await self._sync_entity_patience(final_text)
             return
 
         # A real accept cancels any pending HOLD, then interrupts so truncation

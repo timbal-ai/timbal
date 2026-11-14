@@ -330,6 +330,9 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     # Silence policy is per-call tuning too (a voicemail-heavy campaign wants a
     # short hang-up; a support line wants patient re-engagement).
     "user_idle",
+    # Dictation / spelling. Off unless the agent or this call turns it on.
+    "entity_patience",
+    "entity_patience_secs",
 })
 
 #: Hello keys the transport reads directly — not ``VoiceConfig`` fields, so
@@ -432,6 +435,28 @@ def _merge_client_extra(field: str, server_extra: Any, client_extra: Any) -> dic
     return {**base, **safe}
 
 
+def _sanitize_entity_patience(updates: dict[str, Any]) -> None:
+    """Drop a malformed hello value instead of failing the socket.
+
+    ``model_copy`` does not re-validate. A non-bool or an out-of-range
+    duration keeps the server's setting.
+    """
+    if "entity_patience" in updates and not isinstance(updates["entity_patience"], bool):
+        logger.info("voice_client_entity_patience_invalid")
+        del updates["entity_patience"]
+    if "entity_patience_secs" not in updates:
+        return
+    try:
+        if isinstance(updates["entity_patience_secs"], bool):
+            raise TypeError("a boolean is not a duration")
+        updates["entity_patience_secs"] = VoiceConfig(
+            entity_patience_secs=updates["entity_patience_secs"]
+        ).entity_patience_secs
+    except (TypeError, ValueError):
+        logger.info("voice_client_entity_patience_invalid")
+        del updates["entity_patience_secs"]
+
+
 def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str, Any]) -> VoiceConfig:
     """Apply the optional first WebSocket JSON message over the server config.
 
@@ -476,6 +501,7 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     )
     if ignored:
         logger.info("voice_client_config_ignored", keys=ignored)
+    _sanitize_entity_patience(updates)
     for field in ("stt_extra", "tts_extra"):
         if field in updates:
             updates[field] = _merge_client_extra(field, getattr(server_defaults, field), updates[field])
@@ -1140,6 +1166,7 @@ def build_voice_session(
         model=llm_model,
         turn_detector=turn_detector_label,
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
+        entity_patience=merged.entity_patience,
         direction=direction,
         greeting=(None if greeting is None else ((greeting.text or "")[:80] or "<generated>")),
         user_idle=merged.user_idle is not None,
@@ -1159,6 +1186,9 @@ def build_voice_session(
             session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)
         except (TypeError, ValueError):
             logger.warning("voice_ws_bad_turn_timeout_secs", value=repr(merged.turn_timeout_secs))
+    if merged.entity_patience:
+        session_kwargs["entity_patience"] = True
+    session_kwargs["entity_patience_secs"] = merged.entity_patience_secs
     if merged.turn_timeout_fallback is not None:
         # "" disables the spoken apology; None means "VoiceSession default".
         session_kwargs["turn_timeout_fallback"] = str(merged.turn_timeout_fallback)
