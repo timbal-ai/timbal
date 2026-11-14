@@ -77,14 +77,14 @@ Environment variables are separate from code: use `timbal env push` to upload th
 
 ## Cloning a project
 
-Every platform project is a Git repository at `https://api.timbal.ai/orgs/<org_id>/projects/<project_id>/git`. Run `timbal configure` first: it registers the Timbal credential helper for that host, so `git clone`, `pull`, and `push` authenticate with your profile's API key without prompting. Set `TIMBAL_PROFILE` to use a named profile; otherwise the helper uses the `default` profile.
+Every platform project is a Git repository at `https://api.timbal.ai/orgs/{org_id}/projects/{project_id}/git`. Run `timbal configure` first: it registers the Timbal credential helper for your profile's platform base URL (`https://api.timbal.ai` by default), so `git clone`, `pull`, and `push` authenticate with your profile's API key without prompting. Git calls the helper with the profile from `TIMBAL_PROFILE` (falling back to `default`), so set `TIMBAL_PROFILE` when cloning from a non-default profile.
 
 ```bash
 timbal configure
-git clone https://api.timbal.ai/orgs/<org_id>/projects/<project_id>/git my-project
+git clone https://api.timbal.ai/orgs/{org_id}/projects/{project_id}/git my-project
 ```
 
-Without the CLI, Git prompts for credentials (for example through Git Credential Manager). Enter any non-empty username, and a Timbal API key with access to the project as the password. Do not use your account password.
+Without the CLI, Git prompts for credentials (for example through Git Credential Manager). Enter any non-empty username, such as `timbal`, and a Timbal API key with access to the project as the password. Do not use your account password.
 
 ## `timbal.yaml` manifest
 
