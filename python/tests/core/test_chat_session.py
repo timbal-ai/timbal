@@ -1783,3 +1783,85 @@ class TestDue:
             assert session.due  # the answers are the session's to act on
             await records(session, "turn_finished", 3)  # the resume, the event, the wake
             assert not session.parked and not session.due
+
+
+class Unreachable(InMemoryTracingProvider):
+    """A trace store that takes nothing: every save raises."""
+
+    @classmethod
+    async def _store(cls, _run_context):
+        raise OSError("the trace store is unreachable")
+
+
+@pytest.fixture
+def refusing_platform(monkeypatch):
+    """The real platform provider against a platform that turns every request down for good (403)."""
+    from timbal.errors import PlatformError
+    from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+    from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+    async def refused(*_args, **_kwargs):
+        raise PlatformError("forbidden", status_code=403)
+
+    monkeypatch.setattr("timbal.platform.utils._request", refused)
+    config = PlatformConfig(
+        host="api.refusing.test",
+        auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t2_test"),
+        subject=PlatformSubject(org_id="1", app_id="2"),
+    )
+    yield PlatformTracingProvider.configured(platform_config=config)
+    for task in PlatformTracingProvider._retries.values():
+        task.cancel()
+    for state in ("_caps", "_delta_runs", "_recent", "_flights", "_unsaved", "_retries"):
+        getattr(PlatformTracingProvider, state).clear()
+
+
+class TestTracesThatCannotBeStored:
+    """A session without a session store keeps its turns in the traces as well as the provider allows, as
+    every run does: a save the provider refuses is logged and counted, and the conversation goes on. Only a
+    durable session (``session_store=``) holds a turn open until its trace is stored: it promised to bring
+    the conversation back."""
+
+    @pytest.mark.parametrize("provider", ["a platform that answers 403", "a store that raises"])
+    async def test_the_conversation_goes_on(self, provider, refusing_platform):
+        provider = refusing_platform if provider == "a platform that answers 403" else Unreachable
+        agent = Agent(name="agent", model=TestModel(handler=echo), tools=[], tracing_provider=provider)
+        async with ChatSession(agent) as session:
+            session.send("one")
+            session.send("two", mode="followup")
+            finished = await records(session, "turn_finished", 2, timeout=30)
+            assert [turn["status"]["code"] for turn in finished] == ["success", "success"]
+            assert not session.busy and not session.pending_messages() and session.turns == 2
+            outputs = root_outputs(session)
+            assert [output.output.collect_text() for output in outputs] == ["echo: one", "echo: two"]
+            assert all(output.usage["tracing:save_failed"] >= 1 for output in outputs)  # counted, not hidden
+
+    async def test_a_turn_that_asks_its_user_still_parks_and_is_answered(self):
+        """Parked on an approval with no trace stored: the session still says so, and takes the answer."""
+        charged = []
+
+        def handler(messages):
+            return "done" if messages[-1].role == "tool" else tool_call("charge")
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: charged.append(1) or "charged", requires_approval=True)],
+            tracing_provider=Unreachable,
+        )
+        async with ChatSession(agent) as session:
+            session.send("pay")
+            (first,) = await records(session, "turn_finished", 1, timeout=30)
+            assert first["parked"] and session.parked and not session.busy
+            approval = next(e for e in session.log.peek()[0] if isinstance(e, ApprovalEvent))
+            session.resume({approval.approval_id: True})
+            await records(session, "turn_finished", 2, timeout=30)
+            assert not session.busy  # whatever a run with no stored parent makes of the answer, it is not stuck
+
+    async def test_closing_while_a_refused_turn_is_being_settled_records_how_it_ended(self):
+        agent = Agent(name="agent", model=TestModel(handler=echo), tools=[], tracing_provider=Unreachable)
+        session = ChatSession(agent)
+        session.send("one")
+        (finished,) = await records(session, "turn_finished", 1, timeout=30)
+        assert finished["status"]["code"] == "success"
+        await session.close()

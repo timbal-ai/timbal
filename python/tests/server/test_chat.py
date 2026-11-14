@@ -189,3 +189,45 @@ def test_a_runnable_that_is_not_an_agent(monkeypatch):
     with TestClient(create_app()) as client:
         assert client.get("/chat/meta").json()["is_agent"] is False
         assert client.post("/chat/sessions", json={}).status_code == 400
+
+
+REFUSED_TRACES_AGENT = '''
+from timbal import Agent
+from timbal.core.test_model import TestModel
+from timbal.state.tracing.providers import InMemoryTracingProvider
+
+
+class Refused(InMemoryTracingProvider):
+    """A trace store that turns every save down, for good (a platform answering 403)."""
+
+    @classmethod
+    async def _store(cls, _run_context):
+        raise PermissionError("403: the platform refused the trace")
+
+
+agent = Agent(
+    name="agent",
+    model=TestModel(handler=lambda messages: f"echo: {messages[-1].collect_text()}"),
+    tools=[],
+    tracing_provider=Refused,
+)
+'''
+
+
+def test_a_session_without_a_store_goes_on_when_its_traces_are_refused(tmp_path, monkeypatch):
+    """The chat route with no session store (the default over platform traces): a trace the provider refuses
+    is logged, and the turn is over. Held open for it, the session would stay busy and every later message
+    queued, with no ``turn_finished`` ever sent."""
+    (tmp_path / "agent.py").write_text(REFUSED_TRACES_AGENT)
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    with TestClient(create_app()) as client:
+        assert client.get("/chat/meta").json()["durable"] is False
+        session_id = open_session(client)
+        for message in ("one", "two"):
+            assert client.post(f"/chat/sessions/{session_id}/messages", json={"text": message}).status_code == 202
+        items = read_log(client, session_id, until_kind="turn_finished", count=2, timeout=20)
+        finished = [item for _, item in items if item.get("kind") == "turn_finished"]
+        assert [turn["status"]["code"] for turn in finished] == ["success", "success"]
+        state = client.get(f"/chat/sessions/{session_id}").json()
+        assert not state["busy"] and not state["pending"]

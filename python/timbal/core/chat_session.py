@@ -1450,8 +1450,9 @@ class ChatSession:
                 # turn in flight (the agent ends it as interrupted; close() marks it, and a restart
                 # recovers it). One that had already ended, or that ends by itself all the same, is settled
                 # below like any other: how it ended (parked, perhaps) must not be lost with the worker, nor
-                # the turn be stored as one that was cut. Unless its trace is not stored: then it stays the
-                # turn in flight too, and a restart recovers it from what the provider does hold.
+                # the turn be stored as one that was cut. Unless, on a durable session, its trace is not
+                # stored: then it stays the turn in flight too, and a restart recovers it from what the
+                # provider does hold. (Any other session has no restart to leave it to: it is settled.)
                 stopping = True
                 cut = not turn.done()
                 if cut:
@@ -1462,7 +1463,8 @@ class ChatSession:
                         # the turn and cut its cleanup short (and raise the turn's own error here).
                         with contextlib.suppress(asyncio.CancelledError):
                             await asyncio.wait({turn})
-                if (cut and not _ended_by_itself(turn)) or context.__dict__.get("_trace_unsaved"):
+                unsaved = self._holds_turns_for_their_trace and context.__dict__.get("_trace_unsaved")
+                if (cut and not _ended_by_itself(turn)) or unsaved:
                     raise
         finally:
             self._turn = None
@@ -1596,22 +1598,41 @@ class ChatSession:
                 followup.release()
         return output
 
+    @property
+    def _holds_turns_for_their_trace(self) -> bool:
+        """Whether a turn stays open until the provider holds its trace (:meth:`_trace_stored`).
+
+        Only a durable session: it promised that the conversation comes back after a restart, and the
+        conversation is in the traces. Any other session keeps its turns as every run keeps its trace, as well
+        as the provider allows: a save it refuses (a platform that answers 403, a store that is down) is logged
+        and counted (``tracing:save_failed``) and the conversation goes on. Held open there, one refused save
+        would stop the session for good: busy, no ``turn_finished``, every later message queued behind it.
+        """
+        return self._session_store is not None
+
     async def _trace_stored(self, context: RunContext) -> None:
-        """Return once the provider holds the trace of the turn that just ended.
+        """Return once the provider holds the trace of the turn that just ended, on a durable session; on any
+        other, once it has been tried.
 
         The conversation is in the traces: the next turn reads this one from the provider. A turn whose last
         save failed (the run itself only logs that and goes on) would be a turn nobody remembers: its
-        messages gone from the history, a question it parked on answered into nothing. So the turn is not
-        over, and the session starts nothing else, until a save lands. Only stopping the session ends the
-        wait (it runs on the worker): an interrupt has nothing to cut in a turn that has ended.
+        messages gone from the history, a question it parked on answered into nothing. So on a durable
+        session the turn is not over, and the session starts nothing else, until a save lands. Only stopping
+        the session ends the wait (it runs on the worker): an interrupt has nothing to cut in a turn that has
+        ended.
         """
         delay = _TURN_RETRY_DELAY_S
         if self._save_cut:
-            # The run's own last save was cut, not refused: again at once.
+            # The run's own last save was cut, not refused: again at once (every session: one try).
             self._save_cut = False
             await context._save_trace(barrier=True)
+        if not self._holds_turns_for_their_trace:
+            if context.__dict__.get("_trace_unsaved"):
+                # Said once, here: the history the next turn reads may lack this one.
+                logger.warning("chat_session_trace_not_stored", session_id=self.id, run_id=context.id, waiting=False)
+            return
         while context.__dict__.get("_trace_unsaved"):
-            logger.warning("chat_session_trace_not_stored", session_id=self.id, run_id=context.id)
+            logger.warning("chat_session_trace_not_stored", session_id=self.id, run_id=context.id, waiting=True)
             await asyncio.sleep(delay)
             await context._save_trace(barrier=True)
             delay = min(delay * 2, _RESTORE_RETRY_MAX_S)
