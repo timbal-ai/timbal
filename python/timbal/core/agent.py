@@ -386,6 +386,14 @@ class _CuttableModelEvents:
         try:
             await asyncio.wait({slot, self._cut_waiter}, return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
+            if slot.done():
+                # The read had already ended: its event was on its way to the agent (a task of its own reads
+                # the stream, so an event arrives a moment after it was produced). The cancellation never
+                # reached the stream. It is the agent's, as it is when it lands on any other of its awaits:
+                # handing the event over instead would take the cancellation away, and a turn its user
+                # stopped would go on to run the tools the model had just asked for.
+                self._done = True
+                raise
             # The turn is cancelled while the model is read. Passed on to the stream: it ends the call as
             # interrupted and says so with its last event, which the agent then handles as it always did.
             self._reader.cancel()

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -33,13 +34,27 @@ class _Database:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute(f"PRAGMA synchronous={synchronous}")
         _ensure_schema(self.conn)
+        # Which file this is a connection to: the path can come to name another one (see alive()).
+        self._file = self._file_at_path()
         # Per run: which spans are finished and committed to this file (not rewritten until the root ends),
         # and the order spans were first seen. Kept per connection: a file recreated after being deleted
         # holds none of them. Bounded: a run whose process died never ends.
         self.runs: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
+    def _file_at_path(self) -> tuple[int, int] | None:
+        try:
+            found = os.stat(self.path)
+        except OSError:
+            return None
+        return (found.st_dev, found.st_ino)
+
     def alive(self) -> bool:
-        return self.path.exists()
+        """Whether the path still names the file this connection opened.
+
+        Not just whether a file is there: one deleted and written again (by another connection, by a
+        restore) is a different file, and this connection would go on writing to the one that is gone.
+        """
+        return self._file is not None and self._file_at_path() == self._file
 
     def run_state(self, run_id: str) -> dict[str, Any]:
         state = self.runs.get(run_id)
@@ -115,8 +130,10 @@ def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
     opened = _Database(Path(path), mode)
     with _DATABASES_LOCK:
         current = _DATABASES.get(key)
-        if current is not None and current is not db:
-            # Another thread opened it meanwhile: one connection per file, theirs.
+        if current is not None and current is not db and current.alive():
+            # Another thread opened it meanwhile: one connection per file, theirs. Only while theirs is
+            # still to the file at the path: one that went stale since (the file deleted under it) is
+            # replaced by this one, as a stale one always is.
             opened.conn.close()
             return current
         _DATABASES[key] = opened

@@ -676,6 +676,64 @@ class TestPerSpanStorage:
         trace = await provider.get(RunContext(parent_id=out.run_id, tracing_provider=provider))
         assert trace is not None and path.exists()
 
+    @unix_only_deletion
+    def test_a_file_replaced_under_a_connection_is_opened_again(self, tmp_path):
+        """A connection is to the file it opened, not to whatever is at that path now. Deleted and written
+        again (by another process, by a restore), the path exists and the old connection still writes to the
+        file that is gone."""
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        path = tmp_path / "replaced.db"
+        first = sqlite_module.database(path)
+        assert sqlite_module.database(path) is first
+        for suffix in ("", "-wal", "-shm"):
+            (tmp_path / f"replaced.db{suffix}").unlink(missing_ok=True)
+        sqlite3.connect(str(path)).close()  # someone else puts a new file there
+        assert path.exists() and not first.alive()
+        second = sqlite_module.database(path)
+        assert second is not first and second.alive()
+        with second.lock, second.conn:
+            second.conn.execute("INSERT INTO runs (run_id, spans, stored_at) VALUES ('r1', '[]', 0)")
+        fresh = sqlite3.connect(str(path))
+        try:
+            assert fresh.execute("SELECT count(*) FROM runs").fetchone() == (1,)  # in the file that is there
+        finally:
+            fresh.close()
+
+    @unix_only_deletion
+    def test_a_connection_that_went_stale_while_another_thread_opened_is_not_handed_back(self, tmp_path, monkeypatch):
+        """Two threads open the same file. The second one's connection is stored first; the file is then
+        deleted under it; the first thread's open then finishes (and puts a new file there). The first thread
+        must keep the connection it just opened: the stored one is to the file that is gone."""
+        import threading
+
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        path = tmp_path / "raced.db"
+        entered, go = threading.Event(), threading.Event()
+        real, calls = sqlite3.connect, []
+
+        def connect(target, *args, **kwargs):
+            calls.append(target)
+            if len(calls) == 1:  # the first thread's open: held until the test lets it go on
+                entered.set()
+                go.wait(30)
+            return real(target, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite_module.sqlite3, "connect", connect)
+        got = []
+        slow = threading.Thread(target=lambda: got.append(sqlite_module.database(path)), daemon=True)
+        slow.start()
+        assert entered.wait(30)
+        stored = sqlite_module.database(path)  # the other thread: opened and stored meanwhile
+        for suffix in ("", "-wal", "-shm"):
+            (tmp_path / f"raced.db{suffix}").unlink(missing_ok=True)  # ...and its file is deleted under it
+        go.set()
+        slow.join(30)
+        (mine,) = got
+        assert mine is not stored and mine.alive() and not stored.alive()
+        assert sqlite_module.database(path) is mine  # and it is the one everybody gets from now on
+
     async def test_a_failed_save_leaves_its_spans_to_the_next_and_the_connection_clean(self, tmp_path):
         from timbal.state import get_run_context, set_run_context
 

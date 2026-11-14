@@ -463,6 +463,88 @@ class TestAnswerCutWhileTheModelIsSilent:
         assert root.output.collect_text() == text and model.ended == ["finished"]
 
 
+class TestReadingTheModelDoesNotLoseACancellation:
+    """The model's stream is read by a task of its own, so an event reaches the agent a moment after the
+    stream produced it. A cancellation of the turn that lands in that moment was never delivered to the
+    stream: it is the agent's, and must end the turn. Handed the event instead, the agent would go on (and
+    run the tools the model had just asked for) as if nobody had stopped it."""
+
+    async def test_a_cancellation_arriving_just_after_an_event_is_not_swallowed(self):
+        from timbal.core.agent import _CuttableModelEvents
+
+        async def stream():
+            yield "one"
+            yield "two"
+
+        events = _CuttableModelEvents(stream(), asyncio.Event())
+        reading = asyncio.ensure_future(events.__anext__())
+        await asyncio.sleep(0)  # the read is asked for; the stream has not been stepped yet
+        assert not events._slot.done()
+        # The event is there, and the turn is cancelled before the agent has taken it.
+        events._slot.add_done_callback(lambda _slot: reading.cancel())
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+        await events.aclose()
+
+    async def test_a_cancellation_during_the_read_is_still_passed_to_the_stream(self):
+        """The other case, unchanged: nothing has arrived, so the stream gets the cancellation and says how
+        the call ended."""
+        from timbal.core.agent import _CuttableModelEvents
+
+        waiting = asyncio.Event()
+
+        async def stream():
+            try:
+                waiting.set()
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                yield "interrupted"  # as a model call does: it ends itself and reports it
+
+        events = _CuttableModelEvents(stream(), asyncio.Event())
+        reading = asyncio.ensure_future(events.__anext__())
+        await waiting.wait()
+        reading.cancel()
+        assert await reading == "interrupted"
+        await events.aclose()
+
+    @pytest.mark.parametrize("steps", range(30))
+    async def test_an_interrupt_at_any_point_of_a_turn_ends_it_there(self, steps):
+        """Swept over where the interrupt lands (``steps`` loop steps after the message): whatever the turn
+        is doing then, it does not carry on as if nobody had stopped it. A cancellation taken away from the
+        turn shows as exactly that: the run goes back to the model after the interrupt and ends well.
+
+        (A step already in flight when the interrupt comes may still complete: a model call or a tool
+        that had just been started is a task of its own, and takes a step before the cancellation reaches
+        it. And a turn cut before it started hands its message back: the next turn, another run, answers.)"""
+        from timbal.state import get_run_context
+
+        asked: list[str] = []  # the run of each model call, in order
+
+        def model(messages):
+            asked.append(get_run_context().id)
+            if messages[-1].role == "tool":
+                return "done"
+            return calls("act")
+
+        a = agent(TestModel(handler=model), [Tool(name="act", handler=lambda: "acted")])
+        session = ChatSession(a)
+        session.send("start")
+        for _ in range(steps):
+            await asyncio.sleep(0)
+        cut_run, asked_before = session.run_id, len(asked)
+        interrupted = session.interrupt()
+        await until(lambda: not session.busy and not session.pending_messages())
+        ended = {
+            record["run_id"]: record["status"]["code"]
+            for record in session.log.peek()[0]
+            if isinstance(record, dict) and record.get("kind") == "turn_finished"
+        }
+        await session.close()
+        if interrupted and ended.get(cut_run, "cancelled") != "cancelled":
+            # It ended by itself: allowed only when nothing of it was left to cut.
+            assert cut_run not in asked[asked_before:], "the interrupted run carried on and finished"
+
+
 class TestEdges:
     async def test_now_while_idle_starts_a_turn(self):
         async with ChatSession(agent(batch_model())) as session:
