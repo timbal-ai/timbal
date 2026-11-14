@@ -77,7 +77,7 @@ Environment variables are separate from code: use `timbal env push` to upload th
 
 ## Cloning a project
 
-Every platform project is a Git repository at `https://api.timbal.ai/orgs/{org_id}/projects/{project_id}/git`. Run `timbal configure` first: it registers the Timbal credential helper for your profile's platform base URL (`https://api.timbal.ai` by default), so `git clone`, `pull`, and `push` authenticate with your profile's API key without prompting. Git calls the helper with the profile from `TIMBAL_PROFILE` (falling back to `default`), so set `TIMBAL_PROFILE` when cloning from a non-default profile.
+Every platform project is a Git repository at `https://api.timbal.ai/orgs/{org_id}/projects/{project_id}/git`. Run `timbal configure` first: it registers the Timbal credential helper for your profile's platform base URL (`https://api.timbal.ai` by default), so `git clone`, `pull`, and `push` authenticate with your profile's API key without prompting. The helper reads the profile from `TIMBAL_PROFILE` (falling back to `default`), so set it when cloning from a non-default profile.
 
 ```bash
 timbal configure
