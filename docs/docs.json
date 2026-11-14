@@ -134,6 +134,7 @@
             "group": "Guides",
             "pages": [
               "examples/guides/mail-assistant",
+              "examples/guides/qlik-analyst",
               "examples/guides/slack-bot",
               "examples/guides/whatsapp-assistant"
             ]
