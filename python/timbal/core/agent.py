@@ -303,6 +303,118 @@ def _record_tool_search(span: Any, mode: str, loaded: list[str], query: str | No
     record["searches"].append({"query": query, "loaded": list(loaded)})
 
 
+_READ_EVENT, _READ_END, _READ_ERROR = 0, 1, 2
+
+
+class _CuttableModelEvents:
+    """The model's events, read so that a 'now' cut does not wait for the next one.
+
+    ``async for event in stream`` can only look at the cut when an event arrives, and a provider that has
+    stalled (or is slow with its next token) sends none: the message that cut the answer would wait for the
+    provider's own timeout. Here the stream is read by a task of its own, and the agent waits for that read
+    and for the cut at once. When the cut comes first, the reading task is cancelled where it waits, which
+    is inside the stream: the model call ends as interrupted and keeps what it had produced on its span, as
+    it does when the turn itself is cancelled there.
+
+    One task for the whole stream, asked for one event at a time:
+
+    - one task, not one per event, so the stream keeps its context variables and its task from one event to
+      the next (a deadline taken with ``asyncio.timeout`` belongs to the task that took it);
+    - one event at a time, so the stream never runs ahead of the agent: closed between two events, it stops
+      at the event the agent stopped at, as when the agent iterated it itself.
+
+    A cancellation of the turn while it reads (an interrupt, a close) is passed on to the stream, which is
+    where it landed when the agent awaited the stream directly.
+    """
+
+    __slots__ = ("_asked", "_cut_waiter", "_done", "_reader", "_slot", "_stream", "cut_while_waiting", "last")
+
+    def __init__(self, stream: AsyncGenerator, cut: asyncio.Event) -> None:
+        self._stream = stream
+        self._asked = asyncio.Event()
+        self._slot: asyncio.Future | None = None
+        self._done = False
+        self.cut_while_waiting = False
+        """The cut ended a read: the stream had nothing for the agent when it came."""
+        self.last: Any = None
+        """What the stream said as it was cut (the call's interrupted OUTPUT), if anything."""
+        self._cut_waiter = asyncio.ensure_future(cut.wait())
+        self._reader = asyncio.create_task(self._read())
+        # However the reader ends (cancelled before its first step included), a pending read is answered.
+        self._reader.add_done_callback(lambda _task: self._answer(_READ_END, None))
+
+    def _answer(self, kind: int, value: Any) -> None:
+        slot = self._slot
+        if slot is not None and not slot.done():
+            slot.set_result((kind, value))
+
+    async def _read(self) -> None:
+        stream = self._stream
+        try:
+            while True:
+                await self._asked.wait()  # cancelled here: between two events, the stream is closed below
+                self._asked.clear()
+                try:
+                    event = await stream.__anext__()  # cancelled here: the stream takes it, and says how it ended
+                except StopAsyncIteration:
+                    return
+                self._answer(_READ_EVENT, event)
+        except asyncio.CancelledError:
+            return  # the agent is done with the stream, or the stream let a cancellation through
+        except BaseException as error:  # the stream's own failure: raised where the agent reads it
+            self._answer(_READ_ERROR, error)
+        finally:
+            await stream.aclose()
+
+    def __aiter__(self) -> "_CuttableModelEvents":
+        return self
+
+    def _taken(self, kind: int, value: Any) -> Any:
+        if kind == _READ_EVENT:
+            return value
+        self._done = True
+        if kind == _READ_ERROR:
+            raise value
+        raise StopAsyncIteration
+
+    async def __anext__(self) -> Any:
+        if self._done or self._reader.done():
+            self._done = True
+            raise StopAsyncIteration
+        slot = self._slot = asyncio.get_running_loop().create_future()
+        self._asked.set()
+        try:
+            await asyncio.wait({slot, self._cut_waiter}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            # The turn is cancelled while the model is read. Passed on to the stream: it ends the call as
+            # interrupted and says so with its last event, which the agent then handles as it always did.
+            self._reader.cancel()
+            kind, value = await slot
+            if kind == _READ_END:
+                self._done = True
+                raise  # the stream let the cancellation through: so does this
+            return self._taken(kind, value)
+        if slot.done():
+            return self._taken(*slot.result())
+        # The cut came first, and the stream has nothing for the agent: the call ends where it is.
+        self.cut_while_waiting = True
+        self._reader.cancel()
+        kind, value = await slot
+        self._done = True
+        if kind == _READ_ERROR:
+            raise value
+        self.last = value
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        """Stop reading and close the stream (after its reader has let go of it)."""
+        self._done = True
+        self._cut_waiter.cancel()
+        if not self._reader.done():
+            self._reader.cancel()
+        await asyncio.gather(self._reader, self._cut_waiter, return_exceptions=True)
+
+
 def _cut_answer(message: Any) -> Message | None:
     """The visible text of an answer a 'now' message cut off, as an assistant message marked interrupted."""
     if not isinstance(message, Message):
@@ -2722,6 +2834,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     **({"deferred_tools": deferred_tools} if deferred_tools else {}),
                     **({**kwargs, "max_tokens": max_tokens_retry} if max_tokens_retry else kwargs),
                 )
+                if cut is not None:
+                    # A 'now' message ends the wait for the model's next event too (a stalled provider
+                    # sends none). Runs that cannot be cut read the stream directly, as before.
+                    active_events = _CuttableModelEvents(active_events, cut)
                 llm_call_id: str | None = None
                 answer_cut = False
                 async for event in active_events:
@@ -2981,6 +3097,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             setattr(event.item, attr, stable)
                     yield event
 
+                if cut is not None and active_events.cut_while_waiting:
+                    # Cut while the model was silent: the same as a cut at its next event, without one.
+                    answer_cut = True
+                    if llm_call_id is None and active_events.last is not None:
+                        llm_call_id = active_events.last.call_id
                 # Output validation/guardrails can break the loop early too.
                 await active_events.aclose()
                 active_events = None

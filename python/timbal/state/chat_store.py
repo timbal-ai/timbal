@@ -21,7 +21,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import structlog
 from uuid_extensions import uuid7
+
+logger = structlog.get_logger("timbal.state.chat_store")
 
 __all__ = [  # ``PROCESS_OWNER`` is still readable (module __getattr__), for code written before process_owner()
     "process_owner",
@@ -381,7 +384,13 @@ class SqliteChatSessionStore(ChatSessionStore):
 
         ids = []
         for session_id, raw in await self._run(query):
-            snapshot = SessionSnapshot.from_json(raw)
+            try:
+                snapshot = SessionSnapshot.from_json(raw)
+            except Exception as e:
+                # One row that cannot be read (cut short, written by something else) must not hide every
+                # session next to it, at startup and on each later look.
+                logger.error("chat_session_snapshot_unreadable", session_id=session_id, error=str(e))
+                continue
             if not snapshot.closed and (not with_work or snapshot.has_work()):
                 ids.append(session_id)
         return ids

@@ -303,6 +303,166 @@ class TestAnswerCut:
         assert model.call_count == 2
 
 
+class StalledStream(StreamingTestModel):
+    """A provider that stops sending: its first call streams ``chunks_before`` chunks and then waits on
+    ``gate`` (never, unless a test opens it). Later calls stream normally."""
+
+    __test__ = False
+
+    def __init__(self, scripts, *, chunks_before=1):
+        super().__init__(scripts)
+        self.chunks_before = chunks_before
+        self.stalled = asyncio.Event()
+        self.gate = asyncio.Event()
+        self.ended: list[str] = []  # how each call's stream ended
+
+    async def stream(self, messages, **kwargs):
+        first, sent = self.call_count == 0, 0
+        try:
+            async for chunk in super().stream(messages, **kwargs):
+                if first and sent == self.chunks_before:
+                    self.stalled.set()
+                    await self.gate.wait()
+                yield chunk
+                sent += 1
+            self.ended.append("finished")
+        except (asyncio.CancelledError, GeneratorExit):
+            self.ended.append("stopped")
+            raise
+
+
+class TestAnswerCutWhileTheModelIsSilent:
+    """A 'now' message must not wait for the model's next chunk: a provider that has stalled (or is slow
+    to produce its next token) sends none, and the message would sit there until the provider timed out."""
+
+    async def test_cuts_a_stream_that_never_sends_another_chunk(self):
+        long = "Once upon a time there was a lighthouse keeper who " * 6
+        model = StalledStream([text_stream(long), text_stream("Sure: BANANA.")])
+        async with ChatSession(agent(model)) as session:
+            session.send("tell me a long story")
+            await asyncio.wait_for(model.stalled.wait(), 30)
+            receipt = session.send("stop, just say BANANA", mode="now")
+            (finished,) = await records(session, "turn_finished", 1, timeout=30)
+        assert finished["status"]["code"] == "success"
+        assert receipt.state == "delivered"
+        assert model.call_count == 2 and model.ended == ["stopped", "finished"]  # the stalled call was ended
+        root, memory = await memory_of(session)
+        assert [m.role for m in memory] == ["user", "assistant", "user", "assistant"]
+        partial = memory[1]
+        assert partial.metadata.get("interrupted") == "steer_now"
+        assert partial.collect_text() == long[:7]  # the one chunk it had sent
+        assert root.output.collect_text() == "Sure: BANANA."
+        (record,) = root.metadata["steer_now"]
+        assert record == {"cut": "answer", "kept_chars": 7}
+
+    async def test_cuts_a_stream_that_has_not_sent_anything_yet(self):
+        # One script: the model picks it by the assistant messages so far, and the cut call leaves none.
+        model = StalledStream([text_stream("Sure: BANANA.")], chunks_before=0)
+        async with ChatSession(agent(model)) as session:
+            session.send("tell me a long story")
+            await asyncio.wait_for(model.stalled.wait(), 30)
+            session.send("stop, just say BANANA", mode="now")
+            (finished,) = await records(session, "turn_finished", 1, timeout=30)
+        assert finished["status"]["code"] == "success"
+        assert model.call_count == 2 and model.ended == ["stopped", "finished"]
+        root, memory = await memory_of(session)
+        # Nothing was said, so nothing is kept of the cut call: the two messages, then the answer.
+        assert [m.role for m in memory] == ["user", "user", "assistant"]
+        assert user_texts(memory) == ["tell me a long story", "stop, just say BANANA"]
+        assert root.output.collect_text() == "Sure: BANANA."
+        assert root.metadata["steer_now"] == [{"cut": "answer", "kept_chars": 0}]
+
+    async def test_a_burst_while_it_is_silent_makes_one_cut(self):
+        model = StalledStream([text_stream("word " * 50), text_stream("ok")])
+        async with ChatSession(agent(model)) as session:
+            session.send("go")
+            await asyncio.wait_for(model.stalled.wait(), 30)
+            for text in ("one", "two", "three"):
+                session.send(text, mode="now")
+                await asyncio.sleep(0.05)
+            await records(session, "turn_finished", 1, timeout=30)
+        root, memory = await memory_of(session)
+        assert user_texts(memory) == ["go", "one", "two", "three"]
+        assert len(root.metadata["steer_now"]) == 1 and model.call_count == 2
+
+    async def test_an_interrupt_while_it_is_silent_still_ends_the_turn_and_keeps_what_was_said(self):
+        """Reading the model so that a cut can end the wait must not change what an interrupt does there:
+        the call ends interrupted, the turn with it, and its partial answer stays in the conversation."""
+        long = "Once upon a time there was a lighthouse keeper who " * 6
+        model = StalledStream([text_stream(long), text_stream("As I was saying.")])
+        async with ChatSession(agent(model)) as session:
+            session.send("tell me a long story")
+            await asyncio.wait_for(model.stalled.wait(), 30)
+            assert session.interrupt() is True
+            (first,) = await records(session, "turn_finished", 1, timeout=30)
+            assert first["status"] == {
+                "code": "cancelled",
+                "reason": "interrupted",
+                "message": first["status"]["message"],
+            }
+            assert model.ended == ["stopped"]
+            session.send("go on")
+            await records(session, "turn_finished", 2, timeout=30)
+        _, memory = await memory_of(session)
+        assert user_texts(memory) == ["tell me a long story", "go on"]
+        assert memory[1].role == "assistant" and memory[1].collect_text() == long[:7]
+
+    async def test_closing_while_it_is_silent_leaves_no_helper_task_behind(self):
+        model = StalledStream([text_stream("word " * 50)])
+        before = asyncio.all_tasks()
+        session = ChatSession(agent(model))
+        session.send("go")
+        await asyncio.wait_for(model.stalled.wait(), 30)
+        await session.close()
+        await asyncio.sleep(0)
+        left = [task for task in asyncio.all_tasks() - before if not task.done() and task is not asyncio.current_task()]
+        assert left == [], [task.get_coro().__qualname__ for task in left]
+        assert model.ended == ["stopped"]
+
+    async def test_the_turns_deadline_still_ends_a_silent_model_call(self):
+        """``Agent.timeout`` cancels the handler where it waits, which is now the read of the model: the
+        call is stopped, the turn ends ``timeout``, and the session goes on."""
+        model = StalledStream([text_stream("word " * 50), text_stream("here I am")])
+        before = asyncio.all_tasks()
+        async with ChatSession(agent(model, timeout=0.3)) as session:
+            session.send("go")
+            (first,) = await records(session, "turn_finished", 1, timeout=30)
+            assert first["status"]["code"] == "timeout" and model.ended == ["stopped"]
+            session.send("still there?")
+            (_, second) = await records(session, "turn_finished", 2, timeout=30)
+            assert second["status"]["code"] == "success"
+        await asyncio.sleep(0)
+        left = [task for task in asyncio.all_tasks() - before if not task.done() and task is not asyncio.current_task()]
+        assert left == [], [task.get_coro().__qualname__ for task in left]
+
+    async def test_a_model_call_that_fails_while_it_is_read_fails_the_turn_as_before(self):
+        class Broken(StreamingTestModel):
+            __test__ = False
+
+            async def stream(self, messages, **kwargs):
+                async for chunk in super().stream(messages, **kwargs):
+                    yield chunk
+                    raise ConnectionError("the provider hung up")
+
+        async with ChatSession(agent(Broken([text_stream("word " * 50)]))) as session:
+            session.send("go")
+            (finished,) = await records(session, "turn_finished", 1, timeout=30)
+        assert finished["status"]["code"] == "error" and "hung up" in str(finished.get("error"))
+
+    async def test_a_stream_that_resumes_by_itself_is_read_to_its_end(self):
+        """No cut: the reads in between are the model's own pace, and the answer is whole."""
+        text = "A short answer, in a few chunks."
+        model = StalledStream([text_stream(text)])
+        async with ChatSession(agent(model)) as session:
+            session.send("hello")
+            await asyncio.wait_for(model.stalled.wait(), 30)
+            model.gate.set()
+            (finished,) = await records(session, "turn_finished", 1, timeout=30)
+        assert finished["status"]["code"] == "success"
+        root, _ = await memory_of(session)
+        assert root.output.collect_text() == text and model.ended == ["finished"]
+
+
 class TestEdges:
     async def test_now_while_idle_starts_a_turn(self):
         async with ChatSession(agent(batch_model())) as session:

@@ -39,6 +39,9 @@ DEFAULT_SESSION_TTL_S = 3600.0
 KEEPALIVE_S = 15.0
 # How long a shutdown waits for a session restore already going before cancelling it.
 _SHUTDOWN_RESTORE_S = 5.0
+# How long startup waits for the store to list its sessions, and when it looks again after it could not.
+_STARTUP_DISCOVERY_S = 5.0
+_DISCOVERY_RETRY_S: tuple[float, ...] = (1.0, 2.0, 5.0, 10.0, 30.0)
 
 
 def _session_ttl() -> float:
@@ -189,7 +192,13 @@ def _restore_done(restoring: dict[str, asyncio.Task], session_id: str, task: asy
 
 async def restore_chat_sessions(app: Any) -> list[str]:
     """Server startup: bring back the durable sessions with work waiting (a queued message, a wake, a turn
-    that died with the last process), so they go on without waiting for a client. Returns their ids."""
+    that died with the last process), so they go on without waiting for a client. Returns their ids.
+
+    Best effort, and never the reason a server does not start: the store is implied by the agent's SQLite
+    traces, so a deployment that only serves ``/run`` and ``/stream`` gets here too. A store that cannot be
+    read now (a mount that is not there, a file that is locked) is looked at again in the background until
+    it answers; meanwhile every other route works, and chat requests fail safely on their own (``503``).
+    """
     from ..core.agent import Agent
 
     app.state.chat_closing = False
@@ -199,11 +208,51 @@ async def restore_chat_sessions(app: Any) -> list[str]:
     store = app.state.chat_store = session_store_for(runnable)
     if store is None:
         return []
+    _app_sessions(app)  # the map exists from here on, whether or not the store can be read yet
+    try:
+        # Bounded: a store that hangs (a stalled network mount) must not hold the server's start either.
+        session_ids = await asyncio.wait_for(store.list_ids(with_work=True), _STARTUP_DISCOVERY_S)
+    except Exception as e:
+        logger.error(
+            "chat_sessions_discovery_failed",
+            error=str(e) or type(e).__name__,
+            detail="The server starts without its stored chat sessions; looking again in the background.",
+        )
+        app.state.chat_discovery = asyncio.get_running_loop().create_task(_discover_later(app, runnable, store))
+        return []
+    return await _restore_discovered(app, runnable, store, session_ids)
+
+
+async def _discover_later(app: Any, agent: Any, store: ChatSessionStore) -> None:
+    """Startup could not list the stored sessions: look again (1 s, 2 s, 5 s, 10 s, then every 30 s) until the
+    store answers, then bring back those with work waiting, as startup would have."""
+    delays = iter(_DISCOVERY_RETRY_S)
+    delay = _DISCOVERY_RETRY_S[0]
+    said: str | None = None
+    while not getattr(app.state, "chat_closing", False):
+        delay = next(delays, delay)
+        await asyncio.sleep(delay)
+        try:
+            session_ids = await store.list_ids(with_work=True)
+        except Exception as e:
+            error = str(e) or type(e).__name__
+            if error != said:  # once per cause, not once per attempt for as long as the store is away
+                said = error
+                logger.warning("chat_sessions_discovery_failed", error=error)
+            continue
+        restored = await _restore_discovered(app, agent, store, session_ids)
+        logger.info("chat_sessions_discovered_late", count=len(restored))
+        return
+
+
+async def _restore_discovered(app: Any, runnable: Any, store: ChatSessionStore, session_ids: list[str]) -> list[str]:
     sessions = _app_sessions(app)
     restored, skipped = [], []
-    for session_id in await store.list_ids(with_work=True):
+    for session_id in session_ids:
         if session_id in sessions:
             continue
+        if getattr(app.state, "chat_closing", False):
+            break
         try:
             await _restore_once(app, runnable, store, session_id)
             restored.append(session_id)
@@ -216,7 +265,7 @@ async def restore_chat_sessions(app: Any) -> list[str]:
             skipped.append(session_id)
     if restored:
         logger.info("chat_sessions_restored", count=len(restored))
-    if skipped:
+    if skipped and not getattr(app.state, "chat_closing", False):
         # A replacement can start before the old container's lease runs out (and a new hostname, or a reused
         # pid, makes its holder look alive): try those again, or their queued work waits for a client.
         app.state.chat_restore_retry = asyncio.get_running_loop().create_task(
@@ -291,11 +340,12 @@ async def close_chat_sessions(app: Any) -> None:
     """Close every session (server shutdown). Durable ones are kept for the next process, a turn this cuts
     recovered there."""
     app.state.chat_closing = True  # no restore starts from here on
-    retry = getattr(app.state, "chat_restore_retry", None)
-    if retry is not None and not retry.done():
-        retry.cancel()
-        with contextlib.suppress(BaseException):
-            await retry
+    for name in ("chat_discovery", "chat_restore_retry"):
+        task = getattr(app.state, name, None)
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
     # A restore already going is shielded from its callers: left alone, it would finish after this and its
     # session keep running, unclosed, through the shutdown. Wait for it (its session is then in the map,
     # closed below); one that takes too long is cancelled, which lets go of its lease and writes nothing.

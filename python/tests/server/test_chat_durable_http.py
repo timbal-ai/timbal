@@ -360,6 +360,107 @@ def test_startup_retries_a_session_whose_old_lease_had_not_run_out(tmp_path, mon
         assert sessions.get("s1") is not None and sessions["s1"].turns == 1
 
 
+def _traces_on_a_mount_that_is_not_there(tmp_path, monkeypatch):
+    """The served agent keeps its SQLite traces at ``<tmp>/mount/timbal.db`` and the mount is missing: the
+    file cannot be opened. Chat storage was never asked for (``TIMBAL_CHAT_STORE`` unset): the session store
+    is only implied by the traces being SQLite."""
+    (tmp_path / "agent.py").write_text(AGENT.replace('DIR / "timbal.db"', 'DIR / "mount" / "timbal.db"'))
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    return tmp_path / "mount"
+
+
+def test_a_trace_store_that_cannot_be_opened_does_not_stop_the_server(tmp_path, monkeypatch):
+    """Looking for chat sessions to bring back is best effort at startup: a deployment that only serves
+    ``/run`` and ``/stream`` must start, and run, with its trace store unavailable, as it did before chat
+    sessions were stored there."""
+    _traces_on_a_mount_that_is_not_there(tmp_path, monkeypatch)
+    with TestClient(create_app()) as client:  # raised out of the lifespan: no route was served at all
+        assert client.get("/healthcheck").status_code == 204
+        ran = client.post("/run", json={"prompt": "hello"})
+        assert ran.status_code == 200 and ran.json()["status"]["code"] == "success"
+        assert "echo: hello" in str(ran.json()["output"])
+        # A durable chat request still fails safely while its store is away: nothing is opened unstored.
+        refused = client.post("/chat/sessions", json={})
+        assert refused.status_code == 503 and client.get("/chat/sessions").json() == []
+
+
+def test_sessions_with_work_are_found_once_the_store_is_back(tmp_path, monkeypatch):
+    """Startup could not look, so it keeps looking: a session with a message waiting is brought back when the
+    store answers again, without a client asking for it."""
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "_DISCOVERY_RETRY_S", (0.05,))
+    mount = _traces_on_a_mount_that_is_not_there(tmp_path, monkeypatch)
+    message = {
+        "id": "m1",
+        "text": "hi",
+        "source": "user",
+        "lane": "later",
+        "mode": "followup",
+        "posted_at": time.time(),
+    }
+    # What the mount holds, prepared beside it: a session another process left with a message waiting.
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    seeded = SqliteChatSessionStore(staging / "timbal.db")
+    asyncio.run(seeded.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None))
+    with TestClient(create_app()) as client:
+        sessions = client.app.state.chat_sessions
+        assert sessions == {}
+        # The mount is back, with everything in it, in one step: the search finds the store as it will stay,
+        # not an empty one a moment before the session is written (it looks once the store answers).
+        staging.rename(mount)
+        _until(lambda: sessions.get("s1") is not None and sessions["s1"].turns == 1, "the session to be found")
+
+
+def test_shutdown_stops_the_search_for_sessions(tmp_path, monkeypatch):
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "_DISCOVERY_RETRY_S", (0.05,))
+    _traces_on_a_mount_that_is_not_there(tmp_path, monkeypatch)
+    with TestClient(create_app()) as client:
+        search = client.app.state.chat_discovery
+        assert not search.done()
+    assert search.done()  # cancelled with the server, not left retrying on a closed loop
+
+
+def test_one_unreadable_snapshot_does_not_hide_the_others(tmp_path, monkeypatch):
+    """A row that cannot be read (written by something else, cut short) is skipped and said: the sessions
+    next to it are still found, at startup and on every later look."""
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    store = SqliteChatSessionStore(tmp_path / "timbal.db")
+    message = {
+        "id": "m1",
+        "text": "hi",
+        "source": "user",
+        "lane": "later",
+        "mode": "followup",
+        "posted_at": time.time(),
+    }
+
+    def garbage(conn):
+        conn.execute(
+            "INSERT INTO chat_sessions (session_id, agent, snapshot, version, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("broken", "agent", "{not json", 1, 0),
+        )
+        conn.commit()
+
+    async def seed():
+        await store.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None)
+        await store._run(garbage)
+        return await store.list_ids(with_work=True)
+
+    assert asyncio.run(seed()) == ["s1"]
+    with TestClient(create_app()) as client:
+        sessions = client.app.state.chat_sessions
+        _until(lambda: sessions.get("s1") is not None and sessions["s1"].turns == 1, "the readable session to run")
+
+
 def test_a_session_being_deleted_is_not_restored_meanwhile(client):
     """Until its row is gone the session stays in the map, closed: a request then is a 404, not a restore of
     the row that is still there."""
