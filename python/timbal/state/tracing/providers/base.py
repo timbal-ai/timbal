@@ -117,6 +117,13 @@ class TracingProvider(ABC):
     ``get()`` at the start of a run to retrieve the parent's trace when session
     chaining is active (i.e. when ``run_context.parent_id`` is set).
 
+    **Durability**
+
+    ``durable`` says whether what a provider stores outlives the process that stored it. A provider whose
+    traces another process can read leaves it True; a process-local one (``InMemoryTracingProvider``) sets
+    it False, which tells callers that keep state across restarts — durable chat sessions — that they cannot
+    rely on this one.
+
     **Why class-based, not instance-based?**
 
     Providers are passed as **types** (classes), not instances::
@@ -190,6 +197,9 @@ class TracingProvider(ABC):
     """
 
     _exporters: list[Exporter] = []
+
+    durable: bool = True
+    """Whether what this provider stores outlives the process that stored it (see **Durability**)."""
 
     _trace_redactor: Callable[[Any], Any] | None = None
     """Optional redactor applied to every span's serialized surfaces (input/output/

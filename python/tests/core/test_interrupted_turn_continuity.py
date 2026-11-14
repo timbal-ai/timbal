@@ -11,6 +11,7 @@ what was serialized, and on the platform provider with and without its recent-tr
 """
 
 import asyncio
+import collections
 import json
 from contextlib import suppress
 from unittest.mock import MagicMock, patch
@@ -29,7 +30,8 @@ from timbal.state.tracing.providers import (
     SqliteTracingProvider,
 )
 from timbal.state.tracing.providers.platform import _parse_cache_limits
-from timbal.types.content import ToolUseContent
+from timbal.types.content import ToolResultContent, ToolUseContent
+from timbal.types.events import ApprovalEvent, OutputEvent
 from timbal.types.message import Message
 
 CONFIG = PlatformConfig(
@@ -148,7 +150,9 @@ class Conversation:
     """One agent, turns chained by run id, and a gate at each point a turn can be cut."""
 
     def __init__(self, provider, monkeypatch, replies=None) -> None:
-        self.gates = {name: Gate() for name in ("system_prompt", "parent_load", "model_call", "after_reply")}
+        self.gates = {
+            name: Gate() for name in ("session_load", "system_prompt", "parent_load", "model_call", "after_reply")
+        }
         self.inputs: list[list[Message]] = []
         replies = iter(replies or [])
 
@@ -169,7 +173,15 @@ class Conversation:
         def charge_card(amount: int) -> str:
             return f"charged {amount}"
 
+        load_session = RunContext.get_session
+
+        async def gated_session(ctx, *args, **kwargs):
+            # Before the run has resolved its input: the span holds it only as it was given.
+            await self.gates["session_load"].hit()
+            return await load_session(ctx, *args, **kwargs)
+
         monkeypatch.setattr(RunContext, "_get_parent_trace", gated_load)
+        monkeypatch.setattr(RunContext, "get_session", gated_session)
         self.agent = Agent(
             name="voice_agent",
             model=GatedModel(handler, before=self.gates["model_call"], after=self.gates["after_reply"]),
@@ -214,7 +226,7 @@ class Conversation:
 
 
 @pytest.mark.parametrize("provider", PROVIDERS, indirect=True)
-@pytest.mark.parametrize("cut_at", ["system_prompt", "parent_load", "model_call"])
+@pytest.mark.parametrize("cut_at", ["session_load", "system_prompt", "parent_load", "model_call"])
 async def test_where_the_cut_lands_does_not_change_the_next_turn(provider, monkeypatch, cut_at):
     chat = Conversation(provider, monkeypatch, replies=["Nice to meet you, Ada."])
     first = await chat.turn("My name is Ada.")
@@ -341,3 +353,108 @@ async def test_a_turn_cut_while_resuming_a_paused_turn_is_rebuilt_as_that_resume
     assert sent[0].collect_text() == "Charge my card 20 euros."
     assert sent[2].content[0].id == "call_1"
     assert sent[-1].collect_text() == "Actually, don't."
+
+
+@pytest.mark.parametrize("recorded", ["one result", "no result"])
+@pytest.mark.parametrize("provider", ["in_memory", "jsonl", "sqlite"], indirect=True)
+async def test_calls_of_a_cut_batch_that_have_no_result_are_answered_not_run_again(provider, recorded):
+    """A batch resumed after an approval records each result as it comes. Cut while one of its calls is still
+    running, the turn leaves a tool_use message answered in part (or not at all, when the cut comes before
+    the first result). The next turn must not take the rest for calls waiting to be run: the ones that were
+    running would run a second time."""
+    ran: collections.Counter = collections.Counter()
+    entered = {name: asyncio.Event() for name in ("quick", "slow", "slower")}
+    quick_recorded = asyncio.Event()
+    inputs: list[list[Message]] = []
+
+    async def quick() -> str:
+        ran["quick"] += 1
+        entered["quick"].set()
+        if recorded == "no result":
+            await asyncio.Event().wait()
+        return "quick done"
+
+    async def slow() -> str:
+        ran["slow"] += 1
+        entered["slow"].set()
+        await asyncio.Event().wait()
+        return "never"
+
+    async def slower() -> str:
+        ran["slower"] += 1
+        entered["slower"].set()
+        await asyncio.Event().wait()
+        return "never"
+
+    def handler(messages):
+        inputs.append(list(messages))
+        if len(inputs) == 1:
+            return Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id="call_quick", name="quick", input={}),
+                    ToolUseContent(id="call_slow", name="slow", input={}),
+                    ToolUseContent(id="call_slower", name="slower", input={}),
+                ],
+                stop_reason="tool_use",
+            )
+        return "ok"
+
+    agent = Agent(
+        name="agent",
+        model=TestModel(handler=handler),
+        tools=[
+            Tool(name="quick", handler=quick, requires_approval=True),
+            Tool(name="slow", handler=slow, requires_approval=True),
+            Tool(name="slower", handler=slower, requires_approval=True),
+        ],
+        tracing_provider=provider,
+    )
+    Conversation._fresh_task_context()
+    events = [event async for event in agent(prompt="Do all three.")]
+    paused = events[-1]
+    assert paused.status.reason == "approval_required"
+    approvals = {event.approval_id: True for event in events if isinstance(event, ApprovalEvent)}
+    assert len(approvals) == 3
+
+    Conversation._fresh_task_context()
+    cut_run = None
+
+    async def resumed() -> None:
+        nonlocal cut_run
+        async for event in agent(prompt="Do all three.", parent_id=paused.run_id, resume=approvals):
+            cut_run = cut_run or event.run_id
+            if isinstance(event, OutputEvent) and event.path == "agent.quick":
+                quick_recorded.set()  # the agent records a result before it passes the event on
+
+    # The calls start in no fixed order (each claims its approval first, through the provider), and how
+    # long a result takes to be recorded depends on the machine: wait for the state itself, not for ticks.
+    task = asyncio.create_task(resumed())
+    state = [*entered.values()] + ([quick_recorded] if recorded == "one result" else [])
+    await asyncio.wait_for(asyncio.gather(*(event.wait() for event in state)), timeout=30)
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+    assert dict(ran) == {"quick": 1, "slow": 1, "slower": 1}
+
+    Conversation._fresh_task_context()
+    after = await agent(prompt="What happened?", parent_id=cut_run).collect()
+
+    assert after.status.code == "success"
+    assert dict(ran) == {"quick": 1, "slow": 1, "slower": 1}  # nothing ran again
+    sent = inputs[-1]
+    results = {c.id: c for m in sent for c in m.content if isinstance(c, ToolResultContent)}
+    assert set(results) == {"call_quick", "call_slow", "call_slower"}
+    # One result per tool message, right after the calls: Chat Completions sends one result per message
+    # (a second one in the same message is dropped), and every provider wants each call answered.
+    assert [m.role for m in sent[-5:]] == ["assistant", "tool", "tool", "tool", "user"]
+    assert all(len(m.content) == 1 for m in sent if m.role == "tool")
+    as_chat_completions = [m.to_openai_chat_completions_input() for m in sent]
+    assert {m["tool_call_id"] for m in as_chat_completions if m["role"] == "tool"} == set(results)
+    if recorded == "one result":
+        assert "quick done" in str(results["call_quick"].content)
+        assert "[Interrupted]" in str(results["call_slow"].content)
+        assert "[Interrupted]" in str(results["call_slower"].content)
+    else:
+        assert "quick done" not in str(results["call_quick"].content)  # cut too: no result of its own
+    assert [m.role for m in sent][-1] == "user" and sent[-1].collect_text() == "What happened?"

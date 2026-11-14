@@ -2556,6 +2556,14 @@ class Runnable(ABC, BaseModel):
             # the original assignment, leaving span.status=None and causing a Pydantic
             # ValidationError in the finally block (OutputEvent.status is required).
             span.status = RunStatus(code="cancelled", reason="interrupted", message=str(e))
+            if span._input_dump is None and span.input is not None:
+                # Cut before its input was resolved (admission, session data, the params themselves): stored
+                # as it was given. A turn that stored neither its memory nor its input would take its prompt
+                # out of the conversation: the next turn rebuilds a cut turn from it (Agent._previous_memory).
+                try:
+                    span._input_dump = await dump(span.input)
+                except Exception:
+                    span._input_dump = None
             if isinstance(e, InterruptError):
                 _get_logger().warning(
                     "Interrupted",

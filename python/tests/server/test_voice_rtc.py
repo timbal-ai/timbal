@@ -80,6 +80,23 @@ def _make_delayed_stt_class(script: list[tuple[float, TranscriptEvent]], *, end_
     return _STT
 
 
+async def _step(what: Any, awaitable: Any, timeout: float = 30.0) -> Any:
+    """One step of the WebRTC exchange, with a deadline: ICE gathering, the DTLS/SCTP handshake and the
+    teardown all wait on the network stack, and one that never returns must fail the test, by name, not
+    hang the run (a Windows job once sat in the first call here for two hours)."""
+    try:
+        return await asyncio.wait_for(awaitable, timeout)
+    except TimeoutError:
+        what = what() if callable(what) else what  # (a callable: described with what had arrived by then)
+        raise AssertionError(f"WebRTC {what} did not finish within {timeout:g} s") from None
+
+
+async def _close(pc: RTCPeerConnection) -> None:
+    """Close the test's side. What the test checks has happened by now: a close that hangs is abandoned."""
+    with contextlib.suppress(Exception, asyncio.TimeoutError):
+        await asyncio.wait_for(pc.close(), 10.0)
+
+
 async def _rtc_call(
     client: TestClient,
     *,
@@ -111,19 +128,22 @@ async def _rtc_call(
 
         asyncio.ensure_future(_pull())
 
-    offer = await pc.createOffer()
-    await pc.setLocalDescription(offer)
-    resp = await asyncio.to_thread(
-        client.post,
-        "/voice/rtc",
-        json={"sdp": pc.localDescription.sdp, "type": "offer", "config": config or {}},
-    )
-    assert resp.status_code == 200, resp.text
-    await pc.setRemoteDescription(RTCSessionDescription(**resp.json()))
     try:
-        await asyncio.wait_for(ended.wait(), timeout=timeout)
+        offer = await _step("createOffer", pc.createOffer())
+        await _step("setLocalDescription (ICE gathering)", pc.setLocalDescription(offer))
+        resp = await _step(
+            "POST /voice/rtc",
+            asyncio.to_thread(
+                client.post,
+                "/voice/rtc",
+                json={"sdp": pc.localDescription.sdp, "type": "offer", "config": config or {}},
+            ),
+        )
+        assert resp.status_code == 200, resp.text
+        await _step("setRemoteDescription", pc.setRemoteDescription(RTCSessionDescription(**resp.json())))
+        await _step(lambda: f"call (no session_ended; got {[m.get('type') for m in messages]})", ended.wait(), timeout)
     finally:
-        await pc.close()
+        await _close(pc)
     return messages, frames
 
 
@@ -306,17 +326,20 @@ class TestVoiceRtcSignalingErrors:
 
         pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=[]))
         pc.createDataChannel("events")  # SCTP only, no mic
-        offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
         try:
+            offer = await _step("createOffer", pc.createOffer())
+            await _step("setLocalDescription (ICE gathering)", pc.setLocalDescription(offer))
             with TestClient(app) as client:
-                resp = await asyncio.to_thread(
-                    client.post,
-                    "/voice/rtc",
-                    json={"sdp": pc.localDescription.sdp, "type": "offer"},
+                resp = await _step(
+                    "POST /voice/rtc",
+                    asyncio.to_thread(
+                        client.post,
+                        "/voice/rtc",
+                        json={"sdp": pc.localDescription.sdp, "type": "offer"},
+                    ),
                 )
         finally:
-            await pc.close()
+            await _close(pc)
         assert resp.status_code == 400
         assert "audio track" in resp.json()["error"]
 

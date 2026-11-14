@@ -1,12 +1,18 @@
 """Chat sessions over HTTP (:class:`~timbal.core.chat_session.ChatSession`), and the chat playground.
 
-``GET /chat/`` serves ``chat.html``. Sessions live in this process: a request
-for a session another worker holds is a 404, like ``/runs/{run_id}/events``.
+``GET /chat/`` serves ``chat.html``. Sessions are served by one process at a
+time. They are durable when the agent stores its traces in SQLite (the
+sessions go in the same file) or ``TIMBAL_CHAT_STORE`` names a store
+(``sqlite:///path/to.db``; ``memory`` turns it off): a session this process
+does not hold is restored on first use, those with work waiting at startup,
+and shutdown keeps them for the next process. Otherwise a request for a
+session another worker (or an earlier process) held is a 404.
 """
 
 import asyncio
 import contextlib
 import json
+import math
 import os
 import time
 from collections.abc import AsyncGenerator
@@ -19,6 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from ..core.chat_session import SEND_MODES, ChatSession
 from ..state.background import BACKGROUND_LOG_GAPPED
+from ..state.chat_store import ChatSessionStore, SessionLeased, SessionNotStored, SqliteChatSessionStore
 
 logger = structlog.get_logger("timbal.server.chat")
 
@@ -27,9 +34,17 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 _HTML_PATH = Path(__file__).parent / "chat.html"
 
 SESSION_TTL_ENV = "TIMBAL_CHAT_SESSION_TTL_S"
+STORE_ENV = "TIMBAL_CHAT_STORE"
+STORE_TIMEOUT_ENV = "TIMBAL_CHAT_STORE_TIMEOUT_S"
+DEFAULT_STORE_TIMEOUT_S = 10.0
 DEFAULT_SESSION_TTL_S = 3600.0
 # An SSE comment this often keeps proxies from closing a quiet stream.
 KEEPALIVE_S = 15.0
+# How long a shutdown waits for a session restore already going before cancelling it.
+_SHUTDOWN_RESTORE_S = 5.0
+# How long startup waits for the store to list its sessions, and when it looks again after it could not.
+_STARTUP_DISCOVERY_S = 5.0
+_DISCOVERY_RETRY_S: tuple[float, ...] = (1.0, 2.0, 5.0, 10.0, 30.0)
 
 
 def _session_ttl() -> float:
@@ -40,6 +55,18 @@ def _session_ttl() -> float:
         return DEFAULT_SESSION_TTL_S
 
 
+def _store_timeout() -> float | None:
+    """How long a chat route waits for the session store (``TIMBAL_CHAT_STORE_TIMEOUT_S``, default 10 s; 0 or
+    less: no limit). A store that fails is told at once; one that hangs (a stalled network mount) says
+    nothing, and without a limit the request, and every later one for that session, would wait with it."""
+    raw = os.environ.get(STORE_TIMEOUT_ENV)
+    try:
+        timeout = float(raw) if raw else DEFAULT_STORE_TIMEOUT_S
+    except ValueError:
+        timeout = DEFAULT_STORE_TIMEOUT_S
+    return timeout if math.isfinite(timeout) and timeout > 0 else None
+
+
 def _sessions(request: Request) -> dict[str, ChatSession]:
     sessions = getattr(request.app.state, "chat_sessions", None)
     if sessions is None:
@@ -47,11 +74,278 @@ def _sessions(request: Request) -> dict[str, ChatSession]:
     return sessions
 
 
-def _session(request: Request, session_id: str, *, allow_closed: bool = False) -> ChatSession:
-    session = _sessions(request).get(session_id)
+def session_store_for(agent: Any) -> ChatSessionStore | None:
+    """Where this server keeps its sessions: ``TIMBAL_CHAT_STORE``, else next to the agent's SQLite traces."""
+    from ..state.tracing.providers import SqliteTracingProvider
+
+    raw = (os.environ.get(STORE_ENV) or "").strip()
+    if raw.lower() in ("memory", "none", "off"):
+        return None
+    if raw:
+        # SQLAlchemy's form: sqlite:///relative.db, sqlite:////absolute/path.db
+        if not raw.startswith("sqlite:///") or len(raw) == len("sqlite:///"):
+            raise RuntimeError(f"{STORE_ENV} must be 'memory' or 'sqlite:///path/to.db', got {raw!r}")
+        _require_durable_traces(agent)
+        return SqliteChatSessionStore(raw[len("sqlite:///") :])
+    provider = getattr(agent, "tracing_provider", None)
+    if isinstance(provider, type) and issubclass(provider, SqliteTracingProvider) and provider._path is not None:
+        return SqliteChatSessionStore(provider._path, synchronous=provider.synchronous)
+    return None
+
+
+def _require_durable_traces(agent: Any) -> None:
+    """A session store that outlives the process is of no use with traces that do not.
+
+    A restored session reads its conversation — and the approval a parked one waits on — from the trace of
+    its last run. With process-local traces a restart leaves the snapshot pointing at runs nobody can read:
+    the session comes back durable, with no history and a question that cannot be answered. Said here,
+    before any work is accepted, instead of being found after the restart.
+    """
+    from ..state.context import RunContext
+
+    # The agent's setting as runs resolve it (TRACING_UNSET: auto-detected from the platform config).
+    provider = RunContext(tracing_provider=getattr(agent, "tracing_provider", None))._tracing_provider
+    if provider is not None and getattr(provider, "durable", True):
+        return
+    name = provider.__name__ if provider is not None else "no tracing provider"
+    raise RuntimeError(
+        f"{STORE_ENV} keeps chat sessions across restarts, but this agent's traces do not ({name}): a "
+        f"restored session would have no history and no pending approval to answer. Give the agent a durable "
+        f"tracing_provider (SqliteTracingProvider, JsonlTracingProvider, PlatformTracingProvider), or set "
+        f"{STORE_ENV}=memory."
+    )
+
+
+def _store(request: Request) -> ChatSessionStore | None:
+    state = request.app.state
+    if not hasattr(state, "chat_store"):
+        runnable = getattr(state, "runnable", None)
+        state.chat_store = session_store_for(runnable) if runnable is not None else None
+    return state.chat_store
+
+
+async def _session(request: Request, session_id: str, *, allow_closed: bool = False) -> ChatSession:
+    sessions = _sessions(request)
+    session = sessions.get(session_id)
+    if session is not None and session.handed_off:
+        # Lost its lease (another process serves it: 409) or let go with keep: the store says where it is now,
+        # once this copy is done closing (until then its turn may run, its task store still be bound).
+        await session.wait_closed()
+        if sessions.get(session_id) is session:
+            sessions.pop(session_id)
+        session = None
+    if session is None:
+        session = await _restore(request, session_id)
     if session is None or (session.closed and not allow_closed):
-        raise HTTPException(status_code=404, detail=f"No chat session {session_id!r} in this process.")
+        raise HTTPException(status_code=404, detail=f"No chat session {session_id!r}.")
     return session
+
+
+async def _restore(request: Request, session_id: str) -> ChatSession | None:
+    """A durable session this process does not hold, restored (once, however many requests ask at the same time)."""
+    store = _store(request)
+    if store is None:
+        return None
+    agent = _agent(request)
+    timeout = _store_timeout()
+    try:
+        # The restore itself is shielded (_restore_once): a request that stops waiting leaves it going, and
+        # the session is there for the next one once the store answers.
+        return await asyncio.wait_for(_restore_once(request.app, agent, store, session_id), timeout)
+    except TimeoutError as e:
+        logger.error("chat_session_restore_timeout", session_id=session_id, timeout_s=timeout)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Chat session {session_id!r} could not be restored: the session store did not answer "
+            f"within {timeout:g} s.",
+            headers=_RETRY,
+        ) from e
+    except LookupError:
+        return None
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except SessionLeased as e:
+        raise HTTPException(status_code=409, detail=f"Chat session {session_id!r} is served by another process.") from e
+    except Exception as e:
+        # The store or the run's trace could not be read: nothing was taken over, the stored state stays.
+        logger.error("chat_session_restore_failed", session_id=session_id, error=str(e))
+        raise HTTPException(
+            status_code=503, detail=f"Chat session {session_id!r} could not be restored: {e}", headers=_RETRY
+        ) from e
+
+
+def _app_sessions(app: Any) -> dict[str, ChatSession]:
+    sessions = getattr(app.state, "chat_sessions", None)
+    if sessions is None:
+        sessions = app.state.chat_sessions = {}
+    return sessions
+
+
+async def _restore_once(app: Any, agent: Any, store: ChatSessionStore, session_id: str) -> ChatSession:
+    """The session restored from the store into this process's map, once per id: requests and the startup
+    retry share one restore, and a session the process already serves is returned as is (this process can
+    always renew its own lease, so a second ``from_store`` would make a second copy)."""
+    state = app.state
+    current = _app_sessions(app).get(session_id)
+    if current is not None and not current.handed_off:
+        return current
+    if getattr(state, "chat_closing", False):
+        raise RuntimeError("The server is shutting down.")
+    restoring: dict[str, asyncio.Task] = getattr(state, "chat_restoring", None) or {}
+    state.chat_restoring = restoring
+    task = restoring.get(session_id)
+    if task is None:
+        task = restoring[session_id] = asyncio.ensure_future(_restore_into(app, agent, store, session_id))
+        task.add_done_callback(lambda done: _restore_done(restoring, session_id, done))
+    # Shielded: a caller that goes away (a dropped request, the retry cancelled at shutdown) does not stop it.
+    return await asyncio.shield(task)
+
+
+async def _restore_into(app: Any, agent: Any, store: ChatSessionStore, session_id: str) -> ChatSession:
+    """One restore, whoever still waits for it: the session is in the map before this returns, so shutdown
+    (which waits for the restores in flight) finds it and closes it with the others."""
+    session = await ChatSession.from_store(agent, store, session_id)
+    _app_sessions(app)[session_id] = session
+    return session
+
+
+def _restore_done(restoring: dict[str, asyncio.Task], session_id: str, task: asyncio.Task) -> None:
+    if restoring.get(session_id) is task:
+        del restoring[session_id]
+    if not task.cancelled():
+        task.exception()  # retrieved: every caller may have gone away
+
+
+async def restore_chat_sessions(app: Any) -> list[str]:
+    """Server startup: bring back the durable sessions with work waiting (a queued message, a wake, a turn
+    that died with the last process), so they go on without waiting for a client. Returns their ids.
+
+    Best effort, and never the reason a server does not start: the store is implied by the agent's SQLite
+    traces, so a deployment that only serves ``/run`` and ``/stream`` gets here too. A store that cannot be
+    read now (a mount that is not there, a file that is locked) is looked at again in the background until
+    it answers; meanwhile every other route works, and chat requests fail safely on their own (``503``).
+    """
+    from ..core.agent import Agent
+
+    app.state.chat_closing = False
+    runnable = getattr(app.state, "runnable", None)
+    if not isinstance(runnable, Agent):
+        return []
+    store = app.state.chat_store = session_store_for(runnable)
+    if store is None:
+        return []
+    _app_sessions(app)  # the map exists from here on, whether or not the store can be read yet
+    try:
+        # Bounded: a store that hangs (a stalled network mount) must not hold the server's start either.
+        session_ids = await asyncio.wait_for(store.list_ids(with_work=True), _STARTUP_DISCOVERY_S)
+    except Exception as e:
+        logger.error(
+            "chat_sessions_discovery_failed",
+            error=str(e) or type(e).__name__,
+            detail="The server starts without its stored chat sessions; looking again in the background.",
+        )
+        app.state.chat_discovery = asyncio.get_running_loop().create_task(_discover_later(app, runnable, store))
+        return []
+    return await _restore_discovered(app, runnable, store, session_ids, timeout=_STARTUP_DISCOVERY_S)
+
+
+async def _discover_later(app: Any, agent: Any, store: ChatSessionStore) -> None:
+    """Startup could not list the stored sessions: look again (1 s, 2 s, 5 s, 10 s, then every 30 s) until the
+    store answers, then bring back those with work waiting, as startup would have."""
+    delays = iter(_DISCOVERY_RETRY_S)
+    delay = _DISCOVERY_RETRY_S[0]
+    said: str | None = None
+    while not getattr(app.state, "chat_closing", False):
+        delay = next(delays, delay)
+        await asyncio.sleep(delay)
+        try:
+            # Bounded like the first look: an attempt that gets no answer is given up, and the next one made.
+            session_ids = await asyncio.wait_for(store.list_ids(with_work=True), _STARTUP_DISCOVERY_S)
+        except Exception as e:
+            error = str(e) or type(e).__name__
+            if error != said:  # once per cause, not once per attempt for as long as the store is away
+                said = error
+                logger.warning("chat_sessions_discovery_failed", error=error)
+            continue
+        restored = await _restore_discovered(app, agent, store, session_ids)
+        logger.info("chat_sessions_discovered_late", count=len(restored))
+        return
+
+
+async def _restore_discovered(
+    app: Any, runnable: Any, store: ChatSessionStore, session_ids: list[str], *, timeout: float | None = None
+) -> list[str]:
+    """Bring back the sessions ``session_ids`` names. ``timeout``: how long to wait for each (startup, which
+    must not wait on a store that has stopped answering)."""
+    sessions = _app_sessions(app)
+    restored, skipped = [], []
+    stalled = False
+    for session_id in session_ids:
+        if session_id in sessions:
+            continue
+        if getattr(app.state, "chat_closing", False):
+            break
+        if stalled:
+            skipped.append(session_id)  # the store stopped answering: not one wait per session
+            continue
+        try:
+            await asyncio.wait_for(_restore_once(app, runnable, store, session_id), timeout)
+            restored.append(session_id)
+        except TimeoutError:
+            # Its restore goes on (shielded) and puts the session in the map if the store comes back; the
+            # retry below sees to the others.
+            logger.error("chat_session_restore_timeout", session_id=session_id, timeout_s=timeout)
+            stalled = True
+            skipped.append(session_id)
+        except SessionLeased:
+            skipped.append(session_id)  # another worker serves it, or a predecessor's lease has not run out yet
+        except (LookupError, ValueError):
+            continue
+        except Exception as e:
+            logger.error("chat_session_restore_failed", session_id=session_id, error=str(e))
+            skipped.append(session_id)
+    if restored:
+        logger.info("chat_sessions_restored", count=len(restored))
+    if skipped and not getattr(app.state, "chat_closing", False):
+        # A replacement can start before the old container's lease runs out (and a new hostname, or a reused
+        # pid, makes its holder look alive): try those again, or their queued work waits for a client.
+        app.state.chat_restore_retry = asyncio.get_running_loop().create_task(
+            _retry_restores(app, runnable, store, skipped)
+        )
+    return restored
+
+
+async def _retry_restores(app: Any, agent: Any, store: ChatSessionStore, session_ids: list[str]) -> None:
+    """Retry restoring sessions skipped at startup, every third of a lease, while they still have work waiting
+    and nobody here holds them. A live worker that serves one keeps its lease, and clears the work."""
+    waiting = set(session_ids)
+    interval = max(store.lease_ttl_s / 3, 0.05)
+    while waiting:
+        await asyncio.sleep(interval)
+        sessions = getattr(app.state, "chat_sessions", None) or {}
+        for session_id in sorted(waiting):
+            if session_id in sessions:
+                waiting.discard(session_id)
+                continue
+            try:
+                snapshot = await store.load(session_id)
+            except Exception as e:
+                logger.warning("chat_session_restore_retry_failed", session_id=session_id, error=str(e))
+                continue
+            if snapshot is None or not snapshot.has_work():
+                waiting.discard(session_id)
+                continue
+            try:
+                await _restore_once(app, agent, store, session_id)
+            except SessionLeased:
+                continue
+            except (LookupError, ValueError):
+                waiting.discard(session_id)
+            except Exception as e:
+                logger.warning("chat_session_restore_retry_failed", session_id=session_id, error=str(e))
+            else:
+                waiting.discard(session_id)
+                logger.info("chat_session_restored_late", session_id=session_id)
 
 
 def _agent(request: Request) -> Any:
@@ -64,24 +358,99 @@ def _agent(request: Request) -> Any:
 
 
 async def _reap(sessions: dict[str, ChatSession]) -> None:
-    """Close sessions idle for longer than the TTL (never one with a turn running)."""
+    """Let go of sessions idle for longer than the TTL (never one with a turn running or due to start one).
+    A durable one is kept in its store: the next request for it restores it."""
     ttl = _session_ttl()
     if ttl <= 0:
         return
     now = time.monotonic()
+    timeout = _store_timeout()
     for session_id, session in list(sessions.items()):
-        if session.closed or (not session.busy and now - session.last_activity > ttl):
-            sessions.pop(session_id, None)
-            await session.close()
+        # `due`, not just `busy`: a session collecting a message (or waiting out a backoff) is neither busy
+        # nor idle. Let go of it and nothing runs that message until a request asks for the session again,
+        # which for an acknowledged message may be never.
+        if session.closed or (not session.busy and not session.due and now - session.last_activity > ttl):
+            # Closed before it leaves the map: a request meanwhile finds it handed off and waits, instead of
+            # restoring a second copy while this one still holds the session's task store.
+            await session.close(keep=True, store_timeout=timeout)
+            await session.wait_closed()
+            if session.close_timed_out:
+                timeout = 0.0  # the store is not answering: the others are let go without waiting for it
+            if sessions.get(session_id) is session:
+                sessions.pop(session_id)
 
 
 async def close_chat_sessions(app: Any) -> None:
-    """Close every session (server shutdown)."""
+    """Close every session (server shutdown). Durable ones are kept for the next process, a turn this cuts
+    recovered there."""
+    app.state.chat_closing = True  # no restore starts from here on
+    for name in ("chat_discovery", "chat_restore_retry"):
+        task = getattr(app.state, name, None)
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+    # A restore already going is shielded from its callers: left alone, it would finish after this and its
+    # session keep running, unclosed, through the shutdown. Wait for it (its session is then in the map,
+    # closed below); one that takes too long is cancelled, which lets go of its lease and writes nothing.
+    restoring = [task for task in (getattr(app.state, "chat_restoring", None) or {}).values() if not task.done()]
+    if restoring:
+        _, slow = await asyncio.wait(restoring, timeout=_SHUTDOWN_RESTORE_S)
+        for task in slow:
+            task.cancel()
+        if slow:
+            await asyncio.gather(*slow, return_exceptions=True)
     sessions = getattr(app.state, "chat_sessions", None) or {}
+    timeout = _store_timeout()
     for session in list(sessions.values()):
         with contextlib.suppress(Exception):
-            await session.close()
+            await session.close(keep=True, store_timeout=timeout)
+        if session.close_timed_out:
+            timeout = 0.0  # the store is not answering: one wait for it, not one per session
     sessions.clear()
+
+
+_RETRY = {"Retry-After": "1"}
+
+
+_TAKEN = "The request was taken (a turn has it), but it would not survive a restart: do not resend."
+_UNCONFIRMED = (
+    "The request was taken, but the store has not confirmed it, so it may not survive a restart: do not resend."
+)
+
+
+async def _stored(session: ChatSession, mark: int, undo: Any = None, *, taken: str = _TAKEN) -> None:
+    """``session.flush()`` for a route about to acknowledge the change it made at ``mark`` (``session.mark()``,
+    taken right after it). A session another process took is a ``409``. When the store fails, or does not
+    answer within :func:`_store_timeout`:
+
+    - the change itself is stored and a later one is what failed: returns, the acknowledgement holds;
+    - the store did not answer and a write that holds the change is still out: ``503`` without
+      ``Retry-After``, the change kept. That write may land at any time (or already has), so taking the
+      change back and asking for a retry could run it twice;
+    - no write holds it and ``undo`` takes it back here too (returns True: no turn has taken it): ``503`` with
+      ``Retry-After``. Nothing was accepted, in memory or in the store, so a retry cannot run it twice,
+      whether or not this process lives to store anything again;
+    - a turn has it: ``503`` without ``Retry-After`` (``taken``)."""
+    timeout = _store_timeout()
+    try:
+        # flush() waits on the session's save loop without owning it: stopping the wait stops no write.
+        await asyncio.wait_for(session.flush(), timeout)
+    except SessionLeased as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except (SessionNotStored, TimeoutError) as e:
+        if session.stored_since(mark):
+            return
+        hung = isinstance(e, TimeoutError)
+        why = f"The session store did not answer within {timeout:g} s" if hung else str(e)
+        if hung:
+            logger.error("chat_session_store_timeout", session_id=session.id, timeout_s=timeout)
+            if session.may_be_stored(mark):
+                detail = taken if taken is not _TAKEN else _UNCONFIRMED
+                raise HTTPException(status_code=503, detail=f"{why}. {detail}") from e
+        if undo is not None and undo():
+            raise HTTPException(status_code=503, detail=f"{why}. Nothing was accepted: retry.", headers=_RETRY) from e
+        raise HTTPException(status_code=503, detail=f"{why}. {taken}") from e
 
 
 def _jsonable(item: Any) -> Any:
@@ -127,6 +496,7 @@ async def chat_meta(request: Request) -> JSONResponse:
             "steering": runnable.steering if is_agent else None,
             "modes": list(SEND_MODES),
             "busy_mode": "steer",
+            "durable": is_agent and _store(request) is not None,
         }
     )
 
@@ -144,6 +514,7 @@ async def create_session(request: Request) -> JSONResponse:
             parent_id=body.get("parent_id"),
             busy_mode=body.get("busy_mode") or "steer",
             collect_window=float(body.get("collect_window", 1.0)),
+            session_store=_store(request),
         )
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -154,6 +525,19 @@ async def create_session(request: Request) -> JSONResponse:
     except Exception as e:
         await session.close()
         raise HTTPException(status_code=503, detail=f"Could not load the run the session continues: {e}") from e
+    session.persist()
+    mark = session.mark()
+    timeout = _store_timeout()
+    try:
+        await asyncio.wait_for(session.flush(), timeout)
+    except (SessionNotStored, SessionLeased, TimeoutError) as e:
+        if isinstance(e, SessionLeased) or not session.stored_since(mark):
+            hung = isinstance(e, TimeoutError)
+            why = f"The session store did not answer within {timeout:g} s" if hung else str(e)
+            # Never acknowledged: nothing of it stays here. With a store that hangs the close does not wait
+            # for it again; a row its first write may still leave is one nobody was given the id of.
+            await session.close(store_timeout=0.0 if hung else timeout)
+            raise HTTPException(status_code=503, detail=f"{why}. No session was opened: retry.", headers=_RETRY) from e
     sessions[session.id] = session
     return _json(session.state(), status_code=201)
 
@@ -165,21 +549,39 @@ async def list_sessions(request: Request) -> JSONResponse:
 
 @router.get("/sessions/{session_id}")
 async def get_session(request: Request, session_id: str) -> JSONResponse:
-    return _json(_session(request, session_id).state())
+    return _json((await _session(request, session_id)).state())
 
 
 @router.delete("/sessions/{session_id}")
 async def delete_session(request: Request, session_id: str) -> JSONResponse:
-    session = _session(request, session_id)
-    _sessions(request).pop(session_id, None)
-    await session.close()
+    session = await _session(request, session_id)
+    sessions = _sessions(request)
+    try:
+        # In the map until it is closed and gone from the store: a request meanwhile finds it closed (404),
+        # not a gap through which to restore the row that is still there.
+        await session.close(store_timeout=_store_timeout())
+        await session.wait_closed()  # a close already going (ownership lost) is this one: wait for its end
+    finally:
+        if sessions.get(session_id) is session:
+            del sessions[session_id]
+    if session.lost:
+        # Another process took it before this copy noticed: nothing was deleted, it goes on there.
+        raise HTTPException(status_code=409, detail=f"Chat session {session_id!r} is served by another process.")
+    if session.close_error is not None:
+        # Closed here, but the store still holds it as open: the next request would restore it. A retry
+        # restores it and deletes again.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Chat session {session_id!r} was closed but not removed from the store: {session.close_error}",
+            headers=_RETRY,
+        )
     return _json({"closed": True})
 
 
 @router.post("/sessions/{session_id}/messages")
 async def send_message(request: Request, session_id: str) -> JSONResponse:
     """Send a user message: ``{"text", "mode"?}`` (``steer`` | ``followup`` | ``collect`` | ``interrupt``)."""
-    session = _session(request, session_id)
+    session = await _session(request, session_id)
     body = await _body(request)
     text = body.get("text")
     mode = body.get("mode") or None
@@ -187,11 +589,16 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
         raise HTTPException(status_code=400, detail="'text' must be a string.")
     busy = session.busy
     try:
-        event = session.send(text, mode=mode)
+        # The message is only queued here: 'now' and 'interrupt' cut the running turn once it is stored, so a
+        # 503 that says nothing was accepted has not cut anything either.
+        event = session.send(text, mode=mode, defer_cut=True)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
+    mark = session.mark()
+    await _stored(session, mark, lambda: session.withdraw(event.id))  # the 202 means it survives a restart
+    session.cut_for(event, mode)
     return _json(
         {"message": {**event.receipt(), "text": event.text}, "mode": mode or session.busy_mode, "busy": busy},
         status_code=202,
@@ -206,11 +613,13 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
     tool, a list of names only those. The wake runs once the user has nothing
     pending, as a turn of its own, and may stay silent.
     """
-    session = _session(request, session_id)
+    session = await _session(request, session_id)
     body = await _body(request)
     text = body.get("text")
     if not isinstance(text, str):
         raise HTTPException(status_code=400, detail="'text' must be a string.")
+    if body.get("key") is not None and not isinstance(body["key"], str):
+        raise HTTPException(status_code=400, detail="'key' must be a string or null.")
     policy = body.get("tool_policy", "read_only")
     if policy is not None and not (policy == "read_only" or isinstance(policy, list)):
         raise HTTPException(status_code=400, detail="'tool_policy' must be 'read_only', a list of tool names, or null.")
@@ -222,27 +631,40 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
+    await _stored(session, session.mark(), lambda: session.withdraw(wake_id))
     return _json({"wake_id": wake_id, "busy": session.busy}, status_code=202)
 
 
 @router.post("/sessions/{session_id}/interrupt")
 async def interrupt_session(request: Request, session_id: str) -> JSONResponse:
-    return _json({"interrupted": _session(request, session_id).interrupt()})
+    session = await _session(request, session_id)
+    interrupted = session.interrupt()
+    if interrupted:
+        await _stored(
+            session,
+            session.mark(),
+            taken="The session was interrupted, but its state could not be stored: it would not survive a restart.",
+        )
+    return _json({"interrupted": interrupted})
 
 
 @router.post("/sessions/{session_id}/resume")
 async def resume_session(request: Request, session_id: str) -> JSONResponse:
     """Answer a parked turn: ``{"resume": {approval_id: true | {...}, interaction_id: value}}``."""
-    session = _session(request, session_id)
+    session = await _session(request, session_id)
     body = await _body(request)
     values = body.get("resume")
     if not isinstance(values, dict) or not values:
         raise HTTPException(status_code=400, detail="'resume' must be a non-empty object.")
     try:
         session.resume(values)
+    except TypeError as e:
+        # An answer the session store cannot hold (the body parser lets NaN and Infinity through).
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except (RuntimeError, ValueError) as e:
         # Not waiting for an answer (yet), or an id already answered differently.
         raise HTTPException(status_code=409, detail=str(e)) from e
+    await _stored(session, session.mark(), lambda: session.withdraw_answers(values))
     return _json({"resumed": True}, status_code=202)
 
 
@@ -256,7 +678,7 @@ async def session_log(
     while nothing is past it. ``gapped`` means entries past ``after`` were
     dropped: continue from ``next_cursor``. ``closed``: the session ended.
     """
-    session = _session(request, session_id, allow_closed=True)
+    session = await _session(request, session_id, allow_closed=True)
     log = session.log
     limit = max(1, min(limit, 2000))
     if wait_ms > 0 and log.cursor_end <= after and not session.closed:
@@ -285,7 +707,7 @@ async def session_events(request: Request, session_id: str, after: int = 0) -> S
     the ring dropped entries past the cursor; the stream goes on from the
     oldest one it still holds.
     """
-    session = _session(request, session_id, allow_closed=True)
+    session = await _session(request, session_id, allow_closed=True)
     last_event_id = request.headers.get("last-event-id")
     if last_event_id and last_event_id.isdigit():
         after = max(after, int(last_event_id))

@@ -54,7 +54,18 @@ def test_page_and_meta(client):
     assert page.status_code == 200 and "Chat playground" in page.text
     meta = client.get("/chat/meta").json()
     assert meta["agent"] == "chat_agent" and meta["is_agent"] is True
-    assert meta["modes"] == ["steer", "followup", "collect", "interrupt"]
+    assert meta["modes"] == ["steer", "now", "followup", "collect", "interrupt"]
+
+
+def test_the_playground_builds_ask_cards_from_the_session_state(client):
+    """A restored session's log has no APPROVAL / INTERACTION event to replay: the cards must come from
+    ``pending_approvals`` / ``pending_interactions`` of the state, every time it is fetched."""
+    page = client.get("/chat/").text
+    refresh = page[page.index("async function refreshState()") : page.index("function resetView()")]
+    assert "pendingCards(state)" in refresh
+    cards = page[page.index("function pendingCards(state)") : page.index("function resetView()")]
+    assert "state.pending_approvals" in cards and 'askCard("approval"' in cards
+    assert "state.pending_interactions" in cards and 'askCard("interaction"' in cards
 
 
 def test_steer_joins_the_running_turn(client):
@@ -178,3 +189,47 @@ def test_a_runnable_that_is_not_an_agent(monkeypatch):
     with TestClient(create_app()) as client:
         assert client.get("/chat/meta").json()["is_agent"] is False
         assert client.post("/chat/sessions", json={}).status_code == 400
+
+
+REFUSED_TRACES_AGENT = '''
+from timbal import Agent
+from timbal.core.test_model import TestModel
+from timbal.state.tracing.providers import InMemoryTracingProvider
+
+
+class Refused(InMemoryTracingProvider):
+    """A trace store that turns every save down, for good (a platform answering 403)."""
+
+    @classmethod
+    async def _store(cls, _run_context):
+        raise PermissionError("403: the platform refused the trace")
+
+
+agent = Agent(
+    name="agent",
+    model=TestModel(handler=lambda messages: f"echo: {messages[-1].collect_text()}"),
+    tools=[],
+    tracing_provider=Refused,
+)
+'''
+
+
+def test_a_session_without_a_store_goes_on_when_its_traces_are_refused(tmp_path, monkeypatch):
+    """The chat route with no session store (the default over platform traces): a trace the provider refuses
+    is logged, and the turn is over. Held open for it, the session would stay busy and every later message
+    queued, with no ``turn_finished`` ever sent."""
+    (tmp_path / "agent.py").write_text(REFUSED_TRACES_AGENT)
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    with TestClient(create_app()) as client:
+        assert client.get("/chat/meta").json()["durable"] is False
+        session_id = open_session(client)
+        for message in ("one", "two"):
+            # followup: a turn of its own each (steered, the second may join the first, and one turn ends)
+            sent = client.post(f"/chat/sessions/{session_id}/messages", json={"text": message, "mode": "followup"})
+            assert sent.status_code == 202
+        items = read_log(client, session_id, until_kind="turn_finished", count=2, timeout=20)
+        finished = [item for _, item in items if item.get("kind") == "turn_finished"]
+        assert [turn["status"]["code"] for turn in finished] == ["success", "success"]
+        state = client.get(f"/chat/sessions/{session_id}").json()
+        assert not state["busy"] and not state["pending"]

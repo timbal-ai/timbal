@@ -1,0 +1,957 @@
+"""Durable chat sessions over HTTP, in one process: lazy restore, one restore per id, 409, delete, the store choice."""
+
+import asyncio
+import textwrap
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+from fastapi.testclient import TestClient
+from timbal.core.chat_session import ChatSession
+from timbal.server.chat import session_store_for
+from timbal.server.http import create_app
+from timbal.state.chat_store import SessionSnapshot, SqliteChatSessionStore, process_owner
+
+AGENT = textwrap.dedent(
+    """
+    import asyncio, os
+    from pathlib import Path
+    from timbal import Agent, Tool
+    from timbal.core.test_model import TestModel
+    from timbal.state.tracing.providers import SqliteTracingProvider
+    from timbal.types.content import ToolUseContent
+    from timbal.types.message import Message
+
+    DIR = Path(os.environ["E2E_DIR"])
+
+    async def wait() -> str:
+        while (DIR / "hang").exists():  # a tool that runs for as long as the test wants a turn busy
+            await asyncio.sleep(0.02)
+        return "waited"
+
+    async def build() -> str:
+        while (DIR / "hang-build").exists():  # detached: the turn that started it ends, this goes on
+            await asyncio.sleep(0.02)
+        return "built"
+
+    def handler(messages):
+        text = next((m.collect_text() for m in reversed(messages) if m.role == "user"), "")
+        if messages[-1].role == "tool":
+            return "done"
+        if text in ("wait", "build", "charge"):
+            return Message(role="assistant", content=[ToolUseContent(id=f"{text}1", name=text, input={})],
+                           stop_reason="tool_use")
+        return f"echo: {text}"
+
+    agent = Agent(
+        name="agent",
+        model=TestModel(handler=handler),
+        tools=[
+            Tool(name="wait", handler=wait),
+            Tool(name="build", handler=build, background_mode="always"),
+            Tool(name="charge", handler=lambda: "charged", requires_approval=True),
+        ],
+        tracing_provider=SqliteTracingProvider.configured(_path=DIR / "timbal.db"),
+    )
+    """
+)
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    with TestClient(create_app()) as client:
+        yield client
+
+
+def wait_turns(client, session_id, turns, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = client.get(f"/chat/sessions/{session_id}").json()
+        if state.get("turns") == turns and not state["busy"]:
+            return state
+        time.sleep(0.02)
+    raise AssertionError(f"session {session_id} did not reach {turns} turns")
+
+
+def forget(client, session_id):
+    """What a restart or idle reaping leaves: the session gone from this process, kept in the store."""
+    session = client.app.state.chat_sessions.pop(session_id)
+    client.portal.call(lambda: session.close(keep=True))
+
+
+def test_meta_says_durable(client):
+    assert client.get("/chat/meta").json()["durable"] is True
+
+
+def test_a_session_this_process_does_not_hold_is_restored_on_first_use(client):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi"})
+    wait_turns(client, session_id, 1)
+    forget(client, session_id)
+
+    state = client.get(f"/chat/sessions/{session_id}").json()
+    assert state["durable"] and state["turns"] == 1
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "again"})
+    assert wait_turns(client, session_id, 2)["last_status"]["code"] == "success"
+
+
+def test_idle_reaping_keeps_the_session_for_later(client, monkeypatch):
+    first = client.post("/chat/sessions", json={}).json()["session_id"]
+    client.post(f"/chat/sessions/{first}/messages", json={"text": "hi"})
+    wait_turns(client, first, 1)
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "0.01")
+    time.sleep(0.05)
+    client.post("/chat/sessions", json={})  # creating a session reaps idle ones
+    assert first not in client.app.state.chat_sessions
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "3600")
+    assert client.get(f"/chat/sessions/{first}").json()["turns"] == 1
+
+
+def test_requests_racing_for_one_session_restore_it_once(client, monkeypatch):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    forget(client, session_id)
+    real, calls = ChatSession.from_store.__func__, []
+
+    async def slow_restore(cls, *args, **kwargs):
+        calls.append(1)
+        await asyncio.sleep(0.2)  # every request arrives while the first restore is still going
+        return await real(cls, *args, **kwargs)
+
+    monkeypatch.setattr(ChatSession, "from_store", classmethod(slow_restore))
+    with ThreadPoolExecutor(6) as pool:
+        codes = list(pool.map(lambda _: client.get(f"/chat/sessions/{session_id}").status_code, range(6)))
+    assert codes == [200] * 6 and len(calls) == 1
+
+
+def test_a_session_another_process_serves_is_a_409(client):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    forget(client, session_id)
+    store = client.app.state.chat_store
+    client.portal.call(store.acquire_lease, session_id, "elsewhere:1:x")
+    response = client.get(f"/chat/sessions/{session_id}")
+    assert response.status_code == 409 and "another process" in response.json()["detail"]
+
+
+def test_a_session_this_process_lost_answers_409_then_comes_back(client):
+    """Losing the lease closes the session here: requests must not keep finding the closed object (404)."""
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    store = client.app.state.chat_store
+    session = client.app.state.chat_sessions[session_id]
+    client.portal.call(store.release_lease, session_id, process_owner())  # lapsed
+    client.portal.call(store.acquire_lease, session_id, "elsewhere:1:x")
+
+    async def lose():
+        session._lose("taken")
+
+    client.portal.call(lose)
+    response = client.get(f"/chat/sessions/{session_id}")
+    assert response.status_code == 409, response.text
+    assert client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi"}).status_code == 409
+    client.portal.call(store.release_lease, session_id, "elsewhere:1:x")  # the other process let it go
+    assert client.get(f"/chat/sessions/{session_id}").status_code == 200
+    assert client.app.state.chat_sessions[session_id] is not session
+
+
+def test_a_session_still_closing_is_restored_only_once_its_close_is_done(client, monkeypatch):
+    """Until close() ends, the old copy may run its turn and holds the session's task store: a restore started
+    before that would bind a second worker to it."""
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    session = client.app.state.chat_sessions[session_id]
+    order = []
+    real_settle = session._settle_store
+
+    async def slow_settle():
+        await asyncio.sleep(0.3)
+        await real_settle()
+        order.append("closed")
+
+    session._settle_store = slow_settle
+    real_restore = ChatSession.from_store.__func__
+
+    async def restore(cls, *args, **kwargs):
+        order.append("restore")
+        return await real_restore(cls, *args, **kwargs)
+
+    monkeypatch.setattr(ChatSession, "from_store", classmethod(restore))
+
+    async def close_later():
+        await session.close(keep=True)
+
+    client.portal.start_task_soon(close_later)
+    client.portal.call(asyncio.sleep, 0.05)  # close() has started: handed off, still settling
+    assert session.handed_off and session_id in client.app.state.chat_sessions
+    assert client.get(f"/chat/sessions/{session_id}").status_code == 200
+    assert order == ["closed", "restore"]
+    assert client.app.state.chat_sessions[session_id] is not session
+
+
+def test_a_message_that_could_not_be_stored_is_a_503_and_not_kept(client, monkeypatch):
+    # A long collect window: no turn takes the message before the route answers, so the route can take it back.
+    session_id = client.post("/chat/sessions", json={"collect_window": 30}).json()["session_id"]
+
+    monkeypatch.setattr(client.app.state.chat_store, "save", _down)
+    response = client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi", "mode": "collect"})
+    assert response.status_code == 503 and response.headers["retry-after"] == "1"
+    assert "Nothing was accepted" in response.json()["detail"]
+    monkeypatch.undo()
+    state = client.get(f"/chat/sessions/{session_id}").json()
+    assert state["pending"] == []
+    assert client.app.state.chat_sessions[session_id]._store.pending_events() == []  # nothing left to run
+    assert client.get(f"/chat/sessions/{session_id}").json()["turns"] == 0
+
+
+async def _down(*_args, **_kwargs):
+    raise OSError("disk full")
+
+
+@pytest.mark.parametrize("mode", ["interrupt", "now"])
+def test_a_503_for_a_cutting_message_has_not_cut_the_turn(client, monkeypatch, tmp_path, mode):
+    """'Nothing was accepted' must be true of the running turn too: no cancel, no cut, before the store has it."""
+    (tmp_path / "hang").touch()
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "wait"})
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not client.get(f"/chat/sessions/{session_id}").json()["busy"]:
+        time.sleep(0.02)
+    running = client.get(f"/chat/sessions/{session_id}").json()["run_id"]
+    assert running
+
+    monkeypatch.setattr(client.app.state.chat_store, "save", _down)
+    response = client.post(f"/chat/sessions/{session_id}/messages", json={"text": "stop", "mode": mode})
+    assert response.status_code == 503 and response.headers["retry-after"] == "1", response.text
+    monkeypatch.undo()
+    state = client.get(f"/chat/sessions/{session_id}").json()
+    assert state["busy"] and state["run_id"] == running and state["pending"] == []
+    (tmp_path / "hang").unlink()
+    assert wait_turns(client, session_id, 1)["last_status"]["code"] == "success"  # it ran to its end, uncut
+
+
+def test_a_message_the_store_already_holds_is_acknowledged_when_a_later_write_fails(client, monkeypatch):
+    """The 503 is for a change the store does not hold. Taking back one it does would leave it there for a
+    restart to run, next to the client's retry."""
+    session_id = client.post("/chat/sessions", json={"collect_window": 3}).json()["session_id"]
+    session, store = client.app.state.chat_sessions[session_id], client.app.state.chat_store
+    real_save, calls = store.save, []
+
+    async def save(snapshot, *, expect_version, owner=None):
+        if calls:
+            raise OSError("disk full")
+        calls.append(1)
+        version = await real_save(snapshot, expect_version=expect_version, owner=owner)
+        session._persist()  # a later change: its write, and the retry of it, fail
+        return version
+
+    monkeypatch.setattr(store, "save", save)
+    response = client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi", "mode": "collect"})
+    assert response.status_code == 202, response.text
+    event_id = response.json()["message"]["event_id"]
+    assert [e["id"] for e in client.portal.call(store.load, session_id).pending] == [event_id]
+    assert [p["event_id"] for p in session.pending_messages()] == [event_id]  # not taken back
+    monkeypatch.undo()
+    assert wait_turns(client, session_id, 1, timeout=20)["last_status"]["code"] == "success"
+
+
+def test_a_delete_the_store_did_not_take_is_a_503_and_a_retry_finishes_it(client, monkeypatch):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    store = client.app.state.chat_store
+    monkeypatch.setattr(store, "save", _down)
+    monkeypatch.setattr(store, "delete", _down)
+    response = client.delete(f"/chat/sessions/{session_id}")
+    assert response.status_code == 503 and response.headers["retry-after"] == "1"
+    monkeypatch.undo()
+    assert client.portal.call(store.load, session_id) is not None  # still there, open: it would come back
+    assert client.delete(f"/chat/sessions/{session_id}").json() == {"closed": True}
+    assert client.portal.call(store.load, session_id) is None
+
+
+def test_a_session_this_process_serves_is_never_restored_a_second_time(client, monkeypatch):
+    """The startup retry and a request can both ask: this process renews its own lease, so nothing else stops
+    a second copy."""
+    from timbal.server.chat import _restore_once
+
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    session = client.app.state.chat_sessions[session_id]
+
+    async def never(_cls, *_args, **_kwargs):
+        raise AssertionError("restored a session this process already serves")
+
+    monkeypatch.setattr(ChatSession, "from_store", classmethod(never))
+    app = client.app
+    again = client.portal.call(_restore_once, app, app.state.runnable, app.state.chat_store, session_id)
+    assert again is session
+
+
+OLD_OWNER = "old-host:1:x"  # another host's: alive for as long as its lease has not run out
+
+
+def _seed_leased_session(tmp_path, monkeypatch):
+    """A stored session with a message waiting, leased by a predecessor on another host for a minute: startup
+    skips it however slow the runner is, and retries every 0.1 s. The test ends the old lease when it wants."""
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    monkeypatch.setattr(SqliteChatSessionStore, "lease_ttl_s", 0.3)  # the server's: a retry every 0.1 s
+    store = SqliteChatSessionStore(tmp_path / "timbal.db")
+    store.lease_ttl_s = 60.0  # this instance's: how long the predecessor's lease lasts
+    message = {
+        "id": "m1",
+        "text": "hi",
+        "source": "user",
+        "lane": "later",
+        "mode": "followup",
+        "posted_at": time.time(),
+    }
+
+    async def seed():
+        await store.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None)
+        await store.acquire_lease("s1", OLD_OWNER)
+
+    asyncio.run(seed())
+    return store
+
+
+def _lease_owner(store, session_id):
+    def query(conn):
+        return conn.execute("SELECT lease_owner FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone()
+
+    return asyncio.run(store._run(query))[0]
+
+
+def test_shutdown_waits_for_a_restore_in_flight_and_closes_its_session(tmp_path, monkeypatch):
+    """A restore the cancelled startup retry was waiting for still finishes: its session must be closed with
+    the others (kept, its lease let go), not left running through the shutdown."""
+    store = _seed_leased_session(tmp_path, monkeypatch)
+    real_restore, restored = ChatSession.from_store.__func__, []
+
+    async def slow_restore(cls, *args, **kwargs):
+        session = await real_restore(cls, *args, **kwargs)
+        restored.append(session)
+        await asyncio.sleep(0.5)  # shutdown comes while the restore is still going
+        return session
+
+    monkeypatch.setattr(ChatSession, "from_store", classmethod(slow_restore))
+    with TestClient(create_app()) as client:
+        assert not restored  # skipped at startup
+        client.portal.call(client.app.state.chat_store.release_lease, "s1", OLD_OWNER)  # the old lease ends
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not restored:
+            time.sleep(0.02)
+        assert restored
+    (session,) = restored
+    assert session.closed and session.handed_off
+    assert _lease_owner(store, "s1") is None  # let go for the next process
+
+
+def test_startup_retries_a_session_whose_old_lease_had_not_run_out(tmp_path, monkeypatch):
+    """A replacement starting before its predecessor's lease expires restores the session once it does."""
+    _seed_leased_session(tmp_path, monkeypatch)
+    with TestClient(create_app()) as client:
+        sessions = client.app.state.chat_sessions
+        assert "s1" not in sessions  # skipped at startup: the lease was still live
+        client.portal.call(client.app.state.chat_store.release_lease, "s1", OLD_OWNER)  # ...and now it ends
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (sessions.get("s1") and sessions["s1"].turns == 1):
+            time.sleep(0.05)
+        assert sessions.get("s1") is not None and sessions["s1"].turns == 1
+
+
+def _traces_on_a_mount_that_is_not_there(tmp_path, monkeypatch):
+    """The served agent keeps its SQLite traces at ``<tmp>/mount/timbal.db`` and the mount is missing: the
+    file cannot be opened. Chat storage was never asked for (``TIMBAL_CHAT_STORE`` unset): the session store
+    is only implied by the traces being SQLite."""
+    (tmp_path / "agent.py").write_text(AGENT.replace('DIR / "timbal.db"', 'DIR / "mount" / "timbal.db"'))
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    return tmp_path / "mount"
+
+
+def test_a_trace_store_that_cannot_be_opened_does_not_stop_the_server(tmp_path, monkeypatch):
+    """Looking for chat sessions to bring back is best effort at startup: a deployment that only serves
+    ``/run`` and ``/stream`` must start, and run, with its trace store unavailable, as it did before chat
+    sessions were stored there."""
+    _traces_on_a_mount_that_is_not_there(tmp_path, monkeypatch)
+    with TestClient(create_app()) as client:  # raised out of the lifespan: no route was served at all
+        assert client.get("/healthcheck").status_code == 204
+        ran = client.post("/run", json={"prompt": "hello"})
+        assert ran.status_code == 200 and ran.json()["status"]["code"] == "success"
+        assert "echo: hello" in str(ran.json()["output"])
+        # A durable chat request still fails safely while its store is away: nothing is opened unstored.
+        refused = client.post("/chat/sessions", json={})
+        assert refused.status_code == 503 and client.get("/chat/sessions").json() == []
+
+
+def _close_database(path):
+    """Close this process's connection to the SQLite file at ``path`` (the write-ahead log is folded into it)."""
+    from pathlib import Path
+
+    from timbal.state.tracing.providers import sqlite as sqlite_module
+
+    resolved = str(Path(path).resolve())
+    with sqlite_module._DATABASES_LOCK:
+        for key in [key for key in sqlite_module._DATABASES if key[0] == resolved]:
+            sqlite_module._DATABASES.pop(key).conn.close()
+
+
+def test_sessions_with_work_are_found_once_the_store_is_back(tmp_path, monkeypatch):
+    """Startup could not look, so it keeps looking: a session with a message waiting is brought back when the
+    store answers again, without a client asking for it."""
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "_DISCOVERY_RETRY_S", (0.05,))
+    mount = _traces_on_a_mount_that_is_not_there(tmp_path, monkeypatch)
+    message = {
+        "id": "m1",
+        "text": "hi",
+        "source": "user",
+        "lane": "later",
+        "mode": "followup",
+        "posted_at": time.time(),
+    }
+    # What the mount holds, prepared beside it: a session another process left with a message waiting.
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    seeded = SqliteChatSessionStore(staging / "timbal.db")
+    asyncio.run(seeded.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None))
+    _close_database(staging / "timbal.db")  # Windows does not rename a folder with a file open in it
+    with TestClient(create_app()) as client:
+        sessions = client.app.state.chat_sessions
+        assert sessions == {}
+        # The mount is back, with everything in it, in one step: the search finds the store as it will stay,
+        # not an empty one a moment before the session is written (it looks once the store answers).
+        staging.rename(mount)
+        _until(lambda: sessions.get("s1") is not None and sessions["s1"].turns == 1, "the session to be found")
+
+
+def test_the_search_gives_up_a_look_that_gets_no_answer(tmp_path, monkeypatch):
+    """The store does not fail, it says nothing: the look at startup, and the first one after it, never
+    return. Each is given up after its bound and the next one made, so the session is found when the store
+    answers again."""
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "_STARTUP_DISCOVERY_S", 0.2)
+    monkeypatch.setattr(chat_module, "_DISCOVERY_RETRY_S", (0.05,))
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    message = {
+        "id": "m1",
+        "text": "hi",
+        "source": "user",
+        "lane": "later",
+        "mode": "followup",
+        "posted_at": time.time(),
+    }
+    seeded = SqliteChatSessionStore(tmp_path / "timbal.db")
+    asyncio.run(seeded.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None))
+    real, looks = SqliteChatSessionStore.list_ids, []
+
+    async def list_ids(store, **kwargs):
+        looks.append(1)
+        if len(looks) <= 2:
+            await asyncio.Event().wait()
+        return await real(store, **kwargs)
+
+    monkeypatch.setattr(SqliteChatSessionStore, "list_ids", list_ids)
+    with TestClient(create_app()) as client:
+        sessions = client.app.state.chat_sessions
+        _until(lambda: sessions.get("s1") is not None and sessions["s1"].turns == 1, "the session to be found")
+    assert len(looks) >= 3
+
+
+def test_shutdown_stops_the_search_for_sessions(tmp_path, monkeypatch):
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "_DISCOVERY_RETRY_S", (0.05,))
+    _traces_on_a_mount_that_is_not_there(tmp_path, monkeypatch)
+    with TestClient(create_app()) as client:
+        search = client.app.state.chat_discovery
+        assert not search.done()
+    assert search.done()  # cancelled with the server, not left retrying on a closed loop
+
+
+def test_one_unreadable_snapshot_does_not_hide_the_others(tmp_path, monkeypatch):
+    """A row that cannot be read (written by something else, cut short) is skipped and said: the sessions
+    next to it are still found, at startup and on every later look."""
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    store = SqliteChatSessionStore(tmp_path / "timbal.db")
+    message = {
+        "id": "m1",
+        "text": "hi",
+        "source": "user",
+        "lane": "later",
+        "mode": "followup",
+        "posted_at": time.time(),
+    }
+
+    def garbage(conn):
+        conn.execute(
+            "INSERT INTO chat_sessions (session_id, agent, snapshot, version, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("broken", "agent", "{not json", 1, 0),
+        )
+        conn.commit()
+
+    async def seed():
+        await store.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None)
+        await store._run(garbage)
+        return await store.list_ids(with_work=True)
+
+    assert asyncio.run(seed()) == ["s1"]
+    with TestClient(create_app()) as client:
+        sessions = client.app.state.chat_sessions
+        _until(lambda: sessions.get("s1") is not None and sessions["s1"].turns == 1, "the readable session to run")
+
+
+def test_a_session_being_deleted_is_not_restored_meanwhile(client):
+    """Until its row is gone the session stays in the map, closed: a request then is a 404, not a restore of
+    the row that is still there."""
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    session = client.app.state.chat_sessions[session_id]
+
+    async def a_worker_slow_to_stop():
+        async def worker():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(1.0)  # its cleanup: close() waits here, the row still open in the store
+
+        if session._worker is not None:
+            session._worker.cancel()
+        session._worker = asyncio.get_running_loop().create_task(worker())
+
+    client.portal.call(a_worker_slow_to_stop)
+    with ThreadPoolExecutor(1) as pool:
+        deleting = pool.submit(client.delete, f"/chat/sessions/{session_id}")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not session.closed:
+            time.sleep(0.01)
+        assert session.closed
+        assert client.get(f"/chat/sessions/{session_id}").status_code == 404
+        assert deleting.result(10).json() == {"closed": True}
+    assert client.get(f"/chat/sessions/{session_id}").status_code == 404
+    assert session_id not in client.app.state.chat_sessions
+    assert client.portal.call(client.app.state.chat_store.load, session_id) is None
+
+
+def test_deleting_a_session_another_process_took_is_a_409(client):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    store = client.app.state.chat_store
+    client.portal.call(store.release_lease, session_id, process_owner())  # lapsed, before this copy noticed...
+    client.portal.call(store.acquire_lease, session_id, "elsewhere:1:x")  # ...and another worker has it
+    response = client.delete(f"/chat/sessions/{session_id}")
+    assert response.status_code == 409 and "another process" in response.json()["detail"]
+    stored = client.portal.call(store.load, session_id)
+    assert stored is not None and not stored.closed  # it goes on there
+
+
+def test_a_session_is_created_with_its_lease_in_one_write(client, monkeypatch):
+    """No second write to take the lease: one that fails cannot leave a row nobody holds or knows of."""
+    store = client.app.state.chat_store
+
+    async def unreachable(*_args, **_kwargs):
+        raise OSError("store unreachable")
+
+    monkeypatch.setattr(store, "acquire_lease", unreachable)
+    response = client.post("/chat/sessions", json={})
+    assert response.status_code == 201, response.text
+    session_id = response.json()["session_id"]
+    monkeypatch.undo()
+    assert session_id in [state["session_id"] for state in client.get("/chat/sessions").json()]
+
+    def owner(conn):
+        return conn.execute("SELECT lease_owner FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone()
+
+    assert client.portal.call(store._run, owner)[0] == process_owner()
+
+
+def test_delete_removes_it_for_good(client):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    assert client.delete(f"/chat/sessions/{session_id}").json() == {"closed": True}
+    assert client.portal.call(client.app.state.chat_store.load, session_id) is None
+    assert client.get(f"/chat/sessions/{session_id}").status_code == 404
+
+
+def test_the_store_choice(tmp_path, monkeypatch):
+    from timbal import Agent
+    from timbal.core.test_model import TestModel
+    from timbal.state.tracing.providers import InMemoryTracingProvider, SqliteTracingProvider
+
+    sqlite_agent = Agent(
+        name="a", model=TestModel(), tracing_provider=SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+    )
+    memory_agent = Agent(name="a", model=TestModel(), tracing_provider=InMemoryTracingProvider)
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    assert isinstance(session_store_for(sqlite_agent), SqliteChatSessionStore)
+    assert session_store_for(memory_agent) is None
+    monkeypatch.setenv("TIMBAL_CHAT_STORE", "memory")
+    assert session_store_for(sqlite_agent) is None
+    monkeypatch.setenv("TIMBAL_CHAT_STORE", f"sqlite:///{tmp_path}/s.db")
+    assert session_store_for(sqlite_agent).path == tmp_path / "s.db"  # four slashes: absolute
+    monkeypatch.setenv("TIMBAL_CHAT_STORE", "postgres://x")
+    with pytest.raises(RuntimeError, match="TIMBAL_CHAT_STORE"):
+        session_store_for(memory_agent)
+
+
+def test_a_session_with_a_collected_message_is_not_reaped(client, monkeypatch):
+    """A session collecting a message is not busy, but a turn for it is due: reaping it would leave the
+    message acknowledged and never run (nobody asks for the session again)."""
+    store = client.app.state.chat_store
+    session_id = client.post("/chat/sessions", json={"collect_window": 1.0}).json()["session_id"]
+    hang = _hang_file()
+    hang.touch()
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "wait"})
+    _until(lambda: client.get(f"/chat/sessions/{session_id}").json()["busy"], "the first turn to run")
+    collected = client.post(f"/chat/sessions/{session_id}/messages", json={"text": "second", "mode": "collect"})
+    assert collected.status_code == 202
+    hang.unlink()
+    wait_turns(client, session_id, 1)  # the first turn is over; the collected message waits out its window
+
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "0.01")
+    time.sleep(0.05)
+    client.post("/chat/sessions", json={})  # creating a session reaps idle ones
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "3600")
+    assert session_id in client.app.state.chat_sessions, "reaped with a turn due"
+
+    # Read the store, not the session: a GET would restore it and run the message, hiding the loss.
+    _until(
+        lambda: (client.portal.call(store.load, session_id)).turns == 2,
+        "the collected message to run without anyone asking for the session",
+        timeout=20,
+    )
+    assert not client.portal.call(store.load, session_id).pending
+
+
+def test_an_answer_json_cannot_carry_is_a_400_and_the_question_stays_open(client):
+    """The body parser lets ``NaN`` through, and a snapshot cannot hold it: refused to its sender, not a 500,
+    and not accepted and then lost."""
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "charge"})
+    _until(lambda: client.get(f"/chat/sessions/{session_id}").json()["parked"], "the turn to ask for approval")
+    (approval,) = client.get(f"/chat/sessions/{session_id}").json()["pending_approvals"]
+    approval_id = approval["approval_id"]
+
+    refused = client.post(
+        f"/chat/sessions/{session_id}/resume",
+        content=f'{{"resume": {{"{approval_id}": {{"approved": true, "metadata": {{"ratio": NaN}}}}}}}}',
+        headers={"content-type": "application/json"},
+    )
+    assert refused.status_code == 400 and "cannot be stored" in refused.json()["detail"]
+    assert client.get(f"/chat/sessions/{session_id}").json()["parked"]
+
+    answered = client.post(f"/chat/sessions/{session_id}/resume", json={"resume": {approval_id: True}})
+    assert answered.status_code == 202
+    state = wait_turns(client, session_id, 2)
+    assert not state["parked"] and state["last_status"]["code"] == "success"
+
+
+def test_a_wake_key_that_is_not_text_is_a_400(client):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    for key in (5, ["a"], {"k": 1}):
+        refused = client.post(f"/chat/sessions/{session_id}/wake", json={"text": "heartbeat", "key": key})
+        assert refused.status_code == 400 and "key" in refused.json()["detail"]
+    assert client.get(f"/chat/sessions/{session_id}").json()["wakes"] == []
+
+
+def _reap_idle_sessions(client, monkeypatch):
+    """What the server does when a session is created, with every idle session past its time."""
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "0.01")
+    time.sleep(0.05)
+    client.post("/chat/sessions", json={})
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "3600")
+
+
+def test_a_session_whose_background_tool_is_still_running_is_not_reaped(client, monkeypatch):
+    """Nothing is queued while a detached tool runs, yet the session owes a turn: the tool's result starts
+    one. Reaped meanwhile, the result lands in a session nobody serves and its turn never runs."""
+    store = client.app.state.chat_store
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    hang = _hang_file().with_name("hang-build")
+    hang.touch()
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "build"})
+    state = wait_turns(client, session_id, 1)  # the turn that started the tool is over; the tool is not
+    assert not state["busy"] and not state["pending"]
+
+    _reap_idle_sessions(client, monkeypatch)
+    assert session_id in client.app.state.chat_sessions, "reaped with a background tool still to report"
+
+    hang.unlink()
+    # Read the store, not the session: a GET would restore a reaped one, hiding the loss.
+    _until(
+        lambda: (client.portal.call(store.load, session_id)).turns == 2,
+        "the tool's result to get its turn without anyone asking for the session",
+        timeout=20,
+    )
+
+
+def test_a_session_holding_only_a_silent_event_is_reaped_and_keeps_it(client, monkeypatch):
+    """The other way round: a silent event starts no turn, so it must not keep an idle session in memory
+    for ever. Let go, the session keeps the event in its store, for the turn that next runs."""
+    store = client.app.state.chat_store
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi"})
+    wait_turns(client, session_id, 1)
+    session = client.app.state.chat_sessions[session_id]
+    client.portal.call(lambda: session.store.post_event("FYI: the cache is warm.", announce="silent"))
+    _until(lambda: len(client.portal.call(store.load, session_id).pending) == 1, "the event to be stored")
+
+    _reap_idle_sessions(client, monkeypatch)
+    assert session_id not in client.app.state.chat_sessions, "kept for an event that starts nothing"
+    snapshot = client.portal.call(store.load, session_id)
+    assert [event["text"] for event in snapshot.pending] == ["FYI: the cache is warm."] and snapshot.turns == 1
+
+    # It rides with the next turn of the restored session.
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hello"})
+    wait_turns(client, session_id, 2)
+    assert not client.portal.call(store.load, session_id).pending
+
+
+def _hang_file():
+    import os
+    from pathlib import Path
+
+    return Path(os.environ["E2E_DIR"]) / "hang"
+
+
+def _until(condition, what, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def test_a_store_that_outlives_traces_that_do_not_is_refused(tmp_path, monkeypatch):
+    """Sessions kept across restarts need traces kept across restarts: the conversation, and the question a
+    parked session waits on, live in the trace. With process-local traces a restored session has neither."""
+    from timbal import Agent
+    from timbal.core.test_model import TestModel
+    from timbal.state.tracing.providers import InMemoryTracingProvider, SqliteTracingProvider
+
+    memory_agent = Agent(name="a", model=TestModel(), tracing_provider=InMemoryTracingProvider)
+    sqlite_agent = Agent(
+        name="a", model=TestModel(), tracing_provider=SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+    )
+    monkeypatch.setenv("TIMBAL_CHAT_STORE", f"sqlite:///{tmp_path}/s.db")
+    with pytest.raises(RuntimeError, match="InMemoryTracingProvider"):
+        session_store_for(memory_agent)
+    assert session_store_for(sqlite_agent).path == tmp_path / "s.db"  # four slashes: absolute
+    monkeypatch.setenv("TIMBAL_CHAT_STORE", "memory")
+    assert session_store_for(memory_agent) is None  # asked for process-local sessions: nothing to keep
+
+
+# -- A session store that hangs (does not fail) -------------------------------------------------------------------
+
+
+class HungStore:
+    """Make the session store hang, not fail: while ``hung`` is set, every store call waits (a stalled network
+    mount). The calls go through once it is cleared. A threading event: the app runs on the client's loop."""
+
+    CALLS = ("save", "load", "list_ids", "acquire_lease", "release_lease", "delete")
+
+    def __init__(self, monkeypatch, timeout_s="0.3"):
+        import threading
+
+        self.hung = threading.Event()
+        monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", timeout_s)
+        for name in self.CALLS:
+            monkeypatch.setattr(SqliteChatSessionStore, name, self._stalled(getattr(SqliteChatSessionStore, name)))
+
+    def _stalled(self, real):
+        async def call(store, *args, **kwargs):
+            while self.hung.is_set():
+                await asyncio.sleep(0.01)
+            return await real(store, *args, **kwargs)
+
+        return call
+
+
+# Well under a hang, well over the 0.3 s the routes are given here: a slow runner still fits.
+PROMPT_S = 8.0
+
+
+def _timed(request):
+    started = time.monotonic()
+    response = request()
+    return response, time.monotonic() - started
+
+
+def _stored_snapshot(client, session_id):
+    return client.portal.call(client.app.state.chat_store.load, session_id)
+
+
+def test_a_message_sent_to_a_hung_store_is_answered_and_runs_once(client, monkeypatch):
+    """The store neither takes the message nor refuses it. The route answers within its bound; the write it
+    started may still land, so the message is kept and its sender told not to send it again. When the store
+    is back the message is stored and runs: once."""
+    store = HungStore(monkeypatch)
+    session_id = client.post("/chat/sessions", json={"busy_mode": "followup"}).json()["session_id"]
+    store.hung.set()
+    sent, took = _timed(lambda: client.post(f"/chat/sessions/{session_id}/messages", json={"text": "one"}))
+    assert sent.status_code == 503 and took < PROMPT_S
+    assert "Retry-After" not in sent.headers and "do not resend" in sent.json()["detail"]
+
+    # A second one, while the first write is still out: that write cannot hold it, so it is taken back whole.
+    again, took = _timed(lambda: client.post(f"/chat/sessions/{session_id}/messages", json={"text": "two"}))
+    assert again.status_code == 503 and took < PROMPT_S
+    assert again.headers["Retry-After"] and "Nothing was accepted" in again.json()["detail"]
+    # "two" is gone. "one" is kept: still queued, or already taken by a turn that waits for the store.
+    pending = client.get(f"/chat/sessions/{session_id}").json()["pending"]
+    assert [message["text"] for message in pending] in ([], ["one"])
+
+    store.hung.clear()
+    state = wait_turns(client, session_id, 1)
+    assert not state["pending"]
+    log = client.get(f"/chat/sessions/{session_id}/log", params={"after": 0}).json()["events"]
+    delivered = [
+        e["data"]["event_id"]
+        for e in log
+        if e["data"].get("kind") == "message_settled" and e["data"].get("state") == "delivered"
+    ]
+    assert len(delivered) == 1  # "one", once; "two" never ran
+    prompts = [
+        e["data"]["input"]["prompt"]
+        for e in log
+        if e["data"].get("type") == "OUTPUT" and e["data"].get("path") == "agent"
+    ]
+    assert len(prompts) == 1 and "one" in str(prompts[0]) and "two" not in str(prompts[0])
+    _until(lambda: _stored_snapshot(client, session_id).turns == 1, "the turn to be stored")
+    assert not _stored_snapshot(client, session_id).pending
+
+
+def test_a_wake_and_an_answer_sent_to_a_hung_store(client, monkeypatch):
+    store = HungStore(monkeypatch)
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "charge"})
+    _until(lambda: client.get(f"/chat/sessions/{session_id}").json()["parked"], "the turn to ask for approval")
+    (approval,) = client.get(f"/chat/sessions/{session_id}").json()["pending_approvals"]
+    answer = {"resume": {approval["approval_id"]: True}}
+
+    store.hung.set()
+    resumed, took = _timed(lambda: client.post(f"/chat/sessions/{session_id}/resume", json=answer))
+    assert resumed.status_code == 503 and took < PROMPT_S and "Retry-After" not in resumed.headers
+    woken, took = _timed(lambda: client.post(f"/chat/sessions/{session_id}/wake", json={"text": "heartbeat"}))
+    assert woken.status_code == 503 and took < PROMPT_S
+    assert woken.headers["Retry-After"]  # after the write that is out: taken back
+    assert client.get(f"/chat/sessions/{session_id}").json()["wakes"] == []
+
+    store.hung.clear()
+    state = wait_turns(client, session_id, 2)  # the answer was kept and is used; no wake runs
+    assert not state["parked"] and state["last_status"]["code"] == "success" and state["wakes"] == []
+
+
+def test_an_interrupt_with_a_hung_store_still_cuts_the_turn(client, monkeypatch):
+    store = HungStore(monkeypatch)
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    hang = _hang_file()
+    hang.touch()
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "wait"})
+    _until(lambda: client.get(f"/chat/sessions/{session_id}").json()["busy"], "the turn to run")
+    store.hung.set()
+    interrupted, took = _timed(lambda: client.post(f"/chat/sessions/{session_id}/interrupt"))
+    assert interrupted.status_code == 503 and took < PROMPT_S
+    assert "interrupted" in interrupted.json()["detail"]
+    hang.unlink()
+    store.hung.clear()
+    state = wait_turns(client, session_id, 1)
+    assert state["last_status"]["code"] == "cancelled"
+
+
+def test_opening_a_session_on_a_hung_store(client, monkeypatch):
+    store = HungStore(monkeypatch)
+    idle = client.post("/chat/sessions", json={}).json()["session_id"]
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "0.01")  # the idle one is reaped first: that waits too
+    time.sleep(0.05)
+    store.hung.set()
+    opened, took = _timed(lambda: client.post("/chat/sessions", json={}))
+    assert opened.status_code == 503 and took < 2 * PROMPT_S and opened.headers["Retry-After"]
+    assert idle not in client.app.state.chat_sessions and len(client.app.state.chat_sessions) == 0
+
+    store.hung.clear()
+    monkeypatch.setenv("TIMBAL_CHAT_SESSION_TTL_S", "3600")
+    assert client.post("/chat/sessions", json={}).status_code == 201
+    assert client.get(f"/chat/sessions/{idle}").status_code == 200  # still in the store: restored
+
+
+def test_deleting_a_session_on_a_hung_store(client, monkeypatch):
+    store = HungStore(monkeypatch)
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    store.hung.set()
+    deleted, took = _timed(lambda: client.delete(f"/chat/sessions/{session_id}"))
+    assert deleted.status_code == 503 and took < PROMPT_S and deleted.headers["Retry-After"]
+
+    store.hung.clear()
+    assert client.delete(f"/chat/sessions/{session_id}").json() == {"closed": True}  # the retry finishes it
+    assert client.get(f"/chat/sessions/{session_id}").status_code == 404
+
+
+def test_asking_for_a_session_on_a_hung_store(client, monkeypatch):
+    store = HungStore(monkeypatch)
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    forget(client, session_id)
+    store.hung.set()
+    asked, took = _timed(lambda: client.get(f"/chat/sessions/{session_id}"))
+    assert asked.status_code == 503 and took < PROMPT_S and asked.headers["Retry-After"]
+    store.hung.clear()
+    _until(lambda: client.get(f"/chat/sessions/{session_id}").status_code == 200, "the session to come back")
+
+
+def test_a_server_with_a_hung_store_still_stops(tmp_path, monkeypatch):
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    store = HungStore(monkeypatch)
+    started = time.monotonic()
+    with TestClient(create_app()) as client:
+        for _ in range(3):
+            assert client.post("/chat/sessions", json={}).status_code == 201
+        store.hung.set()
+        leaving = time.monotonic()
+    # Three sessions, one bound: the first close finds the store away, the others do not wait for it again.
+    assert time.monotonic() - leaving < PROMPT_S, f"shutdown took {time.monotonic() - leaving:.1f}s"
+    assert time.monotonic() - started < 3 * PROMPT_S
+
+
+def test_a_server_starts_with_a_store_that_hangs(tmp_path, monkeypatch):
+    """Not an error, a silence: listing the stored sessions, or bringing one back, never answers. The server
+    starts within its bound and brings the session back once the store does."""
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "_STARTUP_DISCOVERY_S", 0.3)
+    monkeypatch.setattr(chat_module, "_DISCOVERY_RETRY_S", (0.05,))
+    monkeypatch.setattr(SqliteChatSessionStore, "lease_ttl_s", 0.3)  # the restore retry: every 0.1 s
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    message = {
+        "id": "m1",
+        "text": "hi",
+        "source": "user",
+        "lane": "later",
+        "mode": "followup",
+        "posted_at": time.time(),
+    }
+    seeded = SqliteChatSessionStore(tmp_path / "timbal.db")
+    asyncio.run(seeded.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None))
+
+    store = HungStore(monkeypatch)
+    store.hung.set()
+    started = time.monotonic()
+    with TestClient(create_app()) as client:
+        assert time.monotonic() - started < PROMPT_S
+        assert client.get("/healthcheck").status_code == 204
+        sessions = client.app.state.chat_sessions
+        assert "s1" not in sessions
+        store.hung.clear()
+        _until(lambda: sessions.get("s1") is not None and sessions["s1"].turns == 1, "the session to come back")

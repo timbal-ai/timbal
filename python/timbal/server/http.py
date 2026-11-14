@@ -91,6 +91,10 @@ async def lifespan(
         if isinstance(runnable, Agent) and voice_warmup_intended(runnable)
         else None
     )
+    # Durable chat sessions with work waiting (a queued message, a turn the last process died in) go on now.
+    from .chat import restore_chat_sessions
+
+    await restore_chat_sessions(app)
     try:
         yield
     finally:
@@ -419,9 +423,7 @@ def create_app() -> FastAPI:
             status_code=200,
             content={
                 "run_id": run_id,
-                "events": [
-                    {"seq": seq, "data": event.model_dump(mode="json")} for seq, event in events
-                ],
+                "events": [{"seq": seq, "data": event.model_dump(mode="json")} for seq, event in events],
                 "next_cursor": next_cursor,
                 "done": done,
                 "expired": False,
