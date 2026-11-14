@@ -387,24 +387,6 @@ class TestEdges:
         assert charge.gate.calls == 0
         await restored.close()
 
-    async def test_losing_the_lease_stops_the_session_without_writing(self, db):
-        provider, store = db
-        store.lease_ttl_s = 0.15
-        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
-        session.send("hi")
-        await records(session, "turn_finished", 1)
-        await session.flush()
-        session._lease_task.cancel()  # this process stalls past its lease...
-        await asyncio.sleep(0.2)
-        store.lease_ttl_s = 60  # (the other host's lease must not run out before this one looks, on a slow disk)
-        await store.acquire_lease(session.id, "elsewhere:1:x")  # ...and another host takes the session
-        store.lease_ttl_s = 0.15
-        version = (await store.load(session.id)).version
-        session._lease_task = asyncio.get_running_loop().create_task(session._renew_lease())
-        await until(lambda: session.closed)
-        assert session.closed and session.state()["durable"] is False
-        assert (await store.load(session.id)).version == version  # not written over
-
     async def test_an_owner_whose_lease_was_taken_cannot_write_before_the_new_owner_does(self, db):
         """Split brain: the lease lapsed (or renewing it failed) and another process took it, but has not
         written yet. The old owner's next save must fail, not the new owner's."""
@@ -1521,27 +1503,216 @@ class TestSteeredMessages:
         await session.close()
 
 
+class Till:
+    """A tool in flight: it charges when released, unless its turn was stopped first."""
+
+    def __init__(self):
+        self.entered, self.release = asyncio.Event(), asyncio.Event()
+        self.charges = 0
+        self.stopped = False
+
+    async def work(self) -> str:
+        self.entered.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.stopped = True
+            raise
+        self.charges += 1
+        return "worked"
+
+
+async def taken_over(store, session_id, timeout=30.0):
+    """Another worker asks for the session until the store gives it to it (the lease there has run out)."""
+
+    async def ask():
+        while True:
+            try:
+                return await store.acquire_lease(session_id, "elsewhere:1:x")
+            except SessionLeased:
+                await asyncio.sleep(0.005)
+
+    await asyncio.wait_for(ask(), timeout)
+
+
+def renewals(store, renew):
+    """This process's lease calls on ``store`` go to ``renew`` (given the real call); another worker's go on."""
+    real = store.acquire_lease
+
+    async def acquire(session_id, owner):
+        if owner == process_owner():
+            return await renew(lambda: real(session_id, owner))
+        return await real(session_id, owner)
+
+    store.acquire_lease = acquire
+
+
 class TestLeaseRunsOut:
-    async def test_a_session_that_cannot_renew_its_lease_for_a_whole_lease_stops(self, db):
-        """Its lease has run out and another process may hold the session: it must not go on acting."""
+    """A lease this process could not renew runs out at a time the store and the session both know. The
+    session has stopped by then, its turn with it: the worker the store gives the session to next must not
+    find the old one still acting."""
+
+    TTL = 0.9
+
+    async def _mid_tool(self, db):
         provider, store = db
-        store.lease_ttl_s = 0.15
-        gate = Gate()
-        session = ChatSession(make_agent(provider, gate), session_store=store)
+        store.lease_ttl_s = self.TTL
+        till = Till()
+        session = ChatSession(make_agent(provider, till), session_store=store)
         session.send("start")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(till.entered.wait(), 30)
         await session.flush()
+        return session, store, till
+
+    @pytest.mark.parametrize("store_is", ["hung", "down", "deaf"])
+    async def test_the_session_has_stopped_when_another_worker_can_take_it(self, db, store_is):
+        session, store, till = await self._mid_tool(db)
         version = (await store.load(session.id)).version
+        back = asyncio.Event()
 
-        async def unreachable(*_args, **_kwargs):
-            raise OSError("store unreachable")
+        async def renew(_real):
+            if store_is == "down":
+                raise OSError("store unreachable")
+            while not back.is_set():
+                try:
+                    await back.wait()  # hung: no answer...
+                except asyncio.CancelledError:
+                    if store_is == "hung":
+                        raise  # ...deaf: and it does not stop when it is told to, either
 
-        store.acquire_lease = unreachable
+        renewals(store, renew)
+        try:
+            await taken_over(store, session.id)
+            # Not a third of a lease later, when the renewal that was out gives up: by the time the store
+            # hands the session to someone else, this copy knows it is not the owner.
+            assert session.lost
+            await asyncio.wait_for(session.wait_closed(), 30)
+            assert session.closed and not session.busy and till.stopped
+            till.release.set()  # the tool it had dispatched, let go under the new owner: it is not there to charge
+            await asyncio.sleep(0.05)
+            assert till.charges == 0
+            assert (await store.load(session.id)).version == version  # and it wrote nothing more
+        finally:
+            back.set()
+
+    async def test_a_store_that_answers_within_the_lease_keeps_the_session(self, db):
+        """Slow is not gone: renewals that take a good part of a lease, and land, are renewals."""
+        session, store, till = await self._mid_tool(db)
+
+        async def renew(real):
+            await asyncio.sleep(self.TTL / 5)
+            return await real()
+
+        renewals(store, renew)
+        with pytest.raises(TimeoutError):
+            await taken_over(store, session.id, timeout=self.TTL * 1.6)  # never free: it was renewed each time
+        assert not session.lost and session.busy
+        till.release.set()
+        await records(session, "turn_finished", 1)
+        assert till.charges == 1
+        await session.close()
+
+    async def test_one_failed_renewal_is_tried_again_before_the_lease_runs_out(self, db):
+        session, store, till = await self._mid_tool(db)
+        failed = []
+
+        async def renew(real):
+            if not failed:
+                failed.append(1)
+                raise OSError("store unreachable")
+            return await real()
+
+        renewals(store, renew)
+        with pytest.raises(TimeoutError):
+            await taken_over(store, session.id, timeout=self.TTL * 1.6)
+        assert failed and not session.lost and session.busy
+        till.release.set()
+        await records(session, "turn_finished", 1)
+        await session.close()
+
+    async def test_a_restored_session_counts_its_lease_from_when_it_took_it(self, db):
+        """Not from when the restore was done: a slow one has used up part of the lease already, and the
+        first renewal is due as much sooner."""
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hi")
+        await records(session, "turn_finished", 1)
+        await session.close(keep=True)
+        store.lease_ttl_s = ttl = 3.0
+        asked: list[float] = []
+        real_load, loop = store.load, asyncio.get_running_loop()
+
+        async def slow_load(session_id):
+            await asyncio.sleep(ttl * 0.4)  # more than the third of a lease between renewals
+            return await real_load(session_id)
+
+        async def renew(real):
+            asked.append(loop.time())
+            return await real()
+
+        store.load = slow_load
+        renewals(store, renew)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
+        done = loop.time()
+        try:
+            await until(lambda: len(asked) >= 2)  # the one that took it, then the first renewal
+            assert asked[1] - done < ttl / 6  # at once: not a third of a lease after the restore returned
+            assert not restored.lost
+        finally:
+            await restored.close(keep=True)
+
+    async def test_a_restore_that_outlasts_its_lease_serves_nothing(self, db):
+        """Its lease ran out while it was still reading: another worker may have the session by now."""
+        provider, store = db
+        model_calls = []
+
+        def counted(messages):
+            model_calls.append(1)
+            return handler(messages)
+
+        agent = Agent(name="agent", model=TestModel(handler=counted), tools=[], tracing_provider=provider)
+        session = ChatSession(agent, session_store=store)
+        held_before_its_turn(session)
+        session.send("hi")
+        await session.flush()
+        await crash(session)
+        store.lease_ttl_s = ttl = 0.3
+        real_load = store.load
+
+        async def slow_load(session_id):
+            await asyncio.sleep(ttl * 1.2)
+            return await real_load(session_id)
+
+        store.load = slow_load
+        restored = await ChatSession.from_store(agent, store, session.id)
+        await asyncio.wait_for(restored.wait_closed(), 30)
+        assert restored.lost and restored.handed_off
+        store.load = real_load
+        assert [event["text"] for event in (await store.load(session.id)).pending] == ["hi"]  # still waiting
+        assert model_calls == []
+
+    async def test_a_lease_that_was_taken_is_noticed_at_the_next_renewal(self, db):
+        """Refused, not unanswered: the store says who holds the session, and this copy stops without writing."""
+        session, store, till = await self._mid_tool(db)
+        refused = []
+
+        async def renew(real):
+            try:
+                return await real()
+            except SessionLeased:
+                refused.append(1)
+                raise
+
+        renewals(store, renew)
+        store.lease_ttl_s = 60  # (the other worker's lease: it must not run out before this copy looks)
+        await store.release_lease(session.id, process_owner())
+        await store.acquire_lease(session.id, "elsewhere:1:x")
+        store.lease_ttl_s = self.TTL
+        version = (await store.load(session.id)).version
         await until(lambda: session.closed)
-        assert session.closed and session.lost
-        await session.wait_closed()
-        assert not session.busy  # its turn was cut with it
-        assert (await store.load(session.id)).version == version  # and it wrote nothing more
+        assert refused and session.lost and session.state()["durable"] is False
+        await asyncio.wait_for(session.wait_closed(), 30)
+        assert till.stopped and (await store.load(session.id)).version == version  # not written over
 
 
 class TestRecordedToolCalls:

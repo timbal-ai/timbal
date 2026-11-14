@@ -77,6 +77,9 @@ _MAX_TURN_FAILURES = 3
 _TURN_RETRY_DELAY_S = 0.5
 # Between attempts to learn whether the run a session continues is parked (its trace store is down).
 _RESTORE_RETRY_MAX_S = 30.0
+# How much of a lease before its end a session that could not renew it stops. Stopping takes a moment (the
+# turn is cancelled, not cut off), and the store's clock is not this process's.
+_LEASE_MARGIN = 0.1
 _RECOVERY_HEADER = "Your previous turn was cut off by a server restart (the user did not write this)."
 _RECOVERY_ADVICE = (
     "Continue where you left off. Do not repeat completed actions. Before redoing one that is not confirmed, "
@@ -275,6 +278,12 @@ def _dump_resume(values: dict[str, Any] | None) -> dict[str, Any] | None:
                 "carry, an ApprovalResolution or a Cancel."
             ) from None
     return stored
+
+
+def _abandon(call: asyncio.Future) -> None:
+    """Stop waiting for ``call``: cancelled, and whatever it ends with is taken (never logged as unretrieved)."""
+    call.cancel()
+    call.add_done_callback(lambda done: done.cancelled() or done.exception())
 
 
 def _load_resume(stored: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -603,6 +612,9 @@ class ChatSession:
         self._saver: asyncio.Task | None = None
         self._leased = False
         self._lease_task: asyncio.Task | None = None
+        # When the request that last confirmed the lease was sent (monotonic): the store counted the lease
+        # from no earlier than that, so it holds at least until this plus `lease_ttl_s`.
+        self._lease_from: float | None = None
         self._lost = False
         # Set once close() has finished: turn cancelled, scheduler and task store let go, the store settled.
         self._close_done = asyncio.Event()
@@ -1071,6 +1083,7 @@ class ChatSession:
         # The lease first, then the row: read before it, a previous owner could still write (and let go)
         # in between, and this process would serve an older state than the store holds.
         session: ChatSession | None = None
+        leased_at = time.monotonic()
         try:
             await session_store.acquire_lease(session_id, process_owner())
             snapshot = await session_store.load(session_id)
@@ -1093,7 +1106,7 @@ class ChatSession:
             # Queuing the stored events would start the worker: not before the dead turn is settled (its recovery
             # goes first, and a turn finishing meanwhile would store a snapshot without it).
             session._hold_worker = True
-            session._version, session._leased = snapshot.version, True
+            session._version, session._leased, session._lease_from = snapshot.version, True, leased_at
             session.turns, session.last_status, session._parked = snapshot.turns, snapshot.last_status, snapshot.parked
             session._last_prompt = _load_prompt(snapshot.last_prompt)
             session.log.restart_at(snapshot.log_cursor + _LOG_RESTART_GAP)
@@ -1837,6 +1850,7 @@ class ChatSession:
             created = self._version is None
             snapshot = self._snapshot()
             self._saving = covers
+            sent = time.monotonic()
             try:
                 self._version = await store.save(snapshot, expect_version=self._version, owner=process_owner())
             except SnapshotConflict as e:
@@ -1857,8 +1871,9 @@ class ChatSession:
             if created:
                 # Inserted with this process's lease, in the same write (ChatSessionStore.save): the row never
                 # exists without an owner, and there is no second write that could fail and leave it so.
-                self._leased = True
+                self._leased, self._lease_from = True, sent
             elif not self._leased and not self.closed:
+                sent = time.monotonic()
                 try:
                     await store.acquire_lease(self.id, process_owner())
                 except SessionLeased as e:
@@ -1870,7 +1885,7 @@ class ChatSession:
                     self._dirty, self._save_error = True, e
                     logger.error("chat_session_lease_failed", session_id=self.id, error=str(e))
                     return
-                self._leased = True
+                self._leased, self._lease_from = True, sent
             if self._leased and self._lease_task is None and not self.closed:
                 self._lease_task = asyncio.get_running_loop().create_task(self._renew_lease())
             self._save_error, self._stored_changes, self._saving = None, covers, None
@@ -1879,29 +1894,65 @@ class ChatSession:
                     wake.replaced = []  # stored: withdrawing a later replacement puts this one back
 
     async def _renew_lease(self) -> None:
+        """Renew the lease every third of it, and stop the session when it runs out unrenewed.
+
+        The lease is counted from when the request that last confirmed it was *sent* (`_lease_from`): the
+        store counted from no earlier, so another process can be given the session no sooner than a whole
+        lease after that. This copy stops `_LEASE_MARGIN` of a lease before then, whatever a renewal still
+        out is doing: checked only when a renewal came back, a store that hangs kept the old owner acting
+        for a third of a lease after the new one had started.
+        """
         store = self._session_store
         assert store is not None
-        renewed = time.monotonic()
+        owner = process_owner()
+        if self._lease_from is None:
+            self._lease_from = time.monotonic()
+        due = self._lease_from + store.lease_ttl_s / 3
+        error = "no renewal was tried"
         while not self.closed and not self._lost:
-            await asyncio.sleep(store.lease_ttl_s / 3)
-            if self.closed:
-                return
-            try:
-                # Bounded: a store that hangs is one that did not renew. Waited for without limit, the lease
-                # would run out while this copy still believed it held the session.
-                await asyncio.wait_for(store.acquire_lease(self.id, process_owner()), store.lease_ttl_s / 3)
-                renewed = time.monotonic()
-            except SessionLeased as e:
-                self._lose(str(e))
-                return
-            except Exception as e:
-                error = str(e) or type(e).__name__
-                logger.warning("chat_session_lease_renewal_failed", session_id=self.id, error=error)
-                if time.monotonic() - renewed >= store.lease_ttl_s:
-                    # Not renewed for a whole lease: it has run out, and another process may hold the session
-                    # by now without this one being able to tell. Going on would be two owners acting.
-                    self._lose(f"the lease could not be renewed for {store.lease_ttl_s:g} s: {error}")
+            ttl = store.lease_ttl_s
+            ends = self._lease_from + ttl * (1 - _LEASE_MARGIN)
+            now = time.monotonic()
+            if now < min(due, ends):
+                await asyncio.sleep(min(due, ends) - now)
+                if self.closed or self._lost:
                     return
+                now = time.monotonic()  # (a timer may fire a clock tick early: what it waited for has come)
+            if due >= ends or now >= ends:
+                # It has (as good as) run out, and another process may hold the session without this one
+                # being able to tell. Going on would be two owners acting.
+                self._lose(
+                    f"the {ttl:g} s lease ran out, {now - self._lease_from:.3g} s after its last renewal: {error}"
+                )
+                return
+            # Not awaited past what is left of the lease, and not waited for once given up (`wait_for`
+            # would wait for the call to end its cancellation: a store that does not, holds the deadline).
+            attempt = asyncio.ensure_future(store.acquire_lease(self.id, owner))
+            waited = max(min(ttl / 3, ends - now), 0.0)
+            try:
+                done, _ = await asyncio.wait({attempt}, timeout=waited)
+            except BaseException:
+                _abandon(attempt)
+                raise
+            if not done:
+                _abandon(attempt)
+                error = f"no answer in {waited:.3g} s"
+            else:
+                try:
+                    attempt.result()
+                except SessionLeased as e:
+                    self._lose(str(e))
+                    return
+                except asyncio.CancelledError:
+                    error = "cancelled by the store"
+                except Exception as e:
+                    error = str(e) or type(e).__name__
+                else:
+                    self._lease_from, due = now, now + ttl / 3
+                    continue
+            logger.warning("chat_session_lease_renewal_failed", session_id=self.id, error=error)
+            # Sooner than the next renewal would be: what is left of the lease is all the time there is.
+            due = time.monotonic() + ttl / 10
 
     def _lose(self, reason: str) -> None:
         """Another process serves this session now: stop, without writing over its state."""

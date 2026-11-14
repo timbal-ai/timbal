@@ -45,6 +45,9 @@ _SHUTDOWN_RESTORE_S = 5.0
 # How long startup waits for the store to list its sessions, and when it looks again after it could not.
 _STARTUP_DISCOVERY_S = 5.0
 _DISCOVERY_RETRY_S: tuple[float, ...] = (1.0, 2.0, 5.0, 10.0, 30.0)
+# How often sessions skipped at startup (another process still held them) are tried again. None: every
+# third of the store's lease, as often as a live holder renews it.
+_RESTORE_RETRY_S: float | None = None
 
 
 def _session_ttl() -> float:
@@ -319,7 +322,7 @@ async def _retry_restores(app: Any, agent: Any, store: ChatSessionStore, session
     """Retry restoring sessions skipped at startup, every third of a lease, while they still have work waiting
     and nobody here holds them. A live worker that serves one keeps its lease, and clears the work."""
     waiting = set(session_ids)
-    interval = max(store.lease_ttl_s / 3, 0.05)
+    interval = _RESTORE_RETRY_S if _RESTORE_RETRY_S is not None else max(store.lease_ttl_s / 3, 0.05)
     while waiting:
         await asyncio.sleep(interval)
         sessions = getattr(app.state, "chat_sessions", None) or {}

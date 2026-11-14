@@ -290,14 +290,17 @@ OLD_OWNER = "old-host:1:x"  # another host's: alive for as long as its lease has
 
 def _seed_leased_session(tmp_path, monkeypatch):
     """A stored session with a message waiting, leased by a predecessor on another host for a minute: startup
-    skips it however slow the runner is, and retries every 0.1 s. The test ends the old lease when it wants."""
+    skips it however slow the runner is, and retries every 0.1 s. The test ends the old lease when it wants.
+    (The retry is set on its own: a server with a 0.3 s lease would give its sessions up on a slow runner.)"""
+    import timbal.server.chat as chat_module
+
     (tmp_path / "agent.py").write_text(AGENT)
     monkeypatch.setenv("E2E_DIR", str(tmp_path))
     monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
     monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
-    monkeypatch.setattr(SqliteChatSessionStore, "lease_ttl_s", 0.3)  # the server's: a retry every 0.1 s
+    monkeypatch.setattr(chat_module, "_RESTORE_RETRY_S", 0.1)
     store = SqliteChatSessionStore(tmp_path / "timbal.db")
-    store.lease_ttl_s = 60.0  # this instance's: how long the predecessor's lease lasts
+    store.lease_ttl_s = 60.0  # how long the predecessor's lease lasts
     message = {
         "id": "m1",
         "text": "hi",
@@ -929,7 +932,7 @@ def test_a_server_starts_with_a_store_that_hangs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(chat_module, "_STARTUP_DISCOVERY_S", 0.3)
     monkeypatch.setattr(chat_module, "_DISCOVERY_RETRY_S", (0.05,))
-    monkeypatch.setattr(SqliteChatSessionStore, "lease_ttl_s", 0.3)  # the restore retry: every 0.1 s
+    monkeypatch.setattr(chat_module, "_RESTORE_RETRY_S", 0.1)
     (tmp_path / "agent.py").write_text(AGENT)
     monkeypatch.setenv("E2E_DIR", str(tmp_path))
     monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
