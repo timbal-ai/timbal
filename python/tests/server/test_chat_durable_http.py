@@ -958,3 +958,155 @@ def test_a_server_starts_with_a_store_that_hangs(tmp_path, monkeypatch):
         assert "s1" not in sessions
         store.hung.clear()
         _until(lambda: sessions.get("s1") is not None and sessions["s1"].turns == 1, "the session to come back")
+
+
+# -- Shutdown with a restore the store never finishes ------------------------------------------------------------
+
+
+def _app_restoring_on(tmp_path):
+    """A stored session (``s1``, nobody serving it), its agent and store, and a bare app to restore it into:
+    the shutdown path on the test's own loop, where the test can hold the store at any call."""
+    from types import SimpleNamespace
+
+    from timbal import Agent
+    from timbal.core.test_model import TestModel
+    from timbal.state.tracing.providers import SqliteTracingProvider
+
+    provider = SqliteTracingProvider.configured(_path=tmp_path / "timbal.db")
+    agent = Agent(name="agent", model=TestModel(responses=["hello"]), tools=[], tracing_provider=provider)
+    store = SqliteChatSessionStore(tmp_path / "timbal.db")
+    app = SimpleNamespace(state=SimpleNamespace(chat_sessions={}, chat_closing=False, runnable=agent))
+    return app, agent, store
+
+
+async def _seed_idle_session(store):
+    await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
+
+
+def _held(store, names):
+    """``store``'s calls in ``names`` wait until the returned event is set (they do not fail). ``entered`` is
+    set by the first one that waits."""
+    back, entered = asyncio.Event(), asyncio.Event()
+
+    def stalled(real):
+        async def call(*args, **kwargs):
+            entered.set()
+            await back.wait()
+            return await real(*args, **kwargs)
+
+        return call
+
+    for name in names:
+        setattr(store, name, stalled(getattr(store, name)))
+    return back, entered
+
+
+async def _shut_down(chat_module, app, back) -> float:
+    """``close_chat_sessions``, timed. What these tests guard against is a shutdown that never returns: the
+    store is let back after ``PROMPT_S``, so that one fails on its time instead of hanging the run."""
+    started = time.monotonic()
+    rescue = asyncio.get_running_loop().call_later(PROMPT_S, back.set)
+    try:
+        await chat_module.close_chat_sessions(app)
+    finally:
+        rescue.cancel()
+    return time.monotonic() - started
+
+
+async def test_shutdown_does_not_wait_for_a_cut_restore_to_let_go_of_its_lease(tmp_path, monkeypatch):
+    """The store went away in the middle of a restore: its lease was taken, its row is never read. Cancelling
+    the restore makes it let go of the lease, through the same store, which does not answer either. Shutdown
+    gives the restore its budget and the store its bound, once, and leaves: the lease runs out on its own."""
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "_SHUTDOWN_RESTORE_S", 0.05)
+    monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", "0.2")
+    app, agent, store = _app_restoring_on(tmp_path)
+    await _seed_idle_session(store)
+    back, entered = _held(store, ("load", "release_lease"))
+    asked = asyncio.ensure_future(chat_module._restore_once(app, agent, store, "s1"))
+    asked.add_done_callback(lambda done: done.cancelled() or done.exception())
+    await asyncio.wait_for(entered.wait(), 30)  # the lease is taken, the read is out
+    restore = app.state.chat_restoring["s1"]
+    try:
+        assert await _shut_down(chat_module, app, back) < PROMPT_S
+        assert app.state.chat_sessions == {}
+        # The store answers again, too late: the restore that was cut is over, and registered nothing.
+        back.set()
+        await asyncio.wait({restore}, timeout=30)
+        assert restore.cancelled()
+        await asyncio.sleep(0.05)
+        assert app.state.chat_sessions == {}
+    finally:
+        back.set()
+    # Whether the lease was let go or left to run out, the session is there for the next process.
+    restored = await ChatSession.from_store(agent, store, "s1")
+    await restored.close(keep=True)
+
+
+async def test_a_restore_that_finishes_after_shutdown_gave_up_on_it_serves_nothing(tmp_path, monkeypatch):
+    """A restore that does not stop when it is cancelled (its store call swallowed it) and completes once the
+    server has stopped waiting: nobody is left to close its session, so it must not be registered or run."""
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "_SHUTDOWN_RESTORE_S", 0.05)
+    monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", "0.2")
+    app, agent, store = _app_restoring_on(tmp_path)
+    message = {"id": "m1", "text": "hi", "source": "user", "lane": "later", "mode": "followup", "posted_at": 0.0}
+    await store.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None)
+    back, entered, restored = asyncio.Event(), asyncio.Event(), []
+    real_restore = ChatSession.from_store.__func__
+
+    async def deaf_restore(cls, *args, **kwargs):
+        entered.set()
+        while not back.is_set():
+            try:
+                await back.wait()
+            except asyncio.CancelledError:
+                pass  # (a store client that swallows cancellation)
+        session = await real_restore(cls, *args, **kwargs)
+        restored.append(session)
+        return session
+
+    monkeypatch.setattr(ChatSession, "from_store", classmethod(deaf_restore))
+    asked = asyncio.ensure_future(chat_module._restore_once(app, agent, store, "s1"))
+    asked.add_done_callback(lambda done: done.cancelled() or done.exception())
+    await asyncio.wait_for(entered.wait(), 30)
+    restore = app.state.chat_restoring["s1"]
+    try:
+        assert await _shut_down(chat_module, app, back) < PROMPT_S
+        back.set()
+        await asyncio.wait({restore}, timeout=30)
+        assert restore.done() and (restore.cancelled() or restore.exception() is not None)
+        assert app.state.chat_sessions == {}
+        (session,) = restored
+        await asyncio.wait_for(session.wait_closed(), 30)
+        assert session.closed and session.handed_off and session.turns == 0  # its message was not run
+        assert agent.model.call_count == 0
+    finally:
+        back.set()
+    assert [event["id"] for event in (await store.load("s1")).pending] == ["m1"]  # still there for the next process
+
+
+async def test_shutdown_does_not_wait_for_a_search_that_does_not_stop(tmp_path, monkeypatch):
+    """The background look for stored sessions, inside a store call that goes on when it is cancelled."""
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", "0.2")
+    app, _agent, _store = _app_restoring_on(tmp_path)
+    back = asyncio.Event()
+
+    async def deaf_search():
+        while not back.is_set():
+            try:
+                await back.wait()
+            except asyncio.CancelledError:
+                pass
+
+    app.state.chat_discovery = asyncio.ensure_future(deaf_search())
+    await asyncio.sleep(0)
+    try:
+        assert await _shut_down(chat_module, app, back) < PROMPT_S
+    finally:
+        back.set()
+        await app.state.chat_discovery

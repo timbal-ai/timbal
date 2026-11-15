@@ -286,6 +286,23 @@ def _abandon(call: asyncio.Future) -> None:
     call.add_done_callback(lambda done: done.cancelled() or done.exception())
 
 
+async def _answered_within(call: Any, timeout: float) -> bool:
+    """Wait for a store call for at most ``timeout`` s. One that has not answered is given up, not waited for
+    (``asyncio.wait_for`` waits for it to end its cancellation, which a store that hangs may never do). Its
+    error is raised; False when it did not answer."""
+    attempt = asyncio.ensure_future(call)
+    try:
+        done, _ = await asyncio.wait({attempt}, timeout=max(timeout, 0.0))
+    except BaseException:
+        _abandon(attempt)
+        raise
+    if not done:
+        _abandon(attempt)
+        return False
+    attempt.result()
+    return True
+
+
 def _load_resume(stored: dict[str, Any] | None) -> dict[str, Any] | None:
     if stored is None:
         return None
@@ -1144,7 +1161,11 @@ class ChatSession:
                 with contextlib.suppress(BaseException):
                     await session.close(keep=True)
             with contextlib.suppress(Exception):
-                await session_store.release_lease(session_id, process_owner())
+                # For as long as the lease lasts, no longer: once it has run out there is nothing to let go
+                # of, and a store that does not answer would hold the caller (a cancelled restore, a server
+                # shutting down) for good.
+                left = leased_at + session_store.lease_ttl_s - time.monotonic()
+                await _answered_within(session_store.release_lease(session_id, process_owner()), left)
             raise
         session._record("restored", head=session.head, recovered=recovered, pending=len(snapshot.pending))
         session._persist()

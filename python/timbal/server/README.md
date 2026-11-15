@@ -114,7 +114,7 @@ On a durable session a `201` / `202` means the change is stored and survives a r
 - **with `Retry-After`** when no write holds the change (it came after the write that is out), so taking it back leaves nothing of it anywhere; also for a session that could not be opened, restored or deleted in time.
 - **without it** when the write that is out holds the change: that write may still land, so the change is kept and runs once the store is back. Do not resend: a retry could run it twice.
 
-Startup, shutdown and idle reaping wait for the store once, not once per session, and go on without it.
+Startup, shutdown and idle reaping wait for the store once, not once per session, and go on without it. That covers a restore still in flight at shutdown: it gets 5 s to finish, is cancelled, and gets the store's bound once more to let go of its lease; past that it is left behind and the lease runs out on its own (30 s). A restore cut this way never serves its session.
 
 A change the store already holds is acknowledged as usual, even if a later write failed. `DELETE` answers `503` with `Retry-After` when the store could neither mark the session closed nor remove it (it would come back); a retry finishes it. `409` when another process took the session meanwhile, also on `DELETE` (nothing is deleted: it goes on there; the delete is conditional on the version and lease this process last held). A session being deleted answers `404` to other requests from the moment its close starts.
 

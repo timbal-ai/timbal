@@ -3232,6 +3232,49 @@ class TestAStoreThatHangs:
         assert (await store.load("s1")).session_id == "s1"  # started again by the next call
         assert await store.list_ids() == ["s1"]
 
+    @pytest.mark.parametrize("ended_by", ["an error", "a cancellation"])
+    async def test_a_restore_that_fails_does_not_wait_past_its_lease_to_let_it_go(self, db, ended_by):
+        """It lets go of the lease it took, through the store. One that does not answer is waited for only
+        while the lease lasts: after that there is nothing left to let go of."""
+        provider, store = db
+        session, _ = await self._idle_session(db)
+        await session.close(keep=True)
+        store.lease_ttl_s = 0.4
+        real_load, real_release = store.load, store.release_lease
+        back, reading = asyncio.Event(), asyncio.Event()
+
+        async def load(session_id):
+            reading.set()
+            if ended_by == "an error":
+                raise OSError("unreadable")
+            await back.wait()
+            return await real_load(session_id)
+
+        async def release(*args):
+            await back.wait()
+            return await real_release(*args)
+
+        store.load, store.release_lease = load, release
+        agent = make_agent(provider, Gate(released=True))
+        restore = asyncio.ensure_future(ChatSession.from_store(agent, store, session.id))
+        try:
+            await asyncio.wait_for(reading.wait(), 30)
+            if ended_by == "a cancellation":
+                restore.cancel()
+            # Not a second cancellation, not the store coming back: the lease running out ends the wait.
+            done, _ = await asyncio.wait({restore}, timeout=30)
+            assert done
+            if ended_by == "an error":
+                assert isinstance(restore.exception(), OSError)
+            else:
+                assert restore.cancelled()
+        finally:
+            back.set()
+            restore.cancel()
+        store.load, store.release_lease = real_load, real_release
+        restored = await ChatSession.from_store(agent, store, session.id)  # nothing was written, nothing is held
+        await restored.close()
+
     async def test_a_session_that_lost_ownership_closes_without_waiting_for_the_store(self, db):
         """Another process serves it: this copy writes nothing more, so it has nothing to wait for. A server
         waits for this close before it restores the session (``wait_closed``)."""

@@ -208,6 +208,11 @@ async def _restore_into(app: Any, agent: Any, store: ChatSessionStore, session_i
     """One restore, whoever still waits for it: the session is in the map before this returns, so shutdown
     (which waits for the restores in flight) finds it and closes it with the others."""
     session = await ChatSession.from_store(agent, store, session_id)
+    if getattr(app.state, "chat_restores_cut", False):
+        # Shutdown stopped waiting for this restore, and it finished all the same (its cancellation was
+        # swallowed on the way): nobody is left to close the session, so it is not served. Kept as stored.
+        await session.close(keep=True, store_timeout=_store_timeout())
+        raise RuntimeError("The server is shutting down.")
     _app_sessions(app)[session_id] = session
     return session
 
@@ -230,7 +235,7 @@ async def restore_chat_sessions(app: Any) -> list[str]:
     """
     from ..core.agent import Agent
 
-    app.state.chat_closing = False
+    app.state.chat_closing = app.state.chat_restores_cut = False
     runnable = getattr(app.state, "runnable", None)
     if not isinstance(runnable, Agent):
         return []
@@ -387,24 +392,45 @@ async def close_chat_sessions(app: Any) -> None:
     """Close every session (server shutdown). Durable ones are kept for the next process, a turn this cuts
     recovered there."""
     app.state.chat_closing = True  # no restore starts from here on
+    timeout = _store_timeout()
     for name in ("chat_discovery", "chat_restore_retry"):
         task = getattr(app.state, name, None)
         if task is not None and not task.done():
             task.cancel()
-            with contextlib.suppress(BaseException):
-                await task
+            # Not `await task`: it may be inside a store call that does not end when it is cancelled.
+            await asyncio.wait({task}, timeout=timeout)
+            if not task.done():
+                timeout = 0.0
+                logger.error("chat_session_task_abandoned", task=name, timeout_s=_store_timeout())
+            elif not task.cancelled():
+                task.exception()  # retrieved
     # A restore already going is shielded from its callers: left alone, it would finish after this and its
     # session keep running, unclosed, through the shutdown. Wait for it (its session is then in the map,
     # closed below); one that takes too long is cancelled, which lets go of its lease and writes nothing.
-    restoring = [task for task in (getattr(app.state, "chat_restoring", None) or {}).values() if not task.done()]
+    restoring = {
+        session_id: task
+        for session_id, task in (getattr(app.state, "chat_restoring", None) or {}).items()
+        if not task.done()
+    }
     if restoring:
-        _, slow = await asyncio.wait(restoring, timeout=_SHUTDOWN_RESTORE_S)
-        for task in slow:
-            task.cancel()
+        _, slow = await asyncio.wait(restoring.values(), timeout=_SHUTDOWN_RESTORE_S)
         if slow:
-            await asyncio.gather(*slow, return_exceptions=True)
+            app.state.chat_restores_cut = True  # from here on a restore registers no session (_restore_into)
+            for task in slow:
+                task.cancel()
+            # Letting go of the lease goes through the store too. One that does not answer gets the bound
+            # every other wait for it has, once: the lease is then left to run out on its own.
+            _, stuck = await asyncio.wait(slow, timeout=timeout)
+            if stuck:
+                timeout = 0.0  # the store is not answering: the sessions below do not wait for it again
+                for task in stuck:
+                    task.cancel()  # again: this one ends its wait for the store
+                logger.error(
+                    "chat_session_restore_abandoned",
+                    session_ids=sorted(session_id for session_id, task in restoring.items() if task in stuck),
+                    timeout_s=_store_timeout(),
+                )
     sessions = getattr(app.state, "chat_sessions", None) or {}
-    timeout = _store_timeout()
     for session in list(sessions.values()):
         with contextlib.suppress(Exception):
             await session.close(keep=True, store_timeout=timeout)
