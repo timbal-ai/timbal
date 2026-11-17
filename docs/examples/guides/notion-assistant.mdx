@@ -1,0 +1,182 @@
+---
+title: "Notion Assistant"
+description: "Let an agent search, read and write Notion pages and databases, connected through OAuth or an API key"
+---
+
+This guide shows how to:
+- Connect Timbal to Notion with **OAuth** (a public integration users sign in to) or an **API key** (an internal integration)
+- Give an agent ten Notion tools: search, read pages as Markdown, query databases, create and update pages, append content, comment
+- Ship the tools and their instructions together as a Skill
+
+The complete example lives in [`examples/notion`](https://github.com/timbal-ai/timbal/tree/main/examples/notion).
+
+## The tools
+
+| Tool | What it does |
+| --- | --- |
+| `NotionWhoAmI` (`notion_whoami`) | The integration, its workspace and owner, and the auth method in use. |
+| `NotionSearch` (`notion_search`) | Pages and databases shared with the integration, by title. |
+| `NotionGetPage` (`notion_get_page`) | A page's properties and its body as Markdown. |
+| `NotionGetDataSource` (`notion_get_data_source`) | A database's columns, types and select/status options. |
+| `NotionQueryDataSource` (`notion_query_data_source`) | Database rows, with Notion filters and sorts. |
+| `NotionCreatePage` (`notion_create_page`) | A sub-page or a database row, with Markdown content. |
+| `NotionUpdatePage` (`notion_update_page`) | Rename, set properties, move to or restore from the trash. |
+| `NotionAppendContent` (`notion_append_content`) | Markdown appended to a page. |
+| `NotionAddComment` / `NotionListComments` | Comment on a page, read its open comments. |
+
+Every ID argument also accepts a notion.so URL, and a database ID or a data source ID both work where a database is expected.
+
+## Setup Requirements
+
+<AccordionGroup>
+  <Accordion title="Installing Packages">
+    ```bash
+    pip install timbal python-dotenv
+    ```
+  </Accordion>
+  <Accordion title="Creating the integration in Notion">
+    <Steps>
+      <Step title="Create it">
+        As a **Workspace Owner**, go to [notion.so/profile/integrations](https://www.notion.so/profile/integrations), click **New integration**, pick the workspace and a name.
+      </Step>
+      <Step title="Choose the type">
+        - **Internal** for an API key.
+        - **Public** for OAuth. Notion asks for company details and the **Redirect URIs**: add `http://localhost:8766/callback` for the example's sign-in script.
+      </Step>
+      <Step title="Set the capabilities">
+        Read, update and insert content; read and insert comments. *User information without email* is enough for `notion_whoami`.
+      </Step>
+      <Step title="Copy the credentials">
+        Internal: the **Internal Integration Secret**. Public: the **OAuth client ID** and **client secret**.
+      </Step>
+    </Steps>
+  </Accordion>
+</AccordionGroup>
+
+## Choose an Authentication Method
+
+<Tabs>
+  <Tab title="OAuth (public integration)">
+    **Use this if** other people connect their own workspaces, or each person should choose the pages the agent sees.
+
+    ```bash
+    NOTION_CLIENT_ID=your_oauth_client_id
+    NOTION_CLIENT_SECRET=your_oauth_client_secret
+    ```
+
+    Sign in once with the example's script. It opens Notion's consent page, where you pick the pages to share, and saves the tokens to `.notion_token.json`, readable by you only:
+
+    ```bash
+    python setup_credentials.py
+    ```
+
+    ```bash
+    NOTION_AUTH_METHOD=oauth
+    NOTION_TOKEN_FILE=.notion_token.json
+    ```
+
+    Notion issues a new refresh token on every refresh. The tools write the newest one back to the token file and refresh under a lock that also holds across processes, so a restart or a second process never reuses a spent token. A token Notion rejects is refreshed once and the call retried. On the Timbal platform, a Notion OAuth integration supplies the token instead (pass `integration=`).
+  </Tab>
+  <Tab title="API key (internal integration)">
+    **Use this if** the agent works in your own workspace and you want one secret, no sign-in.
+
+    ```bash
+    NOTION_API_KEY=ntn_...
+    ```
+
+    Then share each page or database the agent should see: open it in Notion, **`•••`** > **Connections**, and add the integration. Sub-pages are shared with their parent.
+  </Tab>
+</Tabs>
+
+## Building the Agent
+
+```python fragment
+from timbal import Agent
+from timbal.tools import (
+    NotionAppendContent,
+    NotionCreatePage,
+    NotionGetDataSource,
+    NotionGetPage,
+    NotionQueryDataSource,
+    NotionSearch,
+)
+
+agent = Agent(
+    name="notion_assistant",
+    model="anthropic/claude-sonnet-4-6",
+    max_tokens=4096,
+    max_iter=15,
+    system_prompt=(
+        "You help the user with their Notion workspace. Search before you act, read a database's "
+        "schema before querying or writing it, and never invent a page, property or option."
+    ),
+    tools=[
+        NotionSearch(),
+        NotionGetPage(),
+        NotionGetDataSource(),
+        NotionQueryDataSource(),
+        NotionCreatePage(),
+        NotionAppendContent(),
+    ],
+)
+
+result = await agent(prompt="Which tasks in the Tasks database are due this week?").collect()
+print(result.output.collect_text())
+```
+
+A typical request takes three calls:
+
+```python fragment
+notion_search(query="Tasks", object_type="data_source")
+notion_get_data_source(database_id="https://www.notion.so/acme/...")
+notion_query_data_source(
+    database_id="...",
+    filter={"and": [
+        {"property": "Due", "date": {"this_week": {}}},
+        {"property": "Status", "status": {"does_not_equal": "Done"}},
+    ]},
+)
+```
+
+Page content is read and written as Markdown: headings, bulleted and numbered lists, to-dos, quotes, code fences, dividers, **bold**, *italic*, `code` and links. Long content is split to Notion's limits (2,000 characters per text segment, 100 blocks per request).
+
+### Shipping the instructions as a Skill
+
+The example packages the tools with their instructions as a [Skill](/agents/skills). `skills/notion/SKILL.md` tells the agent to search before acting and read the schema before writing. It also shows Notion's filter and property formats and what to do when a page isn't shared. `skills/notion/tools/notion_tools.py` creates the tools.
+
+```python fragment
+agent = Agent(
+    name="notion_assistant",
+    model="anthropic/claude-sonnet-4-6",
+    max_tokens=4096,
+    skills_path="./skills",
+)
+```
+
+## Configuration Reference
+
+| Field | Env var | Method |
+| --- | --- | --- |
+| `api_key` | `NOTION_API_KEY` | API key |
+| `token` | `NOTION_ACCESS_TOKEN` | OAuth |
+| `refresh_token` | `NOTION_REFRESH_TOKEN` | OAuth (with client ID and secret) |
+| `token_file` | `NOTION_TOKEN_FILE` | OAuth: where the newest refresh token is kept |
+| `client_id`, `client_secret` | `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET` | OAuth refresh |
+| `auth_method` | `NOTION_AUTH_METHOD` | pins `oauth` or `api_key` |
+| `notion_version` | `NOTION_VERSION` | the `Notion-Version` header (default `2026-03-11`) |
+| `integration` | | a Timbal platform integration supplying any of the above |
+
+<Note>
+When `auth_method` is not set, OAuth credentials are tried before the API key. Rate limits (`429`, `529`) are retried after Notion's `Retry-After`.
+</Note>
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `object_not_found` / "not shared with this integration" | Share the page: `•••` > Connections > your integration. With OAuth, sign in again and select it. |
+| `401 ... check NOTION_API_KEY` | The secret is wrong or the integration was deleted. |
+| `invalid_grant` on the refresh | The refresh token was revoked or already used. Sign in again and keep `NOTION_TOKEN_FILE` set. |
+| `invalid_client` | Wrong OAuth client ID or secret. |
+| `validation_error` on a filter or property | A property name or option doesn't match the schema: check `notion_get_data_source`. |
+| "Database ... has 2 data sources" | Pass the data source ID the message lists. |
