@@ -1550,9 +1550,16 @@ class BackgroundTaskStore:
                 return True
         return False
 
-    def restore_event(self, data: dict[str, Any]) -> SessionEvent:
+    def restore_event(self, data: dict[str, Any], *, held: SessionEvent | None = None) -> SessionEvent:
         """Queue an event saved with :meth:`SessionEvent.to_dict` (a durable session coming back after a
-        restart): same id and posting time, so its receipt and its order among the others hold."""
+        restart): same id and posting time, so its receipt and its order among the others hold.
+
+        ``held``: the event itself, still pending, when this process has it (the session is restored where
+        it was closed, and took its events out with ``drain_events(settle=False)``): queued again as it is,
+        so the receipt its sender holds is the one that settles."""
+        if held is not None and held.state == "pending":
+            self._queue_event(held)
+            return held
         event = SessionEvent(
             data["text"],
             key=data.get("key"),

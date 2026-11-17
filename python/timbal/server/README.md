@@ -104,6 +104,8 @@ A run is one turn. A chat session is a conversation that stays open while its tu
 | `GET /chat/sessions/{id}/log?after=&wait_ms=` | The same log as JSON pages, long-polled. |
 | `GET` / `DELETE /chat/sessions/{id}` | State (`busy`, `parked`, `head`, `pending`, pending approvals while parked) / close. |
 
+A `TIMBAL_CHAT_STORE` the server cannot honour (a value it does not understand, a SQLite store for an agent whose traces are process-local) does not stop the server: `/run`, `/stream` and the rest work, the error is logged (`chat_store_misconfigured`), and every session route answers `503` with the reason, without `Retry-After`. Sessions are not served without a store instead. `GET /chat/meta` reports it as `store_error`.
+
 On a durable session a `201` / `202` means the change is stored and survives a restart. When the store fails, the route answers `503`:
 
 - **with `Retry-After`** when the store holds nothing of the change and the route took it back here too (a message or wake no turn has taken yet, answers no turn has used, a session never opened). Nothing was accepted, so a retry cannot run it twice. A message sent with `now` or `interrupt` has not cut the running turn either: the cut happens once the message is stored.

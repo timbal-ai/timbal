@@ -70,6 +70,28 @@ class _Database:
 _DATABASES: dict[tuple[str, str], _Database] = {}
 _DATABASES_LOCK = threading.Lock()
 _RUN_STATE_MAX = 2048
+# The parent's connections, in a forked child: kept referenced so that they are never closed there.
+_INHERITED_AFTER_FORK: list[_Database] = []
+
+
+def _forget_databases_after_fork() -> None:
+    """In a forked child (a server that opened a file and then forked its workers): open again.
+
+    A connection shared across a fork is two processes on one connection's file locks and WAL index, which
+    SQLite does not support (lock errors, a corrupted WAL). And a lock a parent thread held at the fork,
+    the registry's or a connection's, stays held in the child with nobody left to let go of it.
+
+    The inherited connections are not closed: closing one here would let go of the file locks the parent
+    holds through it. They are kept referenced instead, so that collecting them never closes them either.
+    """
+    global _DATABASES_LOCK
+    _INHERITED_AFTER_FORK.extend(_DATABASES.values())
+    _DATABASES.clear()
+    _DATABASES_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_databases_after_fork)
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -109,9 +131,24 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             version     INTEGER NOT NULL,
             lease_owner TEXT,
             lease_until REAL,
-            updated_at  INTEGER NOT NULL
+            updated_at  INTEGER NOT NULL,
+            has_work    INTEGER
         )
     """)
+    # has_work: 1 when the session would run something without a client asking (SessionSnapshot.has_work),
+    # 0 when not, written with every save. NULL only in a row from before the column, until it is written
+    # again. Startup asks for the sessions with work: idle ones stay in the table until deleted and soon
+    # outnumber them, so that question is answered from an index over the rows that are not 0.
+    if "has_work" not in {column[1] for column in conn.execute("PRAGMA table_info(chat_sessions)")}:
+        try:
+            conn.execute("ALTER TABLE chat_sessions ADD COLUMN has_work INTEGER")
+        except sqlite3.OperationalError:
+            # Another process opening the file added it first.
+            if "has_work" not in {column[1] for column in conn.execute("PRAGMA table_info(chat_sessions)")}:
+                raise
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_sessions_work ON chat_sessions (session_id) WHERE has_work IS NOT 0"
+    )
     conn.commit()
 
 

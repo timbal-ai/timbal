@@ -1110,3 +1110,131 @@ async def test_shutdown_does_not_wait_for_a_search_that_does_not_stop(tmp_path, 
     finally:
         back.set()
         await app.state.chat_discovery
+
+
+def test_opening_a_session_whose_run_cannot_be_read_on_a_hung_store(client, monkeypatch):
+    """Two things down at once: the run the new session continues cannot be read, so the session is closed
+    again, and the store that close goes through does not answer. The route answers all the same."""
+    import threading
+
+    from timbal.state.tracing.providers import SqliteTracingProvider
+
+    async def unreadable(cls, run_context):  # noqa: ARG001
+        raise OSError("trace store unreachable")
+
+    monkeypatch.setattr(SqliteTracingProvider, "get_strict", classmethod(unreadable))
+    store = HungStore(monkeypatch)
+    store.hung.set()
+    rescue = threading.Timer(PROMPT_S, store.hung.clear)  # a route that waits for the store fails on its time
+    rescue.start()
+    try:
+        opened, took = _timed(lambda: client.post("/chat/sessions", json={"parent_id": "a-run-that-is-not-there"}))
+    finally:
+        rescue.cancel()
+        store.hung.clear()
+    assert opened.status_code == 503 and "Could not load the run" in opened.json()["detail"]
+    assert took < PROMPT_S
+    assert len(client.app.state.chat_sessions) == 0
+
+
+MESSAGE = {"id": "m1", "text": "hi", "source": "user", "lane": "later", "mode": "followup", "posted_at": 0.0}
+
+
+async def test_a_session_the_store_does_not_answer_for_does_not_hold_up_the_others(tmp_path, monkeypatch):
+    """The background look for stored sessions, with a store that has stopped answering for one of them:
+    that one is given up for now (its restore goes on), and the next is brought back."""
+    import timbal.server.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "_STARTUP_DISCOVERY_S", 0.2)
+    monkeypatch.setattr(chat_module, "_DISCOVERY_RETRY_S", (0.02,))
+    monkeypatch.setattr(chat_module, "_RESTORE_RETRY_S", 0.05)
+    monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", "0.2")
+    app, agent, store = _app_restoring_on(tmp_path)
+    for session_id in ("s1", "s2"):
+        snapshot = SessionSnapshot(session_id=session_id, agent="agent", pending=[{**MESSAGE, "id": session_id}])
+        await store.save(snapshot, expect_version=None)
+    back, real_load = asyncio.Event(), store.load
+
+    async def load(session_id):
+        if session_id == "s1":
+            await back.wait()  # no answer for this one
+        return await real_load(session_id)
+
+    store.load = load
+    sessions = app.state.chat_sessions
+    search = asyncio.ensure_future(chat_module._discover_later(app, agent, store))
+    try:
+        await asyncio.wait_for(_async_until(lambda: "s2" in sessions and sessions["s2"].turns == 1), PROMPT_S)
+        assert "s1" not in sessions and not back.is_set()  # still out, and it held nobody up
+        back.set()
+        await asyncio.wait_for(_async_until(lambda: "s1" in sessions and sessions["s1"].turns == 1), PROMPT_S)
+    finally:
+        back.set()
+        search.cancel()
+        await chat_module.close_chat_sessions(app)
+
+
+async def _async_until(condition):
+    while not condition():
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.parametrize("setting", ["a value nobody understands", "a durable store over process-local traces"])
+def test_a_chat_store_setting_that_cannot_be_used_does_not_stop_the_server(tmp_path, monkeypatch, setting):
+    """``TIMBAL_CHAT_STORE`` is about chat sessions. A value that cannot be honoured must not take ``/run``
+    and the rest of the server down with it, and must not be quietly ignored either: the operator asked
+    for sessions that survive a restart, so chat says why it has none to give instead of handing out
+    sessions that do not."""
+    source = AGENT
+    if setting == "a value nobody understands":
+        monkeypatch.setenv("TIMBAL_CHAT_STORE", "postgres://sessions")
+    else:
+        source = AGENT.replace("import SqliteTracingProvider", "import InMemoryTracingProvider").replace(
+            'SqliteTracingProvider.configured(_path=DIR / "timbal.db")', "InMemoryTracingProvider"
+        )
+        assert "SqliteTracingProvider" not in source
+        monkeypatch.setenv("TIMBAL_CHAT_STORE", f"sqlite:///{tmp_path}/sessions.db")
+    (tmp_path / "agent.py").write_text(source)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    with TestClient(create_app()) as client:
+        assert client.get("/healthcheck").status_code == 204
+        assert client.post("/run", json={"prompt": "hello"}).status_code == 200
+        meta = client.get("/chat/meta")
+        assert meta.status_code == 200 and meta.json()["durable"] is False
+        assert "TIMBAL_CHAT_STORE" in meta.json()["store_error"]  # the playground says so instead of opening one
+        opened = client.post("/chat/sessions", json={})
+        assert opened.status_code == 503 and "Retry-After" not in opened.headers  # a retry changes nothing
+        assert "TIMBAL_CHAT_STORE" in opened.json()["detail"]
+        asked = client.get("/chat/sessions/0123")
+        assert asked.status_code == 503 and "TIMBAL_CHAT_STORE" in asked.json()["detail"]
+        assert not getattr(client.app.state, "chat_sessions", None)
+
+
+def test_a_startup_that_fails_after_its_tasks_started_still_cleans_up(tmp_path, monkeypatch):
+    """Whatever goes wrong while the stored sessions are brought back, the shutdown half of the lifespan
+    runs: what startup had already begun is not left behind."""
+    import timbal.server.chat as chat_module
+    import timbal.server.http as http_module
+
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    closed = []
+    real_close = chat_module.close_chat_sessions
+
+    async def broken(_app):
+        raise RuntimeError("could not bring the sessions back")
+
+    async def close(app):
+        closed.append(True)
+        await real_close(app)
+
+    monkeypatch.setattr(chat_module, "restore_chat_sessions", broken)
+    monkeypatch.setattr(chat_module, "close_chat_sessions", close)
+    assert http_module  # (the lifespan imports both by name at call time)
+    with pytest.raises(RuntimeError, match="could not bring the sessions back"):
+        with TestClient(create_app()):
+            pass
+    assert closed == [True]

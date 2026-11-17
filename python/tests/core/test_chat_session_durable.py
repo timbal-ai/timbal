@@ -564,6 +564,97 @@ class TestStores:
         assert await store.load("idle") is None
 
 
+class TestFindingSessionsWithWork:
+    """Startup asks the store for the sessions that have work waiting. Idle ones stay in the table until
+    they are deleted, and there are many more of them: the answer must not be read out of every row."""
+
+    MESSAGE = {"id": "m1", "text": "hi", "source": "user", "lane": "later", "mode": "followup", "posted_at": 0.0}
+
+    async def _store_with_idle_rows(self, tmp_path, idle=40):
+        store = SqliteChatSessionStore(tmp_path / "sessions.db")
+        for n in range(idle):
+            await store.save(SessionSnapshot(session_id=f"idle-{n:02d}", agent="agent"), expect_version=None)
+        await store.save(
+            SessionSnapshot(session_id="queued", agent="agent", pending=[self.MESSAGE]), expect_version=None
+        )
+        await store.save(
+            SessionSnapshot(session_id="waking", agent="agent", wakes=[{"id": "w1", "text": "tick"}]),
+            expect_version=None,
+        )
+        return store
+
+    async def test_only_the_rows_with_work_are_looked_at(self, tmp_path, monkeypatch):
+        store = await self._store_with_idle_rows(tmp_path)
+        read = []
+        real = SessionSnapshot.from_json.__func__
+        monkeypatch.setattr(
+            SessionSnapshot, "from_json", classmethod(lambda cls, raw: read.append(1) or real(cls, raw))
+        )
+        assert await store.list_ids(with_work=True) == ["queued", "waking"]
+        assert read == []  # no snapshot was parsed to tell
+
+        def plan(conn):
+            from timbal.state.chat_store import _WITH_WORK_SQL
+
+            return " ".join(row[-1] for row in conn.execute(f"EXPLAIN QUERY PLAN {_WITH_WORK_SQL}"))
+
+        assert "idx_chat_sessions_work" in await store._run(plan)  # nor a row without work visited
+
+    async def test_the_mark_follows_every_save(self, tmp_path):
+        store = SqliteChatSessionStore(tmp_path / "sessions.db")
+        version = await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
+        assert await store.list_ids(with_work=True) == []
+        version = await store.save(
+            SessionSnapshot(session_id="s1", agent="agent", pending=[self.MESSAGE]), expect_version=version
+        )
+        assert await store.list_ids(with_work=True) == ["s1"]
+        version = await store.save(
+            SessionSnapshot(session_id="s1", agent="agent", pending=[self.MESSAGE], closed=True),
+            expect_version=version,
+            owner="a",
+        )
+        assert await store.list_ids(with_work=True) == []  # closed: its work goes nowhere
+        await store.save(
+            SessionSnapshot(session_id="s1", agent="agent", resume={"a1": True}), expect_version=version, owner="a"
+        )
+        assert await store.list_ids(with_work=True) == ["s1"]
+        assert await store.list_ids() == ["s1"]
+
+    async def test_rows_written_before_the_mark_are_still_found(self, tmp_path):
+        """A file from before the column: its rows carry no mark until they are written again."""
+        import sqlite3
+
+        path = tmp_path / "old.db"
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "CREATE TABLE chat_sessions (session_id TEXT PRIMARY KEY, agent TEXT NOT NULL, snapshot TEXT NOT NULL, "
+            "version INTEGER NOT NULL, lease_owner TEXT, lease_until REAL, updated_at INTEGER NOT NULL)"
+        )
+        rows = [
+            SessionSnapshot(session_id="old-idle", agent="agent", version=1),
+            SessionSnapshot(session_id="old-queued", agent="agent", version=1, pending=[self.MESSAGE]),
+        ]
+        for row in rows:
+            conn.execute(
+                "INSERT INTO chat_sessions (session_id, agent, snapshot, version, updated_at) VALUES (?, ?, ?, 1, 0)",
+                (row.session_id, row.agent, row.to_json()),
+            )
+        conn.execute(
+            "INSERT INTO chat_sessions (session_id, agent, snapshot, version, updated_at) "
+            "VALUES ('old-broken', 'agent', '{not json', 1, 0)"
+        )
+        conn.commit()
+        conn.close()
+
+        store = SqliteChatSessionStore(path)
+        assert await store.list_ids(with_work=True) == ["old-queued"]  # the unreadable one is skipped, not fatal
+        idle = await store.load("old-idle")
+        idle.wakes = [{"id": "w1", "text": "tick"}]
+        await store.save(idle, expect_version=1)
+        assert await store.list_ids(with_work=True) == ["old-idle", "old-queued"]
+        assert sorted(await store.list_ids()) == ["old-idle", "old-queued"]
+
+
 class TestWriteAhead:
     async def test_a_message_is_stored_before_its_receipt_is_trusted(self, db):
         provider, store = db
@@ -923,6 +1014,48 @@ def flaky_db(tmp_path):
         _path=tmp_path / "timbal.db", crashed=False, fail_reads=0, slow_reads=0, read_delay=0.0
     )
     return provider, SqliteChatSessionStore(tmp_path / "timbal.db")
+
+
+class TestAParkedRunThatIsGone:
+    """The snapshot says the session waits for an answer, and the run that asked is not in the trace store
+    (traces kept apart from the sessions and rotated, a platform run that is a 404). Nothing can answer it:
+    the session is not parked, and goes on."""
+
+    async def _restored_without_its_traces(self, db, tmp_path, *, then):
+        provider, store = db
+        session, approval = await parked(provider, store, Charge(released=True))
+        then(session, approval)
+        await session.flush()
+        await session.close(keep=True)
+        rotated = CrashableSqlite.configured(_path=tmp_path / "rotated.db", crashed=False)
+        charge = Charge(released=True)
+        restored = await ChatSession.from_store(gated_agent(rotated, charge), store, session.id)
+        return restored, charge, approval
+
+    async def test_it_is_not_parked_and_takes_the_message_that_waited(self, db, tmp_path):
+        restored, charge, approval = await self._restored_without_its_traces(
+            db, tmp_path, then=lambda session, _approval: session.send("hello")
+        )
+        assert not restored.parked and restored.state()["parked"] is False
+        (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert finished["status"]["code"] == "success"
+        assert root_outputs(restored)[-1].output.collect_text() == "echo: hello"
+        assert not restored._worker.done() or restored._worker.exception() is None  # it did not die on the way
+        with pytest.raises(RuntimeError, match="waiting for an answer"):
+            restored.resume({approval.approval_id: True})
+        assert charge.gate.calls == 0
+        await restored.close()
+
+    async def test_an_answer_that_was_queued_for_it_is_dropped(self, db, tmp_path):
+        restored, charge, approval = await self._restored_without_its_traces(
+            db, tmp_path, then=lambda session, approval: session.resume({approval.approval_id: True})
+        )
+        (dropped,) = await records(restored, "resume_dropped", 1, after=after_restore(restored))
+        assert dropped["run_id"] is None and not restored.parked
+        restored.send("hello")
+        (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert finished["status"]["code"] == "success" and charge.gate.calls == 0
+        await restored.close()
 
 
 class TestRestoreSafety:
@@ -1713,6 +1846,184 @@ class TestLeaseRunsOut:
         assert refused and session.lost and session.state()["durable"] is False
         await asyncio.wait_for(session.wait_closed(), 30)
         assert till.stopped and (await store.load(session.id)).version == version  # not written over
+
+
+class ThinkingModel(TestModel):
+    """A model that is still thinking: a call whose last user message is in ``slow`` waits at ``go``."""
+
+    __test__ = False
+
+    def __init__(self, slow=()):
+        super().__init__(handler=self._answer)
+        self.slow, self.thinking, self.go = set(slow), asyncio.Event(), asyncio.Event()
+        self.answered: list[str] = []
+
+    def _answer(self, messages):
+        if messages[-1].role == "tool":
+            return "done"
+        text = last_user_text(messages)
+        if text == "build":
+            return tool_call("build", f"call-{len(messages)}")
+        self.answered.append(text)
+        return f"echo: {text}"
+
+    async def stream(self, messages, **kwargs):
+        if last_user_text(messages) in self.slow and messages[-1].role == "user":
+            self.thinking.set()
+            await self.go.wait()
+        async for item in super().stream(messages, **kwargs):
+            yield item
+
+
+class TestRestoredWhereItWasClosed:
+    """``close(keep=True)`` and ``from_store`` in one process: an idle session let go and asked for again, a
+    lease lost and taken back. The run's task store may still be there (a background task going, an event
+    no turn took), with the closed session's events in it. The restored session must get what one restored
+    in another process gets, and the closed one must stay closed."""
+
+    async def _cut_while_thinking(self, db, *, then):
+        """A session whose turn ``first`` is cut before its model answered (nothing dispatched: its message
+        is queued again), with a background task still running and whatever ``then`` queued behind it."""
+        provider, store = db
+        model, built = ThinkingModel(slow={"first"}), asyncio.Event()
+
+        async def build() -> str:
+            await built.wait()
+            return "built"
+
+        agent = Agent(
+            name="agent",
+            model=model,
+            tools=[Tool(name="build", handler=build, background_mode="always", background_announce="silent")],
+            tracing_provider=provider,
+        )
+        session = ChatSession(agent, session_store=store, busy_mode="followup")
+        session.send("build")  # a background task: the run's task store outlives the session
+        await records(session, "turn_finished", 1)
+        session.send("first")
+        await asyncio.wait_for(model.thinking.wait(), 30)
+        then(session)
+        await session.flush()
+        await session.close(keep=True)
+        model.slow.clear()
+        return session, agent, store, model, built
+
+    async def test_what_the_cut_turn_took_goes_back_ahead_of_what_was_queued_behind_it(self, db):
+        session, agent, store, model, built = await self._cut_while_thinking(db, then=lambda s: s.send("second"))
+        try:
+            restored = await ChatSession.from_store(agent, store, session.id)
+            assert restored._store is session._store  # the case: one process, the task store still there
+            await records(restored, "turn_finished", 2, after=after_restore(restored))
+            assert model.answered == ["first", "second"]  # in the order they were sent
+            await restored.close()
+        finally:
+            built.set()
+
+    async def test_a_newer_event_with_the_same_key_stands(self, db):
+        """The cut turn took an event; a newer one with its key was posted behind it. Queued again, the
+        older one must not replace the newer."""
+        provider, store = db
+        model = ThinkingModel(slow={"first"})
+        agent = Agent(name="agent", model=model, tools=[], tracing_provider=provider)
+        session = ChatSession(agent, session_store=store, busy_mode="followup")
+        session.send("first")
+        await asyncio.wait_for(model.thinking.wait(), 30)
+        old = session.store.post_event("stock: 3 left", key="stock", lane="next")
+        await until(lambda: old.state == "pending")
+        await session.flush()
+        # Taken by the turn the way a steered event is, and kept with it; then a newer one is posted.
+        session.store.drain_events(session._in_flight["run_id"], where=lambda event: event is old)
+        new = session.store.post_event("stock: sold out", key="stock", lane="next")
+        await session.flush()
+        assert [event["id"] for event in (await store.load(session.id)).in_flight["events"]][-1] == old.id
+        await session.close(keep=True)
+        model.slow.clear()
+
+        restored = await ChatSession.from_store(agent, store, session.id)
+        try:
+            pending = [event for event in restored._store.pending_events() if event.key == "stock"]
+            assert [event.text for event in pending] == ["stock: sold out"] and new.state == "pending"
+        finally:
+            await restored.close()
+
+    async def test_the_restored_session_follows_the_events_and_the_closed_one_writes_nothing(self, db):
+        session, agent, store, model, built = await self._cut_while_thinking(db, then=lambda s: s.send("second"))
+        try:
+            closed_changes, closed_log = session._changes, session.log.cursor_end
+            restored = await ChatSession.from_store(agent, store, session.id)
+            second = next(event for event in restored._store.pending_events() if event.text == "second")
+            finished = await records(restored, "turn_finished", 2, after=after_restore(restored))
+            settled = [
+                item
+                for item in restored.log.peek(after_restore(restored))[0]
+                if isinstance(item, dict) and item.get("kind") == "message_settled"
+            ]
+            # The restored session's log says where the message went: its clients are watching that one.
+            assert {"event_id": second.id, "state": "delivered", "run_id": finished[1]["run_id"]}.items() <= next(
+                item for item in settled if item["event_id"] == second.id
+            ).items()
+            await restored.flush()
+            # The closed session did nothing with it: no record, no write under this process's lease (which
+            # the store could not tell from the live session's).
+            assert session._changes == closed_changes and session.log.cursor_end == closed_log
+            assert session._saver is None or session._saver.done()
+            assert not restored.lost and (await store.load(session.id)).turns == restored.turns
+            await restored.close()
+        finally:
+            built.set()
+
+    async def test_an_event_the_snapshot_names_twice_is_queued_once(self, db):
+        """With the turn that took it, and pending again: the turn was cut before it started and handed the
+        message back. Whichever process restores it, the message is answered once."""
+        provider, store = db
+        model = ThinkingModel()
+        agent = Agent(name="agent", model=model, tools=[], tracing_provider=provider)
+        message = {"id": "m1", "text": "hello", "source": "user", "lane": "later", "mode": "followup", "posted_at": 1.0}
+        snapshot = SessionSnapshot(
+            session_id="s1",
+            agent="agent",
+            pending=[message],
+            in_flight={"run_id": "a-run-that-never-started", "parent_id": None, "events": [message]},
+        )
+        await store.save(snapshot, expect_version=None)
+        restored = await ChatSession.from_store(agent, store, "s1")
+        (started,) = await records(restored, "turn_started", 1, after=after_restore(restored))
+        assert started["trigger"]["event_ids"] == ["m1"]
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert model.answered == ["hello"]
+        await restored.close()
+
+    async def test_a_steered_message_kept_from_before_is_stored_with_the_turn_that_takes_it(self, db):
+        """Kept in the task store across the close: the restored session must still record that a turn took
+        it (``in_flight.events``), or a crash during that turn loses the message."""
+        provider, store = db
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_store=store)
+        session.send("hi")  # a run to continue from: the task store is the one registered for it
+        await records(session, "turn_finished", 1)
+        hold = held_before_its_turn(session)
+        session.send("start", mode="followup")
+        session.send("keep the old API", mode="steer")  # for the turn that will be running: after its tools
+        await session.flush()
+        await session.close(keep=True)
+        hold.set()
+        with_the_turn: list[list[tuple[str, bool]]] = []
+        real_save = store.save
+
+        async def save(snapshot, **kwargs):
+            events = (snapshot.in_flight or {}).get("events") or []
+            with_the_turn.append([(event["text"], bool(event.get("steered"))) for event in events])
+            return await real_save(snapshot, **kwargs)
+
+        store.save = save
+        restored = await ChatSession.from_store(make_agent(provider, gate), store, session.id)
+        assert restored._store is session._store
+        await asyncio.wait_for(gate.entered.wait(), 30)
+        gate.release.set()
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        await restored.flush()
+        assert [("start", False), ("keep the old API", True)] in with_the_turn
+        await restored.close()
 
 
 class TestRecordedToolCalls:

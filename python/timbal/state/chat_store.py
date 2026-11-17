@@ -375,6 +375,14 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_forget_store_threads)
 
 
+# The sessions with work waiting, through the index over them (`idx_chat_sessions_work`): idle sessions stay
+# in the table until deleted, and reading every one of them is what startup would otherwise spend its time on.
+# The snapshot comes along only for a row from before the mark (NULL), which says nothing yet.
+_WITH_WORK_SQL = (
+    "SELECT rowid, session_id, CASE WHEN has_work IS NULL THEN snapshot END FROM chat_sessions WHERE has_work IS NOT 0"
+)
+
+
 class SqliteChatSessionStore(ChatSessionStore):
     """Snapshots in the ``chat_sessions`` table of a SQLite file, next to
     :class:`~timbal.state.tracing.providers.SqliteTracingProvider`'s runs (same connection when it is the
@@ -417,26 +425,27 @@ class SqliteChatSessionStore(ChatSessionStore):
         body.version = new_version
         raw, now = body.to_json(), int(time.time() * 1000)
         lease_until = time.time() + self.lease_ttl_s if owner is not None else None
+        work = int(body.has_work())  # the row's mark for list_ids(with_work=True): never read from the snapshot
 
         def write(conn):
             if expect_version is None:
                 cursor = conn.execute(
                     "INSERT OR IGNORE INTO chat_sessions "
-                    "(session_id, agent, snapshot, version, updated_at, lease_owner, lease_until) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (snapshot.session_id, snapshot.agent, raw, new_version, now, owner, lease_until),
+                    "(session_id, agent, snapshot, version, updated_at, lease_owner, lease_until, has_work) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (snapshot.session_id, snapshot.agent, raw, new_version, now, owner, lease_until, work),
                 )
             elif owner is None:
                 cursor = conn.execute(
-                    "UPDATE chat_sessions SET snapshot = ?, version = ?, updated_at = ? "
+                    "UPDATE chat_sessions SET snapshot = ?, version = ?, updated_at = ?, has_work = ? "
                     "WHERE session_id = ? AND version = ?",
-                    (raw, new_version, now, snapshot.session_id, expect_version),
+                    (raw, new_version, now, work, snapshot.session_id, expect_version),
                 )
             else:
                 cursor = conn.execute(
-                    "UPDATE chat_sessions SET snapshot = ?, version = ?, updated_at = ? "
+                    "UPDATE chat_sessions SET snapshot = ?, version = ?, updated_at = ?, has_work = ? "
                     "WHERE session_id = ? AND version = ? AND (lease_owner IS NULL OR lease_owner = ?)",
-                    (raw, new_version, now, snapshot.session_id, expect_version, owner),
+                    (raw, new_version, now, work, snapshot.session_id, expect_version, owner),
                 )
             conn.commit()
             return cursor.rowcount
@@ -473,10 +482,16 @@ class SqliteChatSessionStore(ChatSessionStore):
 
     async def list_ids(self, *, with_work: bool = False) -> list[str]:
         def query(conn):
+            if with_work:
+                # Oldest first, as the table itself is read.
+                return [(row[1], row[2]) for row in sorted(conn.execute(_WITH_WORK_SQL).fetchall())]
             return conn.execute("SELECT session_id, snapshot FROM chat_sessions").fetchall()
 
         ids = []
         for session_id, raw in await self._run(query):
+            if raw is None:
+                ids.append(session_id)  # marked as having work by the save that wrote it
+                continue
             try:
                 snapshot = SessionSnapshot.from_json(raw)
             except Exception as e:

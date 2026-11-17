@@ -439,6 +439,18 @@
     return entry;
   }
 
+  // A model call starts only once the tools of the call before it have: a card still waiting for its START
+  // then was never run (its answer was cut by a 'now' message before its tools ran, or it named a tool the
+  // agent does not have). Left in the queue, it would take the START and the result of the next call to a
+  // tool of that name.
+  function expireQueuedTools(runId) {
+    Object.keys(S.toolQueue).forEach((key) => {
+      if (!key.startsWith(`${runId}:`)) return;
+      S.toolQueue[key].forEach((t) => { t.state.className = "state"; t.state.textContent = "not run"; });
+      delete S.toolQueue[key];
+    });
+  }
+
   // A provider-side result block (tool_search_tool_result, web_search_tool_result) closes its server card.
   function serverResult(value) {
     const t = S.tools[value.tool_use_id];
@@ -608,6 +620,8 @@
     if (d.type === "START" && d.parent_call_id === null) { turn.rootCallId = d.call_id; return; }
     const direct = turn.rootCallId && d.parent_call_id === turn.rootCallId;
     const isLlm = direct && d.path.endsWith(".llm");
+
+    if (d.type === "START" && isLlm) { expireQueuedTools(d.run_id); return; }
 
     if (d.type === "DELTA") {
       const item = d.item || {};
@@ -905,6 +919,7 @@
       $("agent-name").textContent = meta.agent || "?";
       $("agent-chip").title = meta.model ? `model: ${meta.model}` : "";
       if (!meta.is_agent) { note("the served runnable is not an Agent: chat sessions are unavailable", "warn"); return; }
+      if (meta.store_error) { note(`chat sessions are unavailable: ${meta.store_error}`, "warn"); return; }
     } catch { $("agent-name").textContent = "?"; }
     const match = location.hash.match(/s=([0-9a-f]+)/);
     if (match) {

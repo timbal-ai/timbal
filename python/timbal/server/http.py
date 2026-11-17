@@ -94,8 +94,10 @@ async def lifespan(
     # Durable chat sessions with work waiting (a queued message, a turn the last process died in) go on now.
     from .chat import restore_chat_sessions
 
-    await restore_chat_sessions(app)
     try:
+        # Inside the try: whatever fails here, what startup already began (the voice warmup, the LiveKit
+        # driver) is stopped below, not left running in a server that never came up.
+        await restore_chat_sessions(app)
         yield
     finally:
         from .chat import close_chat_sessions

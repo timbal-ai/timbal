@@ -119,11 +119,39 @@ def _require_durable_traces(agent: Any) -> None:
     )
 
 
-def _store(request: Request) -> ChatSessionStore | None:
+def _choose_store(app: Any, runnable: Any) -> ChatSessionStore | None:
+    """This server's session store, chosen once (``session_store_for``). A ``TIMBAL_CHAT_STORE`` that cannot
+    be honoured is kept as ``chat_store_error`` instead of raised: it is about chat sessions, and must not
+    stop a server whose other routes have nothing to do with it. Chat says so on every request (``_store``)."""
+    state = app.state
+    state.chat_store, state.chat_store_error = None, None
+    try:
+        state.chat_store = session_store_for(runnable) if runnable is not None else None
+    except RuntimeError as e:
+        state.chat_store_error = str(e)
+        logger.error(
+            "chat_store_misconfigured",
+            error=str(e),
+            detail="The server runs; chat sessions are refused until the setting is fixed.",
+        )
+    return state.chat_store
+
+
+def _store_error(request: Request) -> str | None:
+    """Why this server has no session store to give, when its setting cannot be honoured (else None)."""
     state = request.app.state
     if not hasattr(state, "chat_store"):
-        runnable = getattr(state, "runnable", None)
-        state.chat_store = session_store_for(runnable) if runnable is not None else None
+        _choose_store(request.app, getattr(state, "runnable", None))
+    return getattr(state, "chat_store_error", None)
+
+
+def _store(request: Request) -> ChatSessionStore | None:
+    state = request.app.state
+    error = _store_error(request)
+    if error is not None:
+        # Not served without a store instead: whoever set it asked for sessions that survive a restart, and
+        # would be handed ones that do not. No Retry-After: nothing changes until the setting does.
+        raise HTTPException(status_code=503, detail=f"Chat sessions are unavailable on this server: {error}")
     return state.chat_store
 
 
@@ -232,6 +260,8 @@ async def restore_chat_sessions(app: Any) -> list[str]:
     traces, so a deployment that only serves ``/run`` and ``/stream`` gets here too. A store that cannot be
     read now (a mount that is not there, a file that is locked) is looked at again in the background until
     it answers; meanwhile every other route works, and chat requests fail safely on their own (``503``).
+    The same for a ``TIMBAL_CHAT_STORE`` that cannot be honoured (a value that is not understood, a durable
+    store over process-local traces): logged, and every chat request is refused with the reason.
     """
     from ..core.agent import Agent
 
@@ -239,7 +269,7 @@ async def restore_chat_sessions(app: Any) -> list[str]:
     runnable = getattr(app.state, "runnable", None)
     if not isinstance(runnable, Agent):
         return []
-    store = app.state.chat_store = session_store_for(runnable)
+    store = _choose_store(app, runnable)
     if store is None:
         return []
     _app_sessions(app)  # the map exists from here on, whether or not the store can be read yet
@@ -275,7 +305,8 @@ async def _discover_later(app: Any, agent: Any, store: ChatSessionStore) -> None
                 said = error
                 logger.warning("chat_sessions_discovery_failed", error=error)
             continue
-        restored = await _restore_discovered(app, agent, store, session_ids)
+        # Bounded like startup's: the store answered the list, which says nothing about the next call.
+        restored = await _restore_discovered(app, agent, store, session_ids, timeout=_STARTUP_DISCOVERY_S)
         logger.info("chat_sessions_discovered_late", count=len(restored))
         return
 
@@ -325,34 +356,45 @@ async def _restore_discovered(
 
 async def _retry_restores(app: Any, agent: Any, store: ChatSessionStore, session_ids: list[str]) -> None:
     """Retry restoring sessions skipped at startup, every third of a lease, while they still have work waiting
-    and nobody here holds them. A live worker that serves one keeps its lease, and clears the work."""
-    waiting = set(session_ids)
+    and nobody here holds them. A live worker that serves one keeps its lease, and clears the work.
+
+    Each store call is given ``_STARTUP_DISCOVERY_S``. One that gets no answer ends the round (a store that
+    has stopped answering is not waited for once per session) and its session goes last in the next: the
+    others are not kept waiting behind it for as long as it hangs."""
+    waiting = list(dict.fromkeys(session_ids))
     interval = _RESTORE_RETRY_S if _RESTORE_RETRY_S is not None else max(store.lease_ttl_s / 3, 0.05)
     while waiting:
         await asyncio.sleep(interval)
         sessions = getattr(app.state, "chat_sessions", None) or {}
-        for session_id in sorted(waiting):
+        for session_id in list(waiting):
             if session_id in sessions:
-                waiting.discard(session_id)
+                waiting.remove(session_id)
                 continue
             try:
-                snapshot = await store.load(session_id)
-            except Exception as e:
-                logger.warning("chat_session_restore_retry_failed", session_id=session_id, error=str(e))
-                continue
-            if snapshot is None or not snapshot.has_work():
-                waiting.discard(session_id)
-                continue
-            try:
-                await _restore_once(app, agent, store, session_id)
+                snapshot = await asyncio.wait_for(store.load(session_id), _STARTUP_DISCOVERY_S)
+                if snapshot is None or not snapshot.has_work():
+                    waiting.remove(session_id)
+                    continue
+                # Shielded (_restore_once): given up here, it goes on, and its session is in the map (found
+                # at the top of a later round) once the store answers.
+                await asyncio.wait_for(_restore_once(app, agent, store, session_id), _STARTUP_DISCOVERY_S)
+            except TimeoutError:
+                logger.warning(
+                    "chat_session_restore_retry_failed",
+                    session_id=session_id,
+                    error=f"the session store did not answer within {_STARTUP_DISCOVERY_S:g} s",
+                )
+                waiting.remove(session_id)
+                waiting.append(session_id)
+                break
             except SessionLeased:
                 continue
             except (LookupError, ValueError):
-                waiting.discard(session_id)
+                waiting.remove(session_id)
             except Exception as e:
                 logger.warning("chat_session_restore_retry_failed", session_id=session_id, error=str(e))
             else:
-                waiting.discard(session_id)
+                waiting.remove(session_id)
                 logger.info("chat_session_restored_late", session_id=session_id)
 
 
@@ -525,7 +567,9 @@ async def chat_meta(request: Request) -> JSONResponse:
             "steering": runnable.steering if is_agent else None,
             "modes": list(SEND_MODES),
             "busy_mode": "steer",
-            "durable": is_agent and _store(request) is not None,
+            "durable": is_agent and _store_error(request) is None and _store(request) is not None,
+            # Set when TIMBAL_CHAT_STORE cannot be honoured: every session route answers 503 with it.
+            "store_error": _store_error(request) if is_agent else None,
         }
     )
 
@@ -552,7 +596,8 @@ async def create_session(request: Request) -> JSONResponse:
     try:
         await session.restore()
     except Exception as e:
-        await session.close()
+        # Nothing of it was stored. Bounded all the same: closing goes through the store.
+        await session.close(store_timeout=_store_timeout())
         raise HTTPException(status_code=503, detail=f"Could not load the run the session continues: {e}") from e
     session.persist()
     mark = session.mark()

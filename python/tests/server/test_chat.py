@@ -68,6 +68,161 @@ def test_the_playground_builds_ask_cards_from_the_session_state(client):
     assert "state.pending_interactions" in cards and 'askCard("interaction"' in cards
 
 
+PLAYGROUND_HARNESS = r"""
+// Runs the playground's own script against a few stand-ins for the browser, feeds it a session's events
+// (argv[3], a JSON list) the way its EventSource would, and prints what each tool card says.
+const fs = require("fs"), vm = require("vm");
+const html = fs.readFileSync(process.argv[2], "utf8");
+const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
+
+class Node {
+  constructor(tag) {
+    Object.assign(this, { tag, children: [], className: "", textContent: "", dataset: {}, style: {}, parent: null,
+      hidden: false, disabled: false, value: "", checked: false, title: "", scrollTop: 0, scrollHeight: 0,
+      clientHeight: 0, id: "" });
+    const names = () => this.className.split(" ").filter(Boolean);
+    this.classList = {
+      add: (...added) => { this.className = [...new Set([...names(), ...added])].join(" "); },
+      remove: (...gone) => { this.className = names().filter((name) => !gone.includes(name)).join(" "); },
+      toggle: (name, on) => (on ? this.classList.add(name) : this.classList.remove(name)),
+      contains: (name) => names().includes(name),
+    };
+  }
+  appendChild(node) { node.parent = this; this.children.push(node); return node; }
+  append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
+  remove() { if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this); }
+  addEventListener() {}
+  querySelectorAll() { return []; }
+  closest() { return null; }
+  focus() {}
+  set innerHTML(_value) { this.children = []; }
+  get innerHTML() { return ""; }
+}
+
+const byId = {};
+const sources = [];
+const answer = (data) => ({ ok: true, statusText: "", json: async () => data });
+const context = {
+  document: {
+    getElementById: (id) => (byId[id] = byId[id] || new Node("div")),
+    createElement: (tag) => new Node(tag),
+    querySelectorAll: () => [],
+  },
+  location: { href: "http://playground.test/chat/", hash: "" },
+  history: { replaceState() {} },
+  navigator: {},
+  URL, JSON, Promise, Object, String, Math, Set, Error, console, setTimeout, clearTimeout,
+  fetch: async (url, options) => {
+    if (String(url).endsWith("/meta")) return answer({ agent: "agent", is_agent: true });
+    if (options && options.method === "POST") return answer({ session_id: "abc123" });
+    return answer({});
+  },
+  EventSource: class { constructor() { sources.push(this); } addEventListener() {} close() {} },
+};
+vm.runInNewContext(script, context);
+
+setTimeout(() => {
+  const source = sources[sources.length - 1];
+  JSON.parse(process.argv[3]).forEach((event, n) => source.onmessage({ data: JSON.stringify(event), lastEventId: String(n + 1) }));
+  const cards = byId.timeline.children.filter((node) => node.className.split(" ").includes("tool"));
+  // A card's head is: icon, name, state.
+  console.log(JSON.stringify(cards.map((card) => card.children[0].children.slice(1).map((part) => part.textContent))));
+}, 50);
+"""
+
+
+def _playground_tool_cards(client, tmp_path, events):
+    """What the playground's tool cards show after ``events``: [name, state] each, in the order drawn."""
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("needs node to run the playground's script")
+    (tmp_path / "chat.html").write_text(client.get("/chat/").text, encoding="utf-8")
+    (tmp_path / "harness.js").write_text(PLAYGROUND_HARNESS, encoding="utf-8")
+    out = subprocess.run(
+        [node, str(tmp_path / "harness.js"), str(tmp_path / "chat.html"), json.dumps(events)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def _run_events(run_id="r1"):
+    """Event makers for one run: the root's START, a model call's START / tool_use delta / OUTPUT, a tool's
+    START / OUTPUT."""
+    base = {"run_id": run_id, "parent_run_id": None}
+
+    def child(kind, call_id, path, **fields):
+        return {**base, "type": kind, "call_id": call_id, "parent_call_id": "root", "path": path, **fields}
+
+    return {
+        "turn": {"type": "SESSION", "kind": "turn_started", "run_id": run_id, "trigger": {"kind": "user_message"}},
+        "root": {**base, "type": "START", "call_id": "root", "parent_call_id": None, "path": "agent"},
+        "llm_start": lambda call: child("START", call, "agent.llm"),
+        "llm_calls": lambda call, use, name: child(
+            "DELTA", call, "agent.llm", item={"type": "tool_use", "id": use, "name": name, "input": "{}"}
+        ),
+        "llm_output": lambda call, use, name: child(
+            "OUTPUT",
+            call,
+            "agent.llm",
+            status={"code": "success"},
+            output={"role": "assistant", "content": [{"type": "tool_use", "id": use, "name": name, "input": {}}]},
+        ),
+        "tool_start": lambda call, name: child("START", call, f"agent.{name}", input={}),
+        "tool_output": lambda call, name: child(
+            "OUTPUT", call, f"agent.{name}", status={"code": "success"}, output="found", t0=0, t1=5
+        ),
+    }
+
+
+def test_the_playground_does_not_give_a_cut_calls_card_to_the_next_call(client, tmp_path):
+    """A model call streams a tool call and is cut by a 'now' message before the tool runs: its card never
+    gets a START. The step after the cut calls a tool of the same name, and that call's START and result
+    must land on its own card, not on the one left over."""
+    e = _run_events()
+    cards = _playground_tool_cards(
+        client,
+        tmp_path,
+        [
+            e["turn"],
+            e["root"],
+            e["llm_start"]("llm1"),
+            e["llm_calls"]("llm1", "use1", "search"),  # ...and the answer is cut here: no OUTPUT, no tool
+            e["llm_start"]("llm2"),
+            e["llm_calls"]("llm2", "use2", "search"),
+            e["llm_output"]("llm2", "use2", "search"),
+            e["tool_start"]("tool1", "search"),
+            e["tool_output"]("tool1", "search"),
+        ],
+    )
+    assert cards == [["search", "not run"], ["search", "done · 5 ms"]]
+
+
+def test_the_playground_still_pairs_a_batch_of_same_named_calls_in_order(client, tmp_path):
+    e = _run_events()
+    cards = _playground_tool_cards(
+        client,
+        tmp_path,
+        [
+            e["turn"],
+            e["root"],
+            e["llm_start"]("llm1"),
+            e["llm_calls"]("llm1", "use1", "search"),
+            e["llm_calls"]("llm1", "use2", "search"),
+            e["tool_start"]("tool1", "search"),
+            e["tool_start"]("tool2", "search"),
+            e["tool_output"]("tool1", "search"),
+            e["llm_start"]("llm2"),  # the second one is still running when the model is asked again
+        ],
+    )
+    assert cards == [["search", "done · 5 ms"], ["search", "running…"]]
+
+
 def test_steer_joins_the_running_turn(client):
     session_id = open_session(client)
     client.post(f"/chat/sessions/{session_id}/messages", json={"text": "start"})

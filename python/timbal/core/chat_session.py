@@ -656,6 +656,8 @@ class ChatSession:
         # snapshot says).
         self._abandon_parked: str | None = None
         self._shown_events: set[str] = set()
+        # from_store(), in the process that closed the session: the events its task store still held.
+        self._kept_events: dict[str, SessionEvent] = {}
         # Turns in a row the store would not record the start of: they did not run (see _write_ahead).
         self._store_failures = 0
         # The restorable events last seen queued: one arriving through the task store is stored at once.
@@ -1123,6 +1125,16 @@ class ChatSession:
             # Queuing the stored events would start the worker: not before the dead turn is settled (its recovery
             # goes first, and a turn finishing meanwhile would store a snapshot without it).
             session._hold_worker = True
+            # Restored in the process that closed it, the run's task store may still be there (a background
+            # task going, an event no turn took), holding the session's events: in the order they were left,
+            # followed by the closed session. They are taken out and queued again below from the snapshot,
+            # as in a process that never had them: what a dead turn took goes back ahead of what was queued
+            # behind it (and loses to a newer event with its key, not the other way round), each one
+            # followed by this session. The events themselves are kept, so their senders' receipts settle.
+            session._kept_events = {
+                event.id: event
+                for event in session._store.drain_events(settle=False, where=lambda event: event.task_id is None)
+            }
             session._version, session._leased, session._lease_from = snapshot.version, True, leased_at
             session.turns, session.last_status, session._parked = snapshot.turns, snapshot.last_status, snapshot.parked
             session._last_prompt = _load_prompt(snapshot.last_prompt)
@@ -1137,8 +1149,15 @@ class ChatSession:
             # Not the ones the dead run's stored memory shows: it took them, and the snapshot that would have
             # said so was never written.
             session._restore_events([event for event in snapshot.pending if event["id"] not in session._shown_events])
+            session._requeue_kept_events(snapshot.in_flight["run_id"] if snapshot.in_flight is not None else None)
             if session._parked and session._last_context is None:
                 session._last_context = await session._load_run(session.head)
+                if session._last_context is None:
+                    # The run that asked is not in the trace store (traces kept elsewhere and gone, a run
+                    # the platform no longer has): nothing can answer it. Not parked: the session goes on
+                    # from there, and answers still queued for it are dropped by the worker.
+                    logger.warning("chat_session_parked_run_missing", session_id=session_id, run_id=session.head)
+                    session._parked, session._abandon_parked = False, None
             if session._abandon_parked:
                 session._abandon_question(session._abandon_parked)
             parked_trace = session._last_context._trace if session._parked and session._last_context else None
@@ -1157,6 +1176,9 @@ class ChatSession:
             # Nothing was written: the stored state stays as it was, for the next attempt (or another process).
             # Cancelled included (a server shutting down): the lease is let go, also one still being taken.
             if session is not None:
+                # What was taken out of the task store and not queued again yet: back where it was.
+                session._store.requeue([], list(session._kept_events.values()))
+                session._kept_events = {}
                 session._lost = True  # stores nothing while it lets go of the task store
                 with contextlib.suppress(BaseException):
                     await session.close(keep=True)
@@ -1330,7 +1352,8 @@ class ChatSession:
                 if not self.parked:
                     # Another client's run answered the parked turn or went past it: go on from that run.
                     self._parked = False
-                    self._record("unparked", run_id=self._last_context.id, head=scheduler.head)
+                    parked_run = self._last_context.id if self._last_context is not None else None
+                    self._record("unparked", run_id=parked_run, head=scheduler.head)
                     continue
                 await self._until_scheduler_or_work()
                 continue
@@ -1851,6 +1874,11 @@ class ChatSession:
 
     def _persist(self) -> None:
         """Queue a snapshot save: saves run one at a time, in order, a burst coalescing into one."""
+        if self._close_done.is_set():
+            # Closed, and what it had to store is stored (or was given up): nothing is written from here
+            # again. A session restored in this process holds the same lease owner, so the store could not
+            # tell a late write of this one from the live session's, and would take it.
+            return
         self._changes += 1
         if self._session_store is None or self._lost:
             return
@@ -2044,12 +2072,28 @@ class ChatSession:
             self._cancel_pending(self._last_context, reason)
 
     def _restore_events(self, stored: list[dict[str, Any]]) -> None:
-        # Restored in the same process (an idle session let go), the run's task store may still hold them.
-        held = {event.id for event in self._store.pending_events()}
+        # A snapshot can name an event twice: with the turn that took it and, handed back as that turn was
+        # cut before it started, pending again. Queued once, where it comes first.
+        queued = {event.id for event in self._store.pending_events()}
         for data in stored:
-            if data["id"] in held:
+            if data["id"] in queued:
                 continue
-            event = self._store.restore_event(data)
+            queued.add(data["id"])
+            # The event itself when this process still has it (from_store() took it out of the task store).
+            event = self._store.restore_event(data, held=self._kept_events.pop(data["id"], None))
+            if event.source == "user":
+                self._watch(event)
+
+    def _requeue_kept_events(self, dead_run_id: str | None) -> None:
+        """The events the task store held that the snapshot did not queue again: posted after its last
+        write (they go back behind the stored ones, in their order), or taken by the dead run, as its
+        stored memory shows (delivered there: queued again, they would be answered twice)."""
+        kept, self._kept_events = self._kept_events, {}
+        for event in kept.values():
+            if event.id in self._shown_events:
+                event._settle("delivered", dead_run_id)
+                continue
+            self._store.restore_event(event.to_dict(), held=event)
             if event.source == "user":
                 self._watch(event)
 
@@ -2182,10 +2226,14 @@ class ChatSession:
         event.on_settle(self._settled)
 
     def _settled(self, event: SessionEvent) -> None:
+        if self._close_done.is_set():
+            return  # the session restored after this one follows it now (same process, same task store)
         self._keep_with_turn(event)
         self._record("message_settled", event_id=event.id, state=event.state, run_id=event.run_id)
 
     def _event_settled(self, event: SessionEvent) -> None:
+        if self._close_done.is_set():
+            return
         self._followed_events.discard(event.id)
         if self._keep_with_turn(event) and not self.closed:
             self._persist()

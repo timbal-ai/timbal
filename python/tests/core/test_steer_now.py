@@ -304,20 +304,21 @@ class TestAnswerCut:
 
 
 class StalledStream(StreamingTestModel):
-    """A provider that stops sending: its first call streams ``chunks_before`` chunks and then waits on
-    ``gate`` (never, unless a test opens it). Later calls stream normally."""
+    """A provider that stops sending: its first call (or the one numbered ``call``, from 0) streams
+    ``chunks_before`` chunks and then waits on ``gate`` (never, unless a test opens it). The others stream
+    normally."""
 
     __test__ = False
 
-    def __init__(self, scripts, *, chunks_before=1):
+    def __init__(self, scripts, *, chunks_before=1, call=0):
         super().__init__(scripts)
-        self.chunks_before = chunks_before
+        self.chunks_before, self.call = chunks_before, call
         self.stalled = asyncio.Event()
         self.gate = asyncio.Event()
         self.ended: list[str] = []  # how each call's stream ended
 
     async def stream(self, messages, **kwargs):
-        first, sent = self.call_count == 0, 0
+        first, sent = self.call_count == self.call, 0
         try:
             async for chunk in super().stream(messages, **kwargs):
                 if first and sent == self.chunks_before:
@@ -543,6 +544,173 @@ class TestReadingTheModelDoesNotLoseACancellation:
         if interrupted and ended.get(cut_run, "cancelled") != "cancelled":
             # It ended by itself: allowed only when nothing of it was left to cut.
             assert cut_run not in asked[asked_before:], "the interrupted run carried on and finished"
+
+
+class CutAsItArrives(StreamingTestModel):
+    """Calls ``cut()`` in the middle of its first answer, just before a chunk goes out: the turn is cancelled
+    with that chunk already there for it, the moment a cancellation is the agent's and not the stream's."""
+
+    __test__ = False
+
+    def __init__(self, scripts, *, after=2):
+        super().__init__(scripts)
+        self.after, self.cut = after, None
+
+    async def stream(self, messages, **kwargs):
+        sent = 0
+        async for chunk in super().stream(messages, **kwargs):
+            if sent == self.after and self.cut is not None:
+                cut, self.cut = self.cut, None
+                cut()
+            yield chunk
+            sent += 1
+
+
+class TestWhatIsStoredOfACutAnswer:
+    """The turn's memory is stored from its dump, not from the live list, and so is the model call's output.
+    A cut that ends the turn between two chunks must leave both holding what the model had said by then
+    (the chunk that had just arrived included): the next turn, and anyone reading the trace, reads the
+    stored ones."""
+
+    PARTIAL = "Once upon a time ther"  # three chunks of seven: two streamed on, one there when the cut came
+
+    async def _cut_mid_answer(self, tmp_path):
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "timbal.db")
+        model = CutAsItArrives([text_stream("Once upon a time there was a lighthouse keeper."), text_stream("ok")])
+        a = Agent(name="agent", model=model, tools=[], tracing_provider=provider)
+        session = ChatSession(a)
+        model.cut = session.interrupt
+        session.send("tell me")
+        (finished,) = await records(session, "turn_finished", 1)
+        assert finished["status"]["code"] == "cancelled"
+        stored = await provider.get_strict(RunContext(parent_id=finished["run_id"], tracing_provider=provider))
+        spans = stored.as_records()
+        root = next(span for span in spans if span.path == "agent")
+        llm = next(span for span in spans if span.path == "agent.llm")
+        return session, root, llm
+
+    async def test_the_stored_memory_holds_the_partial_answer(self, tmp_path):
+        session, root, llm = await self._cut_mid_answer(tmp_path)
+        memory = [Message.validate(message) for message in root.memory]
+        assert [(m.role, m.collect_text()) for m in memory] == [("user", "tell me"), ("assistant", self.PARTIAL)]
+        assert Message.validate(llm.output).collect_text() == self.PARTIAL  # the call's own span too
+        await session.close()
+
+    async def test_the_next_turn_reads_it(self, tmp_path):
+        session, _root, _llm = await self._cut_mid_answer(tmp_path)
+        seen = []
+        real = session._agent.model.stream
+
+        async def watched(messages, **kwargs):
+            seen.append([(m.role, m.collect_text()) for m in messages if not m.is_runtime()])
+            async for item in real(messages, **kwargs):
+                yield item
+
+        session._agent.model.stream = watched
+        session.send("go on")
+        await records(session, "turn_finished", 2)
+        assert seen[-1] == [("user", "tell me"), ("assistant", self.PARTIAL), ("user", "go on")]
+        await session.close()
+
+
+async def tools_offered(run_id):
+    """The tool names each model call of the run was given, in order."""
+    trace = await RunContext(tracing_provider=InMemoryTracingProvider)._get_parent_trace(run_id)
+    llm_calls = sorted((span for span in trace.values() if span.path == "agent.llm"), key=lambda span: span.t0)
+    return [
+        [tool["name"] if isinstance(tool, dict) else tool.name for tool in span.input.get("tools") or []]
+        for span in llm_calls
+    ]
+
+
+class TestToolsTakenAwayStayAway:
+    """After ``max_consecutive_denials`` the next model call gets no tools. Only a user message gives them
+    back (it is a new request). A step that is repeated for another reason, an answer cut with nothing of
+    the user's to let in, a runtime event that joined, is still that tool-less step."""
+
+    def _agent(self, model, **kwargs):
+        from timbal.guardrails import Verdict, guardrail
+
+        refused = guardrail(lambda _args: Verdict.block("no"), stages=["tool_args"])
+        return agent(
+            model,
+            [Tool(name="act", handler=lambda: "acted", guardrails=[refused])],
+            max_consecutive_denials=1,
+            **kwargs,
+        )
+
+    def _model(self):
+        from ..guardrails.conftest import tool_use_item
+
+        # 1: calls the tool (refused). 2: tool-less, stalls mid-answer. 3: whatever the turn goes on with.
+        return StalledStream(
+            [[tool_use_item("act", {})], text_stream("I could not do that. " * 8), text_stream("as I said")],
+            call=1,
+        )
+
+    async def test_an_answer_cut_by_a_message_a_guardrail_drops(self):
+        from timbal.guardrails import Verdict, guardrail
+
+        model = self._model()
+        blocked = guardrail(lambda text: Verdict.block("nope") if "forbidden" in text else True, stages=["input"])
+        async with ChatSession(self._agent(model, guardrails=[blocked])) as session:
+            session.send("start")
+            await asyncio.wait_for(model.stalled.wait(), 30)
+            session.send("something forbidden", mode="now")  # cuts the answer; nothing of the user's joins
+            (finished,) = await records(session, "turn_finished", 1, timeout=30)
+        assert finished["status"]["code"] == "success"
+        assert await tools_offered(finished["run_id"]) == [["act"], [], []]
+
+    async def test_a_runtime_event_that_joins_before_the_turn_ends(self):
+        model = self._model()
+        async with ChatSession(self._agent(model)) as session:
+            session.send("start")
+            await asyncio.wait_for(model.stalled.wait(), 30)
+            session.store.post_event("the deploy finished", lane="next")  # the application's, not the user's
+            model.gate.set()
+            (finished,) = await records(session, "turn_finished", 1, timeout=30)
+        assert finished["status"]["code"] == "success"
+        assert await tools_offered(finished["run_id"]) == [["act"], [], []]
+
+    async def test_a_user_message_still_gets_them_back(self):
+        model = self._model()
+        async with ChatSession(self._agent(model)) as session:
+            session.send("start")
+            await asyncio.wait_for(model.stalled.wait(), 30)
+            session.send("try something else then", mode="now")
+            (finished,) = await records(session, "turn_finished", 1, timeout=30)
+        assert finished["status"]["code"] == "success"
+        assert await tools_offered(finished["run_id"]) == [["act"], [], ["act"]]
+
+
+class TestACutAnswerThatIsAllRedacted:
+    async def test_nothing_of_it_is_kept_and_the_users_message_stays(self):
+        """The output rail redacts everything the model had said when the cut came, so there is no partial
+        answer to keep. With nothing steered in either (the message was withdrawn), the step is repeated
+        from the same history: the user's message, not one message less."""
+        from timbal.guardrails import KeywordGuard
+
+        class Unsaid(KeywordGuard):
+            def redact_match(self, match):  # noqa: ARG002
+                return ""
+
+        long = "Once upon a time there was a lighthouse keeper who " * 6
+        model = StalledStream([text_stream(long), text_stream("ok")], chunks_before=3)
+        rail = Unsaid(banned=[r"Once[\s\S]*"], stages=["model_output"], action="redact")
+        async with ChatSession(agent(model, guardrails=[rail])) as session:
+            session.send("tell me")
+            await asyncio.wait_for(model.stalled.wait(), 30)
+            # (The scripts go by the answers in the history, and none of this one will be there.)
+            model.scripts = [text_stream("ok")]
+            receipt = session.send("stop", mode="now")
+            assert session.withdraw(receipt.id)  # taken back before the turn let it in: the cut stands
+            (finished,) = await records(session, "turn_finished", 1, timeout=30)
+        assert finished["status"]["code"] == "success"
+        root, memory = await memory_of(session)
+        assert [(m.role, m.collect_text()) for m in memory] == [("user", "tell me"), ("assistant", "ok")]
+        assert root.metadata["steer_now"] == [{"cut": "answer", "kept_chars": 0}]
 
 
 class TestEdges:

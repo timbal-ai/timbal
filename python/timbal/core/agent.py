@@ -2246,14 +2246,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _salvage_interrupted_llm_output(self, run_context: Any, current_span: Any) -> None:
+    async def _salvage_interrupted_llm_output(self, run_context: Any, current_span: Any) -> None:
         """Append any partial LLM output to memory when the agent loop is interrupted.
 
         Called from the handler's finally block when _append_memory never ran
         (GeneratorExit / CancelledError killed the generator before the LLM
         OutputEvent was processed).  The inner LLM span may still have captured
         a partial result via the collector snapshot in Runnable.__call__, so we
-        look it up in the trace and synchronously append it to memory.
+        look it up in the trace and append it to memory.
+
+        To the memory's dump as well: that is what a serializing provider stores
+        (not ``span.memory``), so the next turn and the stored trace would
+        otherwise miss what the user was shown. A message's dump does not suspend
+        (it is plain data), which matters here: this runs while the generator is
+        being closed or cancelled.
         """
         llm_path = f"{self._path}.llm"
         for span in reversed(run_context._trace.as_records()):
@@ -2262,6 +2268,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     cleaned = span.output.without_empty_text_blocks()
                     if cleaned is not None:
                         current_span.memory.append(cleaned)
+                        stored = getattr(current_span, "_memory_dump", None)
+                        if isinstance(stored, list):
+                            stored.append(await dump(cleaned))
                 break
 
     def _trailing_user_messages(self, memory: list[Message]) -> list[Message]:
@@ -3123,7 +3132,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if kept:
                         if stream_scrub:
                             replace_message_text(partial, _runner.scrub_text(message_text(partial), *_out_stages))
-                        await _append_memory(partial)
+                        # False when nothing is left of it (the rails redacted all it had said): not in
+                        # memory, so there is nothing of it to take back below either.
+                        kept = await _append_memory(partial)
                     current_span.metadata.setdefault("steer_now", []).append(
                         {"cut": "answer", "kept_chars": len(message_text(partial)) if kept else 0}
                     )
@@ -3136,6 +3147,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         current_span._memory_dump.pop()
                     if steered_user:
                         i, max_iter_handled = 0, False
+                    else:
+                        # The same step again (nothing of the user's joined: a dropped message, an event):
+                        # still without the tools the denial breaker took away for it.
+                        withhold_tools = withheld
                     continue
                 if guardrail_retry:
                     withhold_tools = withheld
@@ -3189,8 +3204,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         if steered:
                             # Something arrived for this turn before it ended: answer it too.
                             i, max_iter_handled = (0, False) if steered_user else (i + 1, max_iter_handled)
-                            if steered_user:
-                                withhold_tools = False
+                            # A user message is a new request and gets the tools back. An event of the
+                            # application's does not undo the denial breaker: the answer to it is as
+                            # tool-less as the one it followed.
+                            withhold_tools = False if steered_user else withheld
                             continue
                     token = run_context._silence_token
                     if (
@@ -3254,4 +3271,4 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     await active_events.aclose()
             finally:
                 if not _llm_memory_saved:
-                    self._salvage_interrupted_llm_output(run_context, current_span)
+                    await self._salvage_interrupted_llm_output(run_context, current_span)
