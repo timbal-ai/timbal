@@ -660,6 +660,8 @@ f = await File.from_upload(upload_obj)
 
 Auto-detects MIME type. Serializes to base64 for LLM APIs.
 
+Signed platform CDN URLs (`timbalusercontent.com` / `platform_config.cdn` with `Signature`/`Key-Pair-Id`) are stored verbatim by `persist()` and re-signed on read (`load()` and the sync lazy fetch) through `POST /orgs/{org_id}/content/sign` when the run has a platform subject: before fetching when `Expires` is within 60 s, and once after a CDN 403 (expired or revoked key). At most one sign call per read; mints are memoized per (platform + auth, org, object path) until their own `Expires`. Without a platform subject, or for unsigned URLs, reads are unchanged.
+
 ### Content types
 `TextContent`, `ToolUseContent`, `ToolResultContent`, `FileContent`, `ThinkingContent`, `CustomContent` — all in `timbal.types.content`.
 

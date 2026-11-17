@@ -1,6 +1,7 @@
 import asyncio
 import json as json_lib
 import os
+import time
 from collections.abc import AsyncGenerator, Callable
 from typing import Any, Literal
 
@@ -281,6 +282,87 @@ async def _request(
                 error=str(exc),
             )
             await asyncio.sleep(wait_time)
+
+
+def _status_error(exc: httpx.HTTPStatusError) -> PlatformError:
+    """PlatformError for a failed platform response, same shape as :func:`_request`'s."""
+    try:
+        error_body = exc.response.json()
+    except Exception:
+        error_body = exc.response.text
+    return PlatformError(
+        f"\n"
+        f"  URL: {exc.request.url}\n"
+        f"  Status: {exc.response.status_code} {exc.response.reason_phrase}\n"
+        f"  Response body: {error_body or None}",
+        status_code=exc.response.status_code,
+    )
+
+
+def _request_sync(
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"],
+    path: str,
+    headers: dict[str, str] = {},
+    params: dict[str, Any] | None = None,
+    json: dict[str, Any] | None = None,
+    max_retries: int = 3,
+    timeout: httpx.Timeout | float | None = None,
+    service: str | None = None,
+) -> httpx.Response:
+    """Blocking counterpart of :func:`_request` for code that cannot await.
+
+    For sync call sites that may already be running inside an event loop (e.g.
+    a lazy ``File`` read), where starting or nesting a loop is not an option.
+    Same URL/auth resolution, retry policy and ``PlatformError`` mapping as
+    :func:`_request`; JSON bodies only, no connection reuse. Retries sleep
+    with ``time.sleep``, so they block the calling thread.
+    """
+    url, headers = _resolve_url_and_headers(service, path, headers)
+    if timeout is None:
+        timeout = _default_timeout()
+    elif isinstance(timeout, (int, float)):
+        timeout = httpx.Timeout(float(timeout), read=None)
+
+    for attempt in range(max_retries + 1):
+        wait_time = 0.1 * (2**attempt)
+        try:
+            res = httpx.request(method, url, headers=headers, params=params, json=json, timeout=timeout)
+            res.raise_for_status()
+            return res
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if (400 <= status_code < 500 and status_code != 429) or attempt == max_retries:
+                raise _status_error(exc) from exc
+            if status_code == 429:
+                try:
+                    wait_time = max(wait_time, float(exc.response.headers.get("Retry-After", "")))
+                except ValueError:
+                    pass
+            logger.warning(
+                f"Request failed, retrying in {wait_time:.1f}s",
+                attempt=attempt + 1,
+                max_retries=max_retries,
+                status_code=status_code,
+            )
+        except httpx.TimeoutException as exc:
+            if attempt == max_retries:
+                raise PlatformError(_timeout_error_message(exc, url, timeout)) from exc
+            logger.warning(
+                f"Request timed out, retrying in {wait_time:.1f}s",
+                attempt=attempt + 1,
+                max_retries=max_retries,
+                error=type(exc).__name__,
+            )
+        except Exception as exc:
+            if attempt == max_retries:
+                raise
+            logger.warning(
+                f"Request failed, retrying in {wait_time:.1f}s",
+                attempt=attempt + 1,
+                max_retries=max_retries,
+                error=str(exc),
+            )
+        time.sleep(wait_time)
 
 
 async def _stream(

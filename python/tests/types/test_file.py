@@ -1,5 +1,7 @@
+import contextlib
 import io
 import pathlib
+import time
 from io import BytesIO
 
 import pytest
@@ -951,3 +953,314 @@ class TestLazyFetchSafety:
             with pytest.raises(ValueError):
                 File("not://a/real/scheme/at/all")
         gc.collect()  # would trigger the RecursionError via __del__ -> close/repr
+
+
+# ---------------------------------------------------------------------------
+# TestSignedContentResign — expired / revoked platform CDN URLs re-sign on read
+# ---------------------------------------------------------------------------
+
+_KB_OBJECT = "https://timbalusercontent.com/orgs/42/k2/7/files/9/report.pdf"
+
+
+def _signed_url(expires_in: float, signature: str = "old", base: str = _KB_OBJECT) -> str:
+    expires = int(time.time() + expires_in)
+    return f"{base}?Expires={expires}&Signature={signature}&Key-Pair-Id=K2WLME83EQGDL3&Hash-Algorithm=SHA256"
+
+
+def _sign_response(signed_url: str | None, url: str = _KB_OBJECT):
+    from unittest.mock import MagicMock
+
+    res = MagicMock()
+    res.json.return_value = {"signed_url": signed_url, "url": url}
+    return res
+
+
+class _FakeCdn:
+    """Serves every URL in ``ok`` and answers 403 to anything else, recording each GET."""
+
+    def __init__(self, *ok: str) -> None:
+        self.ok = set(ok)
+        self.calls: list[str] = []
+
+    def get_sync(self, url: str, **_kwargs):
+        import httpx
+
+        self.calls.append(url)
+        if url in self.ok:
+            return httpx.Response(
+                200, content=b"%PDF-1.7", headers={"Content-Type": "application/pdf"}, request=httpx.Request("GET", url)
+            )
+        return httpx.Response(403, content=b"<Error>AccessDenied</Error>", request=httpx.Request("GET", url))
+
+    async def get(self, url: str, **kwargs):
+        return self.get_sync(url, **kwargs)
+
+
+def _platform_ctx(org_id: str = "42", token: str = "token123", subject: bool = True):
+    from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+    from timbal.state.context import RunContext
+
+    return RunContext(
+        platform_config=PlatformConfig(
+            host="api.timbal.ai",
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token=token),
+            subject=PlatformSubject(org_id=org_id, app_id="1") if subject else None,
+        ),
+        tracing_provider=None,
+    )
+
+
+@contextlib.contextmanager
+def _sign_endpoint(mode: str, *results):
+    """Patch the platform request the given read path signs through; each call takes the next result."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    if mode == "async":
+        target, mock = "timbal.platform.utils._request", AsyncMock(side_effect=list(results))
+    else:
+        target, mock = "timbal.platform.utils._request_sync", MagicMock(side_effect=list(results))
+    with patch(target, mock):
+        yield mock
+
+
+async def _read(url: str, cdn: _FakeCdn, mode: str) -> bytes:
+    """Read a File through the async load() path or the sync lazy-fetch path."""
+    from unittest.mock import patch
+
+    file = File(url)
+    if mode == "async":
+        await file.load(client=cdn)
+    else:
+        # Lazy fetch inside a running event loop: the sync path must not touch the loop.
+        with patch("httpx.get", side_effect=cdn.get_sync):
+            file.read()
+    file.seek(0)
+    return file.read()
+
+
+@pytest.fixture
+def platform_run():
+    from timbal.state import get_run_context, set_run_context
+    from timbal.types.file import _clear_mint_cache
+
+    previous = get_run_context()
+    set_run_context(_platform_ctx())
+    _clear_mint_cache()
+    yield
+    _clear_mint_cache()
+    set_run_context(previous)
+
+
+@pytest.mark.parametrize("mode", ["async", "sync"])
+@pytest.mark.usefixtures("platform_run")
+class TestSignedContentResign:
+    async def test_fresh_url_is_fetched_without_signing(self, mode: str) -> None:
+        stored = _signed_url(3600)
+        cdn = _FakeCdn(stored)
+        with _sign_endpoint(mode) as sign:
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        sign.assert_not_called()
+        assert cdn.calls == [stored]
+
+    async def test_near_expiry_url_is_resigned_before_fetch(self, mode: str) -> None:
+        stored = _signed_url(30)  # inside the 60 s margin
+        fresh = _signed_url(3600, signature="new")
+        cdn = _FakeCdn(stored, fresh)
+        with _sign_endpoint(mode, _sign_response(fresh)) as sign:
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        assert sign.call_count == 1
+        assert sign.call_args.args == ("POST", "orgs/42/content/sign")
+        assert sign.call_args.kwargs["json"] == {"url": stored}
+        assert cdn.calls == [fresh]
+
+    async def test_expired_url_falls_back_to_legacy_url_field(self, mode: str) -> None:
+        stored = _signed_url(-7200)
+        cdn = _FakeCdn(_KB_OBJECT)
+        with _sign_endpoint(mode, _sign_response(None, url=_KB_OBJECT)):
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        assert cdn.calls == [_KB_OBJECT]
+
+    async def test_403_resigns_once_and_retries(self, mode: str) -> None:
+        # Not expired by its Expires, but signed with a revoked key.
+        stored = _signed_url(3600)
+        fresh = _signed_url(3600, signature="new")
+        cdn = _FakeCdn(fresh)
+        with _sign_endpoint(mode, _sign_response(fresh)) as sign:
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        assert sign.call_count == 1
+        assert cdn.calls == [stored, fresh]
+
+    async def test_403_after_resign_raises_the_fetch_error(self, mode: str) -> None:
+        import httpx
+
+        stored = _signed_url(3600)
+        fresh = _signed_url(3600, signature="new")
+        cdn = _FakeCdn()
+        with _sign_endpoint(mode, _sign_response(fresh)) as sign, pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await _read(stored, cdn, mode)
+        assert exc_info.value.response.status_code == 403
+        assert sign.call_count == 1
+        assert cdn.calls == [stored, fresh]
+
+    async def test_sign_endpoint_403_raises_fetch_error_without_looping(self, mode: str) -> None:
+        import httpx
+        from timbal.errors import PlatformError
+
+        stored = _signed_url(3600)
+        cdn = _FakeCdn()
+        denied = PlatformError("forbidden", status_code=403)
+        with _sign_endpoint(mode, denied, denied) as sign, pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await _read(stored, cdn, mode)
+        assert exc_info.value.response.status_code == 403
+        assert exc_info.value.__cause__ is denied
+        assert sign.call_count == 1
+        assert cdn.calls == [stored]
+
+    async def test_failed_proactive_sign_falls_back_to_stored_url_once(self, mode: str) -> None:
+        import httpx
+        from timbal.errors import PlatformError
+
+        denied = PlatformError("forbidden", status_code=403)
+        # Still a few seconds left: the stored URL serves the read.
+        stored = _signed_url(20)
+        cdn = _FakeCdn(stored)
+        with _sign_endpoint(mode, denied) as sign:
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        assert sign.call_count == 1
+        assert cdn.calls == [stored]
+
+        # Already dead: one sign attempt, one GET, no second sign on the 403.
+        stored = _signed_url(-60)
+        cdn = _FakeCdn()
+        with _sign_endpoint(mode, denied, denied) as sign, pytest.raises(httpx.HTTPStatusError):
+            await _read(stored, cdn, mode)
+        assert sign.call_count == 1
+        assert cdn.calls == [stored]
+
+    async def test_without_platform_subject_behaviour_is_unchanged(self, mode: str) -> None:
+        import httpx
+        from timbal.state import set_run_context
+
+        for ctx in (None, _platform_ctx(subject=False)):
+            set_run_context(ctx)
+            for stored in (_signed_url(-60), _signed_url(3600)):
+                cdn = _FakeCdn()
+                with _sign_endpoint(mode) as sign, pytest.raises(httpx.HTTPStatusError):
+                    await _read(stored, cdn, mode)
+                sign.assert_not_called()
+                assert cdn.calls == [stored]
+
+    async def test_unsigned_and_foreign_urls_are_never_signed(self, mode: str) -> None:
+        import httpx
+
+        for stored in (
+            "https://timbalusercontent.com/orgs/42/assets/logo.png",  # public content
+            "https://timbalusercontent.com/tmp/019f/a.png",
+            "https://content.timbal.ai/orgs/42/k2/7/files/9/report.pdf",  # legacy unsigned link
+            _signed_url(-60, base="https://example.com/report.pdf"),  # not a platform host
+        ):
+            cdn = _FakeCdn()
+            with _sign_endpoint(mode) as sign, pytest.raises(httpx.HTTPStatusError):
+                await _read(stored, cdn, mode)
+            sign.assert_not_called()
+            assert cdn.calls == [stored]
+
+    async def test_second_read_is_served_from_the_mint_cache(self, mode: str) -> None:
+        stored = _signed_url(-60)
+        fresh = _signed_url(3600, signature="new")
+        cdn = _FakeCdn(fresh)
+        with _sign_endpoint(mode, _sign_response(fresh)) as sign:
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+            # Another File for the same object (e.g. the next turn reloading memory).
+            assert await _read(_signed_url(-30), cdn, mode) == b"%PDF-1.7"
+        assert sign.call_count == 1
+        assert cdn.calls == [fresh, fresh]
+
+    async def test_revoked_key_second_read_skips_the_403(self, mode: str) -> None:
+        stored = _signed_url(3600)
+        fresh = _signed_url(3600, signature="new")
+        cdn = _FakeCdn(fresh)
+        with _sign_endpoint(mode, _sign_response(fresh)) as sign:
+            await _read(stored, cdn, mode)
+            await _read(stored, cdn, mode)
+        assert sign.call_count == 1
+        assert cdn.calls == [stored, fresh, fresh]
+
+    async def test_cached_mint_that_is_refused_is_replaced(self, mode: str) -> None:
+        stored = _signed_url(-60)
+        first = _signed_url(3600, signature="first")
+        second = _signed_url(3600, signature="second")
+        cdn = _FakeCdn(first)
+        with _sign_endpoint(mode, _sign_response(first), _sign_response(second)) as sign:
+            await _read(stored, cdn, mode)
+            cdn.ok = {second}  # e.g. the key behind the cached mint was revoked
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        assert sign.call_count == 2
+        assert cdn.calls == [first, first, second]
+
+    async def test_mints_are_not_shared_across_callers(self, mode: str) -> None:
+        from timbal.state import set_run_context
+
+        stored = _signed_url(-60)
+        fresh = _signed_url(3600, signature="new")
+        cdn = _FakeCdn(fresh)
+        with _sign_endpoint(mode, *[_sign_response(fresh)] * 3) as sign:
+            await _read(stored, cdn, mode)
+            set_run_context(_platform_ctx(token="someone-else"))
+            await _read(stored, cdn, mode)
+            set_run_context(_platform_ctx(org_id="43"))
+            await _read(stored, cdn, mode)
+        assert sign.call_count == 3
+
+    async def test_persist_keeps_the_stored_url(self, mode: str) -> None:
+        stored = _signed_url(-60)
+        fresh = _signed_url(3600, signature="new")
+        file = File(stored)
+        cdn = _FakeCdn(fresh)
+        with _sign_endpoint(mode, _sign_response(fresh)):
+            if mode == "async":
+                await file.load(client=cdn)
+            else:
+                from unittest.mock import patch
+
+                with patch("httpx.get", side_effect=cdn.get_sync):
+                    file.read()
+        assert await file.persist() == stored
+        assert file.name == "report.pdf"
+
+
+class TestRequestSync:
+    def test_client_error_raises_platform_error_without_retry(self) -> None:
+        from unittest.mock import patch
+
+        import httpx
+        from timbal.errors import PlatformError
+        from timbal.platform.utils import _request_sync
+        from timbal.state import set_run_context
+
+        set_run_context(_platform_ctx())
+        url = "https://api.timbal.ai/orgs/42/content/sign"
+        denied = httpx.Response(403, json={"error": "no access"}, request=httpx.Request("POST", url))
+        with patch("httpx.request", return_value=denied) as request, pytest.raises(PlatformError) as exc_info:
+            _request_sync("POST", "orgs/42/content/sign", json={"url": "x"})
+        assert exc_info.value.status_code == 403
+        assert request.call_count == 1
+        assert request.call_args.args == ("POST", url)
+        assert request.call_args.kwargs["headers"]["Authorization"] == "Bearer token123"
+        assert request.call_args.kwargs["json"] == {"url": "x"}
+
+    def test_server_error_is_retried(self) -> None:
+        from unittest.mock import patch
+
+        import httpx
+        from timbal.platform.utils import _request_sync
+        from timbal.state import set_run_context
+
+        set_run_context(_platform_ctx())
+        req = httpx.Request("POST", "https://api.timbal.ai/x")
+        responses = [httpx.Response(503, request=req), httpx.Response(200, json={"ok": True}, request=req)]
+        with patch("httpx.request", side_effect=responses) as request, patch("time.sleep") as sleep:
+            res = _request_sync("POST", "x", json={})
+        assert res.json() == {"ok": True}
+        assert request.call_count == 2
+        sleep.assert_called_once()
