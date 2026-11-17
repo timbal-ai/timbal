@@ -32,10 +32,10 @@ class ImportSpec(BaseModel):
         parts = fqn.split("::")
         if len(parts) != 2:
             raise ValueError(f"Invalid FQN {fqn!r}. Expected format: path/to/file.py::object_name")
-        path = Path(parts[0])
+        path = Path(parts[0]).expanduser()
         if base_path is not None:
             path = base_path / path
-        return cls(path=path.expanduser().resolve(), target=parts[1])
+        return cls(path=path.resolve(), target=parts[1])
 
     def load(self) -> Any:
         """Load and return the target object from the module.
