@@ -145,6 +145,7 @@ def _playground_tool_cards(client, tmp_path, events):
         [node, str(tmp_path / "harness.js"), str(tmp_path / "chat.html"), json.dumps(events)],
         capture_output=True,
         text=True,
+        encoding="utf-8",  # node writes UTF-8 whatever the platform's own encoding is ("done · 5 ms")
         timeout=60,
     )
     assert out.returncode == 0, out.stderr[-2000:]
