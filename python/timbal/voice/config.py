@@ -230,7 +230,9 @@ class UserIdleConfig(BaseModel):
     @model_validator(mode="after")
     def _has_something_to_do(self) -> UserIdleConfig:
         has_line = bool(self.instructions and self.instructions.strip()) or bool(
-            self.text if isinstance(self.text, str) and self.text.strip() else [t for t in (self.text or []) if str(t).strip()]
+            self.text
+            if isinstance(self.text, str) and self.text.strip()
+            else [t for t in (self.text or []) if str(t).strip()]
         )
         if self.max_count > 0 and not has_line:
             raise ValueError("user_idle needs 'text' or 'instructions' (or max_count=0 with hangup_after_secs)")
@@ -418,6 +420,18 @@ class VoiceConfig(BaseModel):
     None or zero disables. Tool execution overlaps the speech and the beat;
     tools with no preceding speech never delay the first spoken word.
     """
+    max_tts_pause_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    """Cap internal silence in synthesized PCM. ``None`` (default) leaves the
+    provider audio unchanged. A quiet stretch longer than this, judged by
+    ``tts_quiet_dbfs``, is shortened to this length. The first bytes of a
+    reply are not held back. Requires the ``timbal[voice]`` extra when set."""
+    tts_quiet_dbfs: float = Field(default=-45.0, allow_inf_nan=False)
+    """Level below which PCM counts as silence for ``max_tts_pause_secs``.
+    -45 dBFS keeps breaths. Unused while pause trimming is off."""
+    tts_tempo: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    """Pitch-preserving speaking rate. ``None`` (default) and ``1.0`` leave
+    the audio unchanged; ``1.1`` is a little faster. Requires the
+    ``timbal[voice]`` extra when it is not 1. Applied after pause trimming."""
 
     turn_timeout_secs: float | None = None
     """None → ``VoiceSession`` default."""

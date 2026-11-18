@@ -35,9 +35,26 @@ The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate
 
 `stt_extra` defaults to ElevenLabs-oriented VAD keys (`commit_strategy`, `min_speech_duration_ms`, `vad_silence_threshold_secs`, `vad_threshold`). The server strips those keys for adapters that own end-of-turn. `tts_extra` defaults to `{"auto_mode": true}`. `VoiceConfig.model` is a per-session text-model override (`provider/model`), separate from `stt_model` and `tts_model`.
 
+## Pace synthesized speech
+
+Both controls are off unless you set them, and both need the `timbal[voice]` extra. They apply only to the cascaded pipeline (transcription, then the agent, then speech), not to a `RealtimeSession`. They run on the PCM the caller hears, after the speech provider returns it, and only when the session encoding is PCM16 (`pcm_s16le`, or the `linear16` / `pcm16` aliases). Any other encoding is left unchanged and a warning is logged. An interrupted reply is still cut to the audio that was actually played.
+
+`max_tts_pause_secs` must be `0` or greater. It shortens an internal silence quieter than `tts_quiet_dbfs` (default `-45`, which leaves breaths in) down to that many seconds. Pause trimming does not delay the start of the reply. `tts_tempo` must be greater than `0`. It changes the speaking rate without changing the pitch: `1.0` leaves the audio alone, and a value above `1` is faster. Tempo holds 20–50 ms before the first samples, and a short tail is flushed once no new audio arrives for 0.25 s. `None` on either field disables it. An invalid value in a client hello is dropped and the server's value is kept.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={"language": "en", "max_tts_pause_secs": 0.2, "tts_tempo": 1.05},
+)
+```
+
 ## What a client may override
 
-A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `model`, `tool_beat_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, and `user_idle`. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
+A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, and `user_idle`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
 
 Recording, ambient audio, `events`, `hello_wait_secs`, and `sip_hello_wait_secs` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`) are treated as unset so they do not wipe an inherited value.
 

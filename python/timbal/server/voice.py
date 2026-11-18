@@ -319,6 +319,9 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "vad_endpointing",
     "model",
     "tool_beat_secs",
+    "max_tts_pause_secs",
+    "tts_quiet_dbfs",
+    "tts_tempo",
     "turn_timeout_secs",
     "turn_timeout_fallback",
     "filler",
@@ -432,6 +435,27 @@ def _merge_client_extra(field: str, server_extra: Any, client_extra: Any) -> dic
     return {**base, **safe}
 
 
+def _coerce_client_number(updates: dict[str, Any], field: str) -> None:
+    """Validate one numeric hello field in place. A bad value is dropped.
+
+    ``model_copy`` later skips validation, and telephony parameters arrive as
+    strings. One malformed knob keeps the operator's value instead of closing
+    the socket. Booleans are rejected (``bool`` is an ``int`` subclass).
+    """
+    if field not in updates:
+        return
+    raw = updates[field]
+    if isinstance(raw, bool):
+        logger.info("voice_client_config_invalid", field=field)
+        del updates[field]
+        return
+    try:
+        updates[field] = getattr(VoiceConfig(**{field: raw}), field)
+    except (ValidationError, TypeError, ValueError):
+        logger.info("voice_client_config_invalid", field=field)
+        del updates[field]
+
+
 def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str, Any]) -> VoiceConfig:
     """Apply the optional first WebSocket JSON message over the server config.
 
@@ -459,6 +483,8 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
         except (ValueError, TypeError):
             logger.info("voice_client_tool_beat_invalid")
             del updates["tool_beat_secs"]
+    for field in ("max_tts_pause_secs", "tts_quiet_dbfs", "tts_tempo"):
+        _coerce_client_number(updates, field)
     if "voice" in updates:
         voice = updates["voice"]
         if isinstance(voice, str) and voice.strip():
@@ -1154,6 +1180,11 @@ def build_voice_session(
         session_kwargs["user_idle"] = merged.user_idle
     if merged.tool_beat_secs is not None:
         session_kwargs["tool_beat_secs"] = merged.tool_beat_secs
+    # Pause trim and tempo default off. Always forward them so a per-call
+    # hello and the agent config land on the same VoiceSession fields.
+    session_kwargs["max_tts_pause_secs"] = merged.max_tts_pause_secs
+    session_kwargs["tts_quiet_dbfs"] = merged.tts_quiet_dbfs
+    session_kwargs["tts_tempo"] = merged.tts_tempo
     if merged.turn_timeout_secs is not None:
         try:
             session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)
