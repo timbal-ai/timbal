@@ -46,6 +46,61 @@ The stored trace follows the same rule. For an interrupted turn, the agent run's
 - `event`: true when the turn was started by a session event or an announced background result, not by the caller.
 - `vad_endpointed`: whether Silero endpointing forced the commit.
 
+## Silence to first audio
+
+The caller-facing wait is `speech_end_to_transcript_ms + eou_to_first_audio_ms`: the caller goes quiet, the transcript is committed, and the first speech bytes are emitted. Read the p50 and p95 of that per-turn sum. Adding a p95 of transcription to a p95 of first audio describes a turn where both stages were slow at once, which is a larger number than the tail callers actually hit.
+
+`speech_end_source="vad"` is the last speech frame, back-dated past the silence the detector had to hear. `"partial"` uses the last interim transcript and reads low, because some transcriber delay is already inside the anchor. `report.by_speech_end_source` splits that same per-turn sum by anchor, so compare calls on the `vad` row. Turns with either clock missing are left out, not counted as zero. A session event or greeting (`event`) has no caller silence and is left out too. Filler turns are counted: the clock stops at the filler, and `filler_spoken` marks those turns. The sum stops at the first byte the server sends and excludes client playback delay.
+
+```python
+from timbal.voice.latency import gate_silence_to_first_audio, summarize_turn_metrics
+from timbal.voice.metrics import TurnMetrics
+
+
+def turn(index, speech_ms, audio_ms, **extra):
+    fields = {
+        "turn_index": index,
+        "user_text_chars": 24,
+        "speech_end_to_transcript_ms": speech_ms,
+        "speech_end_source": "vad",
+        "eou_to_first_audio_ms": audio_ms,
+        "turn_total_ms": speech_ms + audio_ms,
+        "interrupted": False,
+        "tts_segments": 1,
+        "audio_bytes": 3200,
+    }
+    fields.update(extra)
+    return TurnMetrics(**fields)
+
+
+report = summarize_turn_metrics(
+    [
+        turn(1, 80.0, 420.0),
+        turn(2, 120.0, 680.0),
+        turn(3, 40.0, 160.0, speech_end_source="partial"),
+        turn(4, 1.0, 1.0, event=True),
+    ]
+)
+assert report.samples == 3
+assert report.p50_ms == 500.0
+assert report.p95_ms == 770.0
+assert report.by_speech_end_source["vad"].p50_ms == 650.0
+assert report.by_speech_end_source["vad"].p95_ms == 785.0
+assert report.by_speech_end_source["partial"].p50_ms == 200.0
+assert report.excluded_counts == {"event_turn": 1}
+assert gate_silence_to_first_audio(report, p95_ms=1000) == []
+```
+
+After a call, `session.metrics` holds these `TurnMetrics`, so you can pass it straight to `summarize_turn_metrics`. Stored traces carry each turn on the root span as `voice_turn_metrics`. Run the report on a JSONL trace (or a directory of them):
+
+```bash
+python -m timbal.voice.latency traces.jsonl
+python -m timbal.voice.latency traces.jsonl --json
+python -m timbal.voice.latency traces.jsonl --p95-ms 1000
+```
+
+`--json` prints the same report as JSON. With `--p95-ms`, the command exits with status 1 when the p95 is above the ceiling, and when the file has no measured caller turns. It exits with status 2 when a path does not exist. Without `--p95-ms` it only prints the report.
+
 Measure time to the useful answer as well as first audio. Compare providers on representative calls, including slow tools, short acknowledgements, background noise, and interruptions.
 
 ## Provider-reported speech usage
