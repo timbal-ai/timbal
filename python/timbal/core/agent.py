@@ -925,6 +925,22 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         return AgentContinuation(self, max_idle_secs=max_idle_secs, max_continuations=max_continuations, **kwargs)
 
+    async def _resolve_input_params(self, input: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Resolve a callable ``system_prompt`` inside the run, before the trace dump.
+
+        Voice turns pass a callable so it sees the forked ``RunContext`` (session
+        data, ``parent_id``). A string is left as-is. The resolved text is what
+        lands on ``span.input``.
+        """
+        resolved = await super()._resolve_input_params(input)
+        prompt = resolved.get("system_prompt")
+        if callable(prompt):
+            value = prompt()
+            if inspect.isawaitable(value):
+                value = await value
+            resolved["system_prompt"] = value
+        return resolved
+
     async def _resolve_system_prompt(self) -> str | None:
         """Resolve system prompt by executing callable or embedded template functions."""
         system_prompt = self.system_prompt

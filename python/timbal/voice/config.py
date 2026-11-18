@@ -37,7 +37,7 @@ def _default_stt_extra() -> dict[str, Any]:
 DEFAULT_FILLER_SYSTEM_PROMPT = (
     "You write the one short phrase a voice assistant says out loud while it looks something "
     "up for the user. Reply with ONLY the phrase: a few natural spoken words, no quotes. "
-    "Match the language the user is speaking. Do not answer the question and do not mention "
+    "Do not answer the question and do not mention "
     'tool or function names — just signal you are on it (like "One sec, let me check that.").'
 )
 
@@ -180,9 +180,8 @@ class GreetingConfig(BaseModel):
 
 DEFAULT_USER_IDLE_SYSTEM_PROMPT = (
     "The other person on this live call has gone quiet after your last sentence. Say ONE short "
-    "spoken line to check they are still there or to gently move the conversation on — matching the "
-    "language of the conversation so far. Reply with only the words to say out loud; no quotes, no "
-    "stage directions."
+    "spoken line to check they are still there or to gently move the conversation on. Reply with "
+    "only the words to say out loud; no quotes, no stage directions."
 )
 
 
@@ -230,7 +229,9 @@ class UserIdleConfig(BaseModel):
     @model_validator(mode="after")
     def _has_something_to_do(self) -> UserIdleConfig:
         has_line = bool(self.instructions and self.instructions.strip()) or bool(
-            self.text if isinstance(self.text, str) and self.text.strip() else [t for t in (self.text or []) if str(t).strip()]
+            self.text
+            if isinstance(self.text, str) and self.text.strip()
+            else [t for t in (self.text or []) if str(t).strip()]
         )
         if self.max_count > 0 and not has_line:
             raise ValueError("user_idle needs 'text' or 'instructions' (or max_count=0 with hangup_after_secs)")
@@ -394,7 +395,15 @@ class VoiceConfig(BaseModel):
     tts_model: str = "eleven_v4_turbo"
     voice: str = DEFAULT_VOICE_ID
     language: str | None = None
-    """None → provider auto-detect."""
+    """Conversation language (BCP-47, e.g. ``"en"``, ``"es"``, ``"es-ES"``).
+
+    When set, the speech-to-text adapter receives it as a language hint and
+    the text model is told to reply in that language. ``None`` leaves
+    detection to the provider and tells the model to follow the user's latest
+    substantive message, unless the agent's own prompt already names one
+    reply language. It does not select a TTS voice. Change it on a live call
+    with :meth:`timbal.voice.session.VoiceSession.set_language`.
+    """
     sample_rate: int = 16_000
     encoding: str = "pcm_s16le"
     stt_extra: dict[str, Any] = Field(default_factory=_default_stt_extra)
