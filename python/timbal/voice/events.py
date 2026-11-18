@@ -67,7 +67,8 @@ class TranscriptPartial(VoiceSessionEvent):
 class TranscriptCommitted(VoiceSessionEvent):
     type: Literal["transcript_committed"] = "transcript_committed"
     text: str
-    # True → rewrite last user bubble (CONTINUE_TURN merge), don't append another.
+    # True → rewrite the last user bubble instead of appending another.
+    # Empty text retracts that bubble (a cancelled early Flux turn).
     replace: bool = False
 
 

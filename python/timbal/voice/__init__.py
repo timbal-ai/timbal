@@ -46,6 +46,9 @@ from .playback import (
     BufferedPlaybackTracker,
     PlaybackTracker,
 )
+from .predictive_eou import (
+    SpeechEouPredictor,
+)
 from .providers import (
     AudioInputConfig,
     AudioOutputConfig,
@@ -167,6 +170,7 @@ __all__ = [
     "SessionInterrupted",
     "SessionStarted",
     "SmartTurnEouModel",
+    "SpeechEouPredictor",
     "SpeechToText",
     "TextEouPredictor",
     "TextToSpeech",
