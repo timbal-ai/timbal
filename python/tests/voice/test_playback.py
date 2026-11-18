@@ -37,6 +37,25 @@ class TestEstimateMode:
         assert tr.played_bytes == BPS
         assert not tr.is_playing
 
+    def test_frozen_clock_keeps_a_short_clip_unheard(self) -> None:
+        """MockTTS queues 64 bytes (~2 ms at 16 kHz PCM16). Until the clock moves,
+        the tracker still says that audio is playing and nothing has been heard.
+
+        ``interrupt()`` then treats the next commit as a barge-in that heard
+        nothing and drops the finished assistant reply. Windows CI hit this on
+        ``test_later_turns_still_see_the_event``: the turn task was done, but
+        ``time.monotonic`` had not moved, so memory was ``user, user``.
+        """
+        clock = FakeClock()
+        tr = BufferedPlaybackTracker(BPS, clock=clock)
+        tr.on_audio_emitted(64)
+        assert tr.is_playing
+        assert tr.played_bytes == 0
+        assert map_played_bytes_to_text([("Ya tengo lo de las inversiones, ¿te lo resumo?", 64)], 0) == ""
+        clock.advance(64 / BPS)
+        assert not tr.is_playing
+        assert tr.played_bytes == 64
+
     def test_gapless_queueing(self) -> None:
         clock = FakeClock()
         tr = BufferedPlaybackTracker(BPS, clock=clock)

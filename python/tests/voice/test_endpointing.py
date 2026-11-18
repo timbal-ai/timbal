@@ -152,6 +152,24 @@ class TestEndpointingDelay:
         assert endpointing_delay(0.95) >= VadEndpointer.MIN_DELAY_SECS - 1e-9
         assert VadEndpointer.MIN_DELAY_SECS >= 0.4
 
+    def test_default_floor_stays_above_a_short_continuation_pause(self):
+        """0.3s was measured and rejected. Scoring overlaps the floor, so the
+        fastest confident commit is stop_silence + min_delay.
+
+        LiveKit's dynamic endpointing uses 0.3s (0.5s is their fixed default).
+        0.20 + 0.30 = 0.50s, inside the ~0.6s the in-repo pause scripts treat as
+        a continuation (``support_pause_short`` is a 0.6s mid-sentence pause that
+        must merge) and inside the 600ms gap before the resumed fragment in the
+        #236 corpus ("Pump three, I think." then the continuation). 0.20 + 0.45
+        = 0.65s still covers that pause. Defaults stay.
+        """
+        fastest = VadEndpointer.STOP_SILENCE_SECS + endpointing_delay(1.0)
+        assert fastest == pytest.approx(0.65)
+        assert fastest > 0.6
+        lowered = VadEndpointer.STOP_SILENCE_SECS + endpointing_delay(1.0, min_delay=0.3)
+        assert lowered == pytest.approx(0.5)
+        assert lowered < 0.6
+
     def test_curve_still_fast_without_floor(self):
         assert endpointing_delay(0.95, min_delay=0.0) < 0.05
 
@@ -552,3 +570,68 @@ class TestVoiceSessionEndpointing:
         assert session._endpointer is None
         await stt.finish()
         await asyncio.wait_for(consumer, timeout=5.0)
+
+
+class TestEndpointingFloorsOnSession:
+    async def test_session_knobs_are_passed_to_the_endpointer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        class _EP:
+            def __init__(self, vad: object = None, **kwargs: object) -> None:
+                captured.update(kwargs)
+                self.min_delay_secs = kwargs.get("min_delay_secs")
+                self.stop_silence_secs = kwargs.get("stop_silence_secs")
+                self.max_delay_secs = 3.0
+
+            def bind(self, **kwargs: object) -> None:
+                return None
+
+            async def start(self, *, sample_rate: int) -> None:
+                self.sample_rate = sample_rate
+
+        monkeypatch.setattr("timbal.voice.endpointing.VadEndpointer", _EP)
+        session = VoiceSession(
+            agent=Agent(name="t", model=TestModel(responses=["ok"]), tools=[]),
+            stt=EndpointSTT(),
+            tts=_SilentTTS(),
+            turn_detector="lexical",
+            vad_endpointing=True,
+            min_delay_secs=0.4,
+            stop_silence_secs=0.15,
+        )
+        await session._maybe_start_endpointer()
+        assert captured["min_delay_secs"] == 0.4
+        assert captured["stop_silence_secs"] == 0.15
+
+    async def test_custom_endpointer_keeps_its_own_floors(self) -> None:
+        ep = VadEndpointer(
+            vad=FakeVad(),
+            min_delay_secs=0.11,
+            stop_silence_secs=0.07,
+            min_commit_interval_secs=0.0,
+        )
+        session = VoiceSession(
+            agent=Agent(name="t", model=TestModel(responses=["ok"]), tools=[]),
+            stt=EndpointSTT(),
+            tts=_SilentTTS(),
+            turn_detector="lexical",
+            vad_endpointing=ep,
+            min_delay_secs=0.9,
+            stop_silence_secs=0.9,
+        )
+        await session._maybe_start_endpointer()
+        assert session._endpointer is ep
+        assert ep.min_delay_secs == 0.11
+        assert ep.stop_silence_secs == 0.07
+
+    def test_session_rejects_bad_floors(self) -> None:
+        kwargs = dict(
+            agent=Agent(name="t", model=TestModel(responses=["ok"]), tools=[]),
+            stt=EndpointSTT(),
+            tts=_SilentTTS(),
+            turn_detector="heuristic",
+        )
+        with pytest.raises(ValueError):
+            VoiceSession(**kwargs, min_delay_secs=-1)
+        with pytest.raises(ValueError):
+            VoiceSession(**kwargs, stop_silence_secs=True)

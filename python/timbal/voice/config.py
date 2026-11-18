@@ -410,6 +410,26 @@ class VoiceConfig(BaseModel):
     ``select_turn_detector_spec``)."""
     vad_endpointing: bool | None = None
     """None → auto: on when the turn detector exposes an audio EOU model."""
+    min_delay_secs: float = Field(default=0.45, ge=0.0, le=3.0)
+    """Extra silence after a confident end-of-turn score before local
+    endpointing force-commits. Scoring overlaps this wait, so with the
+    default and ``stop_silence_secs`` a confident turn commits about 0.65
+    seconds after speech stops. Lower scores wait longer, up to 3 seconds.
+    LiveKit's turn detector uses about 0.3–0.5 seconds; 0.3 here would commit
+    at about 0.5 seconds and cut callers who pause for roughly 0.6 seconds
+    and then continue, so the default stays 0.45. Set on the agent. A caller
+    hello cannot change it. Ignored when endpointing is off, and a
+    ``VadEndpointer`` passed straight to ``VoiceSession`` keeps its own value."""
+    stop_silence_secs: float = Field(default=0.20, ge=0.0, le=2.0)
+    """How long the line must be quiet before the end-of-turn model is scored.
+    The default 0.2 seconds is the usual speech-stop gap; shorter hears a
+    breath as the end of the turn. Added to ``min_delay_secs`` on a confident
+    commit. Same exposure rules as ``min_delay_secs``."""
+    first_flush_min_words: int | None = Field(default=None, ge=1, le=40)
+    """Unset → the first spoken segment waits for a sentence, like every later
+    segment. A whole number from 1 to 40 lets that first segment start at a
+    comma once it has that many words. 4 is the useful value: long enough to
+    speak, early enough in a long opening sentence. A caller hello cannot set it."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -457,6 +477,14 @@ class VoiceConfig(BaseModel):
     string / block → that opener on outbound only. Only a host that knows the
     call direction can apply it (:func:`greeting_for_direction`); the session
     itself never sees a direction."""
+
+    @field_validator("min_delay_secs", "stop_silence_secs", "first_flush_min_words", mode="before")
+    @classmethod
+    def _reject_bool_seconds(cls, v: Any) -> Any:
+        # ``True`` is an int. A JSON ``true`` must not become 1.
+        if isinstance(v, bool):
+            raise ValueError("must be a number, not a boolean")
+        return v
 
     @field_validator("greeting", "outbound_greeting", mode="before")
     @classmethod

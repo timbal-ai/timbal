@@ -50,6 +50,26 @@ Available modes are:
 
 `vad_endpointing=None` enables the local fast path when supported. Set it to `False` to disable it. A Python declaration may also supply a `TurnDetector` instance or zero-argument factory; clients may send supported mode names, and sessions own detector clones.
 
+## Endpointing floors
+
+Local endpointing waits out two silences before it force-commits. `stop_silence_secs` (default 0.2) is how long the line must be quiet before the end-of-turn model is scored. `min_delay_secs` (default 0.45) is the extra wait after a confident score. Scoring runs during that wait, so a confident turn commits about 0.65 seconds after speech stops. A lower score waits longer, up to 3 seconds, and often loses to the transcription provider's own pause.
+
+Lower `min_delay_secs` only when short pauses of about 0.6 s should end the caller's turn. A `VadEndpointer` passed into `VoiceSession` keeps its own values.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You are a helpful voice assistant. Reply in one or two short spoken sentences.",
+    voice_config={
+        "language": "en",
+        "min_delay_secs": 0.35,
+    },
+)
+```
+
 ## Custom clients
 
 WebSocket clients must report cumulative milliseconds of audio actually played and discard queued audio on `interrupted`. Reporting received bytes as played can preserve words the caller never heard. WebRTC and LiveKit use the server's paced media clock. See [Transports](/voice/transports) for the wire contract and [Events and usage](/voice/observability) for interruption metrics.
