@@ -82,6 +82,19 @@ def _resolve_api_key(explicit: str | SecretStr | None) -> str:
     return key
 
 
+def _flux_confidence(value: Any) -> float | None:
+    """Clamp Flux ``end_of_turn_confidence`` into ``[0, 1]``, or ``None``."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if score != score:  # NaN
+        return None
+    return min(1.0, max(0.0, score))
+
+
 def _encoding_param(config: AudioInputConfig) -> str:
     """Timbal speaks PCM16LE mono end-to-end; Deepgram calls that ``linear16``."""
     if config.encoding in ("pcm_s16le", "linear16", ""):
@@ -212,7 +225,8 @@ class _DeepgramSTTBase(SpeechToText):
                 break
             if item.type == "error":
                 raise RuntimeError(item.text)
-            if item.text:
+            # TurnResumed cancels a speculative reply even with an empty transcript.
+            if item.type == "resumed" or item.text:
                 yield item
 
     async def _send_json(self, payload: dict[str, Any]) -> None:
@@ -250,8 +264,14 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
     * ``Update`` / ``StartOfTurn`` → ``partial`` (transcript is the whole turn
       so far, matching how the session treats Scribe partials)
     * ``EndOfTurn`` → ``committed``
-    * ``EagerEndOfTurn`` / ``TurnResumed`` → logged only (speculative-LLM
-      lifecycle is a follow-up)
+    * ``EagerEndOfTurn`` → ``eager`` and ``TurnResumed`` → ``resumed``, with
+      ``end_of_turn_confidence``. Predictions only: they do not commit.
+
+    Flux emits the eager pair only when ``eager_eot_threshold`` is on the
+    connection. Speculative generation sets that from
+    :func:`timbal.voice.predictive_eou.flux_eager_threshold`, strictly below
+    ``eot_threshold``. Deepgram guarantees the ``EndOfTurn`` transcript matches
+    the preceding ``EagerEndOfTurn`` unless ``TurnResumed`` came first.
 
     ``commit()`` is a no-op: the Flux turn machine owns endpointing, there is
     no client-side force-commit. Run with ``turn_detector="provider"`` and
@@ -320,14 +340,24 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
             elif event in ("Update", "StartOfTurn"):
                 if text:
                     await self._queue.put(TranscriptEvent(type="partial", text=text))
-            elif event in ("EagerEndOfTurn", "TurnResumed"):
-                # Speculative reply lifecycle not wired yet — visibility only.
+            elif event == "EagerEndOfTurn":
+                confidence = _flux_confidence(msg.get("end_of_turn_confidence"))
                 logger.info(
                     "dg_flux_eager_event",
                     turn_event=event,
-                    eou_confidence=msg.get("end_of_turn_confidence"),
+                    eou_confidence=confidence,
                     text_preview=text[:80],
                 )
+                await self._queue.put(TranscriptEvent(type="eager", text=text, confidence=confidence))
+            elif event == "TurnResumed":
+                confidence = _flux_confidence(msg.get("end_of_turn_confidence"))
+                logger.info(
+                    "dg_flux_eager_event",
+                    turn_event=event,
+                    eou_confidence=confidence,
+                    text_preview=text[:80],
+                )
+                await self._queue.put(TranscriptEvent(type="resumed", text=text, confidence=confidence))
             return
         if mt in ("Error", "FatalError"):
             err = msg.get("description") or msg.get("message") or "Unknown Flux error"

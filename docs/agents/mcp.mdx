@@ -133,7 +133,7 @@ MCPServer(
 )
 ```
 
-- `"destructive"` gates tools whose annotations mark them destructive (`destructiveHint` not `false` and `readOnlyHint` not `true`). Tools with **no annotations at all are not gated** — gating them would mean gating every tool of every server that never annotated. Note the spec default: a tool that sets *any* annotation without `destructiveHint: false` counts as destructive, so a server that annotates `readOnlyHint: false` on every writer gates every writer.
+- `"destructive"` gates tools whose annotations mark them destructive (`destructiveHint` not `false` and `readOnlyHint` not `true`). Tools with **no annotations at all are not gated** — gating them would mean gating every tool of every server that never annotated. Note the spec default: a tool that sets *any* annotation without `destructiveHint: false` counts as destructive, so a server that annotates `readOnlyHint: false` on every writer gates every writer. Those same destructive tools also get `defer_until_eot=True`, whatever `approval` is set to (including no approval at all). A speculative voice turn will not run them until the turn is confirmed, and drops the call if the caller keeps talking. Unannotated tools are not deferred.
 - `"all"` gates every tool.
 - A one-argument callable receives the server's `mcp.types.Tool` once, at resolve time, and returns `True` to gate every call of that tool.
 - A two-argument callable receives the tool **and the call's arguments** and is evaluated per call, so one tool that multiplexes subcommands can gate some and wave others through. It may be async and may return a `bool`, a dict, or an `ApprovalPolicyDecision` (the same contract as [`requires_approval`](/human-in-the-loop/approval-gates)):

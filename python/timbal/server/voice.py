@@ -1073,6 +1073,22 @@ def build_voice_session(
         # (Flux, Munsit).
         for k in ("commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"):
             stt_extra.pop(k, None)
+    # Speculative generation asks Flux for EagerEndOfTurn. Leave
+    # ``eager_eot_threshold`` alone when another feature already set it, so a
+    # later merge can fill that variable first without a second query value.
+    eager_eot_threshold: float | None = None
+    if (
+        eager_eot_threshold is None
+        and merged.speculative_generation.enabled
+        and stt_provider == "deepgram-flux"
+    ):
+        from ..voice.deepgram import DeepgramFluxSTT
+
+        if isinstance(stt, DeepgramFluxSTT):
+            from ..voice.predictive_eou import flux_eager_threshold
+
+            eager_eot_threshold = flux_eager_threshold(stt_extra)
+            stt_extra["eager_eot_threshold"] = str(eager_eot_threshold)
     audio_in = AudioInputConfig(
         model=stt_model,
         language=merged.language,
@@ -1174,6 +1190,7 @@ def build_voice_session(
         session_kwargs["announce_background_results"] = defaults.events.announce_background_results
         session_kwargs["client_events"] = defaults.events.client_notify
         session_kwargs["on_busy"] = defaults.events.on_busy
+    session_kwargs["speculative_generation"] = merged.speculative_generation
 
     # Call recording is read from *server* config only — env (per session,
     # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).

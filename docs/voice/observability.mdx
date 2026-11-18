@@ -45,6 +45,8 @@ The stored trace follows the same rule. For an interrupted turn, the agent run's
 - `filler_spoken` and `filler_count`: whether a latency-masking phrase was spoken. When present, first-audio latency can measure the filler rather than the substantive answer.
 - `event`: true when the turn was started by a session event or an announced background result, not by the caller.
 - `vad_endpointed`: whether Silero endpointing forced the commit.
+- `speculative`: true when this turn started before the transcript was confirmed. `eou_to_first_audio_ms` is still measured from that confirmation, so 0 means audio was already waiting.
+- `speculative_generations_started` and `speculative_generations_discarded`: running totals for the call. A discarded attempt is one the caller resumed, or whose confirmed transcript did not match, or that was interrupted. The same totals are usage keys `speculative_generations:started` and `speculative_generations:discarded` on the turn's run.
 
 Measure time to the useful answer as well as first audio. Compare providers on representative calls, including slow tools, short acknowledgements, background noise, and interruptions.
 
