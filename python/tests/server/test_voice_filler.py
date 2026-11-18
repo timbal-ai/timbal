@@ -102,6 +102,19 @@ class TestFillerConfig:
         cfg = VoiceConfig(filler={"enabled": True})
         assert cfg.filler is not None
         assert cfg.filler.delay_secs == 1.0
+        assert cfg.filler.soft_timeout_secs is None
+        assert cfg.filler.message is None
+
+    def test_soft_timeout_defaults_off_and_minus_one_disables(self) -> None:
+        assert FillerConfig().soft_timeout_secs is None
+        assert FillerConfig(soft_timeout_secs=-1).soft_timeout_secs is None
+        assert FillerConfig(soft_timeout_secs="-1").soft_timeout_secs is None
+        assert FillerConfig(soft_timeout_secs=" -1.0 ").soft_timeout_secs is None
+        assert FillerConfig(message="  ").message is None
+
+    def test_negative_soft_timeout_fails(self) -> None:
+        with pytest.raises(ValidationError):
+            FillerConfig(soft_timeout_secs=-0.5)
 
 
 class TestFillerTurnFlow:
@@ -770,6 +783,27 @@ class TestFillerEnvDefaults:
         assert cfg.filler.model == "openai/gpt-4o-mini"
         assert cfg.filler.delay_secs == 0.5
 
+    def test_soft_timeout_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER_SOFT_TIMEOUT_SECS", "1.5")
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER_MESSAGE", "One moment.")
+        cfg = voice_routes.default_voice_config_from_env()
+        assert cfg.filler is not None
+        assert cfg.filler.soft_timeout_secs == 1.5
+        assert cfg.filler.message == "One moment."
+
+    def test_soft_timeout_env_minus_one_stays_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The env value is a string. "-1" disables and must not enable fillers."""
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER_SOFT_TIMEOUT_SECS", "-1")
+        assert voice_routes.default_voice_config_from_env().filler is None
+
+    def test_soft_timeout_env_minus_one_with_filler_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER", "1")
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER_SOFT_TIMEOUT_SECS", "-1")
+        cfg = voice_routes.default_voice_config_from_env()
+        assert cfg.filler is not None
+        assert cfg.filler.enabled is True
+        assert cfg.filler.soft_timeout_secs is None
+
     def test_explicit_off_wins_over_detail_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TIMBAL_VOICE_FILLER", "0")
         monkeypatch.setenv("TIMBAL_VOICE_FILLER_MODEL", "openai/gpt-4o-mini")
@@ -1065,3 +1099,224 @@ class TestEmptyRetryFiller:
         assert session.metrics[-1].filler_count == 1
         assert session.metrics[-1].tts_segments == 3
         assert session.metrics[-1].audio_bytes == 128 + (32 if partial_audio else 0)
+
+
+class TestSoftTimeout:
+    """Opt-in progress line after a quiet tool wait (ElevenLabs soft timeout / LiveKit with_filler)."""
+
+    async def test_no_filler_before_the_delay(self) -> None:
+        """A tool that returns inside the window stays silent, even if the classic delay is zero."""
+        session = _make_session(
+            tool_sleep=0.05,
+            filler={"message": PHRASE, "soft_timeout_secs": 0.4, "delay_secs": 0.0},
+        )
+        await session._run_turn("what is the answer?")
+        assert not any(e.filler for e in session.transcript)
+        assert session.metrics[-1].filler_spoken is False
+        assert session._filler_agent is None
+
+    async def test_message_without_soft_timeout_does_not_speak(self) -> None:
+        session = _make_session(tool_sleep=0.15, filler={"message": PHRASE, "delay_secs": 30.0})
+        await session._run_turn("what is the answer?")
+        assert not any(e.filler for e in session.transcript)
+        assert session.metrics[-1].filler_spoken is False
+
+    async def test_off_is_status_only(self) -> None:
+        """No filler config: the tool status event is still not audio."""
+        from timbal.voice import AgentStatus, FillerSpoken
+
+        session = _make_session(tool_sleep=0.05)
+        await session._run_turn("what is the answer?")
+        assert not any(e.filler for e in session.transcript)
+        assert session.metrics[-1].filler_spoken is False
+        saw_status = False
+        while not session._event_queue.empty():
+            ev = session._event_queue.get_nowait()
+            assert not isinstance(ev, FillerSpoken)
+            if isinstance(ev, AgentStatus):
+                saw_status = True
+        assert saw_status
+        assert all(text for text, _ in session._turn_tts_segment_records)
+
+    async def test_progress_line_is_spoken_audio_after_the_delay(self) -> None:
+        from timbal.voice import AgentStatus, AudioOutput, FillerSpoken
+
+        spoken_at: list[float] = []
+        session = _make_session(
+            tool_sleep=0.05,
+            wait_for_fillers=1,
+            filler={"message": PHRASE, "soft_timeout_secs": 0.12, "delay_secs": 30.0},
+        )
+        original = session._speak_filler
+
+        async def stamp(phrase: str, tool_name: str) -> None:
+            spoken_at.append(time.monotonic())
+            await original(phrase, tool_name)
+
+        session._speak_filler = stamp  # type: ignore[method-assign]
+        await session._run_turn("what is the answer?")
+
+        assert session._turn_tool_seen_at is not None
+        assert spoken_at
+        assert spoken_at[0] - session._turn_tool_seen_at >= 0.09
+        fillers = [e for e in session.transcript if e.filler]
+        assert [e.text for e in fillers] == [PHRASE]
+        replies = [e for e in session.transcript if e.role == "assistant" and not e.filler]
+        assert replies == [] or [e.text for e in replies] == ["The answer is 42."]
+        assert session.transcript.index(fillers[0]) < session.transcript.index(
+            next(e for e in session.transcript if e.role == "assistant" and not e.filler)
+        )
+        assert session.metrics[-1].filler_spoken is True
+        assert session._filler_agent is None
+        root = session._last_run_context.root_span()
+        memory_text = " ".join(m.collect_text() for m in root.memory)
+        assert PHRASE not in memory_text
+
+        audio = 0
+        saw_filler = False
+        saw_status = False
+        while not session._event_queue.empty():
+            ev = session._event_queue.get_nowait()
+            if isinstance(ev, AudioOutput):
+                audio += len(ev.data)
+            elif isinstance(ev, FillerSpoken):
+                saw_filler = ev.text == PHRASE
+            elif isinstance(ev, AgentStatus):
+                saw_status = True
+        assert audio > 0
+        assert saw_filler
+        assert saw_status
+        filler_audio = [n for text, n in session._turn_tts_segment_records if text == ""]
+        assert filler_audio and filler_audio[0] > 0
+
+    async def test_phrases_skip_the_generator(self) -> None:
+        def _boom(messages):  # noqa: ARG001
+            raise AssertionError("a ready-made progress line must not call the model")
+
+        session = _make_session(
+            tool_sleep=0.05,
+            wait_for_fillers=1,
+            filler={
+                "model": TestModel(handler=_boom),
+                "phrases": ["Mm, let me see."],
+                "soft_timeout_secs": 0.05,
+                "delay_secs": 30.0,
+            },
+        )
+        await session._run_turn("what is the answer?")
+        assert [e.text for e in session.transcript if e.filler] == ["Mm, let me see."]
+
+    async def test_generator_when_no_static_line(self) -> None:
+        session = _make_session(
+            tool_sleep=0.05,
+            wait_for_fillers=1,
+            filler={"model": TestModel(responses=[PHRASE]), "soft_timeout_secs": 0.05, "delay_secs": 30.0},
+        )
+        await session._run_turn("what is the answer?")
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE]
+        assert session._filler_agent is not None
+
+    async def test_preamble_then_quiet_tool_still_gets_a_line(self) -> None:
+        """A short lead-in used to suppress every filler. Silence after it is still a tool wait."""
+        first = Message(
+            role="assistant",
+            content=[TextContent(text="Sure,"), ToolUseContent(id="c1", name="lookup", input={"q": "x"})],
+            stop_reason="tool_use",
+        )
+        session = _make_session(
+            tool_sleep=0.05,
+            wait_for_fillers=1,
+            filler={"message": "Still checking.", "soft_timeout_secs": 0.08, "delay_secs": 0.0},
+            responses=[first, "The answer is 42."],
+        )
+        await session._run_turn("what is the answer?")
+        assert [e.text for e in session.transcript if e.filler] == ["Still checking."]
+        texts = [text for text, _ in session._turn_tts_segment_records]
+        assert texts[0] == "Sure,"
+        filler_at = texts.index("")
+        answer_at = next(i for i, text in enumerate(texts) if "The answer is 42." in text)
+        assert filler_at < answer_at
+
+    async def test_no_tool_means_no_progress_line(self) -> None:
+        session = _thinking_session(
+            think_secs=0.2,
+            filler={"message": PHRASE, "soft_timeout_secs": 0.05},
+        )
+        await session._run_turn("hi")
+        assert not any(e.filler for e in session.transcript)
+        assert session._turn_filler_task is None
+
+    async def test_disabled_soft_timeout_never_schedules(self) -> None:
+        session = _make_session(
+            tool_sleep=0.05,
+            filler={"enabled": False, "message": PHRASE, "soft_timeout_secs": 0.01},
+        )
+        await session._run_turn("what is the answer?")
+        assert session._turn_filler_task is None
+        assert not any(e.filler for e in session.transcript)
+
+    async def test_repeat_while_the_tool_continues(self) -> None:
+        session = _make_session(
+            tool_sleep=0.05,
+            wait_for_fillers=2,
+            filler={
+                "message": PHRASE,
+                "soft_timeout_secs": 0.04,
+                "repeat_secs": 0.04,
+                "max_per_turn": 2,
+                "delay_secs": 30.0,
+            },
+        )
+        await session._run_turn("what is the answer?")
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE, PHRASE]
+        assert session.metrics[-1].filler_count == 2
+
+    async def test_barge_in_cuts_the_progress_line(self) -> None:
+        from timbal.voice import SessionInterrupted, TextToSpeech
+
+        class SlowTTS(TextToSpeech):
+            async def connect(self, config) -> None:  # noqa: ARG002
+                pass
+
+            async def close(self) -> None:
+                pass
+
+            async def synthesize(self, text: str):  # noqa: ARG002
+                for _ in range(6):
+                    await asyncio.sleep(0.05)
+                    yield b"F" * 32
+
+        async def lookup(q: str) -> str:  # noqa: ARG001
+            await asyncio.sleep(5)
+            return "42"
+
+        agent = Agent(
+            name="voice_test",
+            model=TestModel(responses=[_tool_call_message(), "The answer is 42."]),
+            tools=[lookup],
+        )
+        session = VoiceSession(
+            agent,
+            _make_stt_class()(),
+            SlowTTS(),
+            turn_detector="heuristic",
+            filler={"message": PHRASE, "soft_timeout_secs": 0.02, "delay_secs": 30.0},
+        )
+        turn = asyncio.create_task(session._run_turn("what is the answer?"))
+        session._current_turn_task = turn
+        deadline = time.monotonic() + 2.0
+        while session._turn_audio_bytes == 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert session._turn_audio_bytes > 0
+        await session.interrupt()
+        await asyncio.wait_for(turn, timeout=2.0)
+
+        assert 0 < session._turn_audio_bytes < 6 * 32
+        assert not any(e.filler for e in session.transcript)
+        assert not any(e.role == "assistant" and not e.filler and "42" in e.text for e in session.transcript)
+        assert PHRASE in session._turn_filler_text
+        saw_interrupt = False
+        while not session._event_queue.empty():
+            if isinstance(session._event_queue.get_nowait(), SessionInterrupted):
+                saw_interrupt = True
+        assert saw_interrupt

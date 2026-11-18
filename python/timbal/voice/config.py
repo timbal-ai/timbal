@@ -48,13 +48,18 @@ def language_key(code: str | None) -> str:
 
 
 class FillerConfig(BaseModel):
-    """Spoken tool-call filler: a short LLM-generated phrase masks tool dead air.
+    """Spoken tool-call filler: a short phrase masks tool silence.
 
     Generation starts the moment a tool call is detected; the phrase is only
     spoken if the tool is still running after ``delay_secs`` and nothing else
     has been said this turn. ``think_delay_secs`` extends the same cover to the
     silence before the model has said or called anything, and ``phrases``
     makes the first filler instant instead of an LLM round trip.
+
+    ``soft_timeout_secs`` is a separate, opt-in progress line for a tool that
+    is still running after the caller has heard no agent audio for that long
+    (ElevenLabs ``soft_timeout_config``, LiveKit ``ctx.with_filler(delay=)``).
+    Unset, tool waits keep the rules above.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -97,6 +102,42 @@ class FillerConfig(BaseModel):
     Follow-ups are always generated, with the request in hand, so they can
     say what the assistant is working on. The line said on the previous turn
     is avoided when there is another to choose."""
+    soft_timeout_secs: float | None = Field(default=None, ge=0.0)
+    """Progress line during a tool wait. ``None`` (default) leaves tool waits
+    on the rules above — ElevenLabs' ``timeout_seconds: -1`` (disabled).
+
+    Set → once a tool call is in flight and the caller has heard no agent
+    audio for this many seconds, speak one progress line and keep waiting.
+    The wait is continuous silence: audio already playing (a preamble, the
+    answer, an earlier filler) resets it, matching LiveKit
+    ``ctx.with_filler(delay=)``. A tool that returns first stays silent.
+    Their recommended range is 0.5–8 seconds; any non-negative value is
+    accepted so a session can sit closer to its own tool latency.
+    ``-1`` is accepted and means unset."""
+    message: str | None = None
+    """Exact progress line for ``soft_timeout_secs``, spoken with no extra
+    model call. ElevenLabs ``message``; LiveKit ``with_filler("...")``.
+    Blank is dropped. ``None`` uses ``phrases`` when one matches the call's
+    language, otherwise the filler generator (their
+    ``use_llm_generated_message``). Ignored unless ``soft_timeout_secs`` is set."""
+
+    @field_validator("soft_timeout_secs", mode="before")
+    @classmethod
+    def _disabled_soft_timeout(cls, v: Any) -> Any:
+        # ElevenLabs uses -1 for "disabled". Omit / None is the same switch here.
+        # Env vars arrive as strings, before coercion, so "-1" must count too.
+        if isinstance(v, str):
+            v = v.strip()
+        if v in (-1, -1.0, "-1", "-1.0"):
+            return None
+        return v
+
+    @field_validator("message")
+    @classmethod
+    def _strip_message(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return v.strip() or None
 
     @field_validator("phrases")
     @classmethod

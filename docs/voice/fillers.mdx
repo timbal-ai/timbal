@@ -3,7 +3,7 @@ title: "Spoken Fillers"
 description: "Have the assistant acknowledge a slow tool call with a short spoken phrase"
 ---
 
-A filler is a generated phrase such as "One moment, let me check." It can cover a tool's waiting period before the substantive answer arrives. It uses the session's speech output, so it can be heard on phone and browser transports.
+A filler is a short phrase such as "One moment, let me check." It can cover a tool's waiting period before the substantive answer arrives. It uses the session's speech output, so it can be heard on phone and browser transports.
 
 ## Enable one filler
 
@@ -56,6 +56,22 @@ agent.voice_config["filler"] = {
     "max_per_turn": 2,
 }
 ```
+
+## Progress line during a long tool
+
+A client can show a status such as "Calling lookup…" while a tool runs. That event is not speech, so a caller on the phone still hears silence. `soft_timeout_secs` speaks a short line once the caller has heard no agent audio for that many seconds during a tool wait, then keeps waiting for the result.
+
+With `soft_timeout_secs` unset, a tool wait is unchanged. When `soft_timeout_secs` is set, the classic `delay_secs` tool-wait path is not used; `think_delay_secs` still covers silence before the first tool. A tool that finishes inside the window stays silent. Audio already playing resets the wait, so the line does not talk over a preamble or the answer. The caller can interrupt the line the same way they interrupt a reply.
+
+```python
+agent.voice_config["filler"] = {
+    "enabled": True,
+    "soft_timeout_secs": 1.5,
+    "message": "One moment, I'm checking that.",
+}
+```
+
+`message` is spoken directly, with no extra model call. Omit it to use `phrases` when one matches the call's language, or the filler generator otherwise. `repeat_secs` speaks another line after that much further silence, up to `max_per_turn`. ElevenLabs uses `-1` to disable this timeout; omit `soft_timeout_secs`, or set it to `-1`, for the same result.
 
 ## Before the first tool call
 
