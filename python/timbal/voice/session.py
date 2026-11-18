@@ -97,6 +97,7 @@ from .providers import (
 from .turn_detection import (
     CommitAction,
     PartialDecision,
+    ProviderTurnDetector,
     TurnDetector,
     TurnState,
     _is_same_user_utterance_refinement,
@@ -318,6 +319,8 @@ class VoiceSession:
         recorder: CallRecorder | None = None,
         session_id: str | None = None,
         hold_timeout_secs: float = 1.5,
+        ignore_backchannels: bool = False,
+        hold_unfinished_secs: float | None = None,
         tool_beat_secs: float | None = None,
         turn_timeout_secs: float = DEFAULT_TURN_TIMEOUT_SECS,
         turn_timeout_fallback: str | None = DEFAULT_TURN_TIMEOUT_FALLBACK,
@@ -343,6 +346,15 @@ class VoiceSession:
         # or a factory returning a singleton. Inspect ``session.turn_detector``,
         # not the object you passed in.
         self.turn_detector = resolve_turn_detector(turn_detector).clone()
+        if ignore_backchannels:
+            self.turn_detector.ignore_backchannels = True
+        if hold_unfinished_secs is not None:
+            if not isinstance(self.turn_detector, ProviderTurnDetector):
+                raise ValueError("hold_unfinished_secs requires the provider turn detector")
+            # Validate direct session construction the same way VoiceConfig does.
+            self.turn_detector.hold_unfinished_secs = ProviderTurnDetector(
+                hold_unfinished_secs=hold_unfinished_secs
+            ).hold_unfinished_secs
         self.audio_input = audio_input or AudioInputConfig()
         self.audio_output = audio_output or AudioOutputConfig()
         # PCM16 mono: 2 bytes per sample.
@@ -350,8 +362,9 @@ class VoiceSession:
             bytes_per_second=self.audio_output.sample_rate * 2,
         )
         # Default HOLD timeout when a detector returns CommitAction.HOLD without
-        # a per-decision override. Heuristic/provider never HOLD, so this is inert
-        # unless an opt-in detector (local / lexical) is used.
+        # a per-decision override. Heuristic never HOLDs. Provider HOLDs only
+        # when hold_unfinished_secs is set (and then puts the timeout on the
+        # decision). Local / lexical hold on their own.
         self.hold_timeout_secs = hold_timeout_secs
         if tool_beat_secs is not None and (not math.isfinite(tool_beat_secs) or tool_beat_secs < 0):
             raise ValueError("tool_beat_secs must be finite and non-negative")

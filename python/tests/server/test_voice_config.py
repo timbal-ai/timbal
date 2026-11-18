@@ -481,6 +481,28 @@ class TestDefaultPipeline:
         assert meta["tts_provider"] == "elevenlabs"
         assert session.audio_output.model == "eleven_v4_turbo"
 
+    def test_backchannel_and_unfinished_reach_the_provider_detector(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = self._session(VoiceConfig(ignore_backchannels=True, hold_unfinished_secs=1.2))
+        assert session.turn_detector.ignore_backchannels is True
+        assert session.turn_detector.hold_unfinished_secs == 1.2
+
+    def test_hold_unfinished_ignored_for_a_non_provider_detector(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = self._session(
+            VoiceConfig(turn_detector="heuristic", ignore_backchannels=True, hold_unfinished_secs=1.2)
+        )
+        assert session.turn_detector.ignore_backchannels is True
+        assert getattr(session.turn_detector, "hold_unfinished_secs", None) is None
+
+    def test_client_cannot_enable_turn_taking_knobs(self) -> None:
+        out = voice_routes.merge_client_voice_overrides(
+            VoiceConfig(ignore_backchannels=True, hold_unfinished_secs=1.2),
+            {"ignore_backchannels": False, "hold_unfinished_secs": 9},
+        )
+        assert out.ignore_backchannels is True
+        assert out.hold_unfinished_secs == 1.2
+
     def test_without_deepgram_key_falls_back_to_scribe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Deepgram reads its key only at connect: every session would fail there."""
         monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)

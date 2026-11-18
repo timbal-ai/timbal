@@ -399,6 +399,16 @@ class VoiceConfig(BaseModel):
     encoding: str = "pcm_s16le"
     stt_extra: dict[str, Any] = Field(default_factory=_default_stt_extra)
     tts_extra: dict[str, Any] = Field(default_factory=lambda: {"auto_mode": True})
+    ignore_backchannels: bool = False
+    """Drop pure English and Spanish acknowledgements while the assistant is
+    speaking and for one second after playback. "yeah" and "vale" do not
+    interrupt; "no", "stop", "para", and "sí, pero…" still do. Server-side
+    only. Off leaves interruptions unchanged."""
+    hold_unfinished_secs: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    """With provider turn detection, wait this long when a commit ends on a
+    trailing conjunction, preposition, determiner, or filler, then merge the
+    follow-up. None leaves those commits as turns. Ignored for other detectors.
+    Server-side only."""
     turn_detector: Any = None
     """Mode name, ``TurnDetector`` instance, or zero-arg factory.
     ``None`` (unset) resolves to ``"provider"`` on an STT with native

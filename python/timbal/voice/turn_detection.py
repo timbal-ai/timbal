@@ -32,7 +32,9 @@ deprecated text-classifier ONNX models.
 from __future__ import annotations
 
 import copy
+import math
 import re
+import unicodedata
 from abc import ABC, abstractmethod
 from collections import deque
 from difflib import SequenceMatcher
@@ -105,7 +107,8 @@ class CommitAction(StrEnum):
     HOLD = "hold"
     """Incomplete utterance — don't start the agent yet; wait for more speech
     or the session's hold timeout (Pipecat/LiveKit endpointing pattern).
-    Heuristic/provider detectors never emit this; only local/lexical opt-in."""
+    Heuristic never emits this. Provider emits it only when
+    ``hold_unfinished_secs`` is set. Local and lexical opt in on their own."""
 
 
 class CommitDecision(BaseModel):
@@ -183,6 +186,27 @@ class TurnDetector(ABC):
                 self._echo_leak_seen = True
             return True
         return self._echo_leak_seen and _resembles_stt_echo(text, state.assistant_text)
+
+    ignore_backchannels: bool = False
+    """Drop pure EN/ES acknowledgements while the assistant speaks, and for a
+    second after playback. Off by default. Commands ("stop", "para", "sí, pero…")
+    still interrupt. Shallow :meth:`clone` copies an instance override.
+    """
+
+    def suppresses_backchannel(self, text: str, state: TurnState) -> bool:
+        """Whether ``text`` is a pure acknowledgement that must not take the turn.
+
+        ElevenLabs ``interruption_ignore_terms``: case-insensitive match of the
+        whole utterance, and only as an interruption filter. LiveKit's filler
+        filter (agents#4492) is the same rule on a word list — every token has
+        to be an acknowledgement, and the filter applies while the agent is
+        speaking, not to a later answer of "okay".
+        """
+        if not self.ignore_backchannels or not text or not text.strip():
+            return False
+        if not _backchannel_window_open(state):
+            return False
+        return _is_pure_backchannel(text)
 
     def clone(self) -> TurnDetector:
         """Per-session copy for shared configs (server ``voice_config``).
@@ -553,6 +577,305 @@ def _looks_like_finished_utterance(text: str) -> bool:
     return stripped[-1] in _TERMINAL_END_CHARS
 
 
+# How long after playback a pure backchannel is still ignored.
+#
+# A final transcript can land ~0.6s after playback ends (Deepgram Flux
+# EndOfTurn). 1.0s is the top of that 0.6–1.0s window: late "yeah" commits
+# are dropped, and a real "okay" a second later is still an answer.
+_BACKCHANNEL_GRACE_SECS = 1.0
+
+# Orthographic variants of the EN/ES acknowledgements. "sí"/"ajá" lose their
+# accent under :func:`_normalize_spoken`. LiveKit's filler filter (agents#4492)
+# treats mm / mhm / hmm-style listener noises as backchannels, not as answers.
+# Flux often commits that sound as "M." or "Mm."; punctuation folds those to
+# "m" and "mm". "no", "yes", and "sí" stay out — they are real short turns.
+_BACKCHANNEL_WORDS = frozenset(
+    {
+        "m",
+        "mm",
+        "mmm",
+        "mhm",
+        "mhmm",
+        "mmhmm",
+        "uhhuh",
+        "yeah",
+        "yep",
+        "yup",
+        "yah",
+        "okay",
+        "ok",
+        "right",
+        "gotcha",
+        "vale",
+        "aja",
+        "claro",
+        "si",
+    }
+)
+_BACKCHANNEL_PHRASES = frozenset(
+    {
+        "uh huh",
+        "mm hmm",
+        "got it",
+    }
+)
+# Longest first so "got it" is consumed as a phrase, not as two unknown words.
+_BACKCHANNEL_PHRASE_TOKENS = tuple(
+    tuple(phrase.split()) for phrase in sorted(_BACKCHANNEL_PHRASES, key=lambda item: len(item.split()), reverse=True)
+)
+# Closed commands that are complete turns even when they are also function
+# words ("para" is a preposition and "stop"). "sí, pero…" is not in this set:
+# it is unfinished when the assistant is idle, and an interrupt while it speaks.
+_INTERRUPT_COMMANDS = frozenset(
+    {
+        "no",
+        "wait",
+        "hold on",
+        "stop",
+        "actually",
+        "espera",
+        "para",
+        "oh wait",
+    }
+)
+# Pipecat's incomplete-turn "short" class: the phrase is still open when it
+# ends on a conjunction, preposition, determiner, or filler ("because",
+# "es que", "eh"). Pronouns and copulas are left out — "thank you" and "así es"
+# are finished. Single-letter Spanish conjunctions ("y", "e", "o", "u") match
+# the lexical dangling list.
+_UNFINISHED_TRAILING = frozenset(
+    {
+        "and",
+        "or",
+        "but",
+        "so",
+        "because",
+        "if",
+        "when",
+        "while",
+        "that",
+        "which",
+        "who",
+        "then",
+        "as",
+        "than",
+        "to",
+        "of",
+        "for",
+        "with",
+        "from",
+        "in",
+        "on",
+        "at",
+        "by",
+        "into",
+        "about",
+        "over",
+        "the",
+        "a",
+        "an",
+        "my",
+        "your",
+        "our",
+        "their",
+        "his",
+        "her",
+        "its",
+        "um",
+        "uh",
+        "uhm",
+        "eh",
+        "y",
+        "e",
+        "o",
+        "u",
+        "pero",
+        "porque",
+        "que",
+        "si",
+        "cuando",
+        "mientras",
+        "de",
+        "del",
+        "para",
+        "por",
+        "con",
+        "sin",
+        "en",
+        "la",
+        "el",
+        "los",
+        "las",
+        "un",
+        "una",
+        "unos",
+        "unas",
+        "mi",
+        "tu",
+        "su",
+        "este",
+        "pues",
+    }
+)
+# A one-word commit is a turn unless the word cannot stand alone. "because" is
+# held; "él" (normalized "el") and "sí" are not. "para" is a command, so it is
+# absent here even though the multi-word phrase "lo necesito para" still holds.
+_UNFINISHED_SINGLE = frozenset(
+    {
+        "and",
+        "or",
+        "but",
+        "so",
+        "because",
+        "if",
+        "when",
+        "while",
+        "that",
+        "which",
+        "who",
+        "then",
+        "as",
+        "than",
+        "to",
+        "of",
+        "for",
+        "with",
+        "from",
+        "in",
+        "on",
+        "at",
+        "by",
+        "into",
+        "about",
+        "over",
+        "um",
+        "uh",
+        "uhm",
+        "eh",
+        "y",
+        "e",
+        "o",
+        "u",
+        "pero",
+        "porque",
+        "que",
+        "cuando",
+        "mientras",
+        "de",
+        "del",
+        "por",
+        "con",
+        "sin",
+        "en",
+        "este",
+        "pues",
+    }
+)
+_SPOKEN_PUNCT_RE = re.compile(r"[^\w\s']+", re.UNICODE)
+
+
+def _normalize_spoken(text: str, *, strip_accents: bool = True) -> str:
+    """Casefold, strip punctuation, turn hyphens into spaces.
+
+    Accents are stripped for acknowledgement matching ("sí"/"si", "ajá"/"aja").
+    The unfinished-word check keeps them: "sí" and "él" are finished answers,
+    and folding them onto "si"/"el" would hold "creo que sí".
+    """
+    folded = text.casefold().replace("’", "'").replace("‘", "'").replace("-", " ")
+    if strip_accents:
+        folded = unicodedata.normalize("NFD", folded)
+        folded = "".join(ch for ch in folded if unicodedata.category(ch) != "Mn")
+    folded = _SPOKEN_PUNCT_RE.sub(" ", folded)
+    return re.sub(r"\s+", " ", folded).strip()
+
+
+def _backchannel_window_open(state: TurnState) -> bool:
+    """Assistant is speaking, or stopped recently enough that a late commit is still its overlap."""
+    if state.assistant_active or state.audio_playing:
+        return True
+    since = state.seconds_since_assistant_active
+    return since is not None and 0 <= since <= _BACKCHANNEL_GRACE_SECS
+
+
+def _is_pure_backchannel(text: str) -> bool:
+    """True when the utterance is only acknowledgements ("yeah okay", "okay got it").
+
+    Multi-word phrases ("got it", "uh huh") are consumed as a span, so stacking
+    them with other acknowledgements still matches. One other word ("okay stop")
+    does not.
+    """
+    words = _normalize_spoken(text).split()
+    if not words:
+        return False
+    index = 0
+    while index < len(words):
+        matched = False
+        for phrase in _BACKCHANNEL_PHRASE_TOKENS:
+            size = len(phrase)
+            if tuple(words[index : index + size]) == phrase:
+                index += size
+                matched = True
+                break
+        if matched:
+            continue
+        if words[index] in _BACKCHANNEL_WORDS:
+            index += 1
+            continue
+        return False
+    return True
+
+
+def _is_interrupt_command(text: str) -> bool:
+    """Whole utterance is a command that must not be held or ignored."""
+    return _normalize_spoken(text) in _INTERRUPT_COMMANDS
+
+
+def _is_si_pero(text: str) -> bool:
+    """Acknowledgement that already continues ("sí, pero…", "sí, espera")."""
+    words = _normalize_spoken(text).split()
+    if len(words) < 2 or words[0] != "si":
+        return False
+    return any(word not in _BACKCHANNEL_WORDS for word in words[1:])
+
+
+def _cuts_through_backchannels(text: str) -> bool:
+    return _is_interrupt_command(text) or _is_si_pero(text)
+
+
+def _ends_unfinished(text: str) -> bool:
+    """Commit ends on a trailing function word, so the phrase is still open.
+
+    A question mark is a finished turn ("And?", "So?"). A period is not: STT
+    writes "because." on a fragment. A lone acknowledgement ("sí") is an
+    answer even though "si" is also the conjunction "if". Accents stay, so
+    "creo que sí" and "es él" are finished while "no sé si" and "dame el" are not.
+    """
+    stripped = text.strip()
+    if not stripped or stripped.endswith(("?", "？")):
+        return False
+    words = _normalize_spoken(stripped, strip_accents=False).split()
+    if not words or words[-1] not in _UNFINISHED_TRAILING:
+        return False
+    if len(words) == 1:
+        return words[0] in _UNFINISHED_SINGLE
+    return True
+
+
+def _merge_cumulative(held: str, new: str) -> str:
+    """Held fragment plus the follow-up, without doubling a cumulative transcript."""
+    held_norm = _normalize_spoken(held)
+    new_norm = _normalize_spoken(new)
+    if held_norm and (new_norm == held_norm or new_norm.startswith(held_norm + " ")):
+        return new.strip()
+    return _join_held(held, new)
+
+
+def _validate_positive_seconds(name: str, value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be finite and positive")
+    return float(value)
+
+
 class HeuristicTurnDetector(TurnDetector):
     """Default detector: the regex/similarity heuristics tuned for ElevenLabs Scribe.
 
@@ -585,9 +908,22 @@ class HeuristicTurnDetector(TurnDetector):
     async def on_partial(self, text: str, state: TurnState) -> PartialDecision:
         if not state.audio_playing or not text:
             return PartialDecision.IGNORE
+        if self.suppresses_backchannel(text, state):
+            logger.debug(
+                "stt_partial_skipped",
+                text_preview=text[:80],
+                is_backchannel=True,
+                audio_playing=state.audio_playing,
+            )
+            return PartialDecision.IGNORE
         is_noise = _is_noise(text)
         is_hesitation = _is_hesitation_only(text)
         is_echo = self.echo_verdict(text, state) if not is_noise else False
+        # The min-words gate stays for blips ("Nice."). Commands the backchannel
+        # list must not swallow ("stop", "para", "sí, pero…") cut TTS on the
+        # partial, or they wait out endpointing next to the words we just dropped.
+        if self.ignore_backchannels and _cuts_through_backchannels(text) and not is_noise and not is_echo:
+            return PartialDecision.BARGE_IN
         too_short = len(text) < self.MIN_BARGE_IN_PARTIAL_CHARS or len(text.split()) < self.MIN_BARGE_IN_PARTIAL_WORDS
         if not is_noise and not is_hesitation and not is_echo and not too_short:
             return PartialDecision.BARGE_IN
@@ -628,6 +964,8 @@ class HeuristicTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
         if _is_unvoiced_hallucination(text, state):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination_no_vad")
+        if self.suppresses_backchannel(text, state):
+            return CommitDecision(action=CommitAction.IGNORE, text=text, reason="backchannel")
         # Pending HOLD: STT often re-commits a longer form of the same fragment.
         # Mid-turn "refinement" IGNORE would freeze the held text until timeout —
         # re-HOLD with the updated utterance instead (session trusts decision.text).
@@ -741,19 +1079,83 @@ class ProviderTurnDetector(TurnDetector):
     obvious noise/garbage (and assistant echo while speaking) — no heuristic
     continuation merging that fights the provider.
 
+    ``hold_unfinished_secs`` (default off) HOLDs a commit that ends on a
+    trailing EN/ES conjunction, preposition, determiner, or filler and merges
+    the follow-up. It does not fire while the assistant is speaking: a HOLD
+    during playback is deferred and would swallow "sí, pero…". A resumed
+    unheard turn is a separate decision and belongs on commits this method
+    still returns as ``NEW_TURN``.
+
     Opt-in: ``resolve_turn_detector("provider")`` or
     ``VoiceSession(..., turn_detector=ProviderTurnDetector())``.
     """
+
+    def __init__(self, *, hold_unfinished_secs: float | None = None) -> None:
+        # Keyword-only so a resumed-merge window can sit beside this without
+        # shifting arguments. The two decisions stay independent.
+        if hold_unfinished_secs is None:
+            self.hold_unfinished_secs: float | None = None
+            return
+        self.hold_unfinished_secs = _validate_positive_seconds("hold_unfinished_secs", hold_unfinished_secs)
+
+    def _continues_open_hold(self, text: str, state: TurnState) -> bool:
+        """A one-word function-word follow-up ("the", "eh") belongs to the hold.
+
+        Those tokens are otherwise dropped as contentless or hesitation, which
+        is right for a ghost "the" after a finished turn and wrong once a
+        phrase is already open ("I need it for" + "the").
+        """
+        if self.hold_unfinished_secs is None or not state.holding or not state.active_user_text:
+            return False
+        words = _normalize_spoken(text).split()
+        return len(words) == 1 and words[0] in _UNFINISHED_TRAILING
+
+    def _unfinished_decision(self, text: str, state: TurnState) -> CommitDecision | None:
+        """HOLD an open phrase, or merge it with the commit that follows.
+
+        Returns None when the commit should keep the caller's normal action
+        (a new turn, or a resumed merge decided by another knob).
+        """
+        if self.hold_unfinished_secs is None:
+            return None
+        if state.holding and state.active_user_text:
+            merged = _merge_cumulative(state.active_user_text, text)
+            # Re-HOLD during playback would defer the interrupt. A follow-up
+            # that arrives over the assistant starts the merged turn now.
+            if state.assistant_active or state.audio_playing:
+                return CommitDecision(action=CommitAction.NEW_TURN, text=merged, reason="unfinished_merge")
+            if _ends_unfinished(merged) and not _is_interrupt_command(text):
+                return CommitDecision(
+                    action=CommitAction.HOLD,
+                    text=merged,
+                    reason="unfinished_merge",
+                    hold_timeout_secs=self.hold_unfinished_secs,
+                )
+            return CommitDecision(action=CommitAction.NEW_TURN, text=merged, reason="unfinished_merge")
+        if state.assistant_active or state.audio_playing:
+            return None
+        if _is_interrupt_command(text) or not _ends_unfinished(text):
+            return None
+        return CommitDecision(
+            action=CommitAction.HOLD,
+            text=text,
+            reason="unfinished",
+            hold_timeout_secs=self.hold_unfinished_secs,
+        )
 
     async def on_partial(self, text: str, state: TurnState) -> PartialDecision:
         # Provider already endpointed; partials are captions only unless clearly
         # a barge-in while audio is playing.
         if not state.audio_playing or not text:
             return PartialDecision.IGNORE
+        if self.suppresses_backchannel(text, state):
+            return PartialDecision.IGNORE
         if _is_noise(text) or _is_garbage_commit(text) or _is_hesitation_only(text):
             return PartialDecision.IGNORE
         if self.echo_verdict(text, state):
             return PartialDecision.IGNORE
+        if self.ignore_backchannels and _cuts_through_backchannels(text):
+            return PartialDecision.BARGE_IN
         # Same min-words gate as HeuristicTurnDetector: one short partial while
         # the assistant is speaking is more often a mic blip than a barge-in.
         if len(text.strip()) < 4 or len(text.split()) < HeuristicTurnDetector.MIN_BARGE_IN_PARTIAL_WORDS:
@@ -765,14 +1167,23 @@ class ProviderTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="noise")
         if _is_garbage_commit(text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="garbage")
-        if _is_hesitation_only(text):
+        continuing = self._continues_open_hold(text, state)
+        if _is_hesitation_only(text) and not continuing:
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hesitation")
-        if _is_contentless_single_token(text):
+        if _is_contentless_single_token(text) and not continuing:
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="contentless")
         if self.echo_verdict(text, state, arm=True):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
         if _is_unvoiced_hallucination(text, state):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination_no_vad")
+        if self.suppresses_backchannel(text, state):
+            return CommitDecision(action=CommitAction.IGNORE, text=text, reason="backchannel")
+        # Unfinished HOLD before the final NEW_TURN. A resumed-merge check
+        # belongs between these two: it only applies to commits that would
+        # otherwise start a turn, and it must not see a backchannel.
+        unfinished = self._unfinished_decision(text, state)
+        if unfinished is not None:
+            return unfinished
         return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="provider")
 
 
@@ -1031,7 +1442,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
 
     def clone(self) -> LocalAudioTurnDetector:
         """Fresh PCM buffer per session; the ``audio_eou`` model stays shared."""
-        return type(self)(
+        cloned = type(self)(
             audio_eou=self.audio_eou,
             completion_threshold=self.completion_threshold,
             hold_timeout_secs=self.hold_timeout_secs,
@@ -1039,6 +1450,10 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             text_incomplete_hold_timeout_secs=self.text_incomplete_hold_timeout_secs,
             fallback_text_eou=self.fallback_text_eou,
         )
+        # The constructor does not take this. copy.copy on the base class keeps
+        # an instance override; this rebuild must do the same.
+        cloned.ignore_backchannels = self.ignore_backchannels
+        return cloned
 
     def push_audio(self, chunk: bytes) -> None:
         if not chunk:
