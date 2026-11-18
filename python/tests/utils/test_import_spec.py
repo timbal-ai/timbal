@@ -61,6 +61,7 @@ class TestHomeExpansion:
         entry = home / "home_entry.py"
         entry.write_text("handler = 42\n")
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
         # load() intentionally retains its module and import path.
         monkeypatch.setattr(sys, "path", list(sys.path))
         monkeypatch.delitem(sys.modules, "home_entry", raising=False)
@@ -83,6 +84,7 @@ class TestHomeExpansion:
         workspace.mkdir()
         (workspace / "timbal.yaml").write_text("fqn: '~/entry.py::handler'\n")
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
 
         assert parse_fqn(workspace).path == home / "entry.py"
 
