@@ -1,8 +1,11 @@
 import asyncio
+import concurrent.futures
+import contextvars
 import json as json_lib
 import os
+import threading
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any, Literal
 
 import httpx
@@ -169,12 +172,17 @@ def _resolve_url_and_headers(
         return url, headers
 
 
-class _RetryBudget:
-    """Wall-clock budget for a request and all its retries (``total_timeout``).
+class _TotalTimeoutExceeded(Exception):
+    """A request was still in flight at its ``total_timeout`` deadline."""
 
-    No retry starts when its wait would end past the deadline, and each
-    attempt's timeout phases are capped at the time left, so the whole call
-    stays within the budget instead of each attempt getting the full timeout.
+
+class _RetryBudget:
+    """Deadline for one call and all its retries (``total_timeout``).
+
+    An attempt is cancelled at the deadline (:meth:`run`), whatever the phase it
+    is in: httpx timeouts are per phase and per read, so a response dripping in
+    under the read timeout would otherwise run on. No retry starts when its
+    wait would end past the deadline (:meth:`exhausted_by`).
     """
 
     __slots__ = ("deadline",)
@@ -182,21 +190,44 @@ class _RetryBudget:
     def __init__(self, total: float) -> None:
         self.deadline = time.monotonic() + total
 
+    def left(self) -> float:
+        return self.deadline - time.monotonic()
+
     def exhausted_by(self, wait: float) -> bool:
-        return time.monotonic() + wait >= self.deadline
+        return self.left() <= wait
 
-    def cap(self, timeout: httpx.Timeout) -> httpx.Timeout:
-        left = max(self.deadline - time.monotonic(), 0.001)
+    async def run(self, attempt: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
+        timeout = asyncio.timeout(self.left())
+        try:
+            async with timeout:
+                return await attempt()
+        except TimeoutError as exc:
+            if not timeout.expired():
+                raise  # the attempt's own TimeoutError, not this deadline
+            raise _TotalTimeoutExceeded from exc
 
-        def phase(value: float | None) -> float:
-            return left if value is None else min(value, left)
 
-        return httpx.Timeout(
-            connect=phase(timeout.connect),
-            read=phase(timeout.read),
-            write=phase(timeout.write),
-            pool=phase(timeout.pool),
-        )
+def _total_timeout_error(url: str, total_timeout: float) -> PlatformError:
+    return PlatformError(
+        f"\n"
+        f"  URL: {url}\n"
+        f"  Error: no response within the call's total timeout (total_timeout={total_timeout:g}s, retries included)"
+    )
+
+
+def _status_error(exc: httpx.HTTPStatusError) -> PlatformError:
+    """PlatformError for a failed platform response."""
+    try:
+        error_body = exc.response.json()
+    except Exception:
+        error_body = exc.response.text
+    return PlatformError(
+        f"\n"
+        f"  URL: {exc.request.url}\n"
+        f"  Status: {exc.response.status_code} {exc.response.reason_phrase}\n"
+        f"  Response body: {error_body or None}",
+        status_code=exc.response.status_code,
+    )
 
 
 async def _request(
@@ -219,10 +250,13 @@ async def _request(
     index, returns seconds to wait (default: 0.1s doubling). A ``Retry-After``
     on 429 still wins when longer. ``timeout`` overrides
     :func:`_default_timeout` (connect 10s, read/write unbounded; see
-    ``TIMBAL_HTTP_*_TIMEOUT``). ``total_timeout`` bounds the whole call,
-    retries and their waits included: each attempt's timeout phases are capped
-    at the time left, and a retry whose wait would end past it is not
-    attempted (the last failure is raised instead).
+    ``TIMBAL_HTTP_*_TIMEOUT``). ``total_timeout`` is a deadline, in seconds,
+    for the whole call, retries and their waits included. An attempt still in
+    flight at the deadline is cancelled and the call raises
+    :class:`PlatformError`. A retry whose wait would end past the deadline is
+    not attempted: the call ends as it does after its last retry, raising that
+    failure. ``timeout`` alone cannot give this bound: it applies per phase
+    and per read, and again on every retry.
     """
     url, headers = _resolve_url_and_headers(service, path, headers)
     if timeout is None:
@@ -242,19 +276,26 @@ async def _request(
         payload_kwargs["files"] = files
     budget = _RetryBudget(total_timeout) if total_timeout is not None else None
 
+    async def send() -> httpx.Response:
+        async with request_client(timeout) as client:
+            res = await client.request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                timeout=timeout,
+                **payload_kwargs,
+            )
+            res.raise_for_status()
+            return res
+
     for attempt in range(max_retries + 1):
         try:
-            async with request_client(timeout) as client:
-                res = await client.request(
-                    method,
-                    url,
-                    headers=headers,
-                    params=params,
-                    timeout=budget.cap(timeout) if budget is not None else timeout,
-                    **payload_kwargs,
-                )
-                res.raise_for_status()
-                return res
+            if budget is None:
+                return await send()
+            return await budget.run(send)
+        except _TotalTimeoutExceeded as exc:
+            raise _total_timeout_error(url, total_timeout) from exc
         except httpx.HTTPStatusError as exc:
             try:
                 error_body = exc.response.json()
@@ -270,6 +311,14 @@ async def _request(
                     status_code=exc.response.status_code,
                 ) from exc
             # Retry on 429, 5xx, or other errors
+            if attempt == max_retries:
+                raise PlatformError(
+                    f"\n"
+                    f"  URL: {exc.request.url}\n"
+                    f"  Status: {exc.response.status_code} {exc.response.reason_phrase}\n"
+                    f"  Response body: {error_body or None}",
+                    status_code=exc.response.status_code,
+                ) from exc
             # Default exponential backoff: 100ms, 200ms, 400ms
             wait_time = backoff(attempt) if backoff is not None else 0.1 * (2**attempt)
             if exc.response.status_code == 429:
@@ -279,14 +328,8 @@ async def _request(
                         wait_time = max(wait_time, float(retry_after))
                     except ValueError:
                         pass
-            if attempt == max_retries or (budget is not None and budget.exhausted_by(wait_time)):
-                raise PlatformError(
-                    f"\n"
-                    f"  URL: {exc.request.url}\n"
-                    f"  Status: {exc.response.status_code} {exc.response.reason_phrase}\n"
-                    f"  Response body: {error_body or None}",
-                    status_code=exc.response.status_code,
-                ) from exc
+            if budget is not None and budget.exhausted_by(wait_time):
+                raise _status_error(exc) from exc
             logger.warning(
                 f"Request failed, retrying in {wait_time:.1f}s",
                 attempt=attempt + 1,
@@ -295,8 +338,10 @@ async def _request(
             )
             await asyncio.sleep(wait_time)
         except httpx.TimeoutException as exc:
+            if attempt == max_retries:
+                raise PlatformError(_timeout_error_message(exc, url, timeout)) from exc
             wait_time = backoff(attempt) if backoff is not None else 0.1 * (2**attempt)
-            if attempt == max_retries or (budget is not None and budget.exhausted_by(wait_time)):
+            if budget is not None and budget.exhausted_by(wait_time):
                 raise PlatformError(_timeout_error_message(exc, url, timeout)) from exc
             logger.warning(
                 f"Request timed out, retrying in {wait_time:.1f}s",
@@ -307,8 +352,10 @@ async def _request(
             await asyncio.sleep(wait_time)
         except Exception as exc:
             # Retry on any other error (network, etc.)
+            if attempt == max_retries:
+                raise
             wait_time = backoff(attempt) if backoff is not None else 0.1 * (2**attempt)
-            if attempt == max_retries or (budget is not None and budget.exhausted_by(wait_time)):
+            if budget is not None and budget.exhausted_by(wait_time):
                 raise
             logger.warning(
                 f"Request failed, retrying in {wait_time:.1f}s",
@@ -317,21 +364,6 @@ async def _request(
                 error=str(exc),
             )
             await asyncio.sleep(wait_time)
-
-
-def _status_error(exc: httpx.HTTPStatusError) -> PlatformError:
-    """PlatformError for a failed platform response, same shape as :func:`_request`'s."""
-    try:
-        error_body = exc.response.json()
-    except Exception:
-        error_body = exc.response.text
-    return PlatformError(
-        f"\n"
-        f"  URL: {exc.request.url}\n"
-        f"  Status: {exc.response.status_code} {exc.response.reason_phrase}\n"
-        f"  Response body: {error_body or None}",
-        status_code=exc.response.status_code,
-    )
 
 
 def _request_sync(
@@ -345,70 +377,54 @@ def _request_sync(
     service: str | None = None,
     total_timeout: float | None = None,
 ) -> httpx.Response:
-    """Blocking counterpart of :func:`_request` for code that cannot await.
+    """Blocking :func:`_request`, for code that cannot await (a lazy ``File`` read).
 
-    For sync call sites that may already be running inside an event loop (e.g.
-    a lazy ``File`` read), where starting or nesting a loop is not an option.
-    Same URL/auth resolution, retry policy and ``PlatformError`` mapping as
-    :func:`_request`; JSON bodies only, no connection reuse. Retries sleep
-    with ``time.sleep``, so they block the calling thread.
+    Runs :func:`_request` on a private event loop in a helper thread and waits
+    for it, so it is safe on a thread whose own loop is running (it never
+    touches that loop) and auth, retries and errors are :func:`_request`'s. The
+    helper thread runs in a copy of the caller's context (run context included).
 
-    ``total_timeout`` bounds the whole call as in :func:`_request`: attempts
-    and retry sleeps together, which matters here since both block the thread.
+    The calling thread is blocked until the call ends, and never longer than
+    ``total_timeout``: the request is cancelled at that deadline, and the wait
+    itself stops there too should the helper thread fail to finish in time.
     """
-    url, headers = _resolve_url_and_headers(service, path, headers)
-    if timeout is None:
-        timeout = _default_timeout()
-    elif isinstance(timeout, (int, float)):
-        timeout = httpx.Timeout(float(timeout), read=None)
-    budget = _RetryBudget(total_timeout) if total_timeout is not None else None
+    done: concurrent.futures.Future[httpx.Response] = concurrent.futures.Future()
 
-    def last_try(attempt: int, wait_time: float) -> bool:
-        return attempt == max_retries or (budget is not None and budget.exhausted_by(wait_time))
-
-    for attempt in range(max_retries + 1):
-        wait_time = 0.1 * (2**attempt)
+    async def call() -> None:
         try:
-            attempt_timeout = budget.cap(timeout) if budget is not None else timeout
-            res = httpx.request(method, url, headers=headers, params=params, json=json, timeout=attempt_timeout)
-            res.raise_for_status()
-            return res
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
-            if 400 <= status_code < 500 and status_code != 429:
-                raise _status_error(exc) from exc
-            if status_code == 429:
-                try:
-                    wait_time = max(wait_time, float(exc.response.headers.get("Retry-After", "")))
-                except ValueError:
-                    pass
-            if last_try(attempt, wait_time):
-                raise _status_error(exc) from exc
-            logger.warning(
-                f"Request failed, retrying in {wait_time:.1f}s",
-                attempt=attempt + 1,
+            res = await _request(
+                method,
+                path,
+                headers=headers,
+                params=params,
+                json=json,
                 max_retries=max_retries,
-                status_code=status_code,
+                timeout=timeout,
+                service=service,
+                total_timeout=total_timeout,
             )
-        except httpx.TimeoutException as exc:
-            if last_try(attempt, wait_time):
-                raise PlatformError(_timeout_error_message(exc, url, timeout)) from exc
-            logger.warning(
-                f"Request timed out, retrying in {wait_time:.1f}s",
-                attempt=attempt + 1,
-                max_retries=max_retries,
-                error=type(exc).__name__,
-            )
-        except Exception as exc:
-            if last_try(attempt, wait_time):
-                raise
-            logger.warning(
-                f"Request failed, retrying in {wait_time:.1f}s",
-                attempt=attempt + 1,
-                max_retries=max_retries,
-                error=str(exc),
-            )
-        time.sleep(wait_time)
+        except BaseException as exc:
+            done.set_exception(exc)
+        else:
+            done.set_result(res)
+
+    def run() -> None:
+        try:
+            asyncio.run(call())
+        except BaseException as exc:
+            if not done.done():  # the loop itself failed, before or after the call
+                done.set_exception(exc)
+
+    # The result is published from inside the loop: closing the loop afterwards
+    # can outlast the deadline (it joins asyncio's executor, e.g. a DNS lookup
+    # still in flight), and the caller must not wait for that.
+    context = contextvars.copy_context()
+    threading.Thread(target=context.run, args=(run,), name="timbal-request-sync", daemon=True).start()
+    finished, _ = concurrent.futures.wait([done], timeout=total_timeout)
+    if not finished:
+        url, _ = _resolve_url_and_headers(service, path, headers)
+        raise _total_timeout_error(url, total_timeout)
+    return done.result()
 
 
 async def _stream(

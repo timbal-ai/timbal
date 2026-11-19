@@ -74,16 +74,19 @@ def _is_platform_cdn_host(host: str | None, platform_config: Any) -> bool:
 # object, re-checks the caller's access and mints a fresh URL. It ignores the old
 # signature, so expired URLs and ones signed with a revoked key both re-sign.
 # Only reads change: the stored reference stays the URL that was stored.
-
-_RESIGN_SKEW_SECS = 60
-"""Re-sign before fetching when the URL expires within this many seconds."""
+#
+# Two rules keep a read from ever doing worse than it did before re-signing:
+# - A stored URL that has not reached its Expires is the read's first request,
+#   exactly as before. Replacement URLs and the sign endpoint come into play
+#   only after the CDN refused it (403) or once it is past its Expires.
+# - No read fails without having fetched the stored URL: this machine's clock
+#   decides what is tried first, never whether the stored URL is tried at all.
 
 _SIGN_BUDGET_SECS = 10.0
-"""Wall-clock budget for one sign call, retries included (``total_timeout``).
+"""Deadline for one sign call, retries included (``total_timeout``).
 
-Short on purpose: a URL re-signed proactively has under _RESIGN_SKEW_SECS left,
-which a slow sign call would spend before the read can fall back to it, and the
-sync path blocks its thread (possibly an event loop's) for the whole call."""
+Short on purpose: the sync read path blocks its thread (possibly an event
+loop's) for the whole call."""
 
 _MINT_CACHE_MAX = 1_000
 """Cap on memoized mints; the least recently stored entry is evicted past it."""
@@ -110,8 +113,17 @@ def _signed_url_expires(url: str) -> float | None:
         return None
 
 
-def _expiring(expires: float | None) -> bool:
-    return expires is not None and expires - _RESIGN_SKEW_SECS <= time.time()
+def _unexpired(expires: float | None) -> bool:
+    """Not past ``expires`` by this machine's clock (or no Expires to go by): the URL may still serve."""
+    return expires is None or expires > time.time()
+
+
+def _failure_label(failure: Any) -> Any:
+    """How a failed fetch is logged: its status code, else the exception's type (never a signed URL)."""
+    if isinstance(failure, int):
+        return failure
+    response = getattr(failure, "response", None)
+    return getattr(response, "status_code", None) or type(failure).__name__
 
 
 class _SignedContentUrl:
@@ -161,18 +173,15 @@ class _SignedContentUrl:
         """The URL without its query string — safe to log (no signature)."""
         return self._cache_key[2]
 
-    def expiring(self) -> bool:
-        return _expiring(self.expires)
-
     def unexpired(self) -> bool:
         """The stored URL has not reached its Expires (or carries none), so it may still serve."""
-        return self.expires is None or self.expires > time.time()
+        return _unexpired(self.expires)
 
     def cached(self) -> str | None:
-        """A memoized mint for this object that is not about to expire, if any."""
+        """A memoized mint for this object that has not reached its own Expires, if any."""
         with _mint_cache_lock:
             entry = _mint_cache.get(self._cache_key)
-        if entry is None or _expiring(entry[1]):
+        if entry is None or not _unexpired(entry[1]):
             return None
         return entry[0]
 
@@ -194,12 +203,29 @@ class _SignedContentUrl:
                 _mint_cache.popitem(last=False)
             _mint_cache[self._cache_key] = (minted, _signed_url_expires(minted))
 
-    def forget(self, url: str) -> None:
-        """Drop the memoized mint if it is ``url`` (a URL that just failed to serve)."""
+    def forget(self, url: str, failure: Any) -> None:
+        """Drop the memoized mint if it is ``url``, which just failed to serve.
+
+        ``failure`` is the error status it answered or the exception its fetch raised.
+        """
+        logger.warning(
+            "Dropping a memoized platform content URL that failed to download",
+            url=self.object_url,
+            failure=_failure_label(failure),
+        )
         with _mint_cache_lock:
             entry = _mint_cache.get(self._cache_key)
             if entry is not None and entry[0] == url:
                 del _mint_cache[self._cache_key]
+
+    def mint_failed(self, exc: Exception) -> Exception:
+        """The freshly minted URL did not download (error status, or the fetch raised)."""
+        logger.warning(
+            "Re-signed platform content URL failed to download",
+            url=self.object_url,
+            failure=_failure_label(exc),
+        )
+        return exc
 
     def sign_failed(self, exc: Exception) -> Exception:
         logger.warning(
@@ -211,32 +237,35 @@ class _SignedContentUrl:
         return exc
 
 
-def _raise_for_status(res: Any, sign_error: Exception | None) -> None:
+def _raise_for_status(res: Any, sign_error: Exception) -> None:
     """raise_for_status(), chaining the sign failure that left the URL unrefreshed."""
     import httpx
 
     try:
         res.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        if sign_error is not None:
-            raise exc from sign_error
-        raise
+        raise exc from sign_error
 
 
 # The two drivers below are the same flow, one awaiting and one blocking:
-# 1. A memoized mint for the object that is not about to expire serves the read
-#    if it downloads. If it fails (any error status), it is dropped and the read
-#    goes on as if nothing was memoized.
-# 2. If the stored URL expires within _RESIGN_SKEW_SECS, re-sign first. A failed
-#    sign falls back to the URL as stored (it may still have a few seconds).
-# 3. On a 403, re-sign once (unless step 2 already tried) and retry once.
-# 4. Still failing and the stored URL was never fetched: if it has not reached
-#    its Expires, fetch it once. A refreshed URL can fail (e.g. the endpoint fell
-#    back to an unsigned legacy url) while the stored one still has seconds.
-# A mint is memoized only once it has served a download, so a URL that fails is
-# never reused by later reads. At most one sign call per read, so a sign
-# endpoint that refuses (403) can't loop: the read raises the CDN's HTTP error,
-# chained to the sign failure.
+# 1. A stored URL that has not reached its Expires is fetched first, exactly as a
+#    read that never re-signs would. Its answer is final (the download, or the
+#    error raised) unless it is a 403: expired by the CDN's clock, or a revoked
+#    key.
+# 2. Otherwise a memoized mint for the object that has not reached its own
+#    Expires is fetched, and serves the read if it downloads. If it fails in any
+#    way (an error status, or the fetch raises: connection refused, timeout, ...)
+#    it is dropped.
+# 3. Otherwise sign once and fetch the minted URL. A mint is memoized only once
+#    it has served a download, so a URL that fails is never reused by later reads.
+# 4. If none of that served the read and step 1 skipped the stored URL (it is
+#    past its Expires here, but this machine's clock may run ahead of the CDN's),
+#    the stored URL is fetched: the CDN has the last word.
+# 5. If nothing served: a failed sign call raises the stored URL's error chained
+#    to the sign failure; a minted URL that failed to download raises its own
+#    error.
+# At most one sign call per read, so a sign endpoint that refuses (403) can't
+# loop.
 
 
 async def _get_signed_content(target: _SignedContentUrl, get: Callable[[str], Awaitable[Any]]) -> Any:
@@ -254,39 +283,60 @@ async def _get_signed_content(target: _SignedContentUrl, get: Callable[[str], Aw
         )
         return target.minted_url(res.json())
 
+    # 1. The stored URL, while it may still serve.
+    stored = None  # its error response, once the CDN has answered it
+    if target.unexpired():
+        res = await get(target.url)
+        if res.status_code != 403:
+            res.raise_for_status()
+            return res
+        stored = res
+
+    # 2. A memoized mint.
     cached = target.cached()
     if cached is not None:
-        res = await get(cached)
-        if res.is_success:
-            return res
-        target.forget(cached)
-
-    signed = False
-    sign_error = None
-    fetch_url = target.url
-    if target.expiring():
-        signed = True
         try:
-            fetch_url = await mint()
+            res = await get(cached)
         except Exception as exc:
-            sign_error = target.sign_failed(exc)
-    res = await get(fetch_url)
-    tried_stored = fetch_url == target.url
-    if res.status_code == 403 and not signed:
-        try:
-            fetch_url = await mint()
-        except Exception as exc:
-            sign_error = target.sign_failed(exc)
+            target.forget(cached, exc)
         else:
-            res = await get(fetch_url)
-            tried_stored = tried_stored or fetch_url == target.url
-    if not res.is_success and not tried_stored and target.unexpired():
-        fetch_url = target.url
-        res = await get(fetch_url)
-    if res.is_success and fetch_url != target.url:
-        target.remember(fetch_url)
-    _raise_for_status(res, sign_error)
-    return res
+            if res.is_success:
+                return res
+            target.forget(cached, res.status_code)
+
+    # 3. A fresh mint.
+    sign_error = mint_error = None
+    try:
+        minted = await mint()
+    except Exception as exc:
+        sign_error = target.sign_failed(exc)
+    else:
+        try:
+            res = await get(minted)
+            res.raise_for_status()
+        except Exception as exc:
+            mint_error = target.mint_failed(exc)
+        else:
+            if minted != target.url:
+                target.remember(minted)
+            return res
+
+    # 4. The stored URL as the last resort, if step 1 skipped it.
+    if stored is None:
+        try:
+            res = await get(target.url)
+        except Exception as exc:
+            if mint_error is None:
+                raise exc from sign_error
+        else:
+            if res.is_success:
+                return res
+            stored = res
+
+    # 5. Nothing served.
+    if mint_error is not None:
+        raise mint_error
+    _raise_for_status(stored, sign_error)
 
 
 def _get_signed_content_sync(target: _SignedContentUrl, get: Callable[[str], Any]) -> Any:
@@ -304,39 +354,60 @@ def _get_signed_content_sync(target: _SignedContentUrl, get: Callable[[str], Any
         )
         return target.minted_url(res.json())
 
+    # 1. The stored URL, while it may still serve.
+    stored = None  # its error response, once the CDN has answered it
+    if target.unexpired():
+        res = get(target.url)
+        if res.status_code != 403:
+            res.raise_for_status()
+            return res
+        stored = res
+
+    # 2. A memoized mint.
     cached = target.cached()
     if cached is not None:
-        res = get(cached)
-        if res.is_success:
-            return res
-        target.forget(cached)
-
-    signed = False
-    sign_error = None
-    fetch_url = target.url
-    if target.expiring():
-        signed = True
         try:
-            fetch_url = mint()
+            res = get(cached)
         except Exception as exc:
-            sign_error = target.sign_failed(exc)
-    res = get(fetch_url)
-    tried_stored = fetch_url == target.url
-    if res.status_code == 403 and not signed:
-        try:
-            fetch_url = mint()
-        except Exception as exc:
-            sign_error = target.sign_failed(exc)
+            target.forget(cached, exc)
         else:
-            res = get(fetch_url)
-            tried_stored = tried_stored or fetch_url == target.url
-    if not res.is_success and not tried_stored and target.unexpired():
-        fetch_url = target.url
-        res = get(fetch_url)
-    if res.is_success and fetch_url != target.url:
-        target.remember(fetch_url)
-    _raise_for_status(res, sign_error)
-    return res
+            if res.is_success:
+                return res
+            target.forget(cached, res.status_code)
+
+    # 3. A fresh mint.
+    sign_error = mint_error = None
+    try:
+        minted = mint()
+    except Exception as exc:
+        sign_error = target.sign_failed(exc)
+    else:
+        try:
+            res = get(minted)
+            res.raise_for_status()
+        except Exception as exc:
+            mint_error = target.mint_failed(exc)
+        else:
+            if minted != target.url:
+                target.remember(minted)
+            return res
+
+    # 4. The stored URL as the last resort, if step 1 skipped it.
+    if stored is None:
+        try:
+            res = get(target.url)
+        except Exception as exc:
+            if mint_error is None:
+                raise exc from sign_error
+        else:
+            if res.is_success:
+                return res
+            stored = res
+
+    # 5. Nothing served.
+    if mint_error is not None:
+        raise mint_error
+    _raise_for_status(stored, sign_error)
 
 
 def _extract_filename(headers: dict, url: str) -> str:
@@ -660,6 +731,7 @@ class File(io.IOBase):
     # Overwrite some io.IOBase methods to proxy to the wrapped file object (explicitly).
     def readable(self) -> bool:
         return self.__getattr__("readable")()
+
     def writable(self) -> bool:
         return self.__getattr__("writable")()
 
@@ -769,6 +841,7 @@ class File(io.IOBase):
                 local_path = str(self)
                 object.__setattr__(self, "__persisted__", local_path)
                 return local_path
+
             temp_dir = tempfile.gettempdir()
             temp_name = str(uuid7())
             if self.__source_extension__:
@@ -819,6 +892,7 @@ class File(io.IOBase):
 
         if not isinstance(value, cls):
             raise ValueError("Cannot serialize a non-file object.")
+
         if value.__persisted__ is not None:
             return value.__persisted__
         else:

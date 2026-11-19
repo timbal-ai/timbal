@@ -1,6 +1,8 @@
+import asyncio
 import contextlib
 import io
 import pathlib
+import threading
 import time
 from io import BytesIO
 
@@ -976,10 +978,12 @@ def _sign_response(signed_url: str | None, url: str = _KB_OBJECT):
 
 
 class _FakeCdn:
-    """Serves every URL in ``ok`` and answers ``fail_status`` (403) to anything else, recording each GET."""
+    """Serves every URL in ``ok``, raises a connection error for those in ``unreachable`` and answers
+    ``fail_status`` (403) to anything else, recording each GET."""
 
     def __init__(self, *ok: str) -> None:
         self.ok = set(ok)
+        self.unreachable: set[str] = set()
         self.fail_status = 403
         self.calls: list[str] = []
 
@@ -987,6 +991,8 @@ class _FakeCdn:
         import httpx
 
         self.calls.append(url)
+        if url in self.unreachable:
+            raise httpx.ConnectError("All connection attempts failed", request=httpx.Request("GET", url))
         if url in self.ok:
             return httpx.Response(
                 200, content=b"%PDF-1.7", headers={"Content-Type": "application/pdf"}, request=httpx.Request("GET", url)
@@ -1022,6 +1028,40 @@ def _sign_endpoint(mode: str, *results):
         target, mock = "timbal.platform.utils._request_sync", MagicMock(side_effect=list(results))
     with patch(target, mock):
         yield mock
+
+
+def _platform_response(status: int, json: dict | None = None, headers: dict | None = None):
+    import httpx
+
+    request = httpx.Request("POST", "https://api.timbal.ai/x")
+    return httpx.Response(status, json=json if json is not None else {}, headers=headers, request=request)
+
+
+class _FakePlatform:
+    """Stands in for the platform's HTTP client, below ``_request``: each request takes the next scripted
+    result and the last one repeats. A result is a response, an exception to raise or a coroutine function."""
+
+    def __init__(self, *results) -> None:
+        self.results = list(results)
+        self.requests: list[tuple[str, str, dict]] = []
+
+    @contextlib.asynccontextmanager
+    async def client(self, _timeout):
+        yield self
+
+    async def request(self, method: str, url: str, **kwargs):
+        self.requests.append((method, url, kwargs))
+        result = self.results.pop(0) if len(self.results) > 1 else self.results[0]
+        if isinstance(result, Exception):
+            raise result
+        if callable(result):
+            return await result()
+        return result
+
+    def patched(self):
+        from unittest.mock import patch
+
+        return patch("timbal.platform.utils.request_client", self.client)
 
 
 async def _read(url: str, cdn: _FakeCdn, mode: str) -> bytes:
@@ -1063,8 +1103,17 @@ class TestSignedContentResign:
         sign.assert_not_called()
         assert cdn.calls == [stored]
 
-    async def test_near_expiry_url_is_resigned_before_fetch(self, mode: str) -> None:
-        stored = _signed_url(30)  # inside the 60 s margin
+    async def test_url_near_its_expiry_is_fetched_without_signing(self, mode: str) -> None:
+        # Not past its Expires yet: it can still serve, so the read does not wait on a sign call.
+        stored = _signed_url(30)
+        cdn = _FakeCdn(stored)
+        with _sign_endpoint(mode) as sign:
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        sign.assert_not_called()
+        assert cdn.calls == [stored]
+
+    async def test_expired_url_is_resigned_before_fetch(self, mode: str) -> None:
+        stored = _signed_url(-1)  # past its Expires: no wasted GET on it
         fresh = _signed_url(3600, signature="new")
         cdn = _FakeCdn(stored, fresh)
         with _sign_endpoint(mode, _sign_response(fresh)) as sign:
@@ -1072,6 +1121,21 @@ class TestSignedContentResign:
         assert sign.call_count == 1
         assert sign.call_args.args == ("POST", "orgs/42/content/sign")
         assert sign.call_args.kwargs["json"] == {"url": stored}
+        assert cdn.calls == [fresh]
+
+    async def test_sign_call_goes_through_the_platform_request_helpers(self, mode: str) -> None:
+        # Only the HTTP client is faked: the sync path really runs its sign call on a helper
+        # thread while this test's event loop is running.
+        stored = _signed_url(-60)
+        fresh = _signed_url(3600, signature="new")
+        platform = _FakePlatform(_platform_response(200, {"signed_url": fresh, "url": _KB_OBJECT}))
+        cdn = _FakeCdn(fresh)
+        with platform.patched():
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        ((method, url, kwargs),) = platform.requests
+        assert (method, url) == ("POST", "https://api.timbal.ai/orgs/42/content/sign")
+        assert kwargs["headers"]["Authorization"] == "Bearer token123"
+        assert kwargs["json"] == {"url": stored}
         assert cdn.calls == [fresh]
 
     async def test_expired_url_falls_back_to_legacy_url_field(self, mode: str) -> None:
@@ -1117,47 +1181,88 @@ class TestSignedContentResign:
         assert sign.call_count == 1
         assert cdn.calls == [stored]
 
-    async def test_failed_proactive_sign_falls_back_to_stored_url_once(self, mode: str) -> None:
+    async def test_failed_sign_of_an_expired_url_fetches_it_once(self, mode: str) -> None:
         import httpx
         from timbal.errors import PlatformError
 
         denied = PlatformError("forbidden", status_code=403)
-        # Still a few seconds left: the stored URL serves the read.
-        stored = _signed_url(20)
+        # Past its Expires and no fresh URL to be had: one sign attempt, one GET, no second sign on the 403.
+        stored = _signed_url(-60)
+        cdn = _FakeCdn()
+        with _sign_endpoint(mode, denied, denied) as sign, pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await _read(stored, cdn, mode)
+        assert exc_info.value.response.status_code == 403
+        assert exc_info.value.__cause__ is denied
+        assert sign.call_count == 1
+        assert cdn.calls == [stored]
+
+        # The CDN has the last word: this machine's clock may be ahead of it.
         cdn = _FakeCdn(stored)
         with _sign_endpoint(mode, denied) as sign:
             assert await _read(stored, cdn, mode) == b"%PDF-1.7"
         assert sign.call_count == 1
         assert cdn.calls == [stored]
 
-        # Already dead: one sign attempt, one GET, no second sign on the 403.
-        stored = _signed_url(-60)
-        cdn = _FakeCdn()
-        with _sign_endpoint(mode, denied, denied) as sign, pytest.raises(httpx.HTTPStatusError):
-            await _read(stored, cdn, mode)
-        assert sign.call_count == 1
-        assert cdn.calls == [stored]
+    async def test_unexpired_url_does_not_depend_on_the_sign_endpoint(self, mode: str) -> None:
+        from timbal.errors import PlatformError
 
-    async def test_refused_refresh_falls_back_to_the_unexpired_stored_url(self, mode: str) -> None:
-        # Signing unavailable: the endpoint answers only the legacy url, which the CDN refuses,
-        # while the stored URL still has 30 s left.
+        # 30 s left. Whatever the sign endpoint would do (fail, or answer a URL the CDN refuses),
+        # the stored URL serves the read and the endpoint is not called.
         stored = _signed_url(30)
-        cdn = _FakeCdn(stored)
-        with _sign_endpoint(mode, _sign_response(None, url=_KB_OBJECT)) as sign:
-            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
-        assert sign.call_count == 1
-        assert cdn.calls == [_KB_OBJECT, stored]
+        for answer in (PlatformError("unavailable", status_code=503), _sign_response(None, url=_KB_OBJECT)):
+            cdn = _FakeCdn(stored)
+            with _sign_endpoint(mode, answer) as sign:
+                assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+            sign.assert_not_called()
+            assert cdn.calls == [stored]
 
-    async def test_refused_cached_mint_falls_back_to_the_stored_url(self, mode: str) -> None:
+    async def test_valid_stored_url_is_fetched_before_a_memoized_mint(self, mode: str) -> None:
         first = _signed_url(3600, signature="first")
         stored = _signed_url(3600)
         cdn = _FakeCdn(first)
         with _sign_endpoint(mode, _sign_response(first)) as sign:
             await _read(_signed_url(-60), cdn, mode)  # memoizes `first` for the object
-            cdn.ok = {stored}
+            cdn.ok = {stored}  # the memoized mint would now be refused
             assert await _read(stored, cdn, mode) == b"%PDF-1.7"
         assert sign.call_count == 1
-        assert cdn.calls[1:] == [first, stored]
+        assert cdn.calls[1:] == [stored]
+
+    @pytest.mark.parametrize("status", [404, 500])
+    async def test_error_other_than_403_on_an_unexpired_url_is_final(self, mode: str, status: int) -> None:
+        import httpx
+
+        fresh = _signed_url(3600, signature="new")
+        stored = _signed_url(3600)
+        cdn = _FakeCdn(fresh)
+        with _sign_endpoint(mode, _sign_response(fresh)) as sign:
+            await _read(_signed_url(-60), cdn, mode)  # a memoized mint that would serve
+            cdn.fail_status = status
+            cdn.calls.clear()
+            with pytest.raises(httpx.HTTPStatusError) as exc_info:
+                await _read(stored, cdn, mode)
+        assert exc_info.value.response.status_code == status
+        assert sign.call_count == 1
+        assert cdn.calls == [stored]
+
+    async def test_url_without_a_usable_expires_is_fetched_first(self, mode: str) -> None:
+        fresh = _signed_url(3600, signature="new")
+        for query in ("Policy=eyJ9&Signature=old&Key-Pair-Id=K2", "Expires=soon&Signature=old&Key-Pair-Id=K2"):
+            stored = f"{_KB_OBJECT}?{query}"
+            # Nothing says it is expired: it is fetched as it is...
+            cdn = _FakeCdn(stored)
+            with _sign_endpoint(mode) as sign:
+                assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+            sign.assert_not_called()
+            assert cdn.calls == [stored]
+            # ...and re-signed only once the CDN refuses it.
+            cdn = _FakeCdn(fresh)
+            with _sign_endpoint(mode, _sign_response(fresh)) as sign:
+                assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+            assert sign.call_count == 1
+            assert cdn.calls == [stored, fresh]
+            from timbal.types.file import _clear_mint_cache
+
+            _clear_mint_cache()
 
     async def test_failed_refresh_is_not_reused_by_later_reads(self, mode: str) -> None:
         import httpx
@@ -1167,7 +1272,7 @@ class TestSignedContentResign:
         cdn.fail_status = 404
         with _sign_endpoint(mode, _sign_response(None, url=_KB_OBJECT)) as sign:
             with pytest.raises(httpx.HTTPStatusError) as exc_info:
-                await _read(_signed_url(30), cdn, mode)
+                await _read(_signed_url(-60), cdn, mode)
             assert exc_info.value.response.status_code == 404
             # ...and a later read of the same object with a working URL is not sent to it.
             working = _signed_url(3600, signature="ok")
@@ -1178,29 +1283,146 @@ class TestSignedContentResign:
         assert cdn.calls == [working]
 
     async def test_cached_mint_failing_with_any_status_is_dropped(self, mode: str) -> None:
+        stored = _signed_url(-60)
+        fresh = _signed_url(3600, signature="new")
+        second = _signed_url(3600, signature="second")
+        cdn = _FakeCdn(fresh)
+        with _sign_endpoint(mode, _sign_response(fresh), _sign_response(second)) as sign:
+            await _read(stored, cdn, mode)  # memoizes `fresh`
+            cdn.ok, cdn.fail_status = {second}, 404
+            cdn.calls.clear()
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        assert sign.call_count == 2
+        assert cdn.calls == [fresh, second, second]
+
+    async def test_memoized_mint_is_used_until_its_own_expires(self, mode: str) -> None:
+        import types
+        from unittest.mock import patch
+
+        start = time.time()
+        now = [start]
+        stored = _signed_url(-60)
+        fresh = _signed_url(3600, signature="new")
+        second = _signed_url(3 * 3600, signature="second")
+        cdn = _FakeCdn(fresh, second)
+        with (
+            patch("timbal.types.file.time", types.SimpleNamespace(time=lambda: now[0])),
+            _sign_endpoint(mode, _sign_response(fresh), _sign_response(second)) as sign,
+        ):
+            await _read(stored, cdn, mode)  # memoizes `fresh`, good for an hour
+            now[0] = start + 3590  # seconds from its Expires: still the URL to use
+            await _read(stored, cdn, mode)
+            assert sign.call_count == 1
+            assert cdn.calls == [fresh, fresh]
+            now[0] = start + 3601  # past it: not fetched again
+            await _read(stored, cdn, mode)
+        assert sign.call_count == 2
+        assert cdn.calls == [fresh, fresh, second]
+
+    async def test_unreachable_cached_mint_does_not_stop_a_valid_stored_url(self, mode: str) -> None:
         fresh = _signed_url(3600, signature="new")
         stored = _signed_url(3600)
         cdn = _FakeCdn(fresh)
         with _sign_endpoint(mode, _sign_response(fresh)) as sign:
             await _read(_signed_url(-60), cdn, mode)  # memoizes `fresh`
-            cdn.ok, cdn.fail_status = {stored}, 404
+            cdn.ok, cdn.unreachable = {stored}, {fresh}  # the memoized URL now raises a connection error
             cdn.calls.clear()
             assert await _read(stored, cdn, mode) == b"%PDF-1.7"
             assert await _read(stored, cdn, mode) == b"%PDF-1.7"
         assert sign.call_count == 1
-        assert cdn.calls == [fresh, stored, stored]
+        assert cdn.calls == [stored, stored]
 
-    async def test_refused_refresh_of_an_expired_url_does_not_fetch_it(self, mode: str) -> None:
+    async def test_unreachable_cached_mint_is_replaced_when_the_stored_url_expired(self, mode: str) -> None:
+        stored = _signed_url(-60)
+        first = _signed_url(3600, signature="first")
+        second = _signed_url(3600, signature="second")
+        cdn = _FakeCdn(first)
+        with _sign_endpoint(mode, _sign_response(first), _sign_response(second)) as sign:
+            await _read(stored, cdn, mode)
+            cdn.ok, cdn.unreachable = {second}, {first}
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        assert sign.call_count == 2
+        assert cdn.calls == [first, first, second, second]
+
+    async def test_unreachable_minted_url_raises_and_is_not_memoized(self, mode: str) -> None:
         import httpx
 
         stored = _signed_url(-60)
         fresh = _signed_url(3600, signature="new")
-        cdn = _FakeCdn(stored)  # would serve it, but it is past its Expires
-        with _sign_endpoint(mode, _sign_response(fresh)), pytest.raises(httpx.HTTPStatusError):
+        cdn = _FakeCdn()
+        cdn.unreachable = {fresh}
+        with _sign_endpoint(mode, _sign_response(fresh)) as sign:
+            with pytest.raises(httpx.ConnectError):
+                await _read(stored, cdn, mode)
+            assert cdn.calls == [fresh, stored]  # the stored URL was still tried before failing
+            # A later read of the same object with a working URL is not sent to the mint.
+            working = _signed_url(3600, signature="ok")
+            cdn.ok = {working}
+            cdn.calls.clear()
+            assert await _read(working, cdn, mode) == b"%PDF-1.7"
+        assert sign.call_count == 1
+        assert cdn.calls == [working]
+
+    async def test_unreachable_stored_url_raises_without_signing(self, mode: str) -> None:
+        import httpx
+
+        # A connection error on a URL that is not past its Expires is what it was before re-signing existed.
+        stored = _signed_url(3600)
+        cdn = _FakeCdn()
+        cdn.unreachable = {stored}
+        with _sign_endpoint(mode) as sign, pytest.raises(httpx.ConnectError):
             await _read(stored, cdn, mode)
-        assert cdn.calls == [fresh]
+        sign.assert_not_called()
+        assert cdn.calls == [stored]
+
+    async def test_failed_sign_then_unreachable_stored_url_raises_both(self, mode: str) -> None:
+        import httpx
+        from timbal.errors import PlatformError
+
+        denied = PlatformError("forbidden", status_code=403)
+        stored = _signed_url(-60)
+        cdn = _FakeCdn()
+        cdn.unreachable = {stored}
+        with _sign_endpoint(mode, denied) as sign, pytest.raises(httpx.ConnectError) as exc_info:
+            await _read(stored, cdn, mode)
+        assert exc_info.value.__cause__ is denied
+        assert sign.call_count == 1
+        assert cdn.calls == [stored]
+
+    async def test_stored_url_is_the_last_resort_after_a_refused_refresh(self, mode: str) -> None:
+        import httpx
+
+        stored = _signed_url(-60)  # past its Expires here; this machine's clock may be ahead of the CDN's
+        for answer, refreshed in (
+            (_sign_response(_signed_url(3600, signature="new")), _signed_url(3600, signature="new")),
+            (_sign_response(None, url=_KB_OBJECT), _KB_OBJECT),  # signing unavailable: only the legacy url
+        ):
+            # The CDN still serves the stored URL: the read is served by it.
+            cdn = _FakeCdn(stored)
+            with _sign_endpoint(mode, answer) as sign:
+                assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+            assert sign.call_count == 1
+            assert cdn.calls == [refreshed, stored]
+            # It does not: the error raised is the refreshed URL's.
+            cdn = _FakeCdn()
+            with _sign_endpoint(mode, answer), pytest.raises(httpx.HTTPStatusError) as exc_info:
+                await _read(stored, cdn, mode)
+            assert str(exc_info.value.request.url) == refreshed
+            assert cdn.calls == [refreshed, stored]
+
+    async def test_sign_answering_the_stored_url_is_not_memoized(self, mode: str) -> None:
+        from timbal.types.file import _SignedContentUrl
+
+        stored = _signed_url(-60)
+        cdn = _FakeCdn(stored)
+        with _sign_endpoint(mode, _sign_response(stored)):
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        assert _SignedContentUrl.resolve(stored).cached() is None
 
     async def test_sign_call_has_a_total_budget(self, mode: str) -> None:
+        import httpx
         from timbal.types.file import _SIGN_BUDGET_SECS
 
         stored = _signed_url(-60)
@@ -1208,6 +1430,7 @@ class TestSignedContentResign:
         with _sign_endpoint(mode, _sign_response(fresh)) as sign:
             await _read(stored, _FakeCdn(fresh), mode)
         assert sign.call_args.kwargs["total_timeout"] == _SIGN_BUDGET_SECS
+        assert sign.call_args.kwargs["timeout"] == httpx.Timeout(_SIGN_BUDGET_SECS)
 
     async def test_without_platform_subject_behaviour_is_unchanged(self, mode: str) -> None:
         import httpx
@@ -1248,15 +1471,15 @@ class TestSignedContentResign:
         assert sign.call_count == 1
         assert cdn.calls == [fresh, fresh]
 
-    async def test_revoked_key_second_read_skips_the_403(self, mode: str) -> None:
-        stored = _signed_url(3600)
+    async def test_revoked_key_second_read_reuses_the_mint(self, mode: str) -> None:
+        stored = _signed_url(3600)  # not past its Expires, so it is asked first on every read
         fresh = _signed_url(3600, signature="new")
         cdn = _FakeCdn(fresh)
         with _sign_endpoint(mode, _sign_response(fresh)) as sign:
             await _read(stored, cdn, mode)
             await _read(stored, cdn, mode)
         assert sign.call_count == 1
-        assert cdn.calls == [stored, fresh, fresh]
+        assert cdn.calls == [stored, fresh, stored, fresh]
 
     async def test_cached_mint_that_is_refused_is_replaced(self, mode: str) -> None:
         stored = _signed_url(-60)
@@ -1302,72 +1525,111 @@ class TestSignedContentResign:
 
 
 @pytest.mark.usefixtures("platform_run")
-class TestRequestSync:
-    def test_client_error_raises_platform_error_without_retry(self) -> None:
-        from unittest.mock import patch
+class TestMintMemo:
+    def test_forget_only_drops_the_url_that_failed(self) -> None:
+        from timbal.types.file import _SignedContentUrl
 
-        import httpx
+        target = _SignedContentUrl.resolve(_signed_url(-60))
+        newer = _signed_url(3600, signature="newer")
+        target.remember(newer)
+        # Another read replaced the mint meanwhile: the failure of the old one must not evict the new one.
+        target.forget(_signed_url(3600, signature="older"), 403)
+        assert target.cached() == newer
+        target.forget(newer, 403)
+        assert target.cached() is None
+
+    def test_cache_is_capped(self, monkeypatch) -> None:
+        from timbal.types.file import _SignedContentUrl
+
+        monkeypatch.setattr("timbal.types.file._MINT_CACHE_MAX", 2)
+        targets = [_SignedContentUrl.resolve(_signed_url(-60, base=f"{_KB_OBJECT}.{i}")) for i in range(3)]
+        for target in targets:
+            target.remember(_signed_url(3600, signature="new", base=target.object_url))
+        assert [target.cached() is not None for target in targets] == [False, True, True]
+
+
+@pytest.mark.usefixtures("platform_run")
+class TestRequestSync:
+    """``_request_sync`` is ``_request`` run on a helper thread: same auth, retries and errors."""
+
+    def test_client_error_raises_platform_error_without_retry(self) -> None:
         from timbal.errors import PlatformError
         from timbal.platform.utils import _request_sync
 
-        url = "https://api.timbal.ai/orgs/42/content/sign"
-        denied = httpx.Response(403, json={"error": "no access"}, request=httpx.Request("POST", url))
-        with patch("httpx.request", return_value=denied) as request, pytest.raises(PlatformError) as exc_info:
+        platform = _FakePlatform(_platform_response(403, {"error": "no access"}))
+        with platform.patched(), pytest.raises(PlatformError) as exc_info:
             _request_sync("POST", "orgs/42/content/sign", json={"url": "x"})
         assert exc_info.value.status_code == 403
-        assert request.call_count == 1
-        assert request.call_args.args == ("POST", url)
-        assert request.call_args.kwargs["headers"]["Authorization"] == "Bearer token123"
-        assert request.call_args.kwargs["json"] == {"url": "x"}
+        ((method, url, kwargs),) = platform.requests
+        assert (method, url) == ("POST", "https://api.timbal.ai/orgs/42/content/sign")
+        # The caller's run context (platform config) reached the helper thread.
+        assert kwargs["headers"]["Authorization"] == "Bearer token123"
+        assert kwargs["json"] == {"url": "x"}
 
     def test_server_error_is_retried(self) -> None:
-        from unittest.mock import patch
+        from unittest.mock import AsyncMock, patch
 
-        import httpx
         from timbal.platform.utils import _request_sync
 
-        req = httpx.Request("POST", "https://api.timbal.ai/x")
-        responses = [httpx.Response(503, request=req), httpx.Response(200, json={"ok": True}, request=req)]
-        with patch("httpx.request", side_effect=responses) as request, patch("time.sleep") as sleep:
+        platform = _FakePlatform(_platform_response(503), _platform_response(200, {"ok": True}))
+        with platform.patched(), patch("asyncio.sleep", AsyncMock()) as sleep:
             res = _request_sync("POST", "x", json={})
         assert res.json() == {"ok": True}
-        assert request.call_count == 2
-        sleep.assert_called_once()
+        assert len(platform.requests) == 2
+        sleep.assert_awaited_once()
+
+    async def test_runs_while_the_callers_event_loop_is_running(self) -> None:
+        from timbal.platform.utils import _request_sync
+
+        # A lazy File read can happen on an event loop's thread, where asyncio.run() would raise.
+        platform = _FakePlatform(_platform_response(200, {"ok": True}))
+        with platform.patched():
+            assert _request_sync("POST", "x", json={}).json() == {"ok": True}
 
     def test_retry_after_past_the_budget_raises_without_sleeping(self) -> None:
-        from unittest.mock import patch
+        from unittest.mock import AsyncMock, patch
 
-        import httpx
         from timbal.errors import PlatformError
         from timbal.platform.utils import _request_sync
 
-        req = httpx.Request("POST", "https://api.timbal.ai/x")
-        limited = httpx.Response(429, headers={"Retry-After": "120"}, request=req)
-        with (
-            patch("httpx.request", return_value=limited) as request,
-            patch("time.sleep") as sleep,
-            pytest.raises(PlatformError) as exc_info,
-        ):
+        platform = _FakePlatform(_platform_response(429, headers={"Retry-After": "120"}))
+        with platform.patched(), patch("asyncio.sleep", AsyncMock()) as sleep, pytest.raises(PlatformError) as exc_info:
             _request_sync("POST", "x", json={}, total_timeout=30)
         assert exc_info.value.status_code == 429
-        assert request.call_count == 1
-        sleep.assert_not_called()
+        assert len(platform.requests) == 1
+        sleep.assert_not_awaited()
 
     def test_short_retries_still_run_inside_the_budget(self) -> None:
-        from unittest.mock import patch
+        from unittest.mock import AsyncMock, patch
 
-        import httpx
         from timbal.platform.utils import _request_sync
 
-        req = httpx.Request("POST", "https://api.timbal.ai/x")
-        responses = [
-            httpx.Response(429, headers={"Retry-After": "1"}, request=req),
-            httpx.Response(200, json={}, request=req),
-        ]
-        with patch("httpx.request", side_effect=responses) as request, patch("time.sleep") as sleep:
+        platform = _FakePlatform(_platform_response(429, headers={"Retry-After": "1"}), _platform_response(200))
+        with platform.patched(), patch("asyncio.sleep", AsyncMock()) as sleep:
             _request_sync("POST", "x", json={}, total_timeout=30)
-        assert request.call_count == 2
-        sleep.assert_called_once_with(1.0)
+        assert len(platform.requests) == 2
+        sleep.assert_awaited_once_with(1.0)
+
+    def test_caller_is_released_at_the_deadline_if_the_helper_thread_is_stuck(self) -> None:
+        from unittest.mock import patch
+
+        from timbal.errors import PlatformError
+        from timbal.platform.utils import _request_sync
+
+        entered, release = threading.Event(), threading.Event()
+
+        async def stuck(*_args, **_kwargs):
+            entered.set()
+            release.wait(10)  # blocks the helper thread's loop, so no deadline can fire in it
+
+        with patch("timbal.platform.utils._request", stuck):
+            try:
+                with pytest.raises(PlatformError, match="total timeout"):
+                    _request_sync("POST", "x", json={}, total_timeout=0.05)
+                # The helper thread may start late: keep the fake in place until it has picked it up.
+                assert entered.wait(10)
+            finally:
+                release.set()
 
 
 class _Clock:
@@ -1379,68 +1641,63 @@ class _Clock:
     def monotonic(self) -> float:
         return self.now
 
-    def sleep(self, seconds: float) -> None:
+    async def sleep(self, seconds: float) -> None:
         self.now += seconds
+
+    def patched(self):
+        """Give the request helpers this clock, leaving the event loop's own clock alone."""
+        import types
+        from unittest.mock import patch
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch("timbal.platform.utils.time", types.SimpleNamespace(monotonic=self.monotonic)))
+        stack.enter_context(patch("asyncio.sleep", self.sleep))
+        return stack
 
 
 @pytest.mark.usefixtures("platform_run")
 class TestRetryBudget:
-    """``total_timeout`` bounds the whole call: attempts and the waits between them."""
+    """``total_timeout`` is a deadline for the whole call: every attempt in full, and the waits between them."""
 
-    def test_sync_retry_gets_only_the_time_left(self) -> None:
-        from unittest.mock import patch
-
-        import httpx
-        from timbal.platform.utils import _request_sync
-
-        clock = _Clock()
-        req = httpx.Request("POST", "https://api.timbal.ai/x")
-        timeouts = []
-
-        def request(*_args, **kwargs):
-            timeouts.append(kwargs["timeout"])
-            if len(timeouts) == 1:
-                clock.now = 25.0  # the first attempt took 25 s
-                return httpx.Response(429, headers={"Retry-After": "1"}, request=req)
-            return httpx.Response(200, json={}, request=req)
-
-        with (
-            patch("time.monotonic", clock.monotonic),
-            patch("time.sleep", clock.sleep),
-            patch("httpx.request", side_effect=request),
-        ):
-            _request_sync("POST", "x", json={}, timeout=httpx.Timeout(30.0), total_timeout=30)
-        assert timeouts[0].read == 30.0
-        # Retry starts at 26 s: every phase is capped at the 4 s left.
-        assert (timeouts[1].connect, timeouts[1].read, timeouts[1].write, timeouts[1].pool) == (4.0, 4.0, 4.0, 4.0)
-
-    def test_sync_no_retry_once_attempts_spent_the_budget(self) -> None:
+    @pytest.mark.parametrize("mode", ["async", "sync"])
+    async def test_deadline_cancels_a_response_that_drips_in(self, mode: str) -> None:
         from unittest.mock import patch
 
         import httpx
         from timbal.errors import PlatformError
-        from timbal.platform.utils import _request_sync
+        from timbal.platform.utils import _request, _request_sync
 
-        clock = _Clock()
-        req = httpx.Request("POST", "https://api.timbal.ai/x")
+        cancelled = threading.Event()
 
-        def request(*_args, **_kwargs):
-            clock.now = 29.95  # no 100 ms backoff fits in what is left
-            return httpx.Response(503, request=req)
+        class Drip(httpx.AsyncByteStream):
+            # Three reads 0.2 s apart: no single read comes near the 5 s read timeout.
+            async def __aiter__(self):
+                try:
+                    for _ in range(3):
+                        await asyncio.sleep(0.2)
+                        yield b" "
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
 
-        with (
-            patch("time.monotonic", clock.monotonic),
-            patch("time.sleep", clock.sleep),
-            patch("httpx.request", side_effect=request) as sent,
-            pytest.raises(PlatformError) as exc_info,
-        ):
-            _request_sync("POST", "x", json={}, timeout=httpx.Timeout(30.0), total_timeout=30)
-        assert exc_info.value.status_code == 503
-        assert sent.call_count == 1
-        assert clock.now == 29.95
+        transport = httpx.MockTransport(lambda _req: httpx.Response(200, stream=Drip()))
 
-    async def test_async_retry_gets_only_the_time_left_and_long_waits_are_skipped(self) -> None:
-        import contextlib
+        @contextlib.asynccontextmanager
+        async def request_client(timeout):
+            async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
+                yield client
+
+        with patch("timbal.platform.utils.request_client", request_client):
+            with pytest.raises(PlatformError, match="total timeout"):
+                if mode == "async":
+                    await _request("POST", "x", json={}, timeout=httpx.Timeout(5.0), total_timeout=0.05)
+                else:
+                    _request_sync("POST", "x", json={}, timeout=httpx.Timeout(5.0), total_timeout=0.05)
+            # The request was cancelled, not left to finish in the background. Waited for inside the
+            # patch: the sync path's helper thread may only reach the fake client after the caller raised.
+            assert cancelled.wait(10)
+
+    async def test_retry_runs_only_until_the_deadline(self) -> None:
         from unittest.mock import patch
 
         import httpx
@@ -1448,37 +1705,45 @@ class TestRetryBudget:
         from timbal.platform.utils import _request
 
         clock = _Clock()
-        req = httpx.Request("POST", "https://api.timbal.ai/x")
-        timeouts = []
-        responses = [
-            httpx.Response(429, headers={"Retry-After": "1"}, request=req),
-            httpx.Response(429, headers={"Retry-After": "120"}, request=req),
-        ]
+        deadlines = []
+        real_timeout = asyncio.timeout
 
-        class Client:
-            async def request(self, *_args, **kwargs):
-                timeouts.append(kwargs["timeout"])
-                if len(timeouts) == 1:
-                    clock.now = 25.0
-                return responses[len(timeouts) - 1]
+        def timeout(delay):
+            deadlines.append(delay)
+            return real_timeout(delay)
 
-        @contextlib.asynccontextmanager
-        async def request_client(_timeout):
-            yield Client()
+        async def slow_429():
+            clock.now = 25.0  # the first attempt took 25 s
+            return _platform_response(429, headers={"Retry-After": "1"})
 
-        async def sleep(seconds: float) -> None:
-            clock.sleep(seconds)
-
+        platform = _FakePlatform(slow_429, _platform_response(429, headers={"Retry-After": "120"}))
         with (
-            patch("time.monotonic", clock.monotonic),
-            patch("asyncio.sleep", sleep),
-            patch("timbal.platform.utils.request_client", request_client),
+            clock.patched(),
+            patch("asyncio.timeout", timeout),
+            platform.patched(),
             pytest.raises(PlatformError) as exc_info,
         ):
             await _request("POST", "x", json={}, timeout=httpx.Timeout(30.0), total_timeout=30)
-        assert timeouts[0].read == 30.0
-        assert timeouts[1].read == 4.0
-        # The second 429's Retry-After: 120 is past the budget: raised, not slept.
+        # The retry starts at 26 s and is cancelled 4 s later, not after another 30.
+        assert deadlines == [30.0, 4.0]
+        # The second 429 asks for 120 s, past the deadline: raised, not slept.
         assert exc_info.value.status_code == 429
-        assert len(timeouts) == 2
+        assert len(platform.requests) == 2
         assert clock.now == 26.0
+
+    async def test_no_retry_once_the_attempts_spent_the_budget(self) -> None:
+        from timbal.errors import PlatformError
+        from timbal.platform.utils import _request
+
+        clock = _Clock()
+
+        async def slow_503():
+            clock.now = 29.95  # no 100 ms backoff fits in what is left
+            return _platform_response(503)
+
+        platform = _FakePlatform(slow_503)
+        with clock.patched(), platform.patched(), pytest.raises(PlatformError) as exc_info:
+            await _request("POST", "x", json={}, total_timeout=30)
+        assert exc_info.value.status_code == 503
+        assert len(platform.requests) == 1
+        assert clock.now == 29.95
