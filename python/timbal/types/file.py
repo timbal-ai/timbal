@@ -81,6 +81,9 @@ _RESIGN_SKEW_SECS = 60
 _SIGN_TIMEOUT_SECS = 30.0
 """Per-phase timeout for the sign call (the platform default leaves reads unbounded)."""
 
+_SIGN_RETRY_BUDGET_SECS = 30.0
+"""Cap on the sync sign call's retry sleeps. It blocks its thread, which may run an event loop."""
+
 _MINT_CACHE_MAX = 1_000
 """Cap on memoized mints; the least recently stored entry is evicted past it."""
 
@@ -160,6 +163,10 @@ class _SignedContentUrl:
     def expiring(self) -> bool:
         return _expiring(self.expires)
 
+    def unexpired(self) -> bool:
+        """The stored URL has not reached its Expires (or carries none), so it may still serve."""
+        return self.expires is None or self.expires > time.time()
+
     def cached(self) -> str | None:
         """A memoized mint for this object that is not about to expire, if any."""
         with _mint_cache_lock:
@@ -216,6 +223,9 @@ def _raise_for_status(res: Any, sign_error: Exception | None) -> None:
 # 2. Else, if the URL expires within _RESIGN_SKEW_SECS, re-sign first. A failed
 #    sign falls back to the URL as stored (it may still have a few seconds).
 # 3. On a 403, re-sign once (unless step 2 already tried) and retry once.
+# 4. Still a 403 and the stored URL was never fetched: if it has not reached its
+#    Expires, fetch it once. A refreshed URL can be refused (e.g. the endpoint
+#    fell back to an unsigned legacy url) while the stored one still has seconds.
 # At most one sign call per read, so a sign endpoint that refuses (403) can't
 # loop: the read raises the CDN's HTTP error, chained to the sign failure.
 
@@ -243,6 +253,7 @@ async def _get_signed_content(target: _SignedContentUrl, get: Callable[[str], Aw
             except Exception as exc:
                 sign_error = target.sign_failed(exc)
     res = await get(fetch_url)
+    tried_stored = fetch_url == target.url
     if res.status_code == 403:
         target.forget(fetch_url)
         if not signed:
@@ -252,8 +263,11 @@ async def _get_signed_content(target: _SignedContentUrl, get: Callable[[str], Aw
                 sign_error = target.sign_failed(exc)
             else:
                 res = await get(fetch_url)
+                tried_stored = tried_stored or fetch_url == target.url
                 if res.status_code == 403:
                     target.forget(fetch_url)
+    if res.status_code == 403 and not tried_stored and target.unexpired():
+        res = await get(target.url)
     _raise_for_status(res, sign_error)
     return res
 
@@ -265,7 +279,11 @@ def _get_signed_content_sync(target: _SignedContentUrl, get: Callable[[str], Any
 
     def mint() -> str:
         res = _request_sync(
-            "POST", target.sign_path, json={"url": target.url}, timeout=httpx.Timeout(_SIGN_TIMEOUT_SECS)
+            "POST",
+            target.sign_path,
+            json={"url": target.url},
+            timeout=httpx.Timeout(_SIGN_TIMEOUT_SECS),
+            total_timeout=_SIGN_RETRY_BUDGET_SECS,
         )
         return target.remember(res.json())
 
@@ -281,6 +299,7 @@ def _get_signed_content_sync(target: _SignedContentUrl, get: Callable[[str], Any
             except Exception as exc:
                 sign_error = target.sign_failed(exc)
     res = get(fetch_url)
+    tried_stored = fetch_url == target.url
     if res.status_code == 403:
         target.forget(fetch_url)
         if not signed:
@@ -290,8 +309,11 @@ def _get_signed_content_sync(target: _SignedContentUrl, get: Callable[[str], Any
                 sign_error = target.sign_failed(exc)
             else:
                 res = get(fetch_url)
+                tried_stored = tried_stored or fetch_url == target.url
                 if res.status_code == 403:
                     target.forget(fetch_url)
+    if res.status_code == 403 and not tried_stored and target.unexpired():
+        res = get(target.url)
     _raise_for_status(res, sign_error)
     return res
 
@@ -617,7 +639,6 @@ class File(io.IOBase):
     # Overwrite some io.IOBase methods to proxy to the wrapped file object (explicitly).
     def readable(self) -> bool:
         return self.__getattr__("readable")()
-
     def writable(self) -> bool:
         return self.__getattr__("writable")()
 
@@ -641,6 +662,7 @@ class File(io.IOBase):
             _ = self.__wrapped__
             return
         import httpx
+
         url = str(self)
         headers = {"User-Agent": f"Timbal/{__version__}"}
         own_client = client is None
@@ -726,7 +748,6 @@ class File(io.IOBase):
                 local_path = str(self)
                 object.__setattr__(self, "__persisted__", local_path)
                 return local_path
-
             temp_dir = tempfile.gettempdir()
             temp_name = str(uuid7())
             if self.__source_extension__:
@@ -750,6 +771,7 @@ class File(io.IOBase):
         params = {"org_id": org_id} if org_id.isdigit() else None
 
         from ..platform.utils import _request
+
         res = await _request("POST", path, params=params, files=files)
         upload_response = UploadFileResponse.model_validate(res.json())
         # The platform returns a fully percent-encoded URL — use it verbatim.
@@ -776,7 +798,6 @@ class File(io.IOBase):
 
         if not isinstance(value, cls):
             raise ValueError("Cannot serialize a non-file object.")
-
         if value.__persisted__ is not None:
             return value.__persisted__
         else:
@@ -801,6 +822,7 @@ class File(io.IOBase):
     def _fetch_http_file(cls, url: str) -> io.IOBase:
         """Fetch a file from a HTTP/HTTPS URL (sync fallback)."""
         import httpx
+
         headers = {"User-Agent": f"Timbal/{__version__}"}
 
         def get(fetch_url: str) -> httpx.Response:

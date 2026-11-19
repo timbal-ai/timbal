@@ -308,6 +308,7 @@ def _request_sync(
     max_retries: int = 3,
     timeout: httpx.Timeout | float | None = None,
     service: str | None = None,
+    total_timeout: float | None = None,
 ) -> httpx.Response:
     """Blocking counterpart of :func:`_request` for code that cannot await.
 
@@ -316,12 +317,21 @@ def _request_sync(
     Same URL/auth resolution, retry policy and ``PlatformError`` mapping as
     :func:`_request`; JSON bodies only, no connection reuse. Retries sleep
     with ``time.sleep``, so they block the calling thread.
+
+    ``total_timeout`` bounds the retry sleeps: a retry whose wait (a 429's
+    ``Retry-After`` included) would end past ``total_timeout`` seconds from
+    the call's start is not attempted, and the last failure is raised instead.
+    Each attempt is still bounded by ``timeout`` on its own.
     """
     url, headers = _resolve_url_and_headers(service, path, headers)
     if timeout is None:
         timeout = _default_timeout()
     elif isinstance(timeout, (int, float)):
         timeout = httpx.Timeout(float(timeout), read=None)
+    deadline = time.monotonic() + total_timeout if total_timeout is not None else None
+
+    def last_try(attempt: int, wait_time: float) -> bool:
+        return attempt == max_retries or (deadline is not None and time.monotonic() + wait_time >= deadline)
 
     for attempt in range(max_retries + 1):
         wait_time = 0.1 * (2**attempt)
@@ -331,13 +341,15 @@ def _request_sync(
             return res
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
-            if (400 <= status_code < 500 and status_code != 429) or attempt == max_retries:
+            if 400 <= status_code < 500 and status_code != 429:
                 raise _status_error(exc) from exc
             if status_code == 429:
                 try:
                     wait_time = max(wait_time, float(exc.response.headers.get("Retry-After", "")))
                 except ValueError:
                     pass
+            if last_try(attempt, wait_time):
+                raise _status_error(exc) from exc
             logger.warning(
                 f"Request failed, retrying in {wait_time:.1f}s",
                 attempt=attempt + 1,
@@ -345,7 +357,7 @@ def _request_sync(
                 status_code=status_code,
             )
         except httpx.TimeoutException as exc:
-            if attempt == max_retries:
+            if last_try(attempt, wait_time):
                 raise PlatformError(_timeout_error_message(exc, url, timeout)) from exc
             logger.warning(
                 f"Request timed out, retrying in {wait_time:.1f}s",
@@ -354,7 +366,7 @@ def _request_sync(
                 error=type(exc).__name__,
             )
         except Exception as exc:
-            if attempt == max_retries:
+            if last_try(attempt, wait_time):
                 raise
             logger.warning(
                 f"Request failed, retrying in {wait_time:.1f}s",
