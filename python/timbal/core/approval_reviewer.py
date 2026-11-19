@@ -65,8 +65,9 @@ class ApprovalRequest:
     """False when no person started this turn (a wake, a recovery turn, a background event)."""
     trigger: dict[str, Any] | None = None
     delegation: str | None = None
-    """The request this agent was given by another agent's model or a workflow step: not the user's words, never
-    authorization. ``user_messages`` come only from the run's own root agent."""
+    """The request this agent was given by another agent's model, a workflow step or a call's code: not the
+    user's words, never authorization. ``user_messages`` come only from the agent the person talks to: the root
+    agent of the run nothing else started (an agent a tool or step calls in its code is not one)."""
     hidden_arguments: bool = False
     """True when redaction hides some argument values from this view (``approval_redact_keys`` / ``redactor``)."""
 

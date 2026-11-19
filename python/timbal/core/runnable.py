@@ -1568,9 +1568,12 @@ class Runnable(ABC, BaseModel):
                 span.metadata["approval"]["review"] = review.record()
                 run_context.update_usage(f"approvals:reviewer_{review.verdict}", 1)
                 if review.verdict != "escalate":
-                    # In a resume this gate was pending in the paused run: another resume of it may be deciding
-                    # it too. Claimed like a person's answer, so the call runs at most once.
-                    if run_context._resume_values and not await _claim():
+                    # A gate the run this one continues left waiting is being run again here, resume values
+                    # given or not, and another run continuing the same one may be deciding it too. Claimed
+                    # like a person's answer (so is any gate of a resume), and the call runs at most once.
+                    # A call that waited nowhere has nothing to race for.
+                    waited = run_context._resume_values or await run_context._waited_in_parent(approval_id)
+                    if waited and not await _claim():
                         return False, None, validated_input
                     approved = review.verdict == "approve"
                     approval_resolution = ApprovalResolution(
@@ -1725,14 +1728,24 @@ class Runnable(ABC, BaseModel):
             return None
         from .approval_reviewer import ApprovalRequest, said_by_the_user
 
-        # Evidence is what the person said, to the outermost agent. A subagent's "user" messages are its caller's
-        # model talking to it: shown apart, as delegation, never as authorization.
-        outermost = caller
-        ancestor = run_context.parent_of(caller)
-        while ancestor is not None:
-            if isinstance(ancestor.memory, list):
-                outermost = ancestor
-            ancestor = run_context.parent_of(ancestor)
+        # Evidence is what the person said, to the agent the person talks to: the root agent of the run a person
+        # (or a channel) started. Every agent below it got its prompt from a model or from code: a subagent,
+        # an agent under a workflow step, and an agent some call's code started as a run of its own (inside a
+        # tool or step body, where it is its run's root). Followed up the call chain, across those runs.
+        outermost, top_context, top_span = caller, run_context, caller
+        while True:
+            above = top_context.parent_of(top_span)
+            if above is None:
+                if top_context._invoker is None:
+                    break
+                top_context, invoking_call_id = top_context._invoker
+                above = top_context._trace.get(invoking_call_id)
+                if above is None:
+                    outermost = None  # the call that started this run cannot be found: nobody to cite
+                    break
+            top_span = above
+            if isinstance(top_span.memory, list):
+                outermost = top_span
 
         def said(span: Any) -> list[str]:
             memory = span.memory if isinstance(span.memory, list) else []
@@ -1744,23 +1757,24 @@ class Runnable(ABC, BaseModel):
                 and (text := message.collect_text().strip())
             ]
 
-        # Only the run's own root agent talks to a person. An agent under a workflow step or a tool gets its
-        # prompt from code or another model: that is a request, not the user's words.
-        root_span = run_context.root_span()
-        if outermost is root_span:
+        if outermost is not None and outermost is top_span:
+            # ``top_span`` is the root of the run nothing else started: an agent there talks to the person.
             user_messages = said(outermost)
             delegated_by = caller if outermost is not caller else None
         else:
+            # Under a workflow step, a tool, or a chain that cannot be followed: a request, not the user's words.
             user_messages = []
             delegated_by = caller
+        # Who started the turn is on the root of that same run; a chain that cannot be followed shows nobody.
+        trigger = (top_span.metadata or {}).get("trigger") if outermost is not None else None
+        attended = outermost is not None and (
+            not isinstance(trigger, dict) or trigger.get("kind") in ("user_message", "resume")
+        )
         user_messages = user_messages[-reviewer.context_messages :] if reviewer.context_messages else []
         delegation = None
         if delegated_by is not None:
             asked = said(delegated_by)
             delegation = asked[-1] if asked else None
-        root = run_context.root_span()
-        trigger = (root.metadata or {}).get("trigger") if root is not None else None
-        attended = not isinstance(trigger, dict) or trigger.get("kind") in ("user_message", "resume")
         request = ApprovalRequest(
             tool=self.name,
             arguments=redacted_input,
@@ -2149,6 +2163,7 @@ class Runnable(ABC, BaseModel):
         # must be restored on exit or the swap leaks into the caller's run.
         _entry_run_context = run_context
         _entry_call_id = _call_id
+        _entry_parent_call_id = _parent_call_id
         if run_context is None:
             run_context = RunContext(parent_id=explicit_parent_id, tracing_provider=self.tracing_provider)
             _parent_call_id = None
@@ -2177,6 +2192,12 @@ class Runnable(ABC, BaseModel):
                         # Started by a call that outlived its run (a background tool): its tools are still
                         # that run's, so a read-only tool cannot run an agent with write tools.
                         _inherit_tool_policy(run_context, _entry_run_context, _entry_call_id)
+                        from ..state.background import current_background_task_id
+
+                        if current_background_task_id() is not None:
+                            # A background child's code, for certain (a call id is also left behind in
+                            # the task of whoever abandoned a stream mid-way: that is nobody's code).
+                            run_context.__dict__["_invoker"] = (_entry_run_context, _entry_call_id)
                 else:
                     run_context = RunContext(
                         parent_id=explicit_parent_id,
@@ -2187,6 +2208,7 @@ class Runnable(ABC, BaseModel):
                         # Started by a running call's code (an Agent inside a tool or step
                         # body): link the two runs both ways so a trace viewer can follow it.
                         run_context._invoked_by = {"run_id": _entry_run_context.id, "call_id": _entry_call_id}
+                        run_context.__dict__["_invoker"] = (_entry_run_context, _entry_call_id)
                         # Its tools are the caller's run's: a read-only tool cannot run an agent with write tools.
                         _inherit_tool_policy(run_context, _entry_run_context, _entry_call_id)
                         caller_span = _entry_run_context._trace.get(_entry_call_id)
@@ -2856,6 +2878,13 @@ class Runnable(ABC, BaseModel):
                 # (entry call id None) deliberately leave their context set so
                 # sequential same-task runs chain sessions implicitly.
                 set_run_context(_entry_run_context)
+                if _call_id is None and run_context._invoker is not None:
+                    # This was a run of its own, started by a call's code, and that code goes on: it is
+                    # still inside its call. Without its ids back, the next run it starts would look like
+                    # one nobody's code started (no link, no tool policy inherited, and an approval
+                    # reviewer reading its prompt as a person's).
+                    set_parent_call_id(_entry_parent_call_id)
+                    set_call_id(_entry_call_id)
             # Flush any still-buffered RunContext.emit() events (post_hook,
             # error paths, plain handlers) so every emission is ordered
             # before this call's OUTPUT. Close first: a racing off-loop emit

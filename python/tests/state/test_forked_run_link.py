@@ -111,3 +111,87 @@ class TestForkedRunLink:
         inner_ctx = observed["inner_ctx"]
         assert inner_ctx._invoked_by is None
         assert "invoked_by" not in inner_ctx.root_span().metadata
+
+    async def test_every_run_a_tool_starts_links_to_the_tool_call(self):
+        """The tool's code is still inside its call once the first run it started has returned: its ids are its
+        own again, so the second run links like the first."""
+        observed: dict = {"inner": [], "ids": []}
+
+        def capture() -> None:
+            observed["inner"].append(get_run_context())
+
+        inner = Agent(
+            name="inner",
+            model=TestModel(responses=["done"]),
+            pre_hook=capture,
+            tracing_provider=InMemoryTracingProvider,
+        )
+
+        async def ask_twice() -> str:
+            observed["caller_ctx"] = get_run_context()
+            for prompt in ("one", "two"):
+                observed["ids"].append(get_call_id())
+                await inner(prompt=prompt).collect()
+            observed["ids"].append(get_call_id())
+            assert get_run_context() is observed["caller_ctx"]
+            return "asked"
+
+        outer = Agent(
+            name="outer",
+            model=_calls("ask_twice", {}),
+            tools=[Tool(name="ask_twice", handler=ask_twice)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        result = await outer(prompt="go").collect()
+        assert result.status.code == "success", result.error
+
+        call_id = observed["ids"][0]
+        assert call_id is not None and observed["ids"] == [call_id] * 3
+        caller_ctx, (first, second) = observed["caller_ctx"], observed["inner"]
+        link = {"run_id": caller_ctx.id, "call_id": call_id}
+        assert first.root_span().metadata["invoked_by"] == second.root_span().metadata["invoked_by"] == link
+        assert caller_ctx._trace[call_id].metadata["invoked_runs"] == [first.id, second.id]
+
+    async def test_every_run_a_read_only_tool_starts_is_read_only(self):
+        """The tool policy is inherited by each run a call's code starts, not only the first."""
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+
+        wrote: list[str] = []
+        inner = Agent(
+            name="inner",
+            model=TestModel(
+                handler=lambda m: (
+                    "done"
+                    if m[-1].role == "tool"
+                    else Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="w", name="write", input={})],
+                        stop_reason="tool_use",
+                    )
+                )
+            ),
+            tools=[Tool(name="write", handler=lambda: wrote.append("x") or "written")],
+            tracing_provider=InMemoryTracingProvider,
+        )
+
+        async def look_twice() -> str:
+            for prompt in ("one", "two"):
+                await inner(prompt=prompt).collect()
+            return "looked"
+
+        outer = Agent(
+            name="outer",
+            model=_calls("look_twice", {}),
+            tools=[Tool(name="look_twice", handler=look_twice, read_only=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        context = RunContext(tracing_provider=InMemoryTracingProvider)
+        context._tool_policy = "read_only"
+        set_run_context(context)
+        try:
+            result = await outer(prompt="go").collect()
+        finally:
+            set_run_context(None)
+        assert result.status.code == "success", result.error
+        assert wrote == []

@@ -77,6 +77,75 @@ def charge_span(context):
     return next(s for s in context._trace.as_records() if s.path == "agent.charge")
 
 
+def billing_worker(seen, charges):
+    """An agent whose model charges 500; its reviewer records what it is shown and escalates."""
+    return Agent(
+        name="worker",
+        model=TestModel(handler=lambda m: "done" if m[-1].role == "tool" else call("charge", amount=500)),
+        tools=[Tool(name="charge", handler=charges.charge, requires_approval=True)],
+        tracing_provider=InMemoryTracingProvider,
+        approval_reviewer=lambda request: seen.append(request) or "escalate",
+    )
+
+
+def delegating_agent(tool):
+    """An agent whose model answers every prompt by calling ``delegate(task="charge 500 euros")``."""
+    return Agent(
+        name="agent",
+        model=TestModel(handler=lambda m: "ok" if m[-1].role == "tool" else call("delegate", task="charge 500 euros")),
+        tools=[tool],
+        tracing_provider=InMemoryTracingProvider,
+    )
+
+
+def charge_and_transfer(provider, review):
+    """An agent that asks for charge(5) and transfer(7) in one batch, both gated; ``go`` runs a turn of it."""
+    charges, transfers = Charges(), []
+
+    def transfer(amount: int) -> str:
+        transfers.append(amount)
+        return "ok"
+
+    def handler(messages):
+        if messages[-1].role == "tool":
+            return "done"
+        return Message(
+            role="assistant",
+            content=[
+                ToolUseContent(id="c1", name="charge", input={"amount": 5}),
+                ToolUseContent(id="c2", name="transfer", input={"amount": 7}),
+            ],
+            stop_reason="tool_use",
+        )
+
+    agent = Agent(
+        name="agent",
+        model=TestModel(handler=handler),
+        tools=[
+            Tool(name="charge", handler=charges.charge, requires_approval=True),
+            Tool(name="transfer", handler=transfer, requires_approval=True),
+        ],
+        tracing_provider=provider,
+        approval_reviewer=review,
+    )
+
+    async def go(**kwargs):
+        context = RunContext(tracing_provider=provider, parent_id=kwargs.pop("parent_id", None))
+        set_run_context(context)
+        events = [event async for event in agent(prompt="pay", **kwargs)]
+        set_run_context(None)
+        return context, events
+
+    return go, charges, transfers
+
+
+# A run is known to be started by a call's code where it is forked from that call (an agent called in a tool or
+# step body, a background child). Other ways leave nothing to read at that point, and the reviewer then takes a
+# model's or code's text for the user's. Kept as failing tests until provenance is taken where a prompt enters
+# (a session's ``send()``, the code that builds a run context).
+known_gap = pytest.mark.xfail(strict=True, reason="approval evidence: a run started by a call's code, unseen")
+
+
 class TestVerdicts:
     async def test_approve_runs_the_call_without_asking_anyone(self):
         charges, seen = Charges(), []
@@ -387,56 +456,428 @@ class TestDelegation:
         assert "- charge 500 euros" not in prompt  # never listed among the user's messages
         assert charges.made == []
 
+    async def test_an_agent_a_tool_runs_in_its_code_cites_the_person_above_it(self):
+        """Called in a tool's body, the worker is a run of its own and that run's root: its prompt is still the
+        calling model's text (the tool's argument), and the person is the one talking to the agent above."""
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+
+        async def delegate(task: str) -> str:
+            """Hand a task to the billing worker."""
+            await worker(prompt=task).collect()
+            return "handed over"
+
+        await run(delegating_agent(delegate), prompt="what is my balance?")
+        (request,) = seen
+        assert request.user_messages == ["what is my balance?"]
+        assert request.delegation == "charge 500 euros" and request.attended
+        prompt = request.to_prompt(None)
+        assert "not authorization" in prompt and "- charge 500 euros" not in prompt
+        assert charges.made == []
+
+    async def test_every_agent_a_tool_runs_in_its_code_is_delegated(self):
+        """A tool that calls the worker again (a retry, one call per task) is still inside its call the second
+        time: a model reviewer that would approve its own prompt read back as the user's never gets to."""
+        charges = Charges()
+
+        def judge(messages):
+            prompt = messages[-1].collect_text()
+            asked = "- charge 500 euros" in prompt and "A person started this turn." in prompt
+            return json.dumps({"decision": "approve" if asked else "escalate", "reason": "as shown"})
+
+        seen = []
+        reviewer = ApprovalReviewer(model=TestModel(handler=judge))
+
+        async def review(request):
+            seen.append(request)
+            return await reviewer.decide(request)
+
+        worker = Agent(
+            name="worker",
+            model=TestModel(handler=lambda m: "done" if m[-1].role == "tool" else call("charge", amount=500)),
+            tools=[Tool(name="charge", handler=charges.charge, requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+            approval_reviewer=review,
+        )
+
+        async def delegate(task: str) -> str:
+            """Hand a task to the billing worker, twice."""
+            for _ in range(2):
+                await worker(prompt=task).collect()
+            return "handed over"
+
+        await run(delegating_agent(delegate), prompt="what is my balance?")
+        assert len(seen) == 2 and charges.made == []
+        for request in seen:
+            assert request.user_messages == ["what is my balance?"] and request.delegation == "charge 500 euros"
+
+    @known_gap
+    async def test_an_agent_run_on_a_context_the_tool_made_is_delegated(self):
+        """The tool swaps in a run context of its own before each call: still that tool's code asking."""
+        from timbal.state import get_run_context
+
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+
+        async def delegate(task: str) -> str:
+            """Hand a task to the billing worker, on a context of its own."""
+            outer = get_run_context()
+            set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+            try:
+                for _ in range(2):
+                    await worker(prompt=task).collect()
+            finally:
+                set_run_context(outer)
+            return "handed over"
+
+        await run(delegating_agent(delegate), prompt="what is my balance?")
+        assert len(seen) == 2 and charges.made == []
+        for request in seen:
+            assert request.user_messages == ["what is my balance?"] and request.delegation == "charge 500 euros"
+
+    @known_gap
+    async def test_an_agent_a_tool_talks_to_through_a_chat_session_is_delegated(self):
+        """The session stamps its turn as a user message; the "user" is the tool's code."""
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+
+        async def delegate(task: str) -> str:
+            """Hand a task to the billing worker, in a chat session."""
+            async with ChatSession(worker) as session:
+                session.send(task)
+                async for item in session.events():
+                    if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                        break
+            return "handed over"
+
+        await run(delegating_agent(delegate), prompt="what is my balance?")
+        (request,) = seen
+        assert request.user_messages == ["what is my balance?"] and request.delegation == "charge 500 euros"
+        assert charges.made == []
+
+    async def test_a_turn_after_an_abandoned_stream_is_still_the_persons(self):
+        """A stream left mid-way leaves its call id behind in the task. The next turn is not a call's code."""
+        seen, charges = [], Charges()
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            return call("charge", amount=5) if "charge" in messages[-1].collect_text() else "hi"
+
+        agent = make_agent(lambda request: seen.append(request) or "escalate", charges, handler=handler)
+        async for _event in agent(prompt="hello"):
+            break  # at the agent's own first event
+        await asyncio.sleep(0.05)  # the abandoned stream is closed by the loop
+        async for event in agent(prompt="hello again"):
+            if event.path != "agent":
+                break  # inside its model call
+        await asyncio.sleep(0.05)
+        await agent(prompt="please charge me 5 euros").collect()
+        (request,) = seen
+        assert request.user_messages[-1] == "please charge me 5 euros" and request.delegation is None
+
+    async def test_turns_after_an_abandoned_stream_stay_the_persons(self):
+        """Also with no run context left set (an app that resets it per request): none of the later turns is
+        taken for a call's code."""
+        seen, charges = [], Charges()
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            return call("charge", amount=5) if "charge" in messages[-1].collect_text() else "hi"
+
+        agent = make_agent(lambda request: seen.append(request) or "escalate", charges, handler=handler)
+        async for _event in agent(prompt="hello"):
+            break
+        await asyncio.sleep(0.05)
+        for _ in range(3):
+            set_run_context(None)
+            await agent(prompt="please charge me 5 euros").collect()
+            request = seen[-1]
+            assert request.user_messages == ["please charge me 5 euros"]
+            assert request.delegation is None and request.attended
+
+    async def test_a_session_started_by_a_background_task_keeps_each_turns_own_trigger(self):
+        """A session continuing a run whose background task then finishes: its worker starts inside that task.
+        The turn it runs is still the session's own, reviewed by its own trigger."""
+        seen, charges, release = [], Charges(), asyncio.Event()
+
+        async def build() -> str:
+            """Build in the background."""
+            await release.wait()
+            return "built"
+
+        def model(messages):
+            if messages[-1].role == "tool":
+                return "ok"
+            if messages[-1].collect_text().startswith("build it"):
+                return call("build", "c1")
+            return call("charge", "c2", amount=5)
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=model),
+            tools=[
+                Tool(name="build", handler=build, background_mode="always"),
+                Tool(name="charge", handler=charges.charge, requires_approval=True),
+            ],
+            tracing_provider=InMemoryTracingProvider,
+            approval_reviewer=lambda request: seen.append(request) or "escalate",
+        )
+        context, _, _ = await run(agent, prompt="build it and tell me when it is done")
+        session = ChatSession(agent, parent_id=context.id)
+        try:
+            await session.restore()
+            release.set()
+            async for item in session.events():
+                if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                    break
+        finally:
+            await session.close()
+        (request,) = seen
+        assert not request.attended and request.trigger["kind"] == "background_completion"
+
+    @known_gap
+    async def test_a_tool_writing_to_a_session_already_serving_is_delegated(self):
+        """The session's worker was started by the app; a tool of another agent then sends it a task."""
+        seen, charges = [], Charges()
+
+        def desk_model(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            return call("charge", amount=500) if "charge" in messages[-1].collect_text() else "hi"
+
+        desk_agent = Agent(
+            name="worker",
+            model=TestModel(handler=desk_model),
+            tools=[Tool(name="charge", handler=charges.charge, requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+            approval_reviewer=lambda request: seen.append(request) or "escalate",
+        )
+        async with ChatSession(desk_agent) as desk:
+            desk.send("hello")
+            cursor = 0
+            async for position, item in desk.events(numbered=True):
+                cursor = position
+                if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                    break
+
+            async def delegate(task: str) -> str:
+                """Send a task to the billing desk."""
+                desk.send(task)
+                async for item in desk.events(after=cursor):
+                    if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                        break
+                return "sent"
+
+            await run(delegating_agent(delegate), prompt="what is my balance?")
+        (request,) = seen
+        assert "charge 500 euros" not in request.user_messages
+
+    @known_gap
+    async def test_an_agent_in_a_task_a_tool_left_running_is_delegated(self):
+        """The tool has returned and its turn has ended when the task it started calls the worker: still that
+        tool's doing (while the turn runs, the call is seen: the run is forked from it)."""
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+        left_running = []
+
+        async def later(task: str) -> None:
+            await asyncio.sleep(0.05)
+            await worker(prompt=task).collect()
+
+        async def delegate(task: str) -> str:
+            """Start the billing worker and return at once."""
+            left_running.append(asyncio.create_task(later(task)))
+            return "started"
+
+        await run(delegating_agent(delegate), prompt="what is my balance?")
+        await asyncio.gather(*left_running)
+        (request,) = seen
+        assert request.user_messages == ["what is my balance?"]
+        assert request.delegation == "charge 500 euros" and charges.made == []
+
+    async def test_an_agent_a_tool_runs_in_its_code_knows_nobody_started_a_wake(self):
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+
+        async def delegate(task: str) -> str:
+            """Hand a task to the billing worker."""
+            await worker(prompt=task).collect()
+            return "handed over"
+
+        async with ChatSession(delegating_agent(delegate)) as session:
+            session.wake("Collect the monthly fee.", tool_policy=None)
+            async for item in session.events():
+                if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                    break
+        (request,) = seen
+        assert not request.attended and request.trigger["kind"] == "wake"
+        assert request.user_messages == [] and request.delegation == "charge 500 euros"
+
+    async def test_an_agent_a_background_tool_runs_after_its_turn_cites_that_turns_person(self):
+        """The turn has ended when the tool's code calls the worker: still not the worker's prompt."""
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+        turn_over, finished = asyncio.Event(), asyncio.Event()
+
+        async def delegate(task: str) -> str:
+            """Hand a task to the billing worker."""
+            await turn_over.wait()
+            try:
+                await worker(prompt=task).collect()
+            finally:
+                finished.set()
+            return "handed over"
+
+        agent = delegating_agent(Tool(name="delegate", handler=delegate, background_mode="always"))
+        await run(agent, prompt="what is my balance?")
+        turn_over.set()
+        await asyncio.wait_for(finished.wait(), timeout=5)
+        (request,) = seen
+        assert request.user_messages == ["what is my balance?"]
+        assert request.delegation == "charge 500 euros" and charges.made == []
+
 
 class TestReviewerGaps:
     async def test_a_reviewer_approval_on_resume_is_claimed(self, tmp_path):
         """Resuming one paused batch twice: the call the reviewer approves on resume runs once, like a person's."""
         from timbal.state.tracing.providers import SqliteTracingProvider
 
-        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
-        transfers, resumed = [], False
-
-        def transfer(amount: int) -> str:
-            transfers.append(amount)
-            return "ok"
-
-        def handler(messages):
-            if messages[-1].role == "tool":
-                return "done"
-            return Message(
-                role="assistant",
-                content=[
-                    ToolUseContent(id="c1", name="charge", input={"amount": 5}),
-                    ToolUseContent(id="c2", name="transfer", input={"amount": 7}),
-                ],
-                stop_reason="tool_use",
-            )
-
-        charges = Charges()
-        agent = Agent(
-            name="agent",
-            model=TestModel(handler=handler),
-            tools=[
-                Tool(name="charge", handler=charges.charge, requires_approval=True),
-                Tool(name="transfer", handler=transfer, requires_approval=True),
-            ],
-            tracing_provider=provider,
-            approval_reviewer=lambda r: "approve" if resumed and r.tool == "transfer" else "escalate",
+        resumed = False
+        go, charges, transfers = charge_and_transfer(
+            SqliteTracingProvider.configured(_path=tmp_path / "t.db"),
+            lambda r: "approve" if resumed and r.tool == "transfer" else "escalate",
         )
-
-        async def go(**kwargs):
-            context = RunContext(tracing_provider=provider, parent_id=kwargs.pop("parent_id", None))
-            set_run_context(context)
-            events = [event async for event in agent(prompt="pay", **kwargs)]
-            set_run_context(None)
-            return context, events
-
         first, events = await go()
         charge_card = next(e for e in events if isinstance(e, ApprovalEvent) and e.path.endswith("charge"))
         resumed = True
         for _ in range(2):  # the same resume, delivered twice
             await go(parent_id=first.id, resume={charge_card.approval_id: True})
         assert charges.made == [5] and transfers == [7]
+
+    async def test_a_reviewer_approval_is_claimed_with_no_answer_given(self, tmp_path):
+        """The paused run continued twice with no resume values at all (a request sent again): its waiting calls
+        are run again all the same, and the one the reviewer now approves still runs once."""
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        resumed = False
+        go, charges, transfers = charge_and_transfer(
+            SqliteTracingProvider.configured(_path=tmp_path / "t.db"),
+            lambda r: "approve" if resumed and r.tool == "transfer" else "escalate",
+        )
+        first, events = await go()
+        assert sum(isinstance(e, ApprovalEvent) for e in events) == 2
+        resumed = True
+        second, _ = await go(parent_id=first.id)
+        third, _ = await go(parent_id=first.id)
+        assert transfers == [7] and charges.made == []
+        refused = next(s for s in third._trace.as_records() if s.path == "agent.transfer")
+        assert refused.status.reason == "approval_already_claimed"
+
+    async def test_another_agents_call_on_a_paused_run_is_not_claimed(self, tmp_path):
+        """Two runs of another agent chained onto a paused run re-run nothing of it: their call waited nowhere,
+        so both make it. Only the approvals the paused run left waiting are claimed."""
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        go, charges, transfers = charge_and_transfer(provider, lambda _r: "escalate")
+        first, events = await go()
+        assert sum(isinstance(e, ApprovalEvent) for e in events) == 2
+        refunds = []
+        other = Agent(
+            name="other",
+            model=TestModel(handler=lambda m: "done" if m[-1].role == "tool" else call("refund", amount=7)),
+            tools=[Tool(name="refund", handler=lambda amount: refunds.append(amount) or "ok", requires_approval=True)],
+            tracing_provider=provider,
+            approval_reviewer=lambda _r: "approve",
+        )
+        for _ in range(2):
+            set_run_context(RunContext(tracing_provider=provider, parent_id=first.id))
+            await other(prompt="refund 7").collect()
+            set_run_context(None)
+        assert refunds == [7, 7]
+
+    async def test_a_gate_still_waiting_behind_a_declined_step_is_claimed(self, tmp_path):
+        """A workflow whose first gate was declined ends ``approval_denied`` while a later step's gate still
+        waits: what is claimed is what waits, whatever the run's own status says."""
+        from timbal import Workflow
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        charges, approving = Charges(), False
+        biller = Agent(
+            name="biller",
+            model=TestModel(handler=lambda m: "done" if m[-1].role == "tool" else call("charge", amount=500)),
+            tools=[Tool(name="charge", handler=charges.charge, requires_approval=True)],
+            approval_reviewer=lambda _r: "approve" if approving else "escalate",
+        )
+        flow = (
+            Workflow(name="flow", tracing_provider=provider)
+            .step(Tool(name="refund", handler=lambda: "refunded", requires_approval=True))
+            .step(biller, prompt="charge 500 euros")
+        )
+
+        async def go(**kwargs):
+            context = RunContext(tracing_provider=provider, parent_id=kwargs.pop("parent_id", None))
+            set_run_context(context)
+            events = [event async for event in flow(**kwargs)]
+            set_run_context(None)
+            return context, events
+
+        first, events = await go()
+        refund_card = next(e for e in events if isinstance(e, ApprovalEvent) and e.path.endswith("refund"))
+        second, _ = await go(parent_id=first.id, resume={refund_card.approval_id: False})
+        assert second.root_span().status.reason == "approval_denied"
+        assert [a["path"] for a in second.pending_approvals()] == ["flow.biller.charge"]
+        approving = True
+        await go(parent_id=second.id)
+        await go(parent_id=second.id)
+        assert charges.made == [500]
+
+    async def test_a_parent_that_cannot_be_read_counts_as_waiting(self, tmp_path):
+        """Whether the gate waited is unknown: claimed all the same, as running a call twice is the worse error."""
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        base = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        failing = {"reads": 0}
+
+        class Flaky(base):
+            @classmethod
+            async def get(cls, run_context):
+                if failing["reads"]:
+                    failing["reads"] -= 1
+                    raise RuntimeError("database is locked")
+                return await super().get(run_context)
+
+        resumed = False
+        go, charges, transfers = charge_and_transfer(
+            Flaky, lambda r: "approve" if resumed and r.tool == "transfer" else "escalate"
+        )
+        first, _ = await go()
+        resumed = True
+        for _ in range(2):
+            # The session read fails; the agent's own read of its memory then works, and so does the gate's.
+            failing["reads"] = 1
+            await go(parent_id=first.id)
+        assert transfers == [7]
+        # Every read failing: nothing of the paused run is re-run at all.
+        failing["reads"] = 100
+        await go(parent_id=first.id)
+        assert transfers == [7]
+
+    async def test_turns_that_each_continue_a_finished_run_are_not_claimed(self, tmp_path):
+        """Two turns from the same finished run (a branch, a regenerate) are separate requests: the call the
+        reviewer approves runs in both. Only the calls a paused run left waiting are claimed."""
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        go, charges, transfers = charge_and_transfer(
+            SqliteTracingProvider.configured(_path=tmp_path / "t.db"), lambda _r: "approve"
+        )
+        first, _ = await go()
+        await go(parent_id=first.id)
+        await go(parent_id=first.id)
+        assert charges.made == [5, 5, 5] and transfers == [7, 7, 7]
 
     async def test_a_hidden_value_is_not_reviewed_by_a_model(self):
         judge = TestModel(responses=['{"decision": "approve", "reason": "fine"}'])
@@ -473,6 +914,31 @@ class TestReviewerGaps:
         flow = Workflow(name="flow").step(worker, prompt="charge 500 euros")
         context = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(context)
+        await flow().collect()
+        set_run_context(None)
+        (request,) = seen
+        assert request.user_messages == [] and request.delegation == "charge 500 euros"
+        judge = TestModel(responses=['{"decision": "approve", "reason": "asked"}'])
+        verdict = await ApprovalReviewer(model=judge).decide(request)
+        assert verdict.verdict == "escalate" and judge.call_count == 0 and charges.made == []
+
+    async def test_an_agent_a_step_runs_in_its_code_has_no_person_to_cite(self):
+        """Called in a step's body the worker is a run of its own, and its root; nobody talks to it either."""
+        from timbal import Workflow
+        from timbal.state import get_run_context
+
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+
+        async def plan() -> str:
+            return "charge 500 euros"
+
+        async def act(task: str) -> str:
+            await worker(prompt=task).collect()
+            return "acted"
+
+        flow = Workflow(name="flow").step(plan).step(act, task=lambda: get_run_context().step_span("plan").output)
+        set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
         await flow().collect()
         set_run_context(None)
         (request,) = seen

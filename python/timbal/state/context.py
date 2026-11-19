@@ -34,6 +34,20 @@ def _get_logger():
 _NO_RESUME_VALUES: MappingProxyType[str, Any] = MappingProxyType({})
 
 
+def _waiting_approval(span: Any) -> dict[str, Any] | None:
+    """The approval ``span`` still waits for (its ``metadata.approval``), or None. Tolerates ``RunStatus``
+    instances and dicts: traces read back from JSONL/SQLite carry the status as a dict."""
+    status = span.status
+    if isinstance(status, dict):
+        code, reason = status.get("code"), status.get("reason")
+    else:
+        code, reason = getattr(status, "code", None), getattr(status, "reason", None)
+    if code != "cancelled" or reason != "approval_required":
+        return None
+    approval = (span.metadata or {}).get("approval")
+    return approval if approval and approval.get("id") else None
+
+
 class _NoDefault:
     """INTERNAL: Sentinel to distinguish 'no default provided' from 'default is None'."""
 
@@ -255,6 +269,14 @@ class RunContext(BaseModel):
     #   _invoked_by: dict | None — ``{"run_id", "call_id"}`` of the call whose
     #       code started this run (an Agent called inside a tool or step body);
     #       stamped on the root span. Not ``parent_id``: that chains turns.
+    #   _invoker: (RunContext, call_id) | None — the run and the call whose code started this
+    #       one (an Agent called inside a tool or step body, or by a background child after its
+    #       turn ended): set where the run is forked (``Runnable._stream``), from the call id
+    #       that is ambient there. The way up the call chain across runs: an approval reviewer
+    #       follows it to the agent the person talks to, since this run's own root agent got
+    #       its prompt from that call's code. ``_invoked_by`` is the same link as ids, for the trace
+    #   _parent_pending: (parent_id, frozenset[approval_id]) | None — the approvals the run this
+    #       one continues left waiting, read once when a gate asks (``_waited_in_parent``)
     #   _live_background: int — background work (spawned tasks, handed-off
     #       continuations) running on this context; it can outlive the root run.
     # Do not add class-level annotations for them — pydantic would turn any
@@ -274,31 +296,27 @@ class RunContext(BaseModel):
         """
         pending: list[dict[str, Any]] = []
         for span in self._trace.values():
-            status = span.status
-            code = status.get("code") if isinstance(status, dict) else getattr(status, "code", None)
-            reason = status.get("reason") if isinstance(status, dict) else getattr(status, "reason", None)
-            if code == "cancelled" and reason == "approval_required":
-                approval = (span.metadata or {}).get("approval")
-                if approval and approval.get("id"):
-                    entry = {
-                        "approval_id": approval["id"],
-                        "path": span.path,
-                        "call_id": span.call_id,
-                        "tool_call_id": approval.get("tool_call_id"),
-                        "prompt": approval.get("prompt"),
-                        "description": approval.get("description"),
-                        "kind": approval.get("kind"),
-                        "ui": approval.get("ui"),
-                        "input_schema": approval.get("input_schema"),
-                        "grant_key": approval.get("grant_key", span.path),
-                        "grantable": approval.get("grantable", True),
-                        "metadata": approval.get("metadata", {}),
-                        "input": approval.get("input"),
-                    }
-                    if approval.get("expired"):
-                        entry["expired"] = True
-                        entry["expired_at"] = approval.get("expired_at")
-                    pending.append(entry)
+            approval = _waiting_approval(span)
+            if approval is not None:
+                entry = {
+                    "approval_id": approval["id"],
+                    "path": span.path,
+                    "call_id": span.call_id,
+                    "tool_call_id": approval.get("tool_call_id"),
+                    "prompt": approval.get("prompt"),
+                    "description": approval.get("description"),
+                    "kind": approval.get("kind"),
+                    "ui": approval.get("ui"),
+                    "input_schema": approval.get("input_schema"),
+                    "grant_key": approval.get("grant_key", span.path),
+                    "grantable": approval.get("grantable", True),
+                    "metadata": approval.get("metadata", {}),
+                    "input": approval.get("input"),
+                }
+                if approval.get("expired"):
+                    entry["expired"] = True
+                    entry["expired_at"] = approval.get("expired_at")
+                pending.append(entry)
         return pending
 
     def pending_interactions(self) -> list[dict[str, Any]]:
@@ -356,6 +374,8 @@ class RunContext(BaseModel):
             _resume_values=_NO_RESUME_VALUES,
             _used_resume_ids=set(),
             _invoked_by=None,
+            _invoker=None,
+            _parent_pending=None,
             _live_background=0,
             _trace=Trace(),
             _continuation_owner=None,
@@ -584,6 +604,40 @@ class RunContext(BaseModel):
                 if root_span.session is not None:
                     self._session_data.update(root_span.session)
         return self._session_data
+
+    async def _waited_in_parent(self, approval_id: str) -> bool:
+        """Whether the run this one continues left the approval ``approval_id`` waiting: this run is then running
+        that call again, and so may any other run continuing the same one, with resume values or without.
+
+        Read from the parent's trace, once per run, when a gate first asks (never with a provider that keeps no
+        claims). A trace that cannot be read counts as waiting: a claim nobody races for is harmless, a call
+        run twice is not.
+        """
+        parent_id = self.parent_id
+        provider = self._tracing_provider
+        if not parent_id or provider is None:
+            return False
+        if provider.claim_approval.__func__ is TracingProvider.claim_approval.__func__:
+            return False  # this provider keeps no claims: nothing to decide, so no read
+        known = self._parent_pending
+        if known is None or known[0] != parent_id:
+            try:
+                trace = await provider.get(self)
+            except Exception as e:
+                _get_logger().error(
+                    "Parent trace fetch failed. Treating the approval as one the parent left waiting.",
+                    parent_id=parent_id,
+                    run_id=self.id,
+                    error=str(e),
+                )
+                return True
+            waiting = frozenset(
+                approval["id"]
+                for span in (trace.values() if trace is not None else ())
+                if (approval := _waiting_approval(span))
+            )
+            known = self.__dict__["_parent_pending"] = (parent_id, waiting)
+        return approval_id in known[1]
 
     def root_span(self) -> Span | None:
         """Get the root span of the trace (the first span with no parent)."""
