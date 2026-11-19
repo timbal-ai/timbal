@@ -2462,6 +2462,12 @@ class Runnable(ABC, BaseModel):
                 span.status = RunStatus(code="cancelled", reason="interrupted", message="")
                 if collector is not None:
                     span.output = _collector_output_on_interrupt(collector)
+                    # Stored from its dump, like every other way a call ends: without it the trace says
+                    # the call produced nothing, whatever it had streamed. (Plain data: no suspension.)
+                    try:
+                        span._output_dump = await dump(span.output)
+                    except Exception as dump_err:
+                        _get_logger().warning("output_dump_failed_on_exit", error=str(dump_err))
             if collector is not None and not handed_off:
                 # Closing a parent must also close a suspended nested handler;
                 # async-for does not propagate aclose() to its inner iterator.
@@ -2556,6 +2562,14 @@ class Runnable(ABC, BaseModel):
             # the original assignment, leaving span.status=None and causing a Pydantic
             # ValidationError in the finally block (OutputEvent.status is required).
             span.status = RunStatus(code="cancelled", reason="interrupted", message=str(e))
+            if span._input_dump is None and span.input is not None:
+                # Cut before its input was resolved (admission, session data, the params themselves): stored
+                # as it was given. A turn that stored neither its memory nor its input would take its prompt
+                # out of the conversation: the next turn rebuilds a cut turn from it (Agent._previous_memory).
+                try:
+                    span._input_dump = await dump(span.input)
+                except Exception:
+                    span._input_dump = None
             if isinstance(e, InterruptError):
                 _get_logger().warning(
                     "Interrupted",

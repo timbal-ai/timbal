@@ -763,6 +763,26 @@ class TestRobustness:
             memory = await stored_memory(root_outputs(session)[1])
             assert [m.collect_text() for m in memory if m.role == "user"] == ["hi", "pay", "later"]
 
+    async def test_a_session_is_busy_until_its_turn_is_settled(self):
+        """Between the turn's task ending and its outcome being recorded, a reader must not see an idle
+        session that has no status for the turn it just ran."""
+        samples = []
+        async with ChatSession(make_agent(Gate())) as session:
+            real_pump = session._pump
+
+            async def pump(*args, **kwargs):
+                output = await real_pump(*args, **kwargs)
+                # Runs once the turn's task is done and before the session has settled it.
+                asyncio.get_running_loop().call_soon(lambda: samples.append((session.busy, session.last_status)))
+                return output
+
+            session._pump = pump
+            session.send("hi")
+            await records(session, "turn_finished", 1)
+            await asyncio.sleep(0)
+            assert samples == [(True, None)]
+            assert not session.busy and session.last_status["code"] == "success"
+
     async def test_a_turn_failing_before_it_starts_backs_off_then_waits_for_new_work(self, monkeypatch):
         import timbal.core.chat_session as chat_session_module
 
@@ -770,7 +790,7 @@ class TestRobustness:
         attempts = []
         async with ChatSession(make_agent(Gate())) as session:
 
-            async def broken_pump(_context, _kwargs, followup, trigger):
+            async def broken_pump(_context, _kwargs, followup, trigger, _in_flight, _mark):
                 attempts.append(trigger["kind"])
                 if followup is not None:
                     followup.release()
@@ -795,7 +815,7 @@ class TestRobustness:
         attempts = []
         async with ChatSession(make_agent(Gate())) as session:
 
-            async def broken_pump(_context, _kwargs, followup, trigger):
+            async def broken_pump(_context, _kwargs, followup, trigger, _in_flight, _mark):
                 attempts.append(trigger["kind"])
                 if len(attempts) == 3:
                     session.send("also this")  # new work while the third attempt runs
@@ -1657,3 +1677,222 @@ class TestLogCursors:
         stream = log.subscribe(0)
         assert [await stream.__anext__() for _ in range(3)] == [BACKGROUND_LOG_GAPPED, "b", "c"]
         await stream.aclose()
+
+
+async def until(condition, timeout=30.0):
+    """Wait for ``condition()``. The budget is for a slow machine: one where it never holds fails here."""
+
+    async def poll():
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
+class TestDue:
+    """``ChatSession.due``: work the session will start a turn for by itself. Whoever lets go of an idle
+    session (the server's reaper) must not let go of one that is due, and need not keep one that is not:
+    it follows what starts a turn (the announce policy), not what merely sits in the queue."""
+
+    def _builder(self, release, *, announce=None):
+        async def build() -> str:
+            await release.wait()
+            return "built"
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "Started the build."
+            prompt = next(m for m in reversed(messages) if m.role == "user")
+            return "The build is done." if prompt.is_runtime() else tool_call("build")
+
+        return Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="build", handler=build, background_mode="always", background_announce=announce)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+
+    async def test_a_running_background_tool_that_will_announce_is_due(self):
+        release = asyncio.Event()
+        async with ChatSession(self._builder(release)) as session:
+            session.send("build it")
+            await records(session, "turn_finished", 1)
+            assert session.store.running_count() == 1 and not session.busy
+            assert not session.store.pending_events() and not session.store.pending_completions()
+            assert session.due  # nothing is queued yet, and its result will start a turn
+            release.set()
+            started = await records(session, "turn_started", 2)
+            await records(session, "turn_finished", 2)
+            assert started[1]["trigger"]["kind"] == "background_completion"
+            assert not session.due  # reported: the session owes nothing more
+
+    async def test_a_running_background_tool_that_stays_silent_is_not(self):
+        release = asyncio.Event()
+        async with ChatSession(self._builder(release, announce="silent")) as session:
+            session.send("build it")
+            await records(session, "turn_finished", 1)
+            assert session.store.running_count() == 1
+            assert not session.due  # its result rides with the next turn: it starts none
+            release.set()
+            await until(lambda: session.store.pending_completions())
+            assert not session.due and not session.busy and session.turns == 1
+
+    async def test_a_silent_event_is_not_due_and_one_that_asks_for_a_turn_is(self):
+        async with ChatSession(make_agent(Gate())) as session:
+            session.store.post_event("FYI: the cache is warm.", announce="silent")
+            await asyncio.sleep(0)  # the worker has seen it
+            assert session.store.pending_events() and not session.due
+            session.store.post_event("Deploy 42 finished.")
+            assert session.due
+            await records(session, "turn_finished", 1)
+            assert not session.store.pending_events() and not session.due  # the turn took both
+
+    async def test_a_wake_is_due(self):
+        gate = Gate()
+        async with ChatSession(make_agent(gate)) as session:
+            session.send("start")
+            await asyncio.wait_for(gate.entered.wait(), 30)
+            session.wake("heartbeat")
+            assert session.busy and session.due  # held behind the running turn, and the session's to run
+            gate.release.set()
+            await records(session, "turn_finished", 2)
+            assert not session.due
+
+    async def test_queued_answers_are_due_and_a_parked_question_is_not(self):
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            prompt = next(m for m in reversed(messages) if m.role == "user")
+            return "nothing to report" if prompt.is_runtime() else tool_call("charge")
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: "charged", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent) as session:
+            session.send("pay")
+            await records(session, "turn_finished", 1)
+            approval = next(e for e in session.log.peek()[0] if isinstance(e, ApprovalEvent))
+            assert session.parked and not session.due  # it waits for its user, not for the session
+            session.wake("heartbeat")
+            session.store.post_event("Deploy 42 finished.")
+            assert not session.due  # nothing runs past a parked question: neither a wake nor an event
+            session.resume({approval.approval_id: True})
+            assert session.due  # the answers are the session's to act on
+            await records(session, "turn_finished", 3)  # the resume, the event, the wake
+            assert not session.parked and not session.due
+
+
+class Unreachable(InMemoryTracingProvider):
+    """A trace store that takes nothing: every save raises."""
+
+    @classmethod
+    async def _store(cls, _run_context):
+        raise OSError("the trace store is unreachable")
+
+
+@pytest.fixture
+async def refusing_platform(monkeypatch):
+    """The real platform provider against a platform that turns every request down for good (403).
+
+    Runs it could not store stay with the provider and with the buffered uploads for a later flush (process
+    state): all of it is put back as it was, or the next server shutdown in this process would try to send
+    them for real.
+    """
+    from timbal.errors import PlatformError
+    from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+    from timbal.state.tracing import uploads
+    from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+    async def refused(*_args, **_kwargs):
+        raise PlatformError("forbidden", status_code=403)
+
+    monkeypatch.setattr("timbal.platform.utils._request", refused)
+    config = PlatformConfig(
+        host="api.refusing.test",
+        auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t2_test"),
+        subject=PlatformSubject(org_id="1", app_id="2"),
+    )
+    kept = (
+        "_caps",
+        "_delta_runs",
+        "_keepalives",
+        "_recent",
+        "_saving",
+        "_flights",
+        "_unsaved",
+        "_own_snapshots",
+        "_retries",
+        "_oversized",
+    )
+    before = {name: dict(getattr(PlatformTracingProvider, name)) for name in kept}
+    buffered = uploads._reset_for_tests()
+    try:
+        yield PlatformTracingProvider.configured(platform_config=config)
+    finally:
+        left = [run.task for run in uploads._RUNS.values() if run.task is not None]
+        left += [task for task in PlatformTracingProvider._retries.values() if task not in before["_retries"].values()]
+        for keepalive in PlatformTracingProvider._keepalives.values():
+            keepalive.cancel()
+        for task in left:
+            task.cancel()
+        await asyncio.gather(*left, return_exceptions=True)
+        uploads._RUNS.clear()
+        uploads._RUNS.update(buffered)
+        for name in kept:
+            state = getattr(PlatformTracingProvider, name)
+            state.clear()
+            state.update(before[name])
+
+
+class TestTracesThatCannotBeStored:
+    """A session without a session store keeps its turns in the traces as well as the provider allows, as
+    every run does: a save the provider refuses is logged and counted, and the conversation goes on. Only a
+    durable session (``session_store=``) holds a turn open until its trace is stored: it promised to bring
+    the conversation back."""
+
+    @pytest.mark.parametrize("provider", ["a platform that answers 403", "a store that raises"])
+    async def test_the_conversation_goes_on(self, provider, refusing_platform):
+        provider = refusing_platform if provider == "a platform that answers 403" else Unreachable
+        agent = Agent(name="agent", model=TestModel(handler=echo), tools=[], tracing_provider=provider)
+        async with ChatSession(agent) as session:
+            session.send("one")
+            session.send("two", mode="followup")
+            finished = await records(session, "turn_finished", 2, timeout=30)
+            assert [turn["status"]["code"] for turn in finished] == ["success", "success"]
+            assert not session.busy and not session.pending_messages() and session.turns == 2
+            outputs = root_outputs(session)
+            assert [output.output.collect_text() for output in outputs] == ["echo: one", "echo: two"]
+            assert all(output.usage["tracing:save_failed"] >= 1 for output in outputs)  # counted, not hidden
+
+    async def test_a_turn_that_asks_its_user_still_parks_and_is_answered(self):
+        """Parked on an approval with no trace stored: the session still says so, and takes the answer."""
+        charged = []
+
+        def handler(messages):
+            return "done" if messages[-1].role == "tool" else tool_call("charge")
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: charged.append(1) or "charged", requires_approval=True)],
+            tracing_provider=Unreachable,
+        )
+        async with ChatSession(agent) as session:
+            session.send("pay")
+            (first,) = await records(session, "turn_finished", 1, timeout=30)
+            assert first["parked"] and session.parked and not session.busy
+            approval = next(e for e in session.log.peek()[0] if isinstance(e, ApprovalEvent))
+            session.resume({approval.approval_id: True})
+            await records(session, "turn_finished", 2, timeout=30)
+            assert not session.busy  # whatever a run with no stored parent makes of the answer, it is not stuck
+
+    async def test_closing_while_a_refused_turn_is_being_settled_records_how_it_ended(self):
+        agent = Agent(name="agent", model=TestModel(handler=echo), tools=[], tracing_provider=Unreachable)
+        session = ChatSession(agent)
+        session.send("one")
+        (finished,) = await records(session, "turn_finished", 1, timeout=30)
+        assert finished["status"]["code"] == "success"
+        await session.close()

@@ -227,13 +227,22 @@ class RunContext(BaseModel):
     #   _steering: bool | None — the channel that started this run asks its root agent to
     #       take ``lane="next"`` session events between steps (``Agent.steering=None``),
     #       or, False, forbids it for this turn whatever the agent says (a wake)
-    #   _tool_policy: "read_only" | Collection[str] | Callable | None — narrows the
-    #       tools every agent in this run offers its model (``Agent._tool_allowed``)
+    #   _tool_policy: "read_only" | Collection[str] | Callable | ReadOnlyWithin | None — narrows
+    #       the tools every agent in this run offers its model (``Agent._tool_allowed``)
     #   _tool_policy_origin: (RunContext, call_id) | None — for a run started inside a call
     #       under a callable policy, the outermost such call: its agents note what the policy
     #       let through on that call's span too (``timbal.core.tool_policy``)
     #   _silence_token: str | None — a root agent whose final answer is exactly this
     #       marks its span ``metadata.silent`` (a turn the runtime started may stay quiet)
+    #   _cut: asyncio.Event | None — set by the channel on a 'now' message: the steering
+    #       root agent cuts its answer or its interruptible tools and takes the message
+    #   _trace_unsaved: bool — the latest write-through save of the trace failed (cleared by the
+    #       next one that lands): what the provider holds is behind the run. A chat session does
+    #       not go on to the next turn while it is (the next turn reads this one from the provider)
+    #   _before_tool_dispatch: async (agent_path, [(tool_use_id, name, input)]) | None — awaited
+    #       by every agent of the run right before it runs tool calls (a model's, a slash
+    #       command's, those a resume left pending): a durable chat session records them
+    #       first, so a restart knows what may have run
     #   _resume_values: read-only mapping — active resume values keyed by id,
     #       supplied via ``resume=`` to fulfill a paused run. The id is an approval_id
     #       for an approval gate (value normalized to ``ApprovalResolution``) or a
@@ -355,6 +364,9 @@ class RunContext(BaseModel):
             _tool_policy=None,
             _tool_policy_origin=None,
             _silence_token=None,
+            _cut=None,
+            _before_tool_dispatch=None,
+            _trace_unsaved=False,
         )
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
@@ -503,10 +515,12 @@ class RunContext(BaseModel):
                 error=str(e),
             )
             self.update_usage("tracing:save_failed", 1)
+            self.__dict__["_trace_unsaved"] = True
             return False
         finally:
             uploads.count(self, "tracing:wait_ms", round((time.monotonic() - t0) * 1000))
         uploads.count(self, "tracing:saves")
+        self.__dict__["_trace_unsaved"] = False
         return True
 
     async def _end_background_work(self) -> None:
