@@ -1792,6 +1792,41 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         session = await run_context.get_session()
         session.setdefault(_DENIAL_STREAK_KEY, {})[self._path] = {"run_id": run_context.id, "count": denials}
 
+    # -- Compaction prepared in the background (memory_compaction_prepare_ratio) -----------------
+
+    def _span_model(self, current_span: Any) -> str:
+        return str(current_span.input.get("model") or self.model)
+
+    def _prepare_compaction(self, current_span: Any, prefix: list[Message], utilization: float) -> "_Prepared":
+        """Run the strategies on ``prefix`` (a copy of the history so far) on a task of its own."""
+        task = asyncio.get_running_loop().create_task(
+            self._run_compactors(list(prefix), self._span_model(current_span))
+        )
+        task.add_done_callback(_retrieve_result)
+        return _Prepared(task=task, prefix=list(prefix), utilization=utilization)
+
+    def _swap_prepared(self, current_span: Any, prepared: "_Prepared", run_context: Any) -> bool:
+        """Put a finished prepared compaction in place of the history it covered, when that is still there."""
+        if prepared.task.cancelled() or prepared.task.exception() is not None:
+            if not prepared.task.cancelled():
+                logger.warning(
+                    "Background compaction failed; compacting inline when needed.",
+                    path=self._path,
+                    error=str(prepared.task.exception()),
+                )
+            return False
+        compacted, steps = prepared.task.result()
+        memory = current_span.memory
+        if not prepared.intact(memory):
+            run_context.update_usage("compaction:prepared_stale", 1)
+            return False
+        if len(compacted) >= len(prepared.prefix):
+            return False  # nothing to gain
+        current_span.memory = _join(compacted, memory[len(prepared.prefix) :])
+        self._record_compaction(current_span, prepared.utilization, steps, background=True)
+        run_context.update_usage("compaction:background", 1)
+        return True
+
     async def _compaction_boundary(
         self, current_span: Any, run_context: Any, prepared: "_Prepared | None"
     ) -> "_Prepared | None":
