@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import io
+import os
 import pathlib
 import threading
 import time
@@ -1113,7 +1114,7 @@ class TestSignedContentResign:
         assert cdn.calls == [stored]
 
     async def test_expired_url_is_resigned_before_fetch(self, mode: str) -> None:
-        stored = _signed_url(-1)  # past its Expires: no wasted GET on it
+        stored = _signed_url(-3600)  # clearly expired: no wasted GET on it
         fresh = _signed_url(3600, signature="new")
         cdn = _FakeCdn(stored, fresh)
         with _sign_endpoint(mode, _sign_response(fresh)) as sign:
@@ -1123,10 +1124,50 @@ class TestSignedContentResign:
         assert sign.call_args.kwargs["json"] == {"url": stored}
         assert cdn.calls == [fresh]
 
+    async def test_url_just_past_its_expires_is_still_fetched_first(self, mode: str) -> None:
+        from timbal.errors import PlatformError
+
+        # Expired a couple of seconds ago by this machine's clock, which may be ahead of the CDN's:
+        # the CDN may still accept it, and a sign call first could outlast what it has left.
+        stored = _signed_url(-2)
+        cdn = _FakeCdn(stored)
+        with _sign_endpoint(mode, PlatformError("unavailable", status_code=503)) as sign:
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        sign.assert_not_called()
+        assert cdn.calls == [stored]
+
+        # Really expired: the CDN says so, and the read re-signs as after any 403.
+        fresh = _signed_url(3600, signature="new")
+        cdn = _FakeCdn(fresh)
+        with _sign_endpoint(mode, _sign_response(fresh)) as sign:
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        assert sign.call_count == 1
+        assert cdn.calls == [stored, fresh]
+
+    async def test_clock_skew_grace_decides_what_is_fetched_first(self, mode: str) -> None:
+        import types
+        from unittest.mock import patch
+
+        from timbal.types.file import _CLOCK_SKEW_GRACE_SECS, _clear_mint_cache
+
+        start = time.time()
+        now = [start]
+        stored = _signed_url(0)
+        expires = int(start)
+        fresh = _signed_url(7200, signature="new")
+        with patch("timbal.types.file.time", types.SimpleNamespace(time=lambda: now[0])):
+            for past_expires, first in ((_CLOCK_SKEW_GRACE_SECS - 1, stored), (_CLOCK_SKEW_GRACE_SECS + 1, fresh)):
+                now[0] = expires + past_expires
+                _clear_mint_cache()
+                cdn = _FakeCdn(stored, fresh)
+                with _sign_endpoint(mode, _sign_response(fresh)):
+                    await _read(stored, cdn, mode)
+                assert cdn.calls == [first]
+
     async def test_sign_call_goes_through_the_platform_request_helpers(self, mode: str) -> None:
         # Only the HTTP client is faked: the sync path really runs its sign call on a helper
         # thread while this test's event loop is running.
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         fresh = _signed_url(3600, signature="new")
         platform = _FakePlatform(_platform_response(200, {"signed_url": fresh, "url": _KB_OBJECT}))
         cdn = _FakeCdn(fresh)
@@ -1187,7 +1228,7 @@ class TestSignedContentResign:
 
         denied = PlatformError("forbidden", status_code=403)
         # Past its Expires and no fresh URL to be had: one sign attempt, one GET, no second sign on the 403.
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         cdn = _FakeCdn()
         with _sign_endpoint(mode, denied, denied) as sign, pytest.raises(httpx.HTTPStatusError) as exc_info:
             await _read(stored, cdn, mode)
@@ -1221,7 +1262,7 @@ class TestSignedContentResign:
         stored = _signed_url(3600)
         cdn = _FakeCdn(first)
         with _sign_endpoint(mode, _sign_response(first)) as sign:
-            await _read(_signed_url(-60), cdn, mode)  # memoizes `first` for the object
+            await _read(_signed_url(-3600), cdn, mode)  # memoizes `first` for the object
             cdn.ok = {stored}  # the memoized mint would now be refused
             assert await _read(stored, cdn, mode) == b"%PDF-1.7"
         assert sign.call_count == 1
@@ -1235,7 +1276,7 @@ class TestSignedContentResign:
         stored = _signed_url(3600)
         cdn = _FakeCdn(fresh)
         with _sign_endpoint(mode, _sign_response(fresh)) as sign:
-            await _read(_signed_url(-60), cdn, mode)  # a memoized mint that would serve
+            await _read(_signed_url(-3600), cdn, mode)  # a memoized mint that would serve
             cdn.fail_status = status
             cdn.calls.clear()
             with pytest.raises(httpx.HTTPStatusError) as exc_info:
@@ -1272,7 +1313,7 @@ class TestSignedContentResign:
         cdn.fail_status = 404
         with _sign_endpoint(mode, _sign_response(None, url=_KB_OBJECT)) as sign:
             with pytest.raises(httpx.HTTPStatusError) as exc_info:
-                await _read(_signed_url(-60), cdn, mode)
+                await _read(_signed_url(-3600), cdn, mode)
             assert exc_info.value.response.status_code == 404
             # ...and a later read of the same object with a working URL is not sent to it.
             working = _signed_url(3600, signature="ok")
@@ -1283,7 +1324,7 @@ class TestSignedContentResign:
         assert cdn.calls == [working]
 
     async def test_cached_mint_failing_with_any_status_is_dropped(self, mode: str) -> None:
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         fresh = _signed_url(3600, signature="new")
         second = _signed_url(3600, signature="second")
         cdn = _FakeCdn(fresh)
@@ -1296,14 +1337,17 @@ class TestSignedContentResign:
         assert sign.call_count == 2
         assert cdn.calls == [fresh, second, second]
 
-    async def test_memoized_mint_is_used_until_its_own_expires(self, mode: str) -> None:
+    async def test_memoized_mint_is_used_until_it_is_clearly_expired(self, mode: str) -> None:
         import types
         from unittest.mock import patch
 
+        from timbal.types.file import _CLOCK_SKEW_GRACE_SECS
+
         start = time.time()
         now = [start]
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         fresh = _signed_url(3600, signature="new")
+        expires = int(start + 3600)
         second = _signed_url(3 * 3600, signature="second")
         cdn = _FakeCdn(fresh, second)
         with (
@@ -1311,21 +1355,23 @@ class TestSignedContentResign:
             _sign_endpoint(mode, _sign_response(fresh), _sign_response(second)) as sign,
         ):
             await _read(stored, cdn, mode)  # memoizes `fresh`, good for an hour
-            now[0] = start + 3590  # seconds from its Expires: still the URL to use
+            now[0] = expires - 10  # seconds from its Expires: still the URL to use
+            await _read(stored, cdn, mode)
+            now[0] = expires + _CLOCK_SKEW_GRACE_SECS - 1  # just past it here; the CDN's clock may be behind
             await _read(stored, cdn, mode)
             assert sign.call_count == 1
-            assert cdn.calls == [fresh, fresh]
-            now[0] = start + 3601  # past it: not fetched again
+            assert cdn.calls == [fresh, fresh, fresh]
+            now[0] = expires + _CLOCK_SKEW_GRACE_SECS + 1  # clearly expired: not fetched again
             await _read(stored, cdn, mode)
         assert sign.call_count == 2
-        assert cdn.calls == [fresh, fresh, second]
+        assert cdn.calls == [fresh, fresh, fresh, second]
 
     async def test_unreachable_cached_mint_does_not_stop_a_valid_stored_url(self, mode: str) -> None:
         fresh = _signed_url(3600, signature="new")
         stored = _signed_url(3600)
         cdn = _FakeCdn(fresh)
         with _sign_endpoint(mode, _sign_response(fresh)) as sign:
-            await _read(_signed_url(-60), cdn, mode)  # memoizes `fresh`
+            await _read(_signed_url(-3600), cdn, mode)  # memoizes `fresh`
             cdn.ok, cdn.unreachable = {stored}, {fresh}  # the memoized URL now raises a connection error
             cdn.calls.clear()
             assert await _read(stored, cdn, mode) == b"%PDF-1.7"
@@ -1334,7 +1380,7 @@ class TestSignedContentResign:
         assert cdn.calls == [stored, stored]
 
     async def test_unreachable_cached_mint_is_replaced_when_the_stored_url_expired(self, mode: str) -> None:
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         first = _signed_url(3600, signature="first")
         second = _signed_url(3600, signature="second")
         cdn = _FakeCdn(first)
@@ -1349,7 +1395,7 @@ class TestSignedContentResign:
     async def test_unreachable_minted_url_raises_and_is_not_memoized(self, mode: str) -> None:
         import httpx
 
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         fresh = _signed_url(3600, signature="new")
         cdn = _FakeCdn()
         cdn.unreachable = {fresh}
@@ -1382,7 +1428,7 @@ class TestSignedContentResign:
         from timbal.errors import PlatformError
 
         denied = PlatformError("forbidden", status_code=403)
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         cdn = _FakeCdn()
         cdn.unreachable = {stored}
         with _sign_endpoint(mode, denied) as sign, pytest.raises(httpx.ConnectError) as exc_info:
@@ -1394,7 +1440,7 @@ class TestSignedContentResign:
     async def test_stored_url_is_the_last_resort_after_a_refused_refresh(self, mode: str) -> None:
         import httpx
 
-        stored = _signed_url(-60)  # past its Expires here; this machine's clock may be ahead of the CDN's
+        stored = _signed_url(-3600)  # past its Expires here; this machine's clock may be ahead of the CDN's
         for answer, refreshed in (
             (_sign_response(_signed_url(3600, signature="new")), _signed_url(3600, signature="new")),
             (_sign_response(None, url=_KB_OBJECT), _KB_OBJECT),  # signing unavailable: only the legacy url
@@ -1415,7 +1461,7 @@ class TestSignedContentResign:
     async def test_sign_answering_the_stored_url_is_not_memoized(self, mode: str) -> None:
         from timbal.types.file import _SignedContentUrl
 
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         cdn = _FakeCdn(stored)
         with _sign_endpoint(mode, _sign_response(stored)):
             assert await _read(stored, cdn, mode) == b"%PDF-1.7"
@@ -1425,7 +1471,7 @@ class TestSignedContentResign:
         import httpx
         from timbal.types.file import _SIGN_BUDGET_SECS
 
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         fresh = _signed_url(3600, signature="new")
         with _sign_endpoint(mode, _sign_response(fresh)) as sign:
             await _read(stored, _FakeCdn(fresh), mode)
@@ -1438,7 +1484,7 @@ class TestSignedContentResign:
 
         for ctx in (None, _platform_ctx(subject=False)):
             set_run_context(ctx)
-            for stored in (_signed_url(-60), _signed_url(3600)):
+            for stored in (_signed_url(-3600), _signed_url(3600)):
                 cdn = _FakeCdn()
                 with _sign_endpoint(mode) as sign, pytest.raises(httpx.HTTPStatusError):
                     await _read(stored, cdn, mode)
@@ -1452,7 +1498,7 @@ class TestSignedContentResign:
             "https://timbalusercontent.com/orgs/42/assets/logo.png",  # public content
             "https://timbalusercontent.com/tmp/019f/a.png",
             "https://content.timbal.ai/orgs/42/k2/7/files/9/report.pdf",  # legacy unsigned link
-            _signed_url(-60, base="https://example.com/report.pdf"),  # not a platform host
+            _signed_url(-3600, base="https://example.com/report.pdf"),  # not a platform host
         ):
             cdn = _FakeCdn()
             with _sign_endpoint(mode) as sign, pytest.raises(httpx.HTTPStatusError):
@@ -1461,13 +1507,13 @@ class TestSignedContentResign:
             assert cdn.calls == [stored]
 
     async def test_second_read_is_served_from_the_mint_cache(self, mode: str) -> None:
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         fresh = _signed_url(3600, signature="new")
         cdn = _FakeCdn(fresh)
         with _sign_endpoint(mode, _sign_response(fresh)) as sign:
             assert await _read(stored, cdn, mode) == b"%PDF-1.7"
             # Another File for the same object (e.g. the next turn reloading memory).
-            assert await _read(_signed_url(-30), cdn, mode) == b"%PDF-1.7"
+            assert await _read(_signed_url(-1800), cdn, mode) == b"%PDF-1.7"
         assert sign.call_count == 1
         assert cdn.calls == [fresh, fresh]
 
@@ -1482,7 +1528,7 @@ class TestSignedContentResign:
         assert cdn.calls == [stored, fresh, stored, fresh]
 
     async def test_cached_mint_that_is_refused_is_replaced(self, mode: str) -> None:
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         first = _signed_url(3600, signature="first")
         second = _signed_url(3600, signature="second")
         cdn = _FakeCdn(first)
@@ -1496,7 +1542,7 @@ class TestSignedContentResign:
     async def test_mints_are_not_shared_across_callers(self, mode: str) -> None:
         from timbal.state import set_run_context
 
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         fresh = _signed_url(3600, signature="new")
         cdn = _FakeCdn(fresh)
         with _sign_endpoint(mode, *[_sign_response(fresh)] * 3) as sign:
@@ -1508,7 +1554,7 @@ class TestSignedContentResign:
         assert sign.call_count == 3
 
     async def test_persist_keeps_the_stored_url(self, mode: str) -> None:
-        stored = _signed_url(-60)
+        stored = _signed_url(-3600)
         fresh = _signed_url(3600, signature="new")
         file = File(stored)
         cdn = _FakeCdn(fresh)
@@ -1529,7 +1575,7 @@ class TestMintMemo:
     def test_forget_only_drops_the_url_that_failed(self) -> None:
         from timbal.types.file import _SignedContentUrl
 
-        target = _SignedContentUrl.resolve(_signed_url(-60))
+        target = _SignedContentUrl.resolve(_signed_url(-3600))
         newer = _signed_url(3600, signature="newer")
         target.remember(newer)
         # Another read replaced the mint meanwhile: the failure of the old one must not evict the new one.
@@ -1542,10 +1588,122 @@ class TestMintMemo:
         from timbal.types.file import _SignedContentUrl
 
         monkeypatch.setattr("timbal.types.file._MINT_CACHE_MAX", 2)
-        targets = [_SignedContentUrl.resolve(_signed_url(-60, base=f"{_KB_OBJECT}.{i}")) for i in range(3)]
+        targets = [_SignedContentUrl.resolve(_signed_url(-3600, base=f"{_KB_OBJECT}.{i}")) for i in range(3)]
         for target in targets:
             target.remember(_signed_url(3600, signature="new", base=target.object_url))
         assert [target.cached() is not None for target in targets] == [False, True, True]
+
+
+def _dns_threads() -> list[threading.Thread]:
+    return [thread for thread in threading.enumerate() if thread.name == "timbal-request-sync-dns"]
+
+
+def _until(condition, timeout: float = 10.0) -> None:
+    """Wait for a state another thread is about to reach (never a fixed sleep)."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out waiting for the condition"
+        time.sleep(0.001)
+
+
+class TestSyncDnsPool:
+    """The executor behind every ``_request_sync`` helper loop: bounded, with no idle threads."""
+
+    def test_runs_work_and_leaves_no_thread_behind(self) -> None:
+        from timbal.platform.utils import _SyncDnsPool
+
+        pool = _SyncDnsPool(2)
+        futures = [pool.submit(pow, 2, exponent) for exponent in range(20)]
+        assert [future.result(10) for future in futures] == [2**exponent for exponent in range(20)]
+        _until(lambda: pool._threads_alive == 0)
+        assert not pool._queue
+
+    def test_never_runs_more_at_once_than_its_limit(self) -> None:
+        from timbal.platform.utils import _SyncDnsPool
+
+        pool = _SyncDnsPool(2)
+        gate = threading.Event()
+        running = threading.Semaphore(0)
+
+        def blocked() -> str:
+            running.release()
+            gate.wait(30)
+            return threading.current_thread().name
+
+        try:
+            futures = [pool.submit(blocked) for _ in range(5)]
+            assert running.acquire(timeout=10) and running.acquire(timeout=10)
+            # Two are running; the other three wait for one of those threads, they do not get their own.
+            assert pool._threads_alive == 2
+            assert len(pool._queue) == 3
+            assert not running.acquire(blocking=False)
+        finally:
+            gate.set()
+        assert {future.result(10) for future in futures} == {"timbal-request-sync-dns"}
+        _until(lambda: pool._threads_alive == 0)
+
+    def test_work_cancelled_while_queued_never_runs(self) -> None:
+        from timbal.platform.utils import _SyncDnsPool
+
+        pool = _SyncDnsPool(1)
+        gate = threading.Event()
+        ran: list[int] = []
+        try:
+            first = pool.submit(gate.wait, 30)
+            queued = [pool.submit(ran.append, n) for n in range(3)]
+            assert queued[0].cancel() and queued[2].cancel()
+        finally:
+            gate.set()
+        assert first.result(10) is True
+        assert queued[1].result(10) is None
+        _until(lambda: pool._threads_alive == 0)
+        assert ran == [1]
+
+    def test_cancelled_work_does_not_pile_up_behind_stuck_threads(self) -> None:
+        from timbal.platform.utils import _SyncDnsPool
+
+        pool = _SyncDnsPool(2)
+        gate = threading.Event()
+        try:
+            for _ in range(2):
+                pool.submit(gate.wait, 30)
+            for _ in range(50):  # calls that reached their deadline while the pool was stuck
+                assert pool.submit(int).cancel()
+            assert len(pool._queue) <= 3
+        finally:
+            gate.set()
+        _until(lambda: pool._threads_alive == 0)
+
+    def test_an_exception_reaches_the_future(self) -> None:
+        import socket
+
+        from timbal.platform.utils import _SyncDnsPool
+
+        def lookup() -> None:
+            raise socket.gaierror(8, "no such host")
+
+        pool = _SyncDnsPool(1)
+        assert isinstance(pool.submit(lookup).exception(10), socket.gaierror)
+        assert pool.submit(int).result(10) == 0  # and the pool goes on working
+
+    def test_shutdown_by_a_loop_does_not_stop_it(self) -> None:
+        from timbal.platform.utils import _SyncDnsPool
+
+        pool = _SyncDnsPool(1)
+        pool.shutdown(wait=True)  # what closing an event loop does to its default executor
+        assert pool.submit(int).result(10) == 0
+
+    def test_work_is_not_left_queued_when_no_thread_can_start(self) -> None:
+        from unittest.mock import patch
+
+        from timbal.platform.utils import _SyncDnsPool
+
+        pool = _SyncDnsPool(1)
+        with patch("threading.Thread.start", side_effect=RuntimeError("can't start new thread")):
+            with pytest.raises(RuntimeError):
+                pool.submit(int)
+        assert not pool._queue and pool._threads_alive == 0
+        assert pool.submit(int).result(10) == 0
 
 
 @pytest.mark.usefixtures("platform_run")
@@ -1630,6 +1788,87 @@ class TestRequestSync:
                 assert entered.wait(10)
             finally:
                 release.set()
+
+
+    def test_stalled_dns_lookups_leave_no_helper_threads_and_fill_only_the_pool(self, monkeypatch) -> None:
+        import socket
+        from unittest.mock import patch
+
+        from timbal.errors import PlatformError
+        from timbal.platform import utils
+
+        pool = utils._SyncDnsPool(2)
+        monkeypatch.setattr(utils, "_sync_dns", pool)
+        release = threading.Event()
+        lookups: list[str] = []
+
+        def stalled(host, *_args, **_kwargs):
+            lookups.append(host)
+            release.wait(30)
+            raise socket.gaierror(8, "resolver stalled")
+
+        async def lookup(*_args, total_timeout, **_kwargs):
+            # A request's first step, on the helper's own loop. The name only ever reaches the stub above.
+            try:
+                async with asyncio.timeout(total_timeout):
+                    await asyncio.get_running_loop().getaddrinfo("resolver.invalid", 443)
+            except TimeoutError:
+                raise PlatformError("lookup timed out") from None
+
+        def helpers() -> list[threading.Thread]:
+            return [thread for thread in threading.enumerate() if thread.name == "timbal-request-sync"]
+
+        with patch("timbal.platform.utils._request", lookup), patch("socket.getaddrinfo", stalled):
+            try:
+                for _ in range(5):
+                    with pytest.raises(PlatformError):
+                        utils._request_sync("POST", "x", json={}, total_timeout=0.05)
+                    # The helper thread ends with its request, though its lookup is still in the resolver.
+                    for helper in helpers():
+                        helper.join(10)
+                    assert not helpers()
+                # Five calls timed out; no more lookups are stuck than the pool has threads.
+                assert len(lookups) <= 2
+                assert len(_dns_threads()) <= 2
+            finally:
+                release.set()
+            # Once the resolver answers, the pool's threads are gone too...
+            _until(lambda: not _dns_threads())
+            # ...and the lookups queued behind the stuck ones were cancelled with their calls: none ran.
+            assert len(lookups) <= 2
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+    def test_dns_pool_is_replaced_in_a_forked_child(self) -> None:
+        import subprocess
+        import sys
+        import textwrap
+
+        import timbal
+
+        # In a fresh interpreter: forking this one, with its event loop and threads, proves nothing.
+        script = textwrap.dedent(
+            """
+            import os, sys, threading
+            from timbal.platform import utils
+
+            utils._sync_dns = utils._SyncDnsPool(1)
+            stuck = threading.Event()
+            utils._sync_dns.submit(lambda: (stuck.set(), threading.Event().wait()))  # the pool's one thread, stuck
+            assert stuck.wait(10)
+            pid = os.fork()
+            if pid == 0:
+                # That thread does not exist here: the inherited pool would queue this lookup for ever.
+                try:
+                    ok = utils._sync_dns.submit(int).result(10) == 0
+                except Exception:
+                    ok = False
+                os._exit(0 if ok else 1)
+            sys.exit(os.waitpid(pid, 0)[1] >> 8)
+            """
+        )
+        env = {**os.environ, "PYTHONPATH": str(pathlib.Path(timbal.__file__).parents[1])}
+        result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=120)
+        assert result.returncode == 0, result.stderr
 
 
 class _Clock:

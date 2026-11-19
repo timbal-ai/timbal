@@ -1,8 +1,10 @@
 import asyncio
+import collections
 import concurrent.futures
 import contextvars
 import json as json_lib
 import os
+import sys
 import threading
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -366,6 +368,107 @@ async def _request(
             await asyncio.sleep(wait_time)
 
 
+_SYNC_DNS_WORKERS = 32
+"""Threads resolving DNS for all :func:`_request_sync` helpers together.
+
+A lookup stuck in the resolver cannot be interrupted, only abandoned. Each helper
+used to own its executor and wait for it when closing its loop, so every call
+made while the resolver was stalled left a helper thread and a DNS thread behind.
+Now helpers share one pool (:class:`_SyncDnsPool`) and never wait for it: a
+helper is gone when its request is, and a stalled resolver can hold at most this
+many threads. A lookup queued behind them is cancelled when its call reaches its
+deadline.
+
+32 is the most threads asyncio gives its own default executor, which is where
+sync code calling this usually runs, so a resolver that is slow but answering
+does not make concurrent calls queue for a lookup."""
+
+
+class _SyncDnsPool(concurrent.futures.ThreadPoolExecutor):
+    """The executor of every :func:`_request_sync` helper loop: at most ``max_workers`` threads, none idle.
+
+    The loops using it do not own it, so closing one neither stops it nor waits
+    for it (``shutdown`` does nothing). A thread is started when there is work
+    and no free thread, and exits when the queue is empty, so the pool is empty
+    whenever no lookup is running or stuck. The threads are daemons: a lookup
+    stuck in the resolver does not hold up interpreter exit.
+
+    It subclasses ``ThreadPoolExecutor`` only because an event loop accepts
+    nothing else as its default executor; none of the parent's threads or queue
+    are used.
+    """
+
+    def __init__(self, max_workers: int) -> None:
+        super().__init__(max_workers=max_workers)
+        self._limit = max_workers
+        self._lock = threading.Lock()
+        self._queue: collections.deque[tuple[concurrent.futures.Future, Callable[..., Any], tuple, dict]] = (
+            collections.deque()
+        )
+        self._threads_alive = 0
+
+    def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> concurrent.futures.Future:
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        item = (future, fn, args, kwargs)
+        with self._lock:
+            if len(self._queue) >= self._limit:
+                # Every thread is busy and work is piling up: forget what was cancelled while it waited.
+                self._queue = collections.deque(queued for queued in self._queue if not queued[0].cancelled())
+            self._queue.append(item)
+            start = self._threads_alive < self._limit
+            if start:
+                self._threads_alive += 1
+        if start:
+            try:
+                threading.Thread(target=self._work, name="timbal-request-sync-dns", daemon=True).start()
+            except Exception:  # the thread was not started (e.g. "can't start new thread")
+                with self._lock:
+                    self._threads_alive -= 1
+                    if not self._threads_alive and item in self._queue:
+                        self._queue.remove(item)  # no thread left to run it
+                        raise
+        return future
+
+    def _work(self) -> None:
+        while True:
+            with self._lock:
+                if not self._queue:
+                    self._threads_alive -= 1
+                    return
+                future, fn, args, kwargs = self._queue.popleft()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                result = fn(*args, **kwargs)
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:  # noqa: ARG002
+        pass
+
+
+_sync_dns = _SyncDnsPool(_SYNC_DNS_WORKERS)
+
+
+def _reset_sync_dns() -> None:
+    """After a fork: the pool's threads did not come along, so the child needs a pool of its own."""
+    global _sync_dns
+    _sync_dns = _SyncDnsPool(_SYNC_DNS_WORKERS)
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_sync_dns)
+
+
+def _sync_helper_loop() -> asyncio.AbstractEventLoop:
+    """A stdlib event loop for one :func:`_request_sync` call, whatever loop policy the process installed."""
+    loop = asyncio.ProactorEventLoop() if sys.platform == "win32" else asyncio.SelectorEventLoop()
+    loop.set_default_executor(_sync_dns)  # the loop's only use of an executor is getaddrinfo
+    return loop
+
+
 def _request_sync(
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"],
     path: str,
@@ -387,6 +490,8 @@ def _request_sync(
     The calling thread is blocked until the call ends, and never longer than
     ``total_timeout``: the request is cancelled at that deadline, and the wait
     itself stops there too should the helper thread fail to finish in time.
+    The helper thread ends with its request; see ``_SYNC_DNS_WORKERS`` for the
+    one thing that can outlive it.
     """
     done: concurrent.futures.Future[httpx.Response] = concurrent.futures.Future()
 
@@ -410,14 +515,12 @@ def _request_sync(
 
     def run() -> None:
         try:
-            asyncio.run(call())
+            with asyncio.Runner(loop_factory=_sync_helper_loop) as runner:
+                runner.run(call())
         except BaseException as exc:
             if not done.done():  # the loop itself failed, before or after the call
                 done.set_exception(exc)
 
-    # The result is published from inside the loop: closing the loop afterwards
-    # can outlast the deadline (it joins asyncio's executor, e.g. a DNS lookup
-    # still in flight), and the caller must not wait for that.
     context = contextvars.copy_context()
     threading.Thread(target=context.run, args=(run,), name="timbal-request-sync", daemon=True).start()
     finished, _ = concurrent.futures.wait([done], timeout=total_timeout)

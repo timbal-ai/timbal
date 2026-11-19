@@ -76,11 +76,21 @@ def _is_platform_cdn_host(host: str | None, platform_config: Any) -> bool:
 # Only reads change: the stored reference stays the URL that was stored.
 #
 # Two rules keep a read from ever doing worse than it did before re-signing:
-# - A stored URL that has not reached its Expires is the read's first request,
-#   exactly as before. Replacement URLs and the sign endpoint come into play
-#   only after the CDN refused it (403) or once it is past its Expires.
+# - A stored URL that may still serve (not past its Expires by more than
+#   _CLOCK_SKEW_GRACE_SECS) is the read's first request, exactly as before.
+#   Replacement URLs and the sign endpoint come into play only after the CDN
+#   refused it (403) or once it is clearly expired.
 # - No read fails without having fetched the stored URL: this machine's clock
 #   decides what is tried first, never whether the stored URL is tried at all.
+
+_CLOCK_SKEW_GRACE_SECS = 60
+"""How long past its Expires, by this machine's clock, a URL is still treated as one that may serve.
+
+This clock may run ahead of the CDN's, so a URL that looks just expired here can
+still be accepted there. Skipping it would put a sign call ahead of a URL that
+works, and the URL could expire for real while that call runs. Inside the grace
+the cost is one GET the CDN answers with 403; past it (or with a clock further
+ahead than this) the stored URL is still fetched, as the last resort."""
 
 _SIGN_BUDGET_SECS = 10.0
 """Deadline for one sign call, retries included (``total_timeout``).
@@ -113,9 +123,9 @@ def _signed_url_expires(url: str) -> float | None:
         return None
 
 
-def _unexpired(expires: float | None) -> bool:
-    """Not past ``expires`` by this machine's clock (or no Expires to go by): the URL may still serve."""
-    return expires is None or expires > time.time()
+def _may_serve(expires: float | None) -> bool:
+    """Not past ``expires`` by more than the clock-skew grace (or no Expires to go by)."""
+    return expires is None or expires + _CLOCK_SKEW_GRACE_SECS > time.time()
 
 
 def _failure_label(failure: Any) -> Any:
@@ -173,15 +183,15 @@ class _SignedContentUrl:
         """The URL without its query string — safe to log (no signature)."""
         return self._cache_key[2]
 
-    def unexpired(self) -> bool:
-        """The stored URL has not reached its Expires (or carries none), so it may still serve."""
-        return _unexpired(self.expires)
+    def may_serve(self) -> bool:
+        """The stored URL is not clearly expired (see ``_CLOCK_SKEW_GRACE_SECS``), or carries no Expires."""
+        return _may_serve(self.expires)
 
     def cached(self) -> str | None:
-        """A memoized mint for this object that has not reached its own Expires, if any."""
+        """A memoized mint for this object that is not clearly expired, if any."""
         with _mint_cache_lock:
             entry = _mint_cache.get(self._cache_key)
-        if entry is None or not _unexpired(entry[1]):
+        if entry is None or not _may_serve(entry[1]):
             return None
         return entry[0]
 
@@ -248,19 +258,19 @@ def _raise_for_status(res: Any, sign_error: Exception) -> None:
 
 
 # The two drivers below are the same flow, one awaiting and one blocking:
-# 1. A stored URL that has not reached its Expires is fetched first, exactly as a
-#    read that never re-signs would. Its answer is final (the download, or the
-#    error raised) unless it is a 403: expired by the CDN's clock, or a revoked
-#    key.
-# 2. Otherwise a memoized mint for the object that has not reached its own
-#    Expires is fetched, and serves the read if it downloads. If it fails in any
+# 1. A stored URL that may still serve (not past its Expires by more than the
+#    clock-skew grace) is fetched first, exactly as a read that never re-signs
+#    would. Its answer is final (the download, or the error raised) unless it
+#    is a 403: expired by the CDN's clock, or a revoked key.
+# 2. Otherwise a memoized mint for the object, under the same test of its own
+#    Expires, is fetched and serves the read if it downloads. If it fails in any
 #    way (an error status, or the fetch raises: connection refused, timeout, ...)
 #    it is dropped.
 # 3. Otherwise sign once and fetch the minted URL. A mint is memoized only once
 #    it has served a download, so a URL that fails is never reused by later reads.
-# 4. If none of that served the read and step 1 skipped the stored URL (it is
-#    past its Expires here, but this machine's clock may run ahead of the CDN's),
-#    the stored URL is fetched: the CDN has the last word.
+# 4. If none of that served the read and step 1 skipped the stored URL (clearly
+#    expired here, but this machine's clock may be further ahead of the CDN's
+#    than the grace allows), the stored URL is fetched: the CDN has the last word.
 # 5. If nothing served: a failed sign call raises the stored URL's error chained
 #    to the sign failure; a minted URL that failed to download raises its own
 #    error.
@@ -285,7 +295,7 @@ async def _get_signed_content(target: _SignedContentUrl, get: Callable[[str], Aw
 
     # 1. The stored URL, while it may still serve.
     stored = None  # its error response, once the CDN has answered it
-    if target.unexpired():
+    if target.may_serve():
         res = await get(target.url)
         if res.status_code != 403:
             res.raise_for_status()
@@ -356,7 +366,7 @@ def _get_signed_content_sync(target: _SignedContentUrl, get: Callable[[str], Any
 
     # 1. The stored URL, while it may still serve.
     stored = None  # its error response, once the CDN has answered it
-    if target.unexpired():
+    if target.may_serve():
         res = get(target.url)
         if res.status_code != 403:
             res.raise_for_status()
