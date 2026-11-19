@@ -202,6 +202,62 @@ class TestMidTurn:
             loop.close()
 
 
+    async def test_a_strategy_that_shrinks_results_in_place_is_swapped_in(self):
+        """compact_tool_results keeps the message count: its result must not read as 'nothing to gain'."""
+        from timbal.core.memory_compaction import compact_tool_results
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=tool_loop(6)),
+            tools=[Tool(name="step", handler=step)],
+            tracing_provider=InMemoryTracingProvider,
+            memory_compaction=compact_tool_results(keep_last_n=1, replacement="[compacted]"),
+            memory_compaction_prepare_ratio=0.3,
+            max_iter=30,
+        )
+        context, output = await run(agent)
+        assert output.usage.get("compaction:background", 0) >= 1
+        results = [m for m in root(context).memory if m.role == "tool"]
+        first = results[0].content[0]
+        assert first.content[0].text == "[compacted]"  # replaced in place, message count kept
+
+    async def test_a_prefix_that_compacts_to_nothing_is_not_compacted_again(self, monkeypatch):
+        calls = []
+
+        def unchanged(memory):
+            calls.append(len(memory))
+            return [Message(role=m.role, content=list(m.content), stop_reason=m.stop_reason) for m in memory]
+
+        agent = Agent(name="a", model=TestModel(), memory_compaction=unchanged, memory_compaction_prepare_ratio=0.3)
+
+        async def no_inline(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(agent, "_compact_preserving_last_assistant", no_inline)
+        memory = []
+        for i in range(4):
+            memory += [
+                Message(role="user", content=[TextContent(text=f"u{i}")]),
+                Message(role="assistant", content=[TextContent(text=f"a{i}")]),
+            ]
+        span = SimpleNamespace(memory=memory, metadata={}, input={})
+        usage = {}
+        run_context = SimpleNamespace(update_usage=lambda key, value: usage.__setitem__(key, value))
+        prepared = await agent._compaction_boundary(span, run_context, None)
+        await prepared.task
+        for _ in range(3):  # same history: the futile result is remembered, not recomputed
+            prepared = await agent._compaction_boundary(span, run_context, prepared)
+        assert calls == [7] and prepared.futile and span.memory is memory
+        span.memory = memory = [
+            *memory,
+            Message(role="user", content=[TextContent(text="u4")]),
+            Message(role="assistant", content=[TextContent(text="a4")]),
+        ]
+        prepared = await agent._compaction_boundary(span, run_context, prepared)  # grown: worth another look
+        await prepared.task
+        assert calls == [7, 9]
+
+
 class TestNextTurn:
     async def test_a_turn_that_ends_past_the_ratio_hands_its_compaction_to_the_next(self):
         summarizer = Summarizer(released=False)
@@ -215,6 +271,23 @@ class TestNextTurn:
         assert root(second).metadata["compaction"]["prepared_by"] == first.id
         assert output.usage.get("compaction:background") == 1
         assert len(summarizer.calls) == 1  # once, after turn one: never inline at turn two's start
+
+    async def test_taken_from_this_process_it_is_removed_from_session_data(self):
+        """The record the in-process task handed over must not stay behind for a later turn to find stale."""
+        summarizer = Summarizer(released=False)
+        agent = make_agent(summarizer, steps=2, memory_compaction_prepare_ratio=0.3)
+        first, _ = await run(agent)
+        summarizer.release.set()
+        await settled(first)  # landed in the session data as well
+        agent_module._PREPARING[(first.id, "agent")] = asyncio.get_running_loop().create_future()
+        stored = await RunContext(parent_id=first.id, tracing_provider=InMemoryTracingProvider)._get_parent_trace()
+        record = stored[root(first).call_id].session[agent_module._PREPARED_KEY]["agent"]
+        agent_module._PREPARING[(first.id, "agent")].set_result(record)
+        second, output = await run(agent, prompt="again", parent_id=first.id)
+        assert root(second).memory[0].collect_text() == SUMMARY
+        assert agent_module._PREPARED_KEY not in (await second.get_session())
+        third, output = await run(agent, prompt="again", parent_id=second.id)
+        assert "compaction:prepared_stale" not in output.usage
 
     async def test_another_process_takes_it_from_the_stored_session_data(self):
         summarizer = Summarizer()

@@ -80,6 +80,7 @@ from ..types.events.delta import TextDelta, ThinkingDelta
 from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import coerce_to_dict, dump, invalidate_message_dump_caches
+from ..utils.serialization import _dump_sync
 from .attachment_limit import AttachmentSpills, apply_attachment_limit
 from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
@@ -211,9 +212,19 @@ class _Prepared:
     task: "asyncio.Task"
     prefix: list
     utilization: float | None
+    # Finished with nothing to swap in: kept so the same prefix is not compacted again until the history grows.
+    futile: bool = False
 
     def intact(self, memory: list) -> bool:
         return len(memory) >= len(self.prefix) and all(a is b for a, b in zip(memory, self.prefix, strict=False))
+
+
+def _compaction_changed(prefix: list, compacted: list) -> bool:
+    """Whether the strategies changed the history: fewer messages, or the same number with different content (a
+    strategy such as ``compact_tool_results`` shrinks results in place and rebuilds the messages it keeps)."""
+    if len(compacted) != len(prefix):
+        return True
+    return any(a is not b and _dump_sync(a) != _dump_sync(b) for a, b in zip(compacted, prefix, strict=True))
 
 
 def _retrieve_result(task: "asyncio.Task") -> None:
@@ -1820,8 +1831,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if not prepared.intact(memory):
             run_context.update_usage("compaction:prepared_stale", 1)
             return False
-        if len(compacted) >= len(prepared.prefix):
-            return False  # nothing to gain
+        if not _compaction_changed(prepared.prefix, compacted):
+            prepared.futile = True
+            return False
         current_span.memory = _join(compacted, memory[len(prepared.prefix) :])
         self._record_compaction(current_span, prepared.utilization, steps, background=True)
         run_context.update_usage("compaction:background", 1)
@@ -1833,39 +1845,43 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """Between steps of a turn: swap in a prepared compaction that finished, wait for the one in progress once
         the hard ratio is reached (instead of starting another inline), start one past the prepare ratio."""
         measurement = current_span.metadata.get("context_measurement")
-        if prepared is not None and prepared.task.done():
-            swapped = self._swap_prepared(current_span, prepared, run_context)
-            prepared = None
-            if swapped:
+        if prepared is not None and not prepared.futile and prepared.task.done():
+            if self._swap_prepared(current_span, prepared, run_context):
                 # The measurement predates the swap (an upper bound now): the next call measures again.
                 return None
-        if prepared is not None:
+            if not prepared.futile:
+                prepared = None
+        if prepared is not None and not prepared.futile:
             model = self._span_model(current_span)
             utilization = self._context_utilization(model, current_span.memory, measurement)
             if utilization is None or utilization >= self.memory_compaction_ratio:
                 with contextlib.suppress(Exception):
                     await asyncio.shield(prepared.task)
-                swapped = self._swap_prepared(current_span, prepared, run_context)
-                prepared = None
-                if swapped:
+                if self._swap_prepared(current_span, prepared, run_context):
                     return None
-        compacted_now = False
-        if prepared is None:
+                if not prepared.futile:
+                    prepared = None
+        running = prepared is not None and not prepared.futile
+        if not running:
             before = current_span.memory
             await self._compact_preserving_last_assistant(current_span, measurement=measurement)
             # The measurement predates it: the history only looks big still. The next boundary measures again.
-            compacted_now = current_span.memory is not before
-        if prepared is None and not compacted_now and self.memory_compaction_prepare_ratio is not None:
-            memory = current_span.memory
-            split = next((i for i in range(len(memory) - 1, -1, -1) if memory[i].role == "assistant"), None)
-            head = memory[:split] if split else []
-            utilization = self._context_utilization(self._span_model(current_span), memory, measurement)
-            if (
-                head
-                and utilization is not None
-                and self.memory_compaction_prepare_ratio <= utilization < self.memory_compaction_ratio
-            ):
-                prepared = self._prepare_compaction(current_span, head, utilization)
+            if current_span.memory is not before:
+                return None
+        if running or self.memory_compaction_prepare_ratio is None:
+            return prepared
+        memory = current_span.memory
+        split = next((i for i in range(len(memory) - 1, -1, -1) if memory[i].role == "assistant"), None)
+        head = memory[:split] if split else []
+        if prepared is not None and prepared.intact(memory) and len(head) <= len(prepared.prefix):
+            return prepared  # that prefix compacts to nothing: wait for the history to grow
+        utilization = self._context_utilization(self._span_model(current_span), memory, measurement)
+        if (
+            head
+            and utilization is not None
+            and self.memory_compaction_prepare_ratio <= utilization < self.memory_compaction_ratio
+        ):
+            return self._prepare_compaction(current_span, head, utilization)
         return prepared
 
     def _prepare_for_next_turn(self, current_span: Any, run_context: Any, prepared: "_Prepared | None") -> None:
@@ -1875,6 +1891,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         memory = current_span.memory
         if prepared is not None and not prepared.intact(memory):
             prepared.task.cancel()
+            prepared = None
+        if prepared is not None and prepared.futile:
+            if len(memory) <= len(prepared.prefix):
+                return  # the whole history compacts to nothing
             prepared = None
         if prepared is None:
             utilization = self._context_utilization(
@@ -1897,7 +1917,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             try:
                 await asyncio.shield(prepared.task)
                 compacted, steps = prepared.task.result()
-                if len(compacted) >= len(prepared.prefix):
+                if not _compaction_changed(prepared.prefix, compacted):
                     return None
                 record = {
                     "covered": len(prepared.prefix),
@@ -1939,7 +1959,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         session = await run_context.get_session()
         stored = session.get(_PREPARED_KEY)
         if isinstance(stored, dict):
-            record = record or stored.pop(self._path, None)
+            # Removed whether or not it is used (or the in-process task already gave it): a later turn must not
+            # find it, fail its fingerprint and count a false stale compaction.
+            leftover = stored.pop(self._path, None)
+            record = record or leftover
             if not stored:
                 session.pop(_PREPARED_KEY, None)
         if not isinstance(record, dict) or not isinstance(source.memory, list):
