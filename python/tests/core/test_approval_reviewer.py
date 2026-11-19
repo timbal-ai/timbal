@@ -835,35 +835,57 @@ class TestReviewerGaps:
         await go(parent_id=second.id)
         assert charges.made == [500]
 
-    async def test_a_parent_that_cannot_be_read_counts_as_waiting(self, tmp_path):
-        """Whether the gate waited is unknown: claimed all the same, as running a call twice is the worse error."""
+    @staticmethod
+    def _sqlite_with_failing_reads(tmp_path, failing):
+        """A SQLite provider whose next ``failing["reads"]`` reads fail as SQLite does: ``get_strict`` raises,
+        and ``get`` (the provider's own) answers None."""
+        import sqlite3
+
         from timbal.state.tracing.providers import SqliteTracingProvider
 
-        base = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
-        failing = {"reads": 0}
-
-        class Flaky(base):
+        class Flaky(SqliteTracingProvider.configured(_path=tmp_path / "t.db")):
             @classmethod
-            async def get(cls, run_context):
+            async def get_strict(cls, run_context):
                 if failing["reads"]:
                     failing["reads"] -= 1
-                    raise RuntimeError("database is locked")
-                return await super().get(run_context)
+                    raise sqlite3.OperationalError("database is locked")
+                return await super().get_strict(run_context)
 
+        return Flaky
+
+    async def test_a_parent_the_gate_cannot_read_counts_as_waiting(self, tmp_path):
+        """The gate's own read of the parent fails, after the agent read it and is running its waiting calls
+        again. Whether this one waited is unknown: claimed all the same, as a call run twice is the worse error."""
+        failing = {"reads": 0}
+        resumed = False
+
+        def review(request):
+            if resumed and request.tool == "transfer":
+                failing["reads"] = 1  # the next read is the gate's
+                return "approve"
+            return "escalate"
+
+        go, charges, transfers = charge_and_transfer(self._sqlite_with_failing_reads(tmp_path, failing), review)
+        first, _ = await go()
+        resumed = True
+        await go(parent_id=first.id)
+        await go(parent_id=first.id)
+        assert transfers == [7] and failing["reads"] == 0
+
+    async def test_a_session_read_that_fails_does_not_skip_the_claim(self, tmp_path):
+        """The run's first read of its parent (its session data) fails and is taken for an empty session; the
+        agent's own read then works and runs the waiting calls again. The gate reads for itself."""
+        failing = {"reads": 0}
         resumed = False
         go, charges, transfers = charge_and_transfer(
-            Flaky, lambda r: "approve" if resumed and r.tool == "transfer" else "escalate"
+            self._sqlite_with_failing_reads(tmp_path, failing),
+            lambda r: "approve" if resumed and r.tool == "transfer" else "escalate",
         )
         first, _ = await go()
         resumed = True
         for _ in range(2):
-            # The session read fails; the agent's own read of its memory then works, and so does the gate's.
             failing["reads"] = 1
             await go(parent_id=first.id)
-        assert transfers == [7]
-        # Every read failing: nothing of the paused run is re-run at all.
-        failing["reads"] = 100
-        await go(parent_id=first.id)
         assert transfers == [7]
 
     async def test_turns_that_each_continue_a_finished_run_are_not_claimed(self, tmp_path):

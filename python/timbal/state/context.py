@@ -611,7 +611,8 @@ class RunContext(BaseModel):
 
         Read from the parent's trace, once per run, when a gate first asks (never with a provider that keeps no
         claims). A trace that cannot be read counts as waiting: a claim nobody races for is harmless, a call
-        run twice is not.
+        run twice is not. Hence ``get_strict``: the built-in providers' ``get`` answers a failed read with None,
+        which would read as a parent that left nothing waiting.
         """
         parent_id = self.parent_id
         provider = self._tracing_provider
@@ -622,7 +623,7 @@ class RunContext(BaseModel):
         known = self._parent_pending
         if known is None or known[0] != parent_id:
             try:
-                trace = await provider.get(self)
+                trace = await provider.get_strict(self)
             except Exception as e:
                 _get_logger().error(
                     "Parent trace fetch failed. Treating the approval as one the parent left waiting.",
