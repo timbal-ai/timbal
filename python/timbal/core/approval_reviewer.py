@@ -65,8 +65,10 @@ class ApprovalRequest:
     """False when no person started this turn (a wake, a recovery turn, a background event)."""
     trigger: dict[str, Any] | None = None
     delegation: str | None = None
-    """For a subagent: the request its calling agent's model wrote for it. Model-written, never authorization:
-    ``user_messages`` are still the person's, from the outermost agent."""
+    """The request this agent was given by another agent's model or a workflow step: not the user's words, never
+    authorization. ``user_messages`` come only from the run's own root agent."""
+    hidden_arguments: bool = False
+    """True when redaction hides some argument values from this view (``approval_redact_keys`` / ``redactor``)."""
 
     def arguments_json(self) -> str:
         return json.dumps(self.arguments, default=str, ensure_ascii=False)
@@ -196,6 +198,12 @@ class ApprovalReviewer:
         if len(request.arguments_json()) > ARGUMENTS_BUDGET:
             # A verdict on arguments it could not read in full is not one: a person sees them all.
             return ReviewVerdict("escalate", "The arguments are too large for the reviewer to read in full.")
+        if request.hidden_arguments:
+            # Redaction stays in place for the model, so it cannot check those values against the request.
+            return ReviewVerdict("escalate", "Some argument values are hidden from the reviewer.")
+        if request.delegation and not request.user_messages:
+            # Only another agent's or a step's request: nothing a person said to check the call against.
+            return ReviewVerdict("escalate", "Only a generated request is available, no message from a person.")
         text = await call_judge(
             model=self.model,
             system_prompt=_SYSTEM_PROMPT,

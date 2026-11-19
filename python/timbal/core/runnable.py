@@ -1520,11 +1520,10 @@ class Runnable(ABC, BaseModel):
         # A decision OR a cancel claims the gate; the first claimer wins and
         # any later duplicate (resolve or cancel) stops here. A grant is not a
         # resume of a pending gate, so there is nothing to race for.
-        if (
-            (approval_resolution is not None or approval_cancel is not None)
-            and granted_by is None
-            and run_context._tracing_provider is not None
-        ):
+        async def _claim() -> bool:
+            """Claim the gate for this run; False (and the span closed as already claimed) when another run did."""
+            if run_context._tracing_provider is None:
+                return True
             claimed = await run_context._tracing_provider.claim_approval(
                 str(run_context.parent_id) if run_context.parent_id else None,
                 approval_id,
@@ -1545,6 +1544,10 @@ class Runnable(ABC, BaseModel):
                     "status": "approval_already_claimed",
                 }
                 span._output_dump = await dump(span.output)
+            return claimed
+
+        if (approval_resolution is not None or approval_cancel is not None) and granted_by is None:
+            if not await _claim():
                 return False, None, validated_input
 
         if approval_cancel is not None:
@@ -1559,11 +1562,16 @@ class Runnable(ABC, BaseModel):
         # Nobody answered this call yet: the agent's reviewer (if it has one) may, before a person is asked.
         review = None
         if approval_resolution is None:
-            review = await self._review_gate(approval_decision, redacted_input, span, run_context)
+            hidden = redaction_active and await dump(redacted_input) != input_dump
+            review = await self._review_gate(approval_decision, redacted_input, span, run_context, hidden=hidden)
             if review is not None:
                 span.metadata["approval"]["review"] = review.record()
                 run_context.update_usage(f"approvals:reviewer_{review.verdict}", 1)
                 if review.verdict != "escalate":
+                    # In a resume this gate was pending in the paused run: another resume of it may be deciding
+                    # it too. Claimed like a person's answer, so the call runs at most once.
+                    if run_context._resume_values and not await _claim():
+                        return False, None, validated_input
                     approved = review.verdict == "approve"
                     approval_resolution = ApprovalResolution(
                         approved=approved,
@@ -1695,7 +1703,13 @@ class Runnable(ABC, BaseModel):
         return True, None, validated_input
 
     async def _review_gate(
-        self, approval_decision: ApprovalPolicyDecision, redacted_input: Any, span: Any, run_context: Any
+        self,
+        approval_decision: ApprovalPolicyDecision,
+        redacted_input: Any,
+        span: Any,
+        run_context: Any,
+        *,
+        hidden: bool = False,
     ) -> Any:
         """The verdict of the nearest calling agent's ``approval_reviewer`` on this gate, or None (no reviewer, or
         one that does not review this kind of approval)."""
@@ -1730,11 +1744,19 @@ class Runnable(ABC, BaseModel):
                 and (text := message.collect_text().strip())
             ]
 
-        user_messages = said(outermost)
+        # Only the run's own root agent talks to a person. An agent under a workflow step or a tool gets its
+        # prompt from code or another model: that is a request, not the user's words.
+        root_span = run_context.root_span()
+        if outermost is root_span:
+            user_messages = said(outermost)
+            delegated_by = caller if outermost is not caller else None
+        else:
+            user_messages = []
+            delegated_by = caller
         user_messages = user_messages[-reviewer.context_messages :] if reviewer.context_messages else []
         delegation = None
-        if outermost is not caller:
-            asked = said(caller)
+        if delegated_by is not None:
+            asked = said(delegated_by)
             delegation = asked[-1] if asked else None
         root = run_context.root_span()
         trigger = (root.metadata or {}).get("trigger") if root is not None else None
@@ -1750,6 +1772,7 @@ class Runnable(ABC, BaseModel):
             attended=attended,
             trigger=trigger if isinstance(trigger, dict) else None,
             delegation=delegation,
+            hidden_arguments=hidden,
         )
         return await reviewer.decide(request)
 

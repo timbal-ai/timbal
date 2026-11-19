@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import contextvars
+import copy
 import difflib
 import hashlib
 import inspect
@@ -248,8 +249,15 @@ def _isolated(message: Message) -> Message:
         role=message.role,
         content=[block.model_copy(deep=True) for block in message.content],
         stop_reason=message.stop_reason,
-        metadata=dict(message.metadata) if message.metadata else None,
+        metadata=copy.deepcopy(dict(message.metadata)) if message.metadata else None,
     )
+
+
+def _predecessor_compacting(run_context: Any, path: str) -> bool:
+    """Whether the turn this one continues is still compacting its history in the background, in this process."""
+    parent_id = getattr(run_context, "parent_id", None)
+    finishing = _PREPARING.get((parent_id, path)) if parent_id else None
+    return finishing is not None and not finishing.done()
 
 
 def _retrieve_result(task: "asyncio.Task") -> None:
@@ -1905,6 +1913,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if prepared is not None and prepared.intact(memory) and len(head) <= len(prepared.prefix):
             return prepared  # that prefix compacts to nothing: wait for the history to grow
         utilization = self._context_utilization(self._span_model(current_span), memory, measurement)
+        if _predecessor_compacting(run_context, self._path):
+            return prepared  # one background compaction per session: the turn before's is still running
         if (
             head
             and utilization is not None
@@ -1925,6 +1935,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if len(memory) <= len(prepared.prefix):
                 return  # the whole history compacts to nothing
             prepared = None
+        whole_dump = list(getattr(current_span, "_memory_dump", None) or [])
+        predecessor = None
         if prepared is None:
             utilization = self._context_utilization(
                 self._span_model(current_span), memory, current_span.metadata.get("context_measurement")
@@ -1934,27 +1946,47 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 or not self.memory_compaction_prepare_ratio <= utilization < self.memory_compaction_ratio
             ):
                 return
-            prepared = self._prepare_compaction(current_span, memory, utilization)
-        dumped = list(getattr(current_span, "_memory_dump", None) or [])[: len(prepared.prefix)]
-        if len(dumped) != len(prepared.prefix):
-            prepared.task.cancel()
-            return
+            if _predecessor_compacting(run_context, self._path):
+                # The turn before is still compacting (this one did not wait for it): take its result on for the
+                # next turn when it lands, instead of a second compaction of nearly the same history.
+                predecessor = _PREPARING[(run_context.parent_id, self._path)]
+            else:
+                prepared = self._prepare_compaction(current_span, memory, utilization)
+        if prepared is not None:
+            dumped = whole_dump[: len(prepared.prefix)]
+            if len(dumped) != len(prepared.prefix):
+                prepared.task.cancel()
+                return
         key = (run_context.id, self._path)
         run_context._live_background += 1
 
+        async def produce() -> dict | None:
+            if predecessor is not None:
+                record = await asyncio.shield(predecessor)
+                covered = record.get("covered", 0) if isinstance(record, dict) else 0
+                # Still a prefix of this history (it only grew since): the next turn can use it as is.
+                if not covered or len(whole_dump) < covered or _fingerprint(whole_dump[:covered]) != record.get(
+                    "fingerprint"
+                ):
+                    return None
+                return record
+            await asyncio.shield(prepared.task)
+            compacted, steps = prepared.task.result()
+            if not _compaction_changed(prepared.prefix, compacted):
+                return None
+            return {
+                "covered": len(prepared.prefix),
+                "fingerprint": _fingerprint(dumped),
+                "memory": await dump(compacted),
+                "steps": steps,
+                "utilization": round(prepared.utilization, 4),
+            }
+
         async def finish() -> dict | None:
             try:
-                await asyncio.shield(prepared.task)
-                compacted, steps = prepared.task.result()
-                if not _compaction_changed(prepared.prefix, compacted):
+                record = await produce()
+                if record is None:
                     return None
-                record = {
-                    "covered": len(prepared.prefix),
-                    "fingerprint": _fingerprint(dumped),
-                    "memory": await dump(compacted),
-                    "steps": steps,
-                    "utilization": round(prepared.utilization, 4),
-                }
                 session = await run_context.get_session()
                 # Copied, not updated in place: a child's session data shares its parent's nested dicts.
                 session[_PREPARED_KEY] = {**(session.get(_PREPARED_KEY) or {}), self._path: record}

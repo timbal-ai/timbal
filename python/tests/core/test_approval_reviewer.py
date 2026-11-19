@@ -388,6 +388,100 @@ class TestDelegation:
         assert charges.made == []
 
 
+class TestReviewerGaps:
+    async def test_a_reviewer_approval_on_resume_is_claimed(self, tmp_path):
+        """Resuming one paused batch twice: the call the reviewer approves on resume runs once, like a person's."""
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        transfers, resumed = [], False
+
+        def transfer(amount: int) -> str:
+            transfers.append(amount)
+            return "ok"
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            return Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id="c1", name="charge", input={"amount": 5}),
+                    ToolUseContent(id="c2", name="transfer", input={"amount": 7}),
+                ],
+                stop_reason="tool_use",
+            )
+
+        charges = Charges()
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[
+                Tool(name="charge", handler=charges.charge, requires_approval=True),
+                Tool(name="transfer", handler=transfer, requires_approval=True),
+            ],
+            tracing_provider=provider,
+            approval_reviewer=lambda r: "approve" if resumed and r.tool == "transfer" else "escalate",
+        )
+
+        async def go(**kwargs):
+            context = RunContext(tracing_provider=provider, parent_id=kwargs.pop("parent_id", None))
+            set_run_context(context)
+            events = [event async for event in agent(prompt="pay", **kwargs)]
+            set_run_context(None)
+            return context, events
+
+        first, events = await go()
+        charge_card = next(e for e in events if isinstance(e, ApprovalEvent) and e.path.endswith("charge"))
+        resumed = True
+        for _ in range(2):  # the same resume, delivered twice
+            await go(parent_id=first.id, resume={charge_card.approval_id: True})
+        assert charges.made == [5] and transfers == [7]
+
+    async def test_a_hidden_value_is_not_reviewed_by_a_model(self):
+        judge = TestModel(responses=['{"decision": "approve", "reason": "fine"}'])
+        sent = []
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=lambda m: "done" if m[-1].role == "tool" else call("send", to="eve@evil.com")),
+            tools=[
+                Tool(
+                    name="send",
+                    handler=lambda to: sent.append(to) or "sent",
+                    requires_approval=True,
+                    approval_redact_keys=["to"],
+                )
+            ],
+            tracing_provider=InMemoryTracingProvider,
+            approval_reviewer=judge,
+        )
+        _, events, _ = await run(agent, prompt="send it to bob")
+        assert any(isinstance(e, ApprovalEvent) for e in events) and sent == [] and judge.call_count == 0
+
+    async def test_an_agent_under_a_workflow_has_no_person_to_cite(self):
+        """A step's prompt comes from code or another step: it is a request, not authorization."""
+        from timbal import Workflow
+
+        seen = []
+        charges = Charges()
+        worker = Agent(
+            name="worker",
+            model=TestModel(handler=lambda m: "done" if m[-1].role == "tool" else call("charge", amount=500)),
+            tools=[Tool(name="charge", handler=charges.charge, requires_approval=True)],
+            approval_reviewer=lambda request: seen.append(request) or "escalate",
+        )
+        flow = Workflow(name="flow").step(worker, prompt="charge 500 euros")
+        context = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(context)
+        await flow().collect()
+        set_run_context(None)
+        (request,) = seen
+        assert request.user_messages == [] and request.delegation == "charge 500 euros"
+        judge = TestModel(responses=['{"decision": "approve", "reason": "asked"}'])
+        verdict = await ApprovalReviewer(model=judge).decide(request)
+        assert verdict.verdict == "escalate" and judge.call_count == 0 and charges.made == []
+
+
 class TestReviewerLimits:
     async def test_arguments_it_cannot_read_in_full_escalate(self):
         from timbal.core.approval_reviewer import ARGUMENTS_BUDGET

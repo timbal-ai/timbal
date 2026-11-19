@@ -306,6 +306,20 @@ class TestMidTurn:
             await prepared.task
         assert live[0].content[0].text == "original"
 
+    async def test_nested_metadata_is_copied_too(self):
+        async def edit_then_fail(memory):
+            memory[0].metadata["nested"]["seen"] = "EDITED"
+            raise RuntimeError("summarizer down")
+
+        agent = Agent(
+            name="a", model=TestModel(), memory_compaction=edit_then_fail, memory_compaction_prepare_ratio=0.3
+        )
+        live = [Message(role="user", content=[TextContent(text="hi")], metadata={"nested": {"seen": "original"}})]
+        prepared = agent._prepare_compaction(SimpleNamespace(input={}), live, 0.4)
+        with pytest.raises(RuntimeError):
+            await prepared.task
+        assert live[0].metadata["nested"]["seen"] == "original"
+
 
 class TestNextTurn:
     async def test_a_turn_that_ends_past_the_ratio_hands_its_compaction_to_the_next(self):
@@ -350,6 +364,21 @@ class TestNextTurn:
         assert root(second).memory[0].collect_text() != SUMMARY
         summarizer.release.set()
         await finishing
+
+    async def test_quick_turns_share_one_background_compaction(self):
+        """Turns that do not wait for the one before take its result on instead of starting their own."""
+        summarizer = Summarizer(released=False)
+        agent = make_agent(summarizer, steps=2, memory_compaction_prepare_ratio=0.3)
+        context, _ = await run(agent)
+        for _ in range(3):  # each below the hard ratio: none waits
+            context, _ = await run(agent, prompt="again", parent_id=context.id)
+        await asyncio.sleep(0.05)  # let every summarizer that was started begin
+        assert len(summarizer.calls) == 1
+        summarizer.release.set()
+        await settled(context)
+        last, _ = await run(agent, prompt="again", parent_id=context.id)
+        assert root(last).memory[0].collect_text() == SUMMARY  # the one result reached the latest turn
+        assert len(summarizer.calls) == 1
 
     async def test_the_incoming_prompt_counts_toward_the_hard_ratio(self):
         """14 messages fit (0.70); with the prompt the turn sends, 15 do not (0.75): it waits for the compaction."""
