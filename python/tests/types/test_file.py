@@ -976,10 +976,11 @@ def _sign_response(signed_url: str | None, url: str = _KB_OBJECT):
 
 
 class _FakeCdn:
-    """Serves every URL in ``ok`` and answers 403 to anything else, recording each GET."""
+    """Serves every URL in ``ok`` and answers ``fail_status`` (403) to anything else, recording each GET."""
 
     def __init__(self, *ok: str) -> None:
         self.ok = set(ok)
+        self.fail_status = 403
         self.calls: list[str] = []
 
     def get_sync(self, url: str, **_kwargs):
@@ -990,7 +991,7 @@ class _FakeCdn:
             return httpx.Response(
                 200, content=b"%PDF-1.7", headers={"Content-Type": "application/pdf"}, request=httpx.Request("GET", url)
             )
-        return httpx.Response(403, content=b"<Error>AccessDenied</Error>", request=httpx.Request("GET", url))
+        return httpx.Response(self.fail_status, content=b"<Error/>", request=httpx.Request("GET", url))
 
     async def get(self, url: str, **kwargs):
         return self.get_sync(url, **kwargs)
@@ -1147,17 +1148,47 @@ class TestSignedContentResign:
         assert sign.call_count == 1
         assert cdn.calls == [_KB_OBJECT, stored]
 
-    async def test_refused_cached_and_fresh_mints_fall_back_to_the_stored_url(self, mode: str) -> None:
+    async def test_refused_cached_mint_falls_back_to_the_stored_url(self, mode: str) -> None:
         first = _signed_url(3600, signature="first")
-        second = _signed_url(3600, signature="second")
         stored = _signed_url(3600)
         cdn = _FakeCdn(first)
-        with _sign_endpoint(mode, _sign_response(first), _sign_response(second)) as sign:
+        with _sign_endpoint(mode, _sign_response(first)) as sign:
             await _read(_signed_url(-60), cdn, mode)  # memoizes `first` for the object
             cdn.ok = {stored}
             assert await _read(stored, cdn, mode) == b"%PDF-1.7"
-        assert sign.call_count == 2
-        assert cdn.calls[1:] == [first, second, stored]
+        assert sign.call_count == 1
+        assert cdn.calls[1:] == [first, stored]
+
+    async def test_failed_refresh_is_not_reused_by_later_reads(self, mode: str) -> None:
+        import httpx
+
+        # The endpoint answers only the legacy url (no Expires), which 404s: the read fails...
+        cdn = _FakeCdn()
+        cdn.fail_status = 404
+        with _sign_endpoint(mode, _sign_response(None, url=_KB_OBJECT)) as sign:
+            with pytest.raises(httpx.HTTPStatusError) as exc_info:
+                await _read(_signed_url(30), cdn, mode)
+            assert exc_info.value.response.status_code == 404
+            # ...and a later read of the same object with a working URL is not sent to it.
+            working = _signed_url(3600, signature="ok")
+            cdn.ok = {working}
+            cdn.calls.clear()
+            assert await _read(working, cdn, mode) == b"%PDF-1.7"
+        assert sign.call_count == 1
+        assert cdn.calls == [working]
+
+    async def test_cached_mint_failing_with_any_status_is_dropped(self, mode: str) -> None:
+        fresh = _signed_url(3600, signature="new")
+        stored = _signed_url(3600)
+        cdn = _FakeCdn(fresh)
+        with _sign_endpoint(mode, _sign_response(fresh)) as sign:
+            await _read(_signed_url(-60), cdn, mode)  # memoizes `fresh`
+            cdn.ok, cdn.fail_status = {stored}, 404
+            cdn.calls.clear()
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+            assert await _read(stored, cdn, mode) == b"%PDF-1.7"
+        assert sign.call_count == 1
+        assert cdn.calls == [fresh, stored, stored]
 
     async def test_refused_refresh_of_an_expired_url_does_not_fetch_it(self, mode: str) -> None:
         import httpx
@@ -1169,15 +1200,14 @@ class TestSignedContentResign:
             await _read(stored, cdn, mode)
         assert cdn.calls == [fresh]
 
-    async def test_sync_sign_call_has_a_retry_budget(self, mode: str) -> None:
-        from timbal.types.file import _SIGN_RETRY_BUDGET_SECS
+    async def test_sign_call_has_a_total_budget(self, mode: str) -> None:
+        from timbal.types.file import _SIGN_BUDGET_SECS
 
         stored = _signed_url(-60)
         fresh = _signed_url(3600, signature="new")
         with _sign_endpoint(mode, _sign_response(fresh)) as sign:
             await _read(stored, _FakeCdn(fresh), mode)
-        if mode == "sync":
-            assert sign.call_args.kwargs["total_timeout"] == _SIGN_RETRY_BUDGET_SECS
+        assert sign.call_args.kwargs["total_timeout"] == _SIGN_BUDGET_SECS
 
     async def test_without_platform_subject_behaviour_is_unchanged(self, mode: str) -> None:
         import httpx
@@ -1338,3 +1368,117 @@ class TestRequestSync:
             _request_sync("POST", "x", json={}, total_timeout=30)
         assert request.call_count == 2
         sleep.assert_called_once_with(1.0)
+
+
+class _Clock:
+    """A monotonic clock that only moves when a test (or a patched sleep) moves it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.mark.usefixtures("platform_run")
+class TestRetryBudget:
+    """``total_timeout`` bounds the whole call: attempts and the waits between them."""
+
+    def test_sync_retry_gets_only_the_time_left(self) -> None:
+        from unittest.mock import patch
+
+        import httpx
+        from timbal.platform.utils import _request_sync
+
+        clock = _Clock()
+        req = httpx.Request("POST", "https://api.timbal.ai/x")
+        timeouts = []
+
+        def request(*_args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            if len(timeouts) == 1:
+                clock.now = 25.0  # the first attempt took 25 s
+                return httpx.Response(429, headers={"Retry-After": "1"}, request=req)
+            return httpx.Response(200, json={}, request=req)
+
+        with (
+            patch("time.monotonic", clock.monotonic),
+            patch("time.sleep", clock.sleep),
+            patch("httpx.request", side_effect=request),
+        ):
+            _request_sync("POST", "x", json={}, timeout=httpx.Timeout(30.0), total_timeout=30)
+        assert timeouts[0].read == 30.0
+        # Retry starts at 26 s: every phase is capped at the 4 s left.
+        assert (timeouts[1].connect, timeouts[1].read, timeouts[1].write, timeouts[1].pool) == (4.0, 4.0, 4.0, 4.0)
+
+    def test_sync_no_retry_once_attempts_spent_the_budget(self) -> None:
+        from unittest.mock import patch
+
+        import httpx
+        from timbal.errors import PlatformError
+        from timbal.platform.utils import _request_sync
+
+        clock = _Clock()
+        req = httpx.Request("POST", "https://api.timbal.ai/x")
+
+        def request(*_args, **_kwargs):
+            clock.now = 29.95  # no 100 ms backoff fits in what is left
+            return httpx.Response(503, request=req)
+
+        with (
+            patch("time.monotonic", clock.monotonic),
+            patch("time.sleep", clock.sleep),
+            patch("httpx.request", side_effect=request) as sent,
+            pytest.raises(PlatformError) as exc_info,
+        ):
+            _request_sync("POST", "x", json={}, timeout=httpx.Timeout(30.0), total_timeout=30)
+        assert exc_info.value.status_code == 503
+        assert sent.call_count == 1
+        assert clock.now == 29.95
+
+    async def test_async_retry_gets_only_the_time_left_and_long_waits_are_skipped(self) -> None:
+        import contextlib
+        from unittest.mock import patch
+
+        import httpx
+        from timbal.errors import PlatformError
+        from timbal.platform.utils import _request
+
+        clock = _Clock()
+        req = httpx.Request("POST", "https://api.timbal.ai/x")
+        timeouts = []
+        responses = [
+            httpx.Response(429, headers={"Retry-After": "1"}, request=req),
+            httpx.Response(429, headers={"Retry-After": "120"}, request=req),
+        ]
+
+        class Client:
+            async def request(self, *_args, **kwargs):
+                timeouts.append(kwargs["timeout"])
+                if len(timeouts) == 1:
+                    clock.now = 25.0
+                return responses[len(timeouts) - 1]
+
+        @contextlib.asynccontextmanager
+        async def request_client(_timeout):
+            yield Client()
+
+        async def sleep(seconds: float) -> None:
+            clock.sleep(seconds)
+
+        with (
+            patch("time.monotonic", clock.monotonic),
+            patch("asyncio.sleep", sleep),
+            patch("timbal.platform.utils.request_client", request_client),
+            pytest.raises(PlatformError) as exc_info,
+        ):
+            await _request("POST", "x", json={}, timeout=httpx.Timeout(30.0), total_timeout=30)
+        assert timeouts[0].read == 30.0
+        assert timeouts[1].read == 4.0
+        # The second 429's Retry-After: 120 is past the budget: raised, not slept.
+        assert exc_info.value.status_code == 429
+        assert len(timeouts) == 2
+        assert clock.now == 26.0
