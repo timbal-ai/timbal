@@ -223,9 +223,11 @@ ApprovalUi = dict[str, Any] | BaseModel | Callable[..., dict[str, Any] | BaseMod
 
 # call id -> the run context of every call whose stream has not ended. An ambient call id found here is a call
 # still running, whatever run context is set by now: a run minted under it was started by that call's code. An id
-# a stream abandoned mid-way left behind in its consumer's task is gone from here once the loop has closed it; so
-# is a background child's (its stream ends when it is detached), which the forks in ``_stream`` link themselves.
+# a stream abandoned mid-way left behind in its consumer's task is gone from here once the loop has closed it.
 _LIVE_CALLS: dict[str, RunContext] = {}
+# The same for a detached call (a background child), from the task that runs its code being made until it ends:
+# its stream is over, its handler is not.
+_DETACHED_CALLS: dict[str, RunContext] = {}
 
 
 def _inherit_tool_policy(run_context: RunContext, entry_run_context: RunContext, entry_call_id: str) -> None:
@@ -1967,6 +1969,8 @@ class Runnable(ABC, BaseModel):
         registered = False
         try:
             task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
+            _DETACHED_CALLS[span.call_id] = run_context
+            task.add_done_callback(lambda _task, call_id=span.call_id: _DETACHED_CALLS.pop(call_id, None))
             record = register_background_task(
                 name=self.name,
                 input=input,
@@ -2079,6 +2083,8 @@ class Runnable(ABC, BaseModel):
         registered = False
         try:
             task = asyncio.create_task(_continue_in_background(), context=contextvars.copy_context())
+            _DETACHED_CALLS[span.call_id] = run_context
+            task.add_done_callback(lambda _task, call_id=span.call_id: _DETACHED_CALLS.pop(call_id, None))
             record = register_background_task(
                 name=self.name,
                 input=input,
@@ -2209,9 +2215,8 @@ class Runnable(ABC, BaseModel):
                         from ..state.background import current_background_task_id
 
                         if current_background_task_id() is not None:
-                            # A background child's code, for certain: its call's stream ended when it was
-                            # detached, so the id is not among the running ones (nor is one a stream
-                            # abandoned mid-way left behind, which is nobody's code).
+                            # A background child's code, for certain (an id a stream abandoned mid-way
+                            # left behind in its consumer's task is nobody's code).
                             run_context.__dict__["_invoker"] = (_entry_run_context, _entry_call_id)
                 else:
                     run_context = RunContext(
@@ -2270,9 +2275,9 @@ class Runnable(ABC, BaseModel):
         if _new_parent_call_id is None:
             if _entry_call_id is not None and run_context._invoker is None:
                 # A run of its own that the forks above did not link, minted while a call is ambient: on a
-                # context the handler built and set, or with none set. If that call is still running, its
-                # code started this run all the same.
-                invoking = _LIVE_CALLS.get(_entry_call_id)
+                # context the handler built and set, or with none set. If that call is still running (or
+                # detached, its code still running), its code started this run all the same.
+                invoking = _LIVE_CALLS.get(_entry_call_id) or _DETACHED_CALLS.get(_entry_call_id)
                 if invoking is not None:
                     run_context.__dict__["_invoker"] = (invoking, _entry_call_id)
                     if run_context._tool_policy is None:

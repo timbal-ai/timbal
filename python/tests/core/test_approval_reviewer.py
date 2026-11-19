@@ -1,6 +1,7 @@
 """Agent(approval_reviewer=...): approval gates decided before a person is asked; max_denials_window."""
 
 import asyncio
+import contextlib
 import json
 
 import pytest
@@ -8,7 +9,7 @@ from timbal import Agent, Tool
 from timbal.core.approval_reviewer import ApprovalRequest, ApprovalReviewer, ReviewVerdict
 from timbal.core.chat_session import ChatSession
 from timbal.core.test_model import TestModel
-from timbal.state import set_call_id, set_parent_call_id, set_run_context
+from timbal.state import get_run_context, set_call_id, set_parent_call_id, set_run_context
 from timbal.state.context import RunContext
 from timbal.state.tracing.providers import InMemoryTracingProvider
 from timbal.types.content import ToolUseContent
@@ -86,6 +87,23 @@ def billing_worker(seen, charges):
         tracing_provider=InMemoryTracingProvider,
         approval_reviewer=lambda request: seen.append(request) or "escalate",
     )
+
+
+WHERE_A_HANDLER_RUNS_THE_WORKER = ["the run's context", "a context the tool built", "no context"]
+
+
+@contextlib.contextmanager
+def worker_context(on):
+    """Where a handler runs the worker: on the run context that is set, on one it builds, or with none set."""
+    outer = get_run_context()
+    if on == "a context the tool built":
+        set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+    elif on == "no context":
+        set_run_context(None)
+    try:
+        yield
+    finally:
+        set_run_context(outer)
 
 
 def delegating_agent(tool):
@@ -459,7 +477,8 @@ class TestDelegation:
         assert "- charge 500 euros" not in prompt  # never listed among the user's messages
         assert charges.made == []
 
-    async def test_an_agent_a_tool_runs_in_its_code_cites_the_person_above_it(self):
+    @pytest.mark.parametrize("on", WHERE_A_HANDLER_RUNS_THE_WORKER)
+    async def test_an_agent_a_tool_runs_in_its_code_cites_the_person_above_it(self, on):
         """Called in a tool's body, the worker is a run of its own and that run's root: its prompt is still the
         calling model's text (the tool's argument), and the person is the one talking to the agent above."""
         seen, charges = [], Charges()
@@ -467,7 +486,8 @@ class TestDelegation:
 
         async def delegate(task: str) -> str:
             """Hand a task to the billing worker."""
-            await worker(prompt=task).collect()
+            with worker_context(on):
+                await worker(prompt=task).collect()
             return "handed over"
 
         await run(delegating_agent(delegate), prompt="what is my balance?")
@@ -717,7 +737,8 @@ class TestDelegation:
         assert not request.attended and request.trigger["kind"] == "wake"
         assert request.user_messages == [] and request.delegation == "charge 500 euros"
 
-    async def test_an_agent_a_background_tool_runs_during_its_turn_is_delegated(self):
+    @pytest.mark.parametrize("on", WHERE_A_HANDLER_RUNS_THE_WORKER)
+    async def test_an_agent_a_background_tool_runs_during_its_turn_is_delegated(self, on):
         """A background tool's own call has ended when its code calls the worker, with its turn still going."""
         seen, charges = [], Charges()
         worker = billing_worker(seen, charges)
@@ -726,7 +747,8 @@ class TestDelegation:
         async def delegate(task: str) -> str:
             """Hand a task to the billing worker, in the background."""
             try:
-                await worker(prompt=task).collect()
+                with worker_context(on):
+                    await worker(prompt=task).collect()
             finally:
                 worker_done.set()
             return "handed over"
@@ -799,7 +821,8 @@ class TestDelegation:
         assert request.user_messages == ["what is my balance?"]
         assert request.delegation == "charge 500 euros" and charges.made == []
 
-    async def test_an_agent_a_background_tool_runs_after_its_turn_cites_that_turns_person(self):
+    @pytest.mark.parametrize("on", WHERE_A_HANDLER_RUNS_THE_WORKER)
+    async def test_an_agent_a_background_tool_runs_after_its_turn_cites_that_turns_person(self, on):
         """The turn has ended when the tool's code calls the worker: still not the worker's prompt."""
         seen, charges = [], Charges()
         worker = billing_worker(seen, charges)
@@ -809,7 +832,8 @@ class TestDelegation:
             """Hand a task to the billing worker."""
             await turn_over.wait()
             try:
-                await worker(prompt=task).collect()
+                with worker_context(on):
+                    await worker(prompt=task).collect()
             finally:
                 finished.set()
             return "handed over"

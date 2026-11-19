@@ -1425,11 +1425,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # original prompt already lives in the loaded parent memory.
         tail = [] if is_resume else [prompt]
         merged: list[Message] = []
+        unwaited = run_context.__dict__.get("_unwaited_handoffs", {}).get(self._path)
+        images: dict[int, Message | None] = {}
         for msg in memory + tail:
             cleaned = msg.without_empty_text_blocks()
+            if unwaited is not None:
+                images[id(msg)] = cleaned
             if cleaned is not None:
                 merged.append(cleaned)
         current_span.memory = merged
+        if unwaited is not None:
+            # What this turn holds of each message it loaded: cleaning hands back another object (or drops the
+            # message), and ``_take_predecessors`` tells by identity whether the prefix is still in place.
+            handoff, stored_memory, loaded = unwaited
+            run_context.__dict__["_unwaited_handoffs"][self._path] = (
+                handoff,
+                stored_memory,
+                [images.get(id(message)) for message in loaded],
+            )
 
         # Re-dump prior turns so stored memory matches sanitized messages (no empty text blocks).
         current_span._prev_memory_dump = await dump(merged[:-1])
@@ -1961,16 +1974,19 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         covered = record.get("covered", 0) if isinstance(record, dict) else 0
         if not covered:
             return False
+        # What this turn holds of the messages the record covers (a message cleaned to nothing is not held).
+        held = [message for message in loaded[:covered] if message is not None]
         if (
-            min(len(stored_memory), len(loaded), len(memory)) < covered
-            # Still the messages this turn loaded, in the places the record covers.
-            or not all(a is b for a, b in zip(memory[:covered], loaded[:covered], strict=True))
+            min(len(stored_memory), len(loaded)) < covered
+            or len(memory) < len(held)
+            # Still those messages, first and in order: nothing put between them, none replaced.
+            or not all(a is b for a, b in zip(memory, held, strict=False))
             or _fingerprint(await dump(stored_memory[:covered])) != record.get("fingerprint")
         ):
             run_context.update_usage("compaction:prepared_stale", 1)
             return False
         compacted = [Message.validate(message) for message in record["memory"]]
-        current_span.memory = _join(compacted, memory[covered:])
+        current_span.memory = _join(compacted, memory[len(held) :])
         self._record_compaction(
             current_span,
             record.get("utilization"),
@@ -1999,15 +2015,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             utilization = self._context_utilization(
                 self._span_model(current_span), memory, current_span.metadata.get("context_measurement")
             )
-            if (
-                utilization is None
-                or not self.memory_compaction_prepare_ratio <= utilization < self.memory_compaction_ratio
-            ):
+            if utilization is None or utilization < self.memory_compaction_prepare_ratio:
                 return
             # The turn before's is still on its way (this turn did not wait for it): take its result on for the
-            # next turn when it is there, instead of a second compaction of nearly the same history.
+            # next turn when it is there, instead of a second compaction of nearly the same history. Also when
+            # this turn ends at the hard ratio: the next one then waits for that result rather than compacting
+            # inline next to it.
             predecessor = _predecessors_handoff(run_context, self._path)
             if predecessor is None:
+                if utilization >= self.memory_compaction_ratio:
+                    return  # the next turn compacts at its start, as before
                 prepared = self._prepare_compaction(current_span, memory, utilization)
         if prepared is not None:
             dumped = whole_dump[: len(prepared.prefix)]

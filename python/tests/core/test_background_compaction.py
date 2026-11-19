@@ -442,9 +442,16 @@ class TestNextTurn:
         second, _ = await run(agent, prompt="again", parent_id=first.id)
         assert root(second).memory[0].collect_text() == SUMMARY  # waited, and took it
 
-    async def test_a_turn_crossing_the_hard_ratio_takes_the_one_before_instead_of_compacting_inline(self):
+    @pytest.mark.parametrize(
+        "prompt",
+        ["go", Message(role="user", content=[TextContent(text=""), TextContent(text="go")])],
+        ids=["a plain prompt", "a prompt with an empty text block"],
+    )
+    async def test_a_turn_crossing_the_hard_ratio_takes_the_one_before_instead_of_compacting_inline(self, prompt):
         """Turn two starts below the hard ratio, so it does not wait; its tool results then take it past. It takes
-        the compaction turn one is still preparing, not a second one of the same history next to it."""
+        the compaction turn one is still preparing, not a second one of the same history next to it. Also when
+        loading the history cleaned a message of it (a prompt stored with an empty text block): the turn then
+        holds another object than the one it loaded."""
         running = peak = 0
         release, sizes = asyncio.Event(), []
 
@@ -470,7 +477,7 @@ class TestNextTurn:
             memory_compaction_prepare_ratio=0.3,
             max_iter=30,
         )
-        first, _ = await run(agent)  # 6 messages: past the prepare ratio, its compaction held at the summarizer
+        first, _ = await run(agent, prompt=prompt)  # 6 messages: past the prepare ratio, held at the summarizer
         asyncio.get_running_loop().call_later(0.3, release.set)
         second, output = await run(agent, prompt="more", parent_id=first.id)  # 7, then 15 after four tool results
         assert peak == 1 and sizes[0] == 6
@@ -478,6 +485,61 @@ class TestNextTurn:
         assert root(second).metadata["compaction"]["prepared_by"] == first.id
         assert output.usage.get("compaction:background") == 1
         await settled(second)
+
+    async def test_a_turn_ending_at_the_hard_ratio_takes_the_one_before_on(self):
+        """Turn two never waits and stays below the hard ratio at each step; its answer takes it there. It takes
+        turn one's compaction on, so turn three waits for that one instead of compacting inline next to it."""
+        running = peak = 0
+        release, sizes = asyncio.Event(), []
+
+        async def summarize_old(memory):
+            nonlocal running, peak
+            sizes.append(len(memory))
+            running += 1
+            peak = max(peak, running)
+            try:
+                await release.wait()
+            finally:
+                running -= 1
+            if len(memory) <= 3:
+                return memory
+            return [Message(role="user", content=[TextContent(text=SUMMARY)]), memory[-1]]
+
+        # Turn one: a batch of two calls, one more, the answer (7 messages). Turn two: three single calls.
+        plan, left, made = {"go": [2, 1], "more": [1, 1, 1], "again": []}, [], 0
+
+        def model(messages):
+            nonlocal left, made
+            last = messages[-1]
+            if last.role == "user" and last.collect_text() in plan:
+                left = list(plan[last.collect_text()])
+            if not left:
+                return "done"
+            calls = []
+            for _ in range(left.pop(0)):
+                made += 1
+                calls.append(ToolUseContent(id=f"c{made}", name="step", input={}))
+            return Message(role="assistant", content=calls, stop_reason="tool_use")
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=model),
+            tools=[Tool(name="step", handler=step)],
+            tracing_provider=InMemoryTracingProvider,
+            memory_compaction=summarize_old,
+            memory_compaction_prepare_ratio=0.3,
+            max_iter=30,
+        )
+        first, _ = await run(agent)
+        second, _ = await run(agent, prompt="more", parent_id=first.id)  # 8, then 10, 12, 14; 15 with the answer
+        assert len(root(second).memory) == 15 and (second.id, "agent") in agent_module._PREPARING
+        asyncio.get_running_loop().call_later(0.3, release.set)
+        third, _ = await run(agent, prompt="again", parent_id=second.id)  # 16 at its start: waits, does not compact
+        assert peak == 1 and len(sizes) == 1  # turn one's, started mid-turn; nothing next to it
+        assert root(third).memory[0].collect_text() == SUMMARY
+        assert root(third).metadata["compaction"]["prepared_by"] == second.id
+        for handoff in list(agent_module._PREPARING.values()):
+            await handoff.stored
 
     async def test_a_summary_that_is_there_is_taken_before_its_run_is_stored(self, monkeypatch):
         """The turn at the hard ratio waits for the summary, not for the trace of the run that made it."""
