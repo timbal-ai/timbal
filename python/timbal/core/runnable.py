@@ -1709,17 +1709,15 @@ class Runnable(ABC, BaseModel):
         reviewer = caller.runnable._approval_reviewer
         if not reviewer.reviews(approval_decision.kind):
             return None
-        from .approval_reviewer import ApprovalRequest
+        from .approval_reviewer import ApprovalRequest, said_by_the_user
 
         memory = caller.memory if isinstance(caller.memory, list) else []
         user_messages = [
             text
             for message in memory
-            if isinstance(message, Message)
-            and message.role == "user"
-            and not message.is_runtime()
-            and (text := message.collect_text().strip())
-        ][-reviewer.context_messages :]
+            if isinstance(message, Message) and said_by_the_user(message) and (text := message.collect_text().strip())
+        ]
+        user_messages = user_messages[-reviewer.context_messages :] if reviewer.context_messages else []
         root = run_context.root_span()
         trigger = (root.metadata or {}).get("trigger") if root is not None else None
         attended = not isinstance(trigger, dict) or trigger.get("kind") in ("user_message", "resume")

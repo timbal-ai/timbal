@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 import structlog
 
-__all__ = ["ApprovalRequest", "ApprovalReviewer", "ReviewVerdict"]
+__all__ = ["ApprovalRequest", "ApprovalReviewer", "ReviewVerdict", "said_by_the_user"]
 
 logger = structlog.get_logger("timbal.core.approval_reviewer")
 
@@ -127,6 +127,8 @@ class ApprovalReviewer:
     ) -> None:
         if (model is None) == (review is None):
             raise ValueError("ApprovalReviewer needs a model or a review function (one of them).")
+        if isinstance(context_messages, bool) or not isinstance(context_messages, int) or context_messages < 0:
+            raise ValueError(f"context_messages must be an integer >= 0, got {context_messages!r}")
         self.model = model
         self._review = review
         self.instructions = instructions
@@ -168,7 +170,11 @@ class ApprovalReviewer:
 
     async def _ask(self, request: ApprovalRequest) -> Any:
         if self._review is not None:
-            result = self._review(request)
+            if inspect.iscoroutinefunction(self._review):
+                return await self._review(request)
+            # A synchronous function on the event loop could not be interrupted: the timeout would not hold.
+            # On a thread it can be abandoned at the deadline (the gate escalates; the thread finishes alone).
+            result = await asyncio.to_thread(self._review, request)
             return await result if inspect.isawaitable(result) else result
         from ..guardrails.judge_llm import call_judge
 
@@ -183,25 +189,49 @@ class ApprovalReviewer:
         return _parse(text)
 
 
+def said_by_the_user(message: Any) -> bool:
+    """Whether ``message`` is something a person said, the only evidence an approval may rest on: ``role="user"``
+    with no ``source`` (the runtime marks its own messages: notices, wakes, summaries), and not a compaction
+    summary stored before summaries were marked (they open with its marker)."""
+    from .memory_compaction import _SUMMARY_MARKER
+
+    if message.role != "user":
+        return False
+    metadata = message.metadata or {}
+    if metadata.get("source") is not None:
+        return False
+    return not message.collect_text().lstrip().startswith(_SUMMARY_MARKER)
+
+
 def _clip(text: str, limit: int) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+_FENCED = re.compile(r"\A```(?:json)?\s*\n(.*)\n```\Z", re.DOTALL)
+
+
 def _parse(text: str) -> ReviewVerdict:
-    """The JSON answer; failing that (prose around it, an answer cut at the token limit), its ``decision`` field."""
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match is not None:
-        try:
-            data = json.loads(match.group(0))
-            return _coerce((data.get("decision"), data.get("reason") or ""))
-        except (ValueError, AttributeError):
-            pass
-    decision = re.search(r'"decision"\s*:\s*"(approve|deny|escalate)"', text, re.IGNORECASE)
-    if decision is None:
-        raise ValueError(f"no decision in the reviewer's answer: {_clip(text, 200)!r}")
-    reason = re.search(r'"reason"\s*:\s*"([^"]*)', text)
-    return _coerce((decision.group(1), reason.group(1) if reason else ""))
+    """The model's verdict, only when the whole answer is one schema-valid object:
+    ``{"decision": "approve" | "deny" | "escalate", "reason": "<text>"}`` (optionally the only thing in a
+    fenced block). Anything else (prose around it, an example quoted in an explanation, a second object, a
+    missing or extra field, an answer cut at the token limit) raises, and the gate escalates to a person."""
+    body = text.strip()
+    fenced = _FENCED.match(body)
+    if fenced is not None:
+        body = fenced.group(1).strip()
+    try:
+        data = json.loads(body)
+    except ValueError as e:
+        raise ValueError(f"the reviewer's answer is not a single JSON verdict: {_clip(text, 200)!r}") from e
+    if not isinstance(data, dict) or set(data) != {"decision", "reason"}:
+        raise ValueError(f"the reviewer's verdict must have exactly 'decision' and 'reason': {_clip(text, 200)!r}")
+    decision, reason = data["decision"], data["reason"]
+    if decision not in ("approve", "deny", "escalate") or not isinstance(reason, str):
+        raise ValueError(f"invalid reviewer verdict: {_clip(text, 200)!r}")
+    return ReviewVerdict(
+        decision, reason.strip() or {"approve": "Approved.", "deny": "Denied."}.get(decision, "Needs a person.")
+    )
 
 
 def _coerce(raw: Any) -> ReviewVerdict:

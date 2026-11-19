@@ -201,7 +201,6 @@ class TestMidTurn:
         finally:
             loop.close()
 
-
     async def test_a_strategy_that_shrinks_results_in_place_is_swapped_in(self):
         """compact_tool_results keeps the message count: its result must not read as 'nothing to gain'."""
         from timbal.core.memory_compaction import compact_tool_results
@@ -257,7 +256,6 @@ class TestMidTurn:
         await prepared.task
         assert calls == [7, 9]
 
-
     def test_a_history_with_files_is_compared_without_dumping_them(self):
         """A rebuilt message that still holds a file (a kept attachment) must not crash the swap."""
         from timbal.types.content import FileContent
@@ -297,6 +295,7 @@ class TestNextTurn:
         first, _ = await run(agent)
         assert (first.id, "agent") in agent_module._PREPARING  # still summarizing after the turn ended
         summarizer.release.set()
+        await settled(first)
         second, output = await run(agent, prompt="again", parent_id=first.id)
         memory = root(second).memory
         assert memory[0].collect_text() == SUMMARY and memory[-1].collect_text() == "again done"
@@ -320,6 +319,36 @@ class TestNextTurn:
         assert agent_module._PREPARED_KEY not in (await second.get_session())
         third, output = await run(agent, prompt="again", parent_id=second.id)
         assert "compaction:prepared_stale" not in output.usage
+
+    async def test_a_history_that_fits_does_not_wait_for_it(self):
+        """Below the hard ratio the next turn goes on with the history it has instead of waiting on the summarizer."""
+        summarizer = Summarizer(released=False)
+        agent = make_agent(summarizer, steps=2, memory_compaction_prepare_ratio=0.3)
+        first, _ = await run(agent)
+        finishing = agent_module._PREPARING[(first.id, "agent")]
+        second, _ = await asyncio.wait_for(run(agent, prompt="again", parent_id=first.id), timeout=2)
+        assert not finishing.done()  # never waited for
+        assert root(second).memory[0].collect_text() != SUMMARY
+        summarizer.release.set()
+        await finishing
+
+    async def test_a_history_at_the_hard_ratio_waits_for_it(self, monkeypatch):
+        summarizer = Summarizer(released=False)
+        agent = make_agent(summarizer, steps=2, memory_compaction_prepare_ratio=0.3)
+        first, _ = await run(agent)
+        real = Agent._take_prepared
+
+        async def at_the_limit(self, run_context, source, memory, model):
+            monkeypatch.setattr(Agent, "_context_utilization", lambda *_args: 0.8)  # does not fit as it is
+            try:
+                return await real(self, run_context, source, memory, model)
+            finally:
+                monkeypatch.setattr(Agent, "_context_utilization", lambda _s, _m, messages, _x: 0.05 * len(messages))
+
+        monkeypatch.setattr(Agent, "_take_prepared", at_the_limit)
+        asyncio.get_running_loop().call_later(0.1, summarizer.release.set)
+        second, _ = await run(agent, prompt="again", parent_id=first.id)
+        assert root(second).memory[0].collect_text() == SUMMARY  # waited, and took it
 
     async def test_another_process_takes_it_from_the_stored_session_data(self):
         summarizer = Summarizer()

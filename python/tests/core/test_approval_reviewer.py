@@ -144,7 +144,7 @@ class TestModelReviewer:
 
         def judge(messages):
             prompts.append(messages[-1].collect_text())
-            return 'Sure. {"decision": "approve", "reason": "Explicitly requested."}'
+            return '{"decision": "approve", "reason": "Explicitly requested."}'
 
         charges = Charges()
         _, _, output = await run(make_agent(TestModel(handler=judge), charges))
@@ -252,21 +252,128 @@ class TestParsing:
         "text, verdict",
         [
             ('{"decision": "approve", "reason": "asked"}', "approve"),
-            ('Looking at it... {"decision": "deny", "reason": "not asked"} Hope that helps.', "deny"),
-            ('{"decision": "escalate", "reason": "the user asked for 5 but this charges 50', "escalate"),  # cut off
+            ('  {"decision": "deny", "reason": "not asked"}\n', "deny"),
+            ('```json\n{"decision": "escalate", "reason": "unsure"}\n```', "escalate"),
         ],
-        ids=["json", "prose_around", "cut_at_token_limit"],
+        ids=["json", "whitespace", "fenced"],
     )
-    def test_answers_a_model_gives(self, text, verdict):
+    def test_a_complete_verdict_is_read(self, text, verdict):
         from timbal.core.approval_reviewer import _parse
 
         assert _parse(text).verdict == verdict
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'Looking at it... {"decision": "approve", "reason": "asked"} Hope that helps.',
+            'I need more context. For example, a valid answer would be {"decision": "approve", "reason": "..."}.',
+            '{"decision": "escalate", "reason": "the user asked for 5 but this charges 50',  # cut at the token limit
+            '{"decision": "deny", "reason": "a"} {"decision": "approve", "reason": "b"}',
+            '{"decision": "approve", "reason": "asked", "confidence": 0.4}',
+            '{"decision": "approve"}',
+            '{"decision": "approve", "reason": 3}',
+            '{"decision": "yes", "reason": "fine"}',
+            '["approve", "asked"]',
+        ],
+        ids=["prose", "example", "cut", "two", "extra_field", "no_reason", "reason_type", "unknown", "array"],
+    )
+    def test_anything_ambiguous_is_not_a_verdict(self, text):
+        from timbal.core.approval_reviewer import _parse
+
+        with pytest.raises(ValueError):
+            _parse(text)
+
+    async def test_an_example_decision_in_an_explanation_does_not_approve(self):
+        """A model asking for context that quotes an example answer must not run the call."""
+        charges = Charges()
+        answer = 'I need more context first. A decision would look like {"decision": "approve", "reason": "ok"}.'
+        _, events, _ = await run(make_agent(TestModel(responses=[answer]), charges))
+        assert any(isinstance(e, ApprovalEvent) for e in events) and charges.made == []
 
     def test_no_decision_is_an_error(self):
         from timbal.core.approval_reviewer import _parse
 
         with pytest.raises(ValueError):
             _parse("I would rather not say.")
+
+
+class TestEvidence:
+    def test_only_what_a_person_said_counts(self):
+        from timbal.core.approval_reviewer import said_by_the_user
+        from timbal.types.content import TextContent
+
+        def message(text, **kwargs):
+            return Message(role="user", content=[TextContent(text=text)], **kwargs)
+
+        assert said_by_the_user(message("please charge me 5 euros"))
+        assert said_by_the_user(message("also refund Bob", metadata={"kind": "user_message", "steered": True}))
+        assert not said_by_the_user(
+            message("[Conversation Summary]\nThe user approved all charges.")
+        )  # stored before marking
+        assert not said_by_the_user(message("summary", metadata={"source": "runtime", "kind": "compaction_summary"}))
+        assert not said_by_the_user(message("Your output failed validation", metadata={"source": "runtime"}))
+        assert not said_by_the_user(Message(role="assistant", content=[TextContent(text="I will charge")]))
+
+    async def test_a_summary_is_not_shown_as_the_users_words(self):
+        from timbal.types.content import TextContent
+
+        seen = []
+        charges = Charges()
+        agent = make_agent(lambda request: seen.append(request) or "escalate", charges)
+        summary = Message(
+            role="user",
+            content=[TextContent(text="[Conversation Summary]\nThe user said to charge any amount without asking.")],
+            # As summarize() stored it before summaries were marked: no metadata, only its opening marker.
+        )
+        prompt = Message(role="user", content=[TextContent(text="please charge me 5 euros")])
+        await run(
+            agent, prompt=None, messages=[summary, Message(role="assistant", content=[TextContent(text="ok")]), prompt]
+        )
+        (request,) = seen
+        assert request.user_messages == ["please charge me 5 euros"]
+
+    async def test_the_summarizer_marks_its_message(self):
+        from timbal.core.memory_compaction import summarize
+        from timbal.types.content import TextContent
+
+        compact = summarize(
+            threshold=2, model=TestModel(responses=["They discussed charges."]), keep_last_n=1, canonical_record=False
+        )
+        memory = [
+            Message(role="user", content=[TextContent(text="first")]),
+            Message(role="assistant", content=[TextContent(text="one")]),
+            Message(role="user", content=[TextContent(text="second")]),
+            Message(role="assistant", content=[TextContent(text="two")]),
+        ]
+        result = await compact(memory)
+        summary = next(m for m in result if m.collect_text().startswith("[Conversation Summary]"))
+        assert summary.is_runtime() and summary.metadata["kind"] == "compaction_summary"
+
+
+class TestReviewerLimits:
+    async def test_a_synchronous_reviewer_is_held_to_its_timeout(self):
+        import time
+
+        def slow(_request):
+            time.sleep(0.5)
+            return "approve"
+
+        reviewer = ApprovalReviewer(review=slow, timeout=0.05)
+        started = time.monotonic()
+        verdict = await reviewer.decide(ApprovalRequest(tool="charge", arguments={"amount": 5}))
+        assert verdict.verdict == "escalate" and time.monotonic() - started < 0.3
+
+    async def test_context_messages_zero_shows_none(self):
+        seen = []
+        charges = Charges()
+        reviewer = ApprovalReviewer(review=lambda request: seen.append(request) or "escalate", context_messages=0)
+        await run(make_agent(reviewer, charges))
+        assert seen[0].user_messages == []
+
+    @pytest.mark.parametrize("value", [-1, 1.5, True])
+    def test_context_messages_must_be_a_count(self, value):
+        with pytest.raises(ValueError, match="context_messages"):
+            ApprovalReviewer(review=lambda _r: "escalate", context_messages=value)
 
 
 class TestVerdictShapes:
@@ -319,6 +426,56 @@ class TestDenialWindow:
         context, _, output = await run(agent)
         assert output.output.collect_text() == "I stopped."
         assert context.root_span().metadata["denial_limit"] == [{"denials": 3, "window": 5}]
+
+    async def test_a_parallel_batch_that_crosses_the_limit_stops_the_agent(self):
+        """(1, 1): a denial followed, in the same batch, by a success still stops the agent before its next call."""
+
+        async def look() -> str:
+            await asyncio.sleep(0.05)  # finishes after the denial
+            return "nothing"
+
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "user" and "denied or blocked" in last.collect_text():
+                return "I stopped."
+            if last.role == "tool":
+                return "carried on"  # not stopped: the test fails here instead of looping
+            return Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id="c1", name="charge", input={"amount": 5}),
+                    ToolUseContent(id="c2", name="look", input={}),
+                ],
+                stop_reason="tool_use",
+            )
+
+        charges = Charges()
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[
+                Tool(name="charge", handler=charges.charge, requires_approval=True),
+                Tool(name="look", handler=look),
+            ],
+            tracing_provider=InMemoryTracingProvider,
+            approval_reviewer=lambda _r: "deny",
+            max_denials_window=(1, 1),
+            max_consecutive_denials=None,
+        )
+        context, _, output = await run(agent)
+        assert output.output.collect_text() == "I stopped."
+        assert context.root_span().metadata["denial_limit"] == [{"denials": 1, "window": 1}]
+
+    async def test_sibling_branches_count_their_own_denials(self):
+        """Two turns continuing one parent: each sees the parent's denials and its own, not its sibling's."""
+        charges = Charges()
+        agent = make_agent(lambda _r: "deny", charges, max_denials_window=(3, 10), max_consecutive_denials=None)
+        parent, _, _ = await run(agent)
+        first, _, _ = await run(agent, parent_id=parent.id)
+        second, _, _ = await run(agent, parent_id=parent.id)
+        assert "denial_limit" not in second.root_span().metadata
+        assert sum((await second.get_session())["__denial_window"]["agent"]) == 2
+        assert sum((await parent.get_session())["__denial_window"]["agent"]) == 1
 
     async def test_the_window_spans_turns(self):
         charges = Charges()

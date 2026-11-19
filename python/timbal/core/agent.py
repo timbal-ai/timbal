@@ -1376,7 +1376,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             and not is_resume
             and source is previous_span
         ):
-            memory, prepared = await self._take_prepared(run_context, source, memory)
+            memory, prepared = await self._take_prepared(run_context, source, memory, self._span_model(current_span))
         if not is_resume:
             self._synthesize_missing_tool_results(memory)
         # On resume we are continuing the paused turn, not opening a new user turn.
@@ -1939,7 +1939,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     "utilization": round(prepared.utilization, 4),
                 }
                 session = await run_context.get_session()
-                session.setdefault(_PREPARED_KEY, {})[self._path] = record
+                # Copied, not updated in place: a child's session data shares its parent's nested dicts.
+                session[_PREPARED_KEY] = {**(session.get(_PREPARED_KEY) or {}), self._path: record}
                 run_context.update_usage("compaction:prepared", 1)
                 return record
             except Exception as e:
@@ -1954,17 +1955,23 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         _PREPARING[key] = finishing
 
     async def _take_prepared(
-        self, run_context: Any, source: Any, memory: list[Message]
+        self, run_context: Any, source: Any, memory: list[Message], model: str
     ) -> tuple[list[Message], dict | None]:
         """At a turn's start: the compaction the turn before prepared for this one, if its history is unchanged.
         Returns the memory to use and the record taken (None: none, or stale).
 
-        Waits for one still running in this process (it started before this turn: waiting costs less than
-        compacting inline again). Taken or not, it is removed from this run's session data.
+        One still running in this process is waited for only when the history does not fit as it is (at the hard
+        ratio, or unmeasurable): waiting then costs less than compacting inline again. Below it the turn goes on
+        with the history it has. Taken or not, it is removed from this run's session data.
         """
         key = (run_context.parent_id, self._path)
         record = None
         finishing = _PREPARING.get(key)
+        if finishing is not None and not finishing.done():
+            measurement = (source.metadata or {}).get("context_measurement") if source is not None else None
+            utilization = self._context_utilization(model, memory, measurement)
+            if utilization is not None and utilization < self.memory_compaction_ratio:
+                finishing = None
         if finishing is not None:
             with contextlib.suppress(Exception):
                 record = await asyncio.shield(finishing)
@@ -1972,10 +1979,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         stored = session.get(_PREPARED_KEY)
         if isinstance(stored, dict):
             # Removed whether or not it is used (or the in-process task already gave it): a later turn must not
-            # find it, fail its fingerprint and count a false stale compaction.
+            # find it, fail its fingerprint and count a false stale compaction. Copied, not popped in place: the
+            # dict may still be the parent run's (session data is a shallow copy).
+            stored = dict(stored)
             leftover = stored.pop(self._path, None)
             record = record or leftover
-            if not stored:
+            if stored:
+                session[_PREPARED_KEY] = stored
+            else:
                 session.pop(_PREPARED_KEY, None)
         if not isinstance(record, dict) or not isinstance(source.memory, list):
             return memory, None
@@ -2285,7 +2296,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             )
         elif policy == "final_answer":
             reply = Message(
-                role="user", content=[TextContent(text=DEFAULT_MAX_ITER_NOTICE.format(max_iter=self.max_iter))]
+                role="user",
+                content=[TextContent(text=DEFAULT_MAX_ITER_NOTICE.format(max_iter=self.max_iter))],
+                metadata={"source": "runtime", "kind": "max_iter"},
             )
         else:
             reply = policy(MaxIterContext(max_iter=self.max_iter, memory=tuple(memory), agent_path=self._path))
@@ -2718,14 +2731,27 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         consecutive_denials = 0
         denials_resumed = False
 
+        denial_window: list[int] | None = None
+        # Set when a result takes the window to its limit, so a later result in the same batch cannot hide it.
+        denial_window_crossed: dict | None = None
+
         async def _denial_window() -> list[int]:
-            """The agent's last tool call outcomes (1: denied or blocked), kept across turns in session data."""
-            session = await run_context.get_session()
-            return session.setdefault(_DENIAL_WINDOW_KEY, {}).setdefault(self._path, [])
+            """The agent's last tool call outcomes (1: denied or blocked), kept across turns in session data.
+
+            Copied into this run's own session data on first use: a run's session data is a shallow copy of its
+            parent's, so updating the nested window in place would count a sibling branch's denials too."""
+            nonlocal denial_window
+            if denial_window is None:
+                session = await run_context.get_session()
+                windows = dict(session.get(_DENIAL_WINDOW_KEY) or {})
+                denial_window = list(windows.get(self._path) or [])
+                windows[self._path] = denial_window
+                session[_DENIAL_WINDOW_KEY] = windows
+            return denial_window
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
-            nonlocal consecutive_denials
+            nonlocal consecutive_denials, denial_window_crossed
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
                 return
             # Native-event handlers (coding harness) forward their own OutputEvent
@@ -2783,6 +2809,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 window = await _denial_window()
                 window.append(1 if denied else 0)
                 del window[: -self.max_denials_window[1]]
+                if denied and sum(window) >= self.max_denials_window[0]:
+                    denial_window_crossed = {"denials": sum(window), "window": len(window)}
             # Pin the result when the originating tool opted in (e.g. read_skill), so memory
             # compaction never strips this durable context. The tool name is the final path
             # segment of its OutputEvent.
@@ -2924,18 +2952,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         async def _check_denials() -> None:
             """After a tool batch: past a denial limit (in a row, or in the window), tell the model to stop and
             take its tools away."""
-            nonlocal consecutive_denials, withhold_tools
+            nonlocal consecutive_denials, withhold_tools, denial_window_crossed
             limit = self.max_consecutive_denials
             notice = record = None
             if limit is not None and consecutive_denials >= limit:
                 notice = DEFAULT_DENIAL_NOTICE.format(count=consecutive_denials)
                 record = {"denials": consecutive_denials}
-            elif self.max_denials_window is not None:
-                denied_needed, calls = self.max_denials_window
-                window = (await _denial_window())[-calls:]
-                if sum(window) >= denied_needed:
-                    notice = DEFAULT_DENIAL_WINDOW_NOTICE.format(count=sum(window), calls=len(window))
-                    record = {"denials": sum(window), "window": len(window)}
+            elif denial_window_crossed is not None:
+                record = denial_window_crossed
+                notice = DEFAULT_DENIAL_WINDOW_NOTICE.format(count=record["denials"], calls=record["window"])
+            denial_window_crossed = None
             if notice is None:
                 return
             logger.warning("Agent reached a denial limit.", path=self._path, **record)
@@ -3334,7 +3360,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     )
                                     await _append_memory(
                                         Message.validate(
-                                            {"role": "user", "content": [{"type": "text", "text": feedback}]}
+                                            {
+                                                "role": "user",
+                                                "content": [{"type": "text", "text": feedback}],
+                                                "metadata": {"source": "runtime", "kind": "guardrail_retry"},
+                                            }
                                         )
                                     )
                                     buffered_events.clear()
@@ -3422,6 +3452,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                                     ),
                                                 }
                                             ],
+                                            "metadata": {"source": "runtime", "kind": "output_validation"},
                                         }
                                     )
                                     await _append_memory(error_feedback)

@@ -855,6 +855,8 @@ def summarize(
                 "content": _build_summary_message_text(
                     summary_text, verbatim_entries, transcript_handles, rehydrated, max_verbatim_chars
                 ),
+                # Model-written: never a person's words (an approval reviewer must not read it as authorization).
+                "metadata": {"source": RUNTIME_SOURCE, "kind": "compaction_summary"},
             }
         )
 
