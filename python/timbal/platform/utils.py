@@ -413,20 +413,36 @@ class _SyncDnsPool(concurrent.futures.ThreadPoolExecutor):
         with self._lock:
             if len(self._queue) >= self._limit:
                 # Every thread is busy and work is piling up: forget what was cancelled while it waited.
-                self._queue = collections.deque(queued for queued in self._queue if not queued[0].cancelled())
+                waiting: collections.deque = collections.deque()
+                for queued in self._queue:
+                    if queued[0].cancelled():
+                        queued[0].set_running_or_notify_cancel()  # what a thread reaching it would have done
+                    else:
+                        waiting.append(queued)
+                self._queue = waiting
             self._queue.append(item)
             start = self._threads_alive < self._limit
             if start:
-                self._threads_alive += 1
+                self._threads_alive += 1  # counted before it starts, so concurrent submits cannot overshoot the limit
         if start:
             try:
                 threading.Thread(target=self._work, name="timbal-request-sync-dns", daemon=True).start()
-            except Exception:  # the thread was not started (e.g. "can't start new thread")
+            except Exception as exc:  # the thread was not started (e.g. "can't start new thread")
                 with self._lock:
                     self._threads_alive -= 1
-                    if not self._threads_alive and item in self._queue:
-                        self._queue.remove(item)  # no thread left to run it
-                        raise
+                    if self._threads_alive:
+                        # A running thread, or one another submit is still starting, takes the queue from
+                        # here. If that one fails to start too, it is the one that ends up in the branch below.
+                        return future
+                    # No thread is left and none is on its way: nothing would ever run what is queued, so fail
+                    # all of it now (this submit's own work and what earlier failed starts left behind).
+                    abandoned = [queued[0] for queued in self._queue]
+                    self._queue.clear()
+                for orphan in abandoned:
+                    if orphan is not future and orphan.set_running_or_notify_cancel():
+                        orphan.set_exception(exc)
+                if future in abandoned:
+                    raise
         return future
 
     def _work(self) -> None:

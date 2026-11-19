@@ -1660,19 +1660,25 @@ class TestSyncDnsPool:
         assert ran == [1]
 
     def test_cancelled_work_does_not_pile_up_behind_stuck_threads(self) -> None:
+        from concurrent.futures import wait
+
         from timbal.platform.utils import _SyncDnsPool
 
         pool = _SyncDnsPool(2)
         gate = threading.Event()
+        dropped = []
         try:
             for _ in range(2):
                 pool.submit(gate.wait, 30)
             for _ in range(50):  # calls that reached their deadline while the pool was stuck
-                assert pool.submit(int).cancel()
+                dropped.append(pool.submit(int))
+                assert dropped[-1].cancel()
             assert len(pool._queue) <= 3
         finally:
             gate.set()
         _until(lambda: pool._threads_alive == 0)
+        # Dropped from the queue or reached by a thread, each one ends as any cancelled future does.
+        assert not wait(dropped, timeout=10).not_done
 
     def test_an_exception_reaches_the_future(self) -> None:
         import socket
@@ -1704,6 +1710,160 @@ class TestSyncDnsPool:
                 pool.submit(int)
         assert not pool._queue and pool._threads_alive == 0
         assert pool.submit(int).result(10) == 0
+
+    def test_work_is_failed_when_every_concurrent_thread_start_fails(self, monkeypatch) -> None:
+        from concurrent.futures import Future
+
+        from timbal.platform.utils import _SyncDnsPool
+
+        submitters = 8
+        pool = _SyncDnsPool(submitters)
+        under_way = threading.Barrier(submitters)  # every start is under way before the first one fails
+        real_start = threading.Thread.start
+
+        def start(thread: threading.Thread) -> None:
+            if thread.name != "timbal-request-sync-dns":
+                return real_start(thread)
+            under_way.wait(10)
+            raise RuntimeError("can't start new thread")
+
+        outcomes: list[Future | RuntimeError] = []
+
+        def submit() -> None:
+            try:
+                outcomes.append(pool.submit(int))
+            except RuntimeError as exc:
+                outcomes.append(exc)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        threads = [threading.Thread(target=submit) for _ in range(submitters)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        # No thread exists to run any of it: each lookup failed there and then, none is left waiting for one.
+        assert len(outcomes) == submitters
+        for outcome in outcomes:
+            failure = outcome if isinstance(outcome, RuntimeError) else outcome.exception(timeout=5)
+            assert isinstance(failure, RuntimeError)
+        assert not pool._queue and pool._threads_alive == 0
+        monkeypatch.undo()
+        assert pool.submit(int).result(10) == 0
+
+    def test_cancelled_work_stays_cancelled_when_the_queue_is_failed(self, monkeypatch) -> None:
+        from concurrent.futures import Future
+
+        from timbal.platform.utils import _SyncDnsPool
+
+        pool = _SyncDnsPool(2)
+        go = [threading.Event(), threading.Event()]  # one per thread start, in order of arrival
+        arrived = threading.Semaphore(0)
+        arrivals: list[threading.Thread] = []
+        lock = threading.Lock()
+        real_start = threading.Thread.start
+
+        def start(thread: threading.Thread) -> None:
+            if thread.name != "timbal-request-sync-dns":
+                return real_start(thread)
+            with lock:
+                arrivals.append(threading.current_thread())
+                mine = go[len(arrivals) - 1]
+            arrived.release()
+            assert mine.wait(10)
+            raise RuntimeError("can't start new thread")
+
+        outcomes: dict[threading.Thread, Future | RuntimeError] = {}
+
+        def submit() -> None:
+            try:
+                outcomes[threading.current_thread()] = pool.submit(int)
+            except RuntimeError as exc:
+                outcomes[threading.current_thread()] = exc
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        threads = [threading.Thread(target=submit) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        assert arrived.acquire(timeout=10) and arrived.acquire(timeout=10)
+        first, second = arrivals
+        go[0].set()  # the first start fails while the second is still under way: its lookup stays queued
+        first.join(10)
+        queued = outcomes[first]
+        assert isinstance(queued, Future) and not queued.done()
+        assert queued.cancel()  # its call reached its deadline meanwhile
+        go[1].set()  # the second fails too: nothing is left to run the queue
+        second.join(10)
+        assert isinstance(outcomes[second], RuntimeError)
+        assert queued.cancelled()
+        assert not pool._queue and pool._threads_alive == 0
+
+    def test_work_a_running_thread_got_to_is_returned_though_its_own_thread_did_not_start(self, monkeypatch) -> None:
+        from concurrent.futures import Future
+
+        from timbal.platform.utils import _SyncDnsPool
+
+        pool = _SyncDnsPool(2)
+        gate = threading.Event()
+        starting, fail_now = threading.Event(), threading.Event()
+        real_start = threading.Thread.start
+        hold = [False]
+
+        def start(thread: threading.Thread) -> None:
+            if hold[0] and thread.name == "timbal-request-sync-dns":
+                starting.set()
+                assert fail_now.wait(10)
+                raise RuntimeError("can't start new thread")
+            return real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        outcomes: list[Future | RuntimeError] = []
+
+        def submit() -> None:
+            try:
+                outcomes.append(pool.submit(lambda: "looked up"))
+            except RuntimeError as exc:
+                outcomes.append(exc)
+
+        try:
+            busy = pool.submit(gate.wait, 30)  # the pool's first thread
+            hold[0] = True
+            submitter = threading.Thread(target=submit)
+            submitter.start()
+            assert starting.wait(10)  # a second thread is being started for the queued lookup...
+        finally:
+            gate.set()
+        assert busy.result(10) is True
+        _until(lambda: pool._threads_alive == 1)  # ...but the first got to it, and has exited
+        fail_now.set()  # only now does the second thread fail to start
+        submitter.join(10)
+        (outcome,) = outcomes
+        assert isinstance(outcome, Future) and outcome.result(10) == "looked up"
+        assert not pool._queue and pool._threads_alive == 0
+
+    def test_work_waits_for_a_running_thread_when_another_cannot_start(self, monkeypatch) -> None:
+        from timbal.platform.utils import _SyncDnsPool
+
+        pool = _SyncDnsPool(2)
+        gate = threading.Event()
+        real_start = threading.Thread.start
+        fail = [False]
+
+        def start(thread: threading.Thread) -> None:
+            if fail[0] and thread.name == "timbal-request-sync-dns":
+                raise RuntimeError("can't start new thread")
+            return real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        try:
+            busy = pool.submit(gate.wait, 30)
+            fail[0] = True
+            queued = pool.submit(int)  # no second thread to be had, but the first one is alive
+            assert not queued.done()
+        finally:
+            gate.set()
+        assert busy.result(10) is True
+        assert queued.result(10) == 0
+        _until(lambda: pool._threads_alive == 0)
 
 
 @pytest.mark.usefixtures("platform_run")
