@@ -139,10 +139,13 @@ def charge_and_transfer(provider, review):
     return go, charges, transfers
 
 
-# A run is known to be started by a call's code where it is forked from that call (an agent called in a tool or
-# step body, a background child). Other ways leave nothing to read at that point, and the reviewer then takes a
-# model's or code's text for the user's. Kept as failing tests until provenance is taken where a prompt enters
-# (a session's ``send()``, the code that builds a run context).
+# A run is known to be started by a call's code when its root is minted while that call is still running and
+# ambient (an agent called in a tool or step body, whatever run context the handler set), or by a background
+# child. Two ways leave nothing to read there, and the reviewer then takes a model's or code's text for the
+# user's: a message a tool sends through a ``ChatSession`` (a session runs each turn in a task of its own with
+# the ambient call ids cleared, as a channel should: provenance would have to be taken at ``send()``), and a
+# plain task a tool left running, calling an agent once the tool has returned and its turn has ended. Kept as
+# failing tests so they are not forgotten.
 known_gap = pytest.mark.xfail(strict=True, reason="approval evidence: a run started by a call's code, unseen")
 
 
@@ -511,7 +514,6 @@ class TestDelegation:
         for request in seen:
             assert request.user_messages == ["what is my balance?"] and request.delegation == "charge 500 euros"
 
-    @known_gap
     async def test_an_agent_run_on_a_context_the_tool_made_is_delegated(self):
         """The tool swaps in a run context of its own before each call: still that tool's code asking."""
         from timbal.state import get_run_context
@@ -715,6 +717,88 @@ class TestDelegation:
         assert not request.attended and request.trigger["kind"] == "wake"
         assert request.user_messages == [] and request.delegation == "charge 500 euros"
 
+    async def test_an_agent_a_background_tool_runs_during_its_turn_is_delegated(self):
+        """A background tool's own call has ended when its code calls the worker, with its turn still going."""
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+        worker_done = asyncio.Event()
+
+        async def delegate(task: str) -> str:
+            """Hand a task to the billing worker, in the background."""
+            try:
+                await worker(prompt=task).collect()
+            finally:
+                worker_done.set()
+            return "handed over"
+
+        async def wait() -> str:
+            """Wait for the worker."""
+            await asyncio.wait_for(worker_done.wait(), timeout=5)
+            return "waited"
+
+        def model(messages):
+            if messages[-1].role == "tool":
+                return "ok"
+            return Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id="d1", name="delegate", input={"task": "charge 500 euros"}),
+                    ToolUseContent(id="w1", name="wait", input={}),
+                ],
+                stop_reason="tool_use",
+            )
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=model),
+            tools=[Tool(name="delegate", handler=delegate, background_mode="always"), wait],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        await run(agent, prompt="what is my balance?")
+        (request,) = seen
+        assert request.user_messages == ["what is my balance?"]
+        assert request.delegation == "charge 500 euros" and charges.made == []
+
+    async def test_an_agent_in_a_task_a_tool_started_is_delegated_while_the_turn_runs(self):
+        """The tool has returned; the task it started calls the worker before the turn is over."""
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+        started, worker_done = [], asyncio.Event()
+
+        async def later(task: str) -> None:
+            try:
+                await worker(prompt=task).collect()
+            finally:
+                worker_done.set()
+
+        async def delegate(task: str) -> str:
+            """Start the billing worker and return at once."""
+            started.append(asyncio.create_task(later(task)))
+            return "started"
+
+        async def wait() -> str:
+            """Wait for the worker."""
+            await asyncio.wait_for(worker_done.wait(), timeout=5)
+            return "waited"
+
+        def model(messages):
+            results = sum(1 for message in messages if message.role == "tool")
+            if results == 0:
+                return call("delegate", "d1", task="charge 500 euros")
+            return call("wait", "w1") if results == 1 else "ok"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=model),
+            tools=[delegate, wait],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        await run(agent, prompt="what is my balance?")
+        await asyncio.gather(*started)
+        (request,) = seen
+        assert request.user_messages == ["what is my balance?"]
+        assert request.delegation == "charge 500 euros" and charges.made == []
+
     async def test_an_agent_a_background_tool_runs_after_its_turn_cites_that_turns_person(self):
         """The turn has ended when the tool's code calls the worker: still not the worker's prompt."""
         seen, charges = [], Charges()
@@ -887,6 +971,62 @@ class TestReviewerGaps:
             failing["reads"] = 1
             await go(parent_id=first.id)
         assert transfers == [7]
+
+    async def test_a_resume_delivered_twice_runs_what_follows_once(self, tmp_path):
+        """The run that lost the answered gate is told so and goes on: the call its model makes next, which
+        waited nowhere and the reviewer approves, must not run in both deliveries either."""
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        charges, receipts = Charges(), []
+
+        def receipt(to: str) -> str:
+            """Email a receipt."""
+            receipts.append(to)
+            return "sent"
+
+        def model(messages):
+            results = sum(1 for message in messages if message.role == "tool")
+            if results == 0:
+                return call("charge", "c1", amount=5)
+            return call("receipt", "c2", to="me@example.com") if results == 1 else "done"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=model),
+            tools=[
+                Tool(name="charge", handler=charges.charge, requires_approval=True),
+                Tool(name="receipt", handler=receipt, requires_approval=True),
+            ],
+            tracing_provider=provider,
+            approval_reviewer=lambda request: "escalate" if request.tool == "charge" else "approve",
+        )
+
+        async def go(**kwargs):
+            context = RunContext(tracing_provider=provider, parent_id=kwargs.pop("parent_id", None))
+            set_run_context(context)
+            events = [event async for event in agent(prompt="charge me 5 and email the receipt", **kwargs)]
+            set_run_context(None)
+            return context, events
+
+        first, events = await go()
+        (card,) = [e for e in events if isinstance(e, ApprovalEvent)]
+        for _ in range(2):
+            await go(parent_id=first.id, resume={card.approval_id: True})
+        assert charges.made == [5] and receipts == ["me@example.com"]
+
+    async def test_resume_values_that_answer_nothing_claim_nothing(self, tmp_path):
+        """Two turns from one finished run, each given a resume id no gate has (the runtime logs it as unused):
+        their calls waited nowhere and the runs resume nothing, so both run."""
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        go, charges, transfers = charge_and_transfer(
+            SqliteTracingProvider.configured(_path=tmp_path / "t.db"), lambda _r: "approve"
+        )
+        first, _ = await go()
+        await go(parent_id=first.id, resume={"an-id-no-gate-has": True})
+        await go(parent_id=first.id, resume={"an-id-no-gate-has": True})
+        assert charges.made == [5, 5, 5] and transfers == [7, 7, 7]
 
     async def test_turns_that_each_continue_a_finished_run_are_not_claimed(self, tmp_path):
         """Two turns from the same finished run (a branch, a regenerate) are separate requests: the call the

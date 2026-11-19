@@ -74,6 +74,25 @@ def tool_loop(steps):
     return handler
 
 
+def stepping(steps_for):
+    """A model that makes ``steps_for[prompt]`` tool calls in the turn that prompt opens, then answers ``done``."""
+    left = made = 0
+
+    def handler(messages):
+        nonlocal left, made
+        last = messages[-1]
+        if last.role == "user" and last.collect_text() in steps_for:
+            left = steps_for[last.collect_text()]
+        if not left:
+            return "done"
+        left, made = left - 1, made + 1
+        return Message(
+            role="assistant", content=[ToolUseContent(id=f"c{made}", name="step", input={})], stop_reason="tool_use"
+        )
+
+    return handler
+
+
 async def step() -> str:
     await asyncio.sleep(0.01)  # a real tool waits on I/O: the background summarizer runs meanwhile
     return "ok"
@@ -106,9 +125,9 @@ def root(context):
 
 async def settled(context):
     """Wait for the run's after-turn compaction, if it is still running (it may have landed already)."""
-    finishing = agent_module._PREPARING.get((context.id, "agent"))
-    if finishing is not None:
-        await finishing
+    handoff = agent_module._PREPARING.get((context.id, "agent"))
+    if handoff is not None:
+        await handoff.stored
 
 
 async def test_the_summarizer_sends_no_temperature(monkeypatch):
@@ -343,10 +362,11 @@ class TestNextTurn:
         first, _ = await run(agent)
         summarizer.release.set()
         await settled(first)  # landed in the session data as well
-        agent_module._PREPARING[(first.id, "agent")] = asyncio.get_running_loop().create_future()
+        handoff = agent_module._Handoff(record=asyncio.get_running_loop().create_future())
+        agent_module._PREPARING[(first.id, "agent")] = handoff
         stored = await RunContext(parent_id=first.id, tracing_provider=InMemoryTracingProvider)._get_parent_trace()
         record = stored[root(first).call_id].session[agent_module._PREPARED_KEY]["agent"]
-        agent_module._PREPARING[(first.id, "agent")].set_result(record)
+        handoff.record.set_result(record)
         second, output = await run(agent, prompt="again", parent_id=first.id)
         assert root(second).memory[0].collect_text() == SUMMARY
         assert agent_module._PREPARED_KEY not in (await second.get_session())
@@ -358,12 +378,12 @@ class TestNextTurn:
         summarizer = Summarizer(released=False)
         agent = make_agent(summarizer, steps=2, memory_compaction_prepare_ratio=0.3)
         first, _ = await run(agent)
-        finishing = agent_module._PREPARING[(first.id, "agent")]
+        handoff = agent_module._PREPARING[(first.id, "agent")]
         second, _ = await asyncio.wait_for(run(agent, prompt="again", parent_id=first.id), timeout=2)
-        assert not finishing.done()  # never waited for
+        assert not handoff.record.done()  # never waited for
         assert root(second).memory[0].collect_text() != SUMMARY
         summarizer.release.set()
-        await finishing
+        await handoff.stored
 
     async def test_quick_turns_share_one_background_compaction(self):
         """Turns that do not wait for the one before take its result on instead of starting their own."""
@@ -396,13 +416,13 @@ class TestNextTurn:
         source = SimpleNamespace(memory=memory, metadata={})
         loop = asyncio.get_running_loop()
         for incoming, waits in (([], False), ([prompt], True)):
-            finishing = loop.create_future()
-            agent_module._PREPARING[("parent", "agent")] = finishing
-            loop.call_later(0.2, lambda f=finishing: f.done() or f.set_result(None))
+            result = loop.create_future()
+            agent_module._PREPARING[("parent", "agent")] = agent_module._Handoff(record=result)
+            loop.call_later(0.2, lambda f=result: f.done() or f.set_result(None))
             started = loop.time()
             await agent._take_prepared(run_context, source, memory, "test", incoming)
             assert (loop.time() - started >= 0.15) is waits
-            await finishing
+            await result
 
     async def test_a_history_at_the_hard_ratio_waits_for_it(self, monkeypatch):
         summarizer = Summarizer(released=False)
@@ -421,6 +441,149 @@ class TestNextTurn:
         asyncio.get_running_loop().call_later(0.1, summarizer.release.set)
         second, _ = await run(agent, prompt="again", parent_id=first.id)
         assert root(second).memory[0].collect_text() == SUMMARY  # waited, and took it
+
+    async def test_a_turn_crossing_the_hard_ratio_takes_the_one_before_instead_of_compacting_inline(self):
+        """Turn two starts below the hard ratio, so it does not wait; its tool results then take it past. It takes
+        the compaction turn one is still preparing, not a second one of the same history next to it."""
+        running = peak = 0
+        release, sizes = asyncio.Event(), []
+
+        async def summarize_old(memory):
+            nonlocal running, peak
+            sizes.append(len(memory))
+            running += 1
+            peak = max(peak, running)
+            try:
+                await release.wait()
+            finally:
+                running -= 1
+            if len(memory) <= 3:
+                return memory
+            return [Message(role="user", content=[TextContent(text=SUMMARY)]), *memory[-2:]]
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=stepping({"go": 2, "more": 4})),
+            tools=[Tool(name="step", handler=step)],
+            tracing_provider=InMemoryTracingProvider,
+            memory_compaction=summarize_old,
+            memory_compaction_prepare_ratio=0.3,
+            max_iter=30,
+        )
+        first, _ = await run(agent)  # 6 messages: past the prepare ratio, its compaction held at the summarizer
+        asyncio.get_running_loop().call_later(0.3, release.set)
+        second, output = await run(agent, prompt="more", parent_id=first.id)  # 7, then 15 after four tool results
+        assert peak == 1 and sizes[0] == 6
+        assert root(second).memory[0].collect_text() == SUMMARY
+        assert root(second).metadata["compaction"]["prepared_by"] == first.id
+        assert output.usage.get("compaction:background") == 1
+        await settled(second)
+
+    async def test_a_summary_that_is_there_is_taken_before_its_run_is_stored(self, monkeypatch):
+        """The turn at the hard ratio waits for the summary, not for the trace of the run that made it."""
+        real_store = RunContext._end_background_work
+
+        async def slow_store(self):
+            await asyncio.sleep(0.5)
+            await real_store(self)
+
+        monkeypatch.setattr(RunContext, "_end_background_work", slow_store)
+        summarizer = Summarizer()
+        agent = make_agent(summarizer, steps=2, memory_compaction_prepare_ratio=0.3)
+        first, _ = await run(agent)
+        real = Agent._take_prepared
+
+        async def at_the_limit(self, run_context, source, memory, model, incoming):
+            monkeypatch.setattr(Agent, "_context_utilization", lambda *_args: 0.8)  # does not fit as it is
+            try:
+                return await real(self, run_context, source, memory, model, incoming)
+            finally:
+                monkeypatch.setattr(Agent, "_context_utilization", lambda _s, _m, messages, _x: 0.05 * len(messages))
+
+        monkeypatch.setattr(Agent, "_take_prepared", at_the_limit)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        second, _ = await run(agent, prompt="again", parent_id=first.id)
+        assert root(second).memory[0].collect_text() == SUMMARY
+        assert loop.time() - started < 0.3 and (first.id, "agent") in agent_module._PREPARING  # not stored yet
+        await settled(first)
+
+    async def test_a_turn_that_took_the_summary_prepares_its_own_for_the_next(self, monkeypatch):
+        """The run before is still being stored when the turn that took its summary ends past the prepare ratio:
+        that summary is used up, so the turn compacts its own history for the next one."""
+        real_store = RunContext._end_background_work
+
+        async def slow_store(self):
+            await asyncio.sleep(0.5)
+            await real_store(self)
+
+        monkeypatch.setattr(RunContext, "_end_background_work", slow_store)
+        summarizer = Summarizer()
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=stepping({"go": 2, "more": 2})),
+            tools=[Tool(name="step", handler=step)],
+            tracing_provider=InMemoryTracingProvider,
+            memory_compaction=summarizer.compactor(),
+            memory_compaction_prepare_ratio=0.3,
+            max_iter=30,
+        )
+        first, _ = await run(agent)
+        real = Agent._take_prepared
+
+        async def at_the_limit(self, run_context, source, memory, model, incoming):
+            monkeypatch.setattr(Agent, "_context_utilization", lambda *_args: 0.8)
+            try:
+                return await real(self, run_context, source, memory, model, incoming)
+            finally:
+                monkeypatch.setattr(Agent, "_context_utilization", lambda _s, _m, messages, _x: 0.05 * len(messages))
+
+        monkeypatch.setattr(Agent, "_take_prepared", at_the_limit)
+        second, _ = await run(agent, prompt="more", parent_id=first.id)  # the summary and 2, then 6 more
+        monkeypatch.setattr(Agent, "_take_prepared", real)
+        assert root(second).memory[0].collect_text() == SUMMARY
+        assert (first.id, "agent") in agent_module._PREPARING  # the run before: still being stored
+        assert (second.id, "agent") in agent_module._PREPARING  # and this turn's own, for the next
+        await settled(second)
+        assert summarizer.calls[0] == 6 and len(summarizer.calls) > 1
+        third, _ = await run(agent, prompt="again", parent_id=second.id)
+        assert root(third).metadata["compaction"]["prepared_by"] == second.id
+        await settled(first)
+
+    async def test_a_summary_taken_on_does_not_wait_for_the_run_before_to_be_stored(self, monkeypatch):
+        """Turn two took turn one's compaction on for turn three. Turn three, at the hard ratio, gets the summary
+        as soon as it exists: neither run's trace write holds it."""
+        real_store = RunContext._end_background_work
+
+        async def slow_store(self):
+            await asyncio.sleep(0.5)
+            await real_store(self)
+
+        monkeypatch.setattr(RunContext, "_end_background_work", slow_store)
+        summarizer = Summarizer(released=False)
+        agent = make_agent(summarizer, steps=2, memory_compaction_prepare_ratio=0.3)
+        first, _ = await run(agent)
+        second, _ = await run(agent, prompt="again", parent_id=first.id)  # below the hard ratio: takes it on
+        await asyncio.sleep(0.05)  # let every summarizer that was started begin
+        assert len(summarizer.calls) == 1
+        summarizer.release.set()
+        real = Agent._take_prepared
+
+        async def at_the_limit(self, run_context, source, memory, model, incoming):
+            monkeypatch.setattr(Agent, "_context_utilization", lambda *_args: 0.8)
+            try:
+                return await real(self, run_context, source, memory, model, incoming)
+            finally:
+                monkeypatch.setattr(Agent, "_context_utilization", lambda _s, _m, messages, _x: 0.05 * len(messages))
+
+        monkeypatch.setattr(Agent, "_take_prepared", at_the_limit)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        third, _ = await run(agent, prompt="again", parent_id=second.id)
+        assert root(third).memory[0].collect_text() == SUMMARY and len(summarizer.calls) == 1
+        assert loop.time() - started < 0.3
+        await settled(first)
+        await settled(second)
 
     async def test_the_handoff_is_stored_before_anyone_is_told_it_finished(self, monkeypatch):
         """The next turn waits on ``_PREPARING``: once the entry is gone the record must already be in the trace."""

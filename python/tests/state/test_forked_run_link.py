@@ -3,6 +3,7 @@ own run. ``parent_id`` stays the turn chain; ``invoked_by`` on the child's root 
 and ``invoked_runs`` on the caller's span link the two runs both ways.
 """
 
+import pytest
 from timbal import Agent, Workflow
 from timbal.core import Tool
 from timbal.core.test_model import TestModel
@@ -152,8 +153,10 @@ class TestForkedRunLink:
         assert first.root_span().metadata["invoked_by"] == second.root_span().metadata["invoked_by"] == link
         assert caller_ctx._trace[call_id].metadata["invoked_runs"] == [first.id, second.id]
 
-    async def test_every_run_a_read_only_tool_starts_is_read_only(self):
-        """The tool policy is inherited by each run a call's code starts, not only the first."""
+    @pytest.mark.parametrize("on", ["the run's context", "a context the tool built", "no context"])
+    async def test_every_run_a_read_only_tool_starts_is_read_only(self, on):
+        """The tool policy is inherited by each run a call's code starts: not only the first, and also when the
+        tool gives the run a context of its own or clears the one that was set."""
         from timbal.state import set_run_context
         from timbal.state.context import RunContext
 
@@ -176,8 +179,16 @@ class TestForkedRunLink:
         )
 
         async def look_twice() -> str:
-            for prompt in ("one", "two"):
-                await inner(prompt=prompt).collect()
+            outer = get_run_context()
+            if on == "a context the tool built":
+                set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+            elif on == "no context":
+                set_run_context(None)
+            try:
+                for prompt in ("one", "two"):
+                    await inner(prompt=prompt).collect()
+            finally:
+                set_run_context(outer)
             return "looked"
 
         outer = Agent(

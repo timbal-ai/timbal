@@ -202,8 +202,20 @@ _MAX_TURNS_WITHOUT_MEMORY = 8
 
 # Session data key: per agent path, the compaction a turn prepared for the next one (memory_compaction_prepare_ratio).
 _PREPARED_KEY = "__prepared_compaction"
-# (run_id, agent path) -> that run's after-turn compaction still running in this process: the next turn waits on it.
-_PREPARING: "dict[tuple[str, str], asyncio.Task]" = {}
+# (run_id, agent path) -> the compaction that run prepares for the next turn, until the run is stored again with it.
+_PREPARING: "dict[tuple[str, str], _Handoff]" = {}
+
+
+@dataclass(eq=False)
+class _Handoff:
+    """A turn's compaction for the next one, on its way.
+
+    ``record`` resolves as soon as the result exists (None: nothing to hand on): what a turn in this process
+    takes, whatever the store is doing. ``stored`` ends once the run was stored again with it: what a turn that
+    reads the trace finds. The entry stays in ``_PREPARING`` until then."""
+
+    record: "asyncio.Future"
+    stored: "asyncio.Task | None" = None
 
 
 @dataclass(eq=False)
@@ -253,11 +265,14 @@ def _isolated(message: Message) -> Message:
     )
 
 
-def _predecessor_compacting(run_context: Any, path: str) -> bool:
-    """Whether the turn this one continues is still compacting its history in the background, in this process."""
+def _predecessors_handoff(run_context: Any, path: str) -> "_Handoff | None":
+    """The compaction the turn this one continues prepared for it, while this process still holds it (running,
+    or there and not stored yet) and this turn has not taken it. One background compaction per session: nothing
+    starts another next to it, and a turn that ends first takes it on for the next."""
     parent_id = getattr(run_context, "parent_id", None)
-    finishing = _PREPARING.get((parent_id, path)) if parent_id else None
-    return finishing is not None and not finishing.done()
+    if not parent_id or path in run_context.__dict__.get("_taken_handoffs", ()):
+        return None
+    return _PREPARING.get((parent_id, path))
 
 
 def _retrieve_result(task: "asyncio.Task") -> None:
@@ -1900,6 +1915,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     prepared = None
         running = prepared is not None and not prepared.futile
         if not running:
+            if await self._take_predecessors(current_span, run_context, measurement):
+                return None  # the measurement predates it, as after a swap
             before = current_span.memory
             await self._compact_preserving_last_assistant(current_span, measurement=measurement)
             # The measurement predates it: the history only looks big still. The next boundary measures again.
@@ -1913,8 +1930,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if prepared is not None and prepared.intact(memory) and len(head) <= len(prepared.prefix):
             return prepared  # that prefix compacts to nothing: wait for the history to grow
         utilization = self._context_utilization(self._span_model(current_span), memory, measurement)
-        if _predecessor_compacting(run_context, self._path):
-            return prepared  # one background compaction per session: the turn before's is still running
+        if _predecessors_handoff(run_context, self._path) is not None:
+            return prepared  # one background compaction per session: the turn before's is still on its way
         if (
             head
             and utilization is not None
@@ -1922,6 +1939,47 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         ):
             return self._prepare_compaction(current_span, head, utilization)
         return prepared
+
+    async def _take_predecessors(self, current_span: Any, run_context: Any, measurement: dict | None) -> bool:
+        """At the hard ratio in a turn that started without waiting for the compaction the turn before prepared
+        (its history still fit then): take that one, waiting for it if it is still running, instead of compacting
+        the same history inline next to it. False when there is none, or it no longer covers this history."""
+        unwaited = run_context.__dict__.get("_unwaited_handoffs", {}).get(self._path)
+        if unwaited is None:
+            return False
+        if self.memory_compaction_ratio > 0.0:
+            utilization = self._context_utilization(self._span_model(current_span), current_span.memory, measurement)
+            if utilization is not None and utilization < self.memory_compaction_ratio:
+                return False
+        handoff, stored_memory, loaded = unwaited
+        record = None
+        with contextlib.suppress(Exception):
+            record = await asyncio.shield(handoff.record)
+        del run_context.__dict__["_unwaited_handoffs"][self._path]  # used or not, once
+        run_context.__dict__.setdefault("_taken_handoffs", set()).add(self._path)
+        memory = current_span.memory
+        covered = record.get("covered", 0) if isinstance(record, dict) else 0
+        if not covered:
+            return False
+        if (
+            min(len(stored_memory), len(loaded), len(memory)) < covered
+            # Still the messages this turn loaded, in the places the record covers.
+            or not all(a is b for a, b in zip(memory[:covered], loaded[:covered], strict=True))
+            or _fingerprint(await dump(stored_memory[:covered])) != record.get("fingerprint")
+        ):
+            run_context.update_usage("compaction:prepared_stale", 1)
+            return False
+        compacted = [Message.validate(message) for message in record["memory"]]
+        current_span.memory = _join(compacted, memory[covered:])
+        self._record_compaction(
+            current_span,
+            record.get("utilization"),
+            record.get("steps") or [],
+            background=True,
+            prepared_by=run_context.parent_id,
+        )
+        run_context.update_usage("compaction:background", 1)
+        return True
 
     def _prepare_for_next_turn(self, current_span: Any, run_context: Any, prepared: "_Prepared | None") -> None:
         """A turn that ends past the prepare ratio: compact its history in the background and leave the result in
@@ -1946,11 +2004,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 or not self.memory_compaction_prepare_ratio <= utilization < self.memory_compaction_ratio
             ):
                 return
-            if _predecessor_compacting(run_context, self._path):
-                # The turn before is still compacting (this one did not wait for it): take its result on for the
-                # next turn when it lands, instead of a second compaction of nearly the same history.
-                predecessor = _PREPARING[(run_context.parent_id, self._path)]
-            else:
+            # The turn before's is still on its way (this turn did not wait for it): take its result on for the
+            # next turn when it is there, instead of a second compaction of nearly the same history.
+            predecessor = _predecessors_handoff(run_context, self._path)
+            if predecessor is None:
                 prepared = self._prepare_compaction(current_span, memory, utilization)
         if prepared is not None:
             dumped = whole_dump[: len(prepared.prefix)]
@@ -1962,11 +2019,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         async def produce() -> dict | None:
             if predecessor is not None:
-                record = await asyncio.shield(predecessor)
+                # Its result, not its store: a summary that is there must not wait for an older run's trace.
+                record = await asyncio.shield(predecessor.record)
                 covered = record.get("covered", 0) if isinstance(record, dict) else 0
                 # Still a prefix of this history (it only grew since): the next turn can use it as is.
-                if not covered or len(whole_dump) < covered or _fingerprint(whole_dump[:covered]) != record.get(
-                    "fingerprint"
+                if (
+                    not covered
+                    or len(whole_dump) < covered
+                    or _fingerprint(whole_dump[:covered]) != record.get("fingerprint")
                 ):
                     return None
                 return record
@@ -1982,30 +2042,36 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 "utilization": round(prepared.utilization, 4),
             }
 
-        async def finish() -> dict | None:
+        handoff = _Handoff(record=asyncio.get_running_loop().create_future())
+
+        async def finish() -> None:
             try:
-                record = await produce()
-                if record is None:
-                    return None
-                session = await run_context.get_session()
-                # Copied, not updated in place: a child's session data shares its parent's nested dicts.
-                session[_PREPARED_KEY] = {**(session.get(_PREPARED_KEY) or {}), self._path: record}
-                run_context.update_usage("compaction:prepared", 1)
-                return record
-            except Exception as e:
-                logger.warning("Background compaction for the next turn failed.", path=self._path, error=str(e))
-                return None
+                record = None
+                try:
+                    record = await produce()
+                    if record is not None:
+                        session = await run_context.get_session()
+                        # Copied, not updated in place: a child's session data shares its parent's nested dicts.
+                        session[_PREPARED_KEY] = {**(session.get(_PREPARED_KEY) or {}), self._path: record}
+                        run_context.update_usage("compaction:prepared", 1)
+                except Exception as e:
+                    record = None
+                    logger.warning("Background compaction for the next turn failed.", path=self._path, error=str(e))
+                finally:
+                    # There for this process from here on, whatever the store does next.
+                    if not handoff.record.done():
+                        handoff.record.set_result(record)
             finally:
                 try:
-                    # Stores the run again with the record: the next turn reads it from there.
+                    # Stores the run again with the record: a turn that reads the trace finds it there.
                     await run_context._end_background_work()
                 finally:
-                    # Only then: whoever waits on this entry (the next turn) must find the record stored.
-                    if _PREPARING.get(key) is finishing:
+                    # Only then: once the entry is gone, the record must be in the trace.
+                    if _PREPARING.get(key) is handoff:
                         del _PREPARING[key]
 
-        finishing = asyncio.get_running_loop().create_task(finish())
-        _PREPARING[key] = finishing
+        handoff.stored = asyncio.get_running_loop().create_task(finish())
+        _PREPARING[key] = handoff
 
     async def _take_prepared(
         self, run_context: Any, source: Any, memory: list[Message], model: str, incoming: list[Message]
@@ -2018,18 +2084,28 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         compacting inline again. Below it the turn goes on with the history it has. Taken or not, it is removed
         from this run's session data.
         """
-        key = (run_context.parent_id, self._path)
         record = None
-        finishing = _PREPARING.get(key)
-        if finishing is not None and not finishing.done():
+        handoff = _PREPARING.get((run_context.parent_id, self._path))
+        if handoff is not None and not handoff.record.done():
             measurement = (source.metadata or {}).get("context_measurement") if source is not None else None
             # With the prompt this turn adds: it is what the first call sends.
             utilization = self._context_utilization(model, [*memory, *incoming], measurement)
             if utilization is not None and utilization < self.memory_compaction_ratio:
-                finishing = None
-        if finishing is not None:
+                if isinstance(source.memory, list):
+                    # Not waited for. If this turn reaches the hard ratio later it takes that one instead of
+                    # compacting inline next to it (``_take_predecessors``): what it loaded, to tell then.
+                    run_context.__dict__.setdefault("_unwaited_handoffs", {})[self._path] = (
+                        handoff,
+                        source.memory,
+                        list(memory),
+                    )
+                handoff = None
+        if handoff is not None:
+            # Its result, not its store: this turn does not wait for an earlier run's trace to be written.
             with contextlib.suppress(Exception):
-                record = await asyncio.shield(finishing)
+                record = await asyncio.shield(handoff.record)
+            # Taken (used or not): it is no longer on its way for this turn, which prepares its own from here.
+            run_context.__dict__.setdefault("_taken_handoffs", set()).add(self._path)
         session = await run_context.get_session()
         stored = session.get(_PREPARED_KEY)
         if isinstance(stored, dict):

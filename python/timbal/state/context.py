@@ -32,6 +32,7 @@ def _get_logger():
 # What a run without resume values holds. Read-only and shared by every context: a call
 # installs a new mapping (``Runnable._stream``), nothing ever writes into one in place.
 _NO_RESUME_VALUES: MappingProxyType[str, Any] = MappingProxyType({})
+_NOTHING_WAITING: frozenset[str] = frozenset()
 
 
 def _waiting_approval(span: Any) -> dict[str, Any] | None:
@@ -270,13 +271,14 @@ class RunContext(BaseModel):
     #       code started this run (an Agent called inside a tool or step body);
     #       stamped on the root span. Not ``parent_id``: that chains turns.
     #   _invoker: (RunContext, call_id) | None — the run and the call whose code started this
-    #       one (an Agent called inside a tool or step body, or by a background child after its
-    #       turn ended): set where the run is forked (``Runnable._stream``), from the call id
-    #       that is ambient there. The way up the call chain across runs: an approval reviewer
-    #       follows it to the agent the person talks to, since this run's own root agent got
-    #       its prompt from that call's code. ``_invoked_by`` is the same link as ids, for the trace
+    #       one: set when the run's root span is minted while a call still running is ambient
+    #       (``Runnable._LIVE_CALLS``: an Agent called inside a tool or step body, forked or on
+    #       a context the handler built and set), or by a background child after its turn
+    #       ended. The way up the call chain across runs: an approval reviewer follows it to
+    #       the agent the person talks to, since this run's own root agent got its prompt from
+    #       that call's code. ``_invoked_by`` is the fork's link as ids, for the trace
     #   _parent_pending: (parent_id, frozenset[approval_id]) | None — the approvals the run this
-    #       one continues left waiting, read once when a gate asks (``_waited_in_parent``)
+    #       one continues left waiting, read once when a gate asks (``_left_waiting``)
     #   _live_background: int — background work (spawned tasks, handed-off
     #       continuations) running on this context; it can outlive the root run.
     # Do not add class-level annotations for them — pydantic would turn any
@@ -605,40 +607,40 @@ class RunContext(BaseModel):
                     self._session_data.update(root_span.session)
         return self._session_data
 
-    async def _waited_in_parent(self, approval_id: str) -> bool:
-        """Whether the run this one continues left the approval ``approval_id`` waiting: this run is then running
-        that call again, and so may any other run continuing the same one, with resume values or without.
+    async def _left_waiting(self) -> "frozenset[str] | None":
+        """The approvals the run this one continues left waiting: this run is running those calls again, and so
+        may any other run continuing the same one, with resume values or without. Empty when it left none (or
+        this run continues nothing); None when that cannot be told.
 
         Read from the parent's trace, once per run, when a gate first asks (never with a provider that keeps no
-        claims). A trace that cannot be read counts as waiting: a claim nobody races for is harmless, a call
-        run twice is not. Hence ``get_strict``: the built-in providers' ``get`` answers a failed read with None,
-        which would read as a parent that left nothing waiting.
+        claims: there is nothing to decide). Read with ``get_strict``: the built-in providers' ``get`` answers a
+        failed read with None, which would read as a parent that left nothing waiting.
         """
         parent_id = self.parent_id
         provider = self._tracing_provider
         if not parent_id or provider is None:
-            return False
+            return _NOTHING_WAITING
         if provider.claim_approval.__func__ is TracingProvider.claim_approval.__func__:
-            return False  # this provider keeps no claims: nothing to decide, so no read
+            return _NOTHING_WAITING
         known = self._parent_pending
         if known is None or known[0] != parent_id:
             try:
                 trace = await provider.get_strict(self)
             except Exception as e:
                 _get_logger().error(
-                    "Parent trace fetch failed. Treating the approval as one the parent left waiting.",
+                    "Parent trace fetch failed. Its approvals may be waiting: reviewer decisions are claimed.",
                     parent_id=parent_id,
                     run_id=self.id,
                     error=str(e),
                 )
-                return True
+                return None
             waiting = frozenset(
                 approval["id"]
                 for span in (trace.values() if trace is not None else ())
                 if (approval := _waiting_approval(span))
             )
             known = self.__dict__["_parent_pending"] = (parent_id, waiting)
-        return approval_id in known[1]
+        return known[1]
 
     def root_span(self) -> Span | None:
         """Get the root span of the trace (the first span with no parent)."""

@@ -221,6 +221,13 @@ ApprovalPrompt = str | Callable[..., str | None] | None
 ApprovalUi = dict[str, Any] | BaseModel | Callable[..., dict[str, Any] | BaseModel | None] | None
 
 
+# call id -> the run context of every call whose stream has not ended. An ambient call id found here is a call
+# still running, whatever run context is set by now: a run minted under it was started by that call's code. An id
+# a stream abandoned mid-way left behind in its consumer's task is gone from here once the loop has closed it; so
+# is a background child's (its stream ends when it is detached), which the forks in ``_stream`` link themselves.
+_LIVE_CALLS: dict[str, RunContext] = {}
+
+
 def _inherit_tool_policy(run_context: RunContext, entry_run_context: RunContext, entry_call_id: str) -> None:
     """Give a run started inside a call (``entry_call_id`` of ``entry_run_context``) that run's tool policy.
 
@@ -1569,11 +1576,18 @@ class Runnable(ABC, BaseModel):
                 run_context.update_usage(f"approvals:reviewer_{review.verdict}", 1)
                 if review.verdict != "escalate":
                     # A gate the run this one continues left waiting is being run again here, resume values
-                    # given or not, and another run continuing the same one may be deciding it too. Claimed
-                    # like a person's answer (so is any gate of a resume), and the call runs at most once.
-                    # A call that waited nowhere has nothing to race for.
-                    waited = run_context._resume_values or await run_context._waited_in_parent(approval_id)
-                    if waited and not await _claim():
+                    # given or not, and another run continuing the same one may be deciding it too: claimed
+                    # like a person's answer, so the call runs at most once. So is every other gate of a run
+                    # that answers one of them: the same resume delivered twice goes past the answered gate
+                    # in both runs (the one that lost it is told so, as a tool result), and what the model
+                    # calls next must run once too. A run that resumes nothing has nothing to race for,
+                    # whatever resume values it was given.
+                    waiting = await run_context._left_waiting()
+                    if (
+                        waiting is None
+                        or approval_id in waiting
+                        or any(answered in waiting for answered in run_context._resume_values)
+                    ) and not await _claim():
                         return False, None, validated_input
                     approved = review.verdict == "approve"
                     approval_resolution = ApprovalResolution(
@@ -2195,8 +2209,9 @@ class Runnable(ABC, BaseModel):
                         from ..state.background import current_background_task_id
 
                         if current_background_task_id() is not None:
-                            # A background child's code, for certain (a call id is also left behind in
-                            # the task of whoever abandoned a stream mid-way: that is nobody's code).
+                            # A background child's code, for certain: its call's stream ended when it was
+                            # detached, so the id is not among the running ones (nor is one a stream
+                            # abandoned mid-way left behind, which is nobody's code).
                             run_context.__dict__["_invoker"] = (_entry_run_context, _entry_call_id)
                 else:
                     run_context = RunContext(
@@ -2253,6 +2268,17 @@ class Runnable(ABC, BaseModel):
         assert _new_call_id not in run_context._trace, f"Call ID {_new_call_id} already exists in trace."
         metadata = {**self.metadata}  # Shallow copy
         if _new_parent_call_id is None:
+            if _entry_call_id is not None and run_context._invoker is None:
+                # A run of its own that the forks above did not link, minted while a call is ambient: on a
+                # context the handler built and set, or with none set. If that call is still running, its
+                # code started this run all the same.
+                invoking = _LIVE_CALLS.get(_entry_call_id)
+                if invoking is not None:
+                    run_context.__dict__["_invoker"] = (invoking, _entry_call_id)
+                    if run_context._tool_policy is None:
+                        # Its tools are the caller's run's here too: a read-only tool cannot run an agent
+                        # with write tools by building it a context of its own.
+                        _inherit_tool_policy(run_context, invoking, _entry_call_id)
             if run_context._invoked_by is not None:
                 metadata["invoked_by"] = run_context._invoked_by
             if run_context._tool_policy is not None:
@@ -2321,6 +2347,7 @@ class Runnable(ABC, BaseModel):
         )
         if handoff_control is not None:
             handoff_control.register(span.call_id, self.name)
+        _LIVE_CALLS[_new_call_id] = run_context
         try:
             start_event = StartEvent(
                 run_id=run_context.id,
@@ -2766,6 +2793,7 @@ class Runnable(ABC, BaseModel):
             raise
 
         finally:
+            _LIVE_CALLS.pop(_new_call_id, None)
             # Only skip the snapshot when spawn actually rebound the sink.
             # run_in_background is set at _stream entry; a raise / early
             # return from pre_hook, approval, guardrails, or param
