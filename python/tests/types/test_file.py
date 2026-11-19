@@ -1229,6 +1229,7 @@ class TestSignedContentResign:
         assert file.name == "report.pdf"
 
 
+@pytest.mark.usefixtures("platform_run")
 class TestRequestSync:
     def test_client_error_raises_platform_error_without_retry(self) -> None:
         from unittest.mock import patch
@@ -1236,9 +1237,7 @@ class TestRequestSync:
         import httpx
         from timbal.errors import PlatformError
         from timbal.platform.utils import _request_sync
-        from timbal.state import set_run_context
 
-        set_run_context(_platform_ctx())
         url = "https://api.timbal.ai/orgs/42/content/sign"
         denied = httpx.Response(403, json={"error": "no access"}, request=httpx.Request("POST", url))
         with patch("httpx.request", return_value=denied) as request, pytest.raises(PlatformError) as exc_info:
@@ -1254,9 +1253,7 @@ class TestRequestSync:
 
         import httpx
         from timbal.platform.utils import _request_sync
-        from timbal.state import set_run_context
 
-        set_run_context(_platform_ctx())
         req = httpx.Request("POST", "https://api.timbal.ai/x")
         responses = [httpx.Response(503, request=req), httpx.Response(200, json={"ok": True}, request=req)]
         with patch("httpx.request", side_effect=responses) as request, patch("time.sleep") as sleep:
