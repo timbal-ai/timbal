@@ -258,6 +258,38 @@ class TestMidTurn:
         assert calls == [7, 9]
 
 
+    def test_a_history_with_files_is_compared_without_dumping_them(self):
+        """A rebuilt message that still holds a file (a kept attachment) must not crash the swap."""
+        from timbal.types.content import FileContent
+        from timbal.types.file import File
+
+        agent = Agent(name="a", model=TestModel(), memory_compaction=lambda m: m, memory_compaction_prepare_ratio=0.3)
+        attachment = FileContent(file=File.validate(b"data", {"extension": ".png"}))
+        prefix = [
+            Message(role="user", content=[attachment, TextContent(text="look")]),
+            Message(role="assistant", content=[TextContent(text="long answer")]),
+        ]
+
+        def rebuilt(second_text):
+            return [
+                Message(role="user", content=list(prefix[0].content)),  # same blocks, new message
+                Message(role="assistant", content=[TextContent(text=second_text)]),
+            ]
+
+        loop = asyncio.new_event_loop()
+        try:
+            for second_text, expect_swap in (("long answer", False), ("short", True)):
+                task = loop.create_future()
+                task.set_result((rebuilt(second_text), []))
+                prepared = agent_module._Prepared(task=task, prefix=prefix, utilization=0.4)
+                span = SimpleNamespace(memory=[*prefix], metadata={}, input={})
+                run_context = SimpleNamespace(update_usage=lambda *_: None)
+                assert agent._swap_prepared(span, prepared, run_context) is expect_swap
+                assert prepared.futile is not expect_swap
+        finally:
+            loop.close()
+
+
 class TestNextTurn:
     async def test_a_turn_that_ends_past_the_ratio_hands_its_compaction_to_the_next(self):
         summarizer = Summarizer(released=False)

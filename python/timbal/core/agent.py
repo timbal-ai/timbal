@@ -80,7 +80,6 @@ from ..types.events.delta import TextDelta, ThinkingDelta
 from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import coerce_to_dict, dump, invalidate_message_dump_caches
-from ..utils.serialization import _dump_sync
 from .attachment_limit import AttachmentSpills, apply_attachment_limit
 from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
@@ -221,10 +220,23 @@ class _Prepared:
 
 def _compaction_changed(prefix: list, compacted: list) -> bool:
     """Whether the strategies changed the history: fewer messages, or the same number with different content (a
-    strategy such as ``compact_tool_results`` shrinks results in place and rebuilds the messages it keeps)."""
+    strategy such as ``compact_tool_results`` shrinks results in place and rebuilds the messages it keeps).
+
+    Compared structurally, never dumped: dumping a file needs async I/O. Kept content blocks are passed through by
+    reference; a block equal in fields but not identical counts as unchanged.
+    """
     if len(compacted) != len(prefix):
         return True
-    return any(a is not b and _dump_sync(a) != _dump_sync(b) for a, b in zip(compacted, prefix, strict=True))
+    for new, old in zip(compacted, prefix, strict=True):
+        if new is old:
+            continue
+        if new.role != old.role or new.stop_reason != old.stop_reason or dict(new.metadata) != dict(old.metadata):
+            return True
+        if len(new.content) != len(old.content):
+            return True
+        if any(x is not y and x != y for x, y in zip(new.content, old.content, strict=True)):
+            return True
+    return False
 
 
 def _retrieve_result(task: "asyncio.Task") -> None:
