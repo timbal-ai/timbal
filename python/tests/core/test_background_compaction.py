@@ -287,6 +287,25 @@ class TestMidTurn:
         finally:
             loop.close()
 
+    async def test_a_failing_strategy_cannot_leave_edits_in_the_live_history(self):
+        """The task works on copies: an in-place edit followed by an error stays out of the messages the model sees."""
+
+        async def edit_then_fail(memory):
+            memory[0].content[0].text = "EDITED"
+            raise RuntimeError("summarizer down")
+
+        agent = Agent(
+            name="a", model=TestModel(), memory_compaction=edit_then_fail, memory_compaction_prepare_ratio=0.3
+        )
+        live = [
+            Message(role="user", content=[TextContent(text="original")]),
+            Message(role="assistant", content=[TextContent(text="answer")]),
+        ]
+        prepared = agent._prepare_compaction(SimpleNamespace(input={}), live, 0.4)
+        with pytest.raises(RuntimeError):
+            await prepared.task
+        assert live[0].content[0].text == "original"
+
 
 class TestNextTurn:
     async def test_a_turn_that_ends_past_the_ratio_hands_its_compaction_to_the_next(self):
@@ -332,16 +351,40 @@ class TestNextTurn:
         summarizer.release.set()
         await finishing
 
+    async def test_the_incoming_prompt_counts_toward_the_hard_ratio(self):
+        """14 messages fit (0.70); with the prompt the turn sends, 15 do not (0.75): it waits for the compaction."""
+        agent = Agent(
+            name="agent", model=TestModel(), memory_compaction=lambda m: m, memory_compaction_prepare_ratio=0.3
+        )
+        memory = [Message(role="user", content=[TextContent(text=f"m{i}")]) for i in range(14)]
+        prompt = Message(role="user", content=[TextContent(text="next")])
+        session = {}
+
+        async def get_session():
+            return session
+
+        run_context = SimpleNamespace(parent_id="parent", get_session=get_session, update_usage=lambda *_: None)
+        source = SimpleNamespace(memory=memory, metadata={})
+        loop = asyncio.get_running_loop()
+        for incoming, waits in (([], False), ([prompt], True)):
+            finishing = loop.create_future()
+            agent_module._PREPARING[("parent", "agent")] = finishing
+            loop.call_later(0.2, lambda f=finishing: f.done() or f.set_result(None))
+            started = loop.time()
+            await agent._take_prepared(run_context, source, memory, "test", incoming)
+            assert (loop.time() - started >= 0.15) is waits
+            await finishing
+
     async def test_a_history_at_the_hard_ratio_waits_for_it(self, monkeypatch):
         summarizer = Summarizer(released=False)
         agent = make_agent(summarizer, steps=2, memory_compaction_prepare_ratio=0.3)
         first, _ = await run(agent)
         real = Agent._take_prepared
 
-        async def at_the_limit(self, run_context, source, memory, model):
+        async def at_the_limit(self, run_context, source, memory, model, incoming):
             monkeypatch.setattr(Agent, "_context_utilization", lambda *_args: 0.8)  # does not fit as it is
             try:
-                return await real(self, run_context, source, memory, model)
+                return await real(self, run_context, source, memory, model, incoming)
             finally:
                 monkeypatch.setattr(Agent, "_context_utilization", lambda _s, _m, messages, _x: 0.05 * len(messages))
 

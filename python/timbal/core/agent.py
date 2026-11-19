@@ -241,6 +241,17 @@ def _compaction_changed(prefix: list, compacted: list) -> bool:
     return False
 
 
+def _isolated(message: Message) -> Message:
+    """A copy a background compaction can change freely: its blocks are copied too (a strategy that edits one in
+    place and then fails must not leave the edit in the live history). Files stay shared: copying one keeps it."""
+    return Message(
+        role=message.role,
+        content=[block.model_copy(deep=True) for block in message.content],
+        stop_reason=message.stop_reason,
+        metadata=dict(message.metadata) if message.metadata else None,
+    )
+
+
 def _retrieve_result(task: "asyncio.Task") -> None:
     if not task.cancelled():
         task.exception()
@@ -1378,7 +1389,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             and not is_resume
             and source is previous_span
         ):
-            memory, prepared = await self._take_prepared(run_context, source, memory, self._span_model(current_span))
+            memory, prepared = await self._take_prepared(
+                run_context, source, memory, self._span_model(current_span), [prompt]
+            )
         if not is_resume:
             self._synthesize_missing_tool_results(memory)
         # On resume we are continuing the paused turn, not opening a new user turn.
@@ -1823,9 +1836,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         return str(current_span.input.get("model") or self.model)
 
     def _prepare_compaction(self, current_span: Any, prefix: list[Message], utilization: float) -> "_Prepared":
-        """Run the strategies on ``prefix`` (a copy of the history so far) on a task of its own."""
+        """Run the strategies on ``prefix`` on a task of its own, over copies of its messages: the live history only
+        changes when a finished result is swapped in. ``_Prepared.prefix`` keeps the originals, to tell whether
+        the history is still the one it covered."""
         task = asyncio.get_running_loop().create_task(
-            self._run_compactors(list(prefix), self._span_model(current_span))
+            self._run_compactors([_isolated(message) for message in prefix], self._span_model(current_span))
         )
         task.add_done_callback(_retrieve_result)
         return _Prepared(task=task, prefix=list(prefix), utilization=utilization)
@@ -1961,21 +1976,23 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         _PREPARING[key] = finishing
 
     async def _take_prepared(
-        self, run_context: Any, source: Any, memory: list[Message], model: str
+        self, run_context: Any, source: Any, memory: list[Message], model: str, incoming: list[Message]
     ) -> tuple[list[Message], dict | None]:
         """At a turn's start: the compaction the turn before prepared for this one, if its history is unchanged.
         Returns the memory to use and the record taken (None: none, or stale).
 
-        One still running in this process is waited for only when the history does not fit as it is (at the hard
-        ratio, or unmeasurable): waiting then costs less than compacting inline again. Below it the turn goes on
-        with the history it has. Taken or not, it is removed from this run's session data.
+        One still running in this process is waited for only when the history plus ``incoming`` (the prompt this
+        turn adds) does not fit as it is (at the hard ratio, or unmeasurable): waiting then costs less than
+        compacting inline again. Below it the turn goes on with the history it has. Taken or not, it is removed
+        from this run's session data.
         """
         key = (run_context.parent_id, self._path)
         record = None
         finishing = _PREPARING.get(key)
         if finishing is not None and not finishing.done():
             measurement = (source.metadata or {}).get("context_measurement") if source is not None else None
-            utilization = self._context_utilization(model, memory, measurement)
+            # With the prompt this turn adds: it is what the first call sends.
+            utilization = self._context_utilization(model, [*memory, *incoming], measurement)
             if utilization is not None and utilization < self.memory_compaction_ratio:
                 finishing = None
         if finishing is not None:

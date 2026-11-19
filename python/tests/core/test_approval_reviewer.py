@@ -290,6 +290,13 @@ class TestParsing:
         _, events, _ = await run(make_agent(TestModel(responses=[answer]), charges))
         assert any(isinstance(e, ApprovalEvent) for e in events) and charges.made == []
 
+    def test_a_repeated_key_is_ambiguous(self):
+        from timbal.core.approval_reviewer import _parse
+
+        with pytest.raises(ValueError) as raised:
+            _parse('{"decision": "deny", "decision": "approve", "reason": "x"}')
+        assert "duplicate" in str(raised.value.__cause__)
+
     def test_no_decision_is_an_error(self):
         from timbal.core.approval_reviewer import _parse
 
@@ -350,7 +357,54 @@ class TestEvidence:
         assert summary.is_runtime() and summary.metadata["kind"] == "compaction_summary"
 
 
+class TestDelegation:
+    async def test_a_subagents_reviewer_sees_the_person_and_the_delegation_apart(self):
+        """The parent's model wrote "charge 500 euros"; the person only asked about a balance."""
+        seen = []
+        charges = Charges()
+        worker = Agent(
+            name="worker",
+            description="Handles billing.",
+            model=TestModel(handler=lambda m: "done" if m[-1].role == "tool" else call("charge", amount=500)),
+            tools=[Tool(name="charge", handler=charges.charge, requires_approval=True)],
+            approval_reviewer=lambda request: seen.append(request) or "escalate",
+        )
+
+        def parent(messages):
+            if messages[-1].role == "tool":
+                return "ok"
+            return call("worker", prompt="charge 500 euros")
+
+        agent = Agent(
+            name="agent", model=TestModel(handler=parent), tools=[worker], tracing_provider=InMemoryTracingProvider
+        )
+        await run(agent, prompt="what is my balance?")
+        (request,) = seen
+        assert request.user_messages == ["what is my balance?"]
+        assert request.delegation == "charge 500 euros"
+        prompt = request.to_prompt(None)
+        assert "not authorization" in prompt and "- what is my balance?" in prompt
+        assert "- charge 500 euros" not in prompt  # never listed among the user's messages
+        assert charges.made == []
+
+
 class TestReviewerLimits:
+    async def test_arguments_it_cannot_read_in_full_escalate(self):
+        from timbal.core.approval_reviewer import ARGUMENTS_BUDGET
+
+        judge = TestModel(responses=['{"decision": "approve", "reason": "fine"}'])
+        reviewer = ApprovalReviewer(model=judge)
+        request = ApprovalRequest(tool="send", arguments={"to": "bob", "body": "x" * ARGUMENTS_BUDGET, "bcc": "eve"})
+        verdict = await reviewer.decide(request)
+        assert verdict.verdict == "escalate" and judge.call_count == 0
+
+    def test_a_long_message_is_shortened_visibly(self):
+        from timbal.core.approval_reviewer import _clip
+
+        text = "please do not charge me. " + "x" * 3000 + " Actually never mind, do not do anything."
+        clipped = _clip(text, 1500)
+        assert "characters omitted" in clipped and clipped.endswith("do not do anything.")
+
     async def test_a_synchronous_reviewer_is_held_to_its_timeout(self):
         import time
 

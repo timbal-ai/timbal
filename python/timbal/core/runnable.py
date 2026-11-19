@@ -1711,13 +1711,31 @@ class Runnable(ABC, BaseModel):
             return None
         from .approval_reviewer import ApprovalRequest, said_by_the_user
 
-        memory = caller.memory if isinstance(caller.memory, list) else []
-        user_messages = [
-            text
-            for message in memory
-            if isinstance(message, Message) and said_by_the_user(message) and (text := message.collect_text().strip())
-        ]
+        # Evidence is what the person said, to the outermost agent. A subagent's "user" messages are its caller's
+        # model talking to it: shown apart, as delegation, never as authorization.
+        outermost = caller
+        ancestor = run_context.parent_of(caller)
+        while ancestor is not None:
+            if isinstance(ancestor.memory, list):
+                outermost = ancestor
+            ancestor = run_context.parent_of(ancestor)
+
+        def said(span: Any) -> list[str]:
+            memory = span.memory if isinstance(span.memory, list) else []
+            return [
+                text
+                for message in memory
+                if isinstance(message, Message)
+                and said_by_the_user(message)
+                and (text := message.collect_text().strip())
+            ]
+
+        user_messages = said(outermost)
         user_messages = user_messages[-reviewer.context_messages :] if reviewer.context_messages else []
+        delegation = None
+        if outermost is not caller:
+            asked = said(caller)
+            delegation = asked[-1] if asked else None
         root = run_context.root_span()
         trigger = (root.metadata or {}).get("trigger") if root is not None else None
         attended = not isinstance(trigger, dict) or trigger.get("kind") in ("user_message", "resume")
@@ -1731,6 +1749,7 @@ class Runnable(ABC, BaseModel):
             user_messages=user_messages,
             attended=attended,
             trigger=trigger if isinstance(trigger, dict) else None,
+            delegation=delegation,
         )
         return await reviewer.decide(request)
 
