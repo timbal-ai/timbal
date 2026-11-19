@@ -350,6 +350,23 @@ class TestNextTurn:
         second, _ = await run(agent, prompt="again", parent_id=first.id)
         assert root(second).memory[0].collect_text() == SUMMARY  # waited, and took it
 
+    async def test_the_handoff_is_stored_before_anyone_is_told_it_finished(self, monkeypatch):
+        """The next turn waits on ``_PREPARING``: once the entry is gone the record must already be in the trace."""
+        real = RunContext._end_background_work
+
+        async def slow_store(self):
+            await asyncio.sleep(0.2)  # a store that takes a while (a loaded machine, a remote provider)
+            await real(self)
+
+        monkeypatch.setattr(RunContext, "_end_background_work", slow_store)
+        summarizer = Summarizer()
+        agent = make_agent(summarizer, steps=2, memory_compaction_prepare_ratio=0.3)
+        first, _ = await run(agent)
+        while (first.id, "agent") in agent_module._PREPARING:
+            await asyncio.sleep(0.01)
+        stored = await RunContext(parent_id=first.id, tracing_provider=InMemoryTracingProvider)._get_parent_trace()
+        assert "agent" in (stored[root(first).call_id].session or {}).get(agent_module._PREPARED_KEY, {})
+
     async def test_another_process_takes_it_from_the_stored_session_data(self):
         summarizer = Summarizer()
         agent = make_agent(summarizer, steps=2, memory_compaction_prepare_ratio=0.3)

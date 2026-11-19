@@ -131,6 +131,8 @@ DEFAULT_DENIAL_WINDOW_NOTICE = (
 
 # Session data key: per agent path, its last tool call outcomes for max_denials_window.
 _DENIAL_WINDOW_KEY = "__denial_window"
+# Session data key: per agent path, a window limit reached and not yet acted on (a batch that paused before its end).
+_DENIAL_CROSSED_KEY = "__denial_window_crossed"
 
 DEFAULT_STEER_BLOCKED_NOTICE = (
     "[System notice] A message the user sent during this turn was blocked by the '{rail}' guardrail and is "
@@ -1947,9 +1949,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 logger.warning("Background compaction for the next turn failed.", path=self._path, error=str(e))
                 return None
             finally:
-                if _PREPARING.get(key) is finishing:
-                    del _PREPARING[key]
-                await run_context._end_background_work()
+                try:
+                    # Stores the run again with the record: the next turn reads it from there.
+                    await run_context._end_background_work()
+                finally:
+                    # Only then: whoever waits on this entry (the next turn) must find the record stored.
+                    if _PREPARING.get(key) is finishing:
+                        del _PREPARING[key]
 
         finishing = asyncio.get_running_loop().create_task(finish())
         _PREPARING[key] = finishing
@@ -2811,6 +2817,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 del window[: -self.max_denials_window[1]]
                 if denied and sum(window) >= self.max_denials_window[0]:
                     denial_window_crossed = {"denials": sum(window), "window": len(window)}
+                    # Kept in session data too: a batch that pauses (an approval) must not lose it.
+                    session = await run_context.get_session()
+                    session[_DENIAL_CROSSED_KEY] = {
+                        **(session.get(_DENIAL_CROSSED_KEY) or {}),
+                        self._path: denial_window_crossed,
+                    }
             # Pin the result when the originating tool opted in (e.g. read_skill), so memory
             # compaction never strips this durable context. The tool name is the final path
             # segment of its OutputEvent.
@@ -2958,12 +2970,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if limit is not None and consecutive_denials >= limit:
                 notice = DEFAULT_DENIAL_NOTICE.format(count=consecutive_denials)
                 record = {"denials": consecutive_denials}
-            elif denial_window_crossed is not None:
-                record = denial_window_crossed
-                notice = DEFAULT_DENIAL_WINDOW_NOTICE.format(count=record["denials"], calls=record["window"])
-            denial_window_crossed = None
+            elif self.max_denials_window is not None:
+                if denial_window_crossed is None:  # reached in the paused run this one resumes
+                    denial_window_crossed = ((await run_context.get_session()).get(_DENIAL_CROSSED_KEY) or {}).get(
+                        self._path
+                    )
+                if denial_window_crossed is not None:
+                    record = denial_window_crossed
+                    notice = DEFAULT_DENIAL_WINDOW_NOTICE.format(count=record["denials"], calls=record["window"])
             if notice is None:
                 return
+            denial_window_crossed = None
+            session = await run_context.get_session()
+            pending = dict(session.get(_DENIAL_CROSSED_KEY) or {})
+            if pending.pop(self._path, None) is not None:
+                if pending:
+                    session[_DENIAL_CROSSED_KEY] = pending
+                else:
+                    session.pop(_DENIAL_CROSSED_KEY, None)
             logger.warning("Agent reached a denial limit.", path=self._path, **record)
             current_span.metadata.setdefault("denial_limit", []).append(record)
             await _append_memory(

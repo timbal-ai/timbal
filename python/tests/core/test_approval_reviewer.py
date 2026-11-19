@@ -466,6 +466,51 @@ class TestDenialWindow:
         assert output.output.collect_text() == "I stopped."
         assert context.root_span().metadata["denial_limit"] == [{"denials": 1, "window": 1}]
 
+    async def test_a_limit_reached_in_a_batch_that_pauses_holds_on_resume(self):
+        """(1, 1): one call denied (the limit) while another waits for a person; resumed, that call succeeds after
+        the denial, and the agent must still stop: the crossing is kept in session data across the pause."""
+        transfers = []
+
+        def transfer(amount: int) -> str:
+            transfers.append(amount)
+            return f"transferred {amount}"
+
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "user" and "denied or blocked" in last.collect_text():
+                return "I stopped."
+            if last.role == "tool":
+                return "carried on"
+            return Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id="c1", name="charge", input={"amount": 5}),
+                    ToolUseContent(id="c2", name="transfer", input={"amount": 7}),
+                ],
+                stop_reason="tool_use",
+            )
+
+        charges = Charges()
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[
+                Tool(name="charge", handler=charges.charge, requires_approval=True),
+                Tool(name="transfer", handler=transfer, requires_approval=True),
+            ],
+            tracing_provider=InMemoryTracingProvider,
+            approval_reviewer=lambda request: "deny" if request.tool == "charge" else "escalate",
+            max_denials_window=(1, 1),
+            max_consecutive_denials=None,
+        )
+        first, events, _ = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        resumed, _, output = await run(agent, parent_id=first.id, resume={approval.approval_id: True})
+        assert transfers == [7] and charges.made == []
+        assert output.output.collect_text() == "I stopped."
+        assert resumed.root_span().metadata["denial_limit"] == [{"denials": 1, "window": 1}]
+        assert "__denial_window_crossed" not in (await resumed.get_session())  # acted on: cleared
+
     async def test_sibling_branches_count_their_own_denials(self):
         """Two turns continuing one parent: each sees the parent's denials and its own, not its sibling's."""
         charges = Charges()
