@@ -7,13 +7,13 @@ After you [list a folder](/connect/connections#file-shares) in `config.json`, Ti
 
 Every request needs the connector **online** and the `fs:browse` capability (copying needs `fs:copy`), both reported by connector 0.1.27 or newer and only when at least one share is configured. Otherwise browse requests answer `browse_unsupported` (or `fs_unsupported`) and copy answers `fs_unsupported`.
 
-| Operation | Request (under `/orgs/{org_id}/connectors/{connector_id}`) | Role needed |
-| --------- | ---------------------------------------------------------- | ----------- |
-| List the shares | `GET /browse/filesystems` | Membership |
-| List a folder | `GET /browse/filesystems/entries` | Membership |
-| Summarize a folder tree | `GET /browse/filesystems/summary` | Membership |
-| Search file contents | `GET /browse/filesystems/search` | ConnectorsManage |
-| Copy to a knowledge base | `POST /filesystems/copy` | ConnectorsManage and K2Manage |
+| Operation | Request | Role needed |
+| --------- | ------- | ----------- |
+| List the shares | `GET /orgs/{org_id}/connectors/{connector_id}/browse/filesystems` | Membership |
+| List a folder | `GET /orgs/{org_id}/connectors/{connector_id}/browse/filesystems/entries` | Membership |
+| Summarize a folder tree | `GET /orgs/{org_id}/connectors/{connector_id}/browse/filesystems/summary` | Membership |
+| Search file contents | `GET /orgs/{org_id}/connectors/{connector_id}/browse/filesystems/search` | ConnectorsManage |
+| Copy to a knowledge base | `POST /orgs/{org_id}/connectors/{connector_id}/filesystems/copy` | ConnectorsManage and K2Manage |
 
 Searching needs more than membership because reading file contents is data leaving your network.
 
