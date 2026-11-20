@@ -598,7 +598,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
         text: "#f2f2f2", muted: "#a1a1aa", placeholder: "#80808a", chip: "transparent", chipBorder: "rgba(255, 255, 255, 0.16)",
         activeBg: "rgba(255, 255, 255, 0.10)", activeBorder: "rgba(255, 255, 255, 0.7)", activeText: "#ffffff",
         inlineCode: "rgba(255, 255, 255, 0.10)",
-        codeHead: "#161619", codeBody: "#0a0a0c", codeBorder: "rgba(255, 255, 255, 0.12)", codeText: "#e8e8ea", codeMuted: "#a1a1aa",
+        codeHead: "#161619", codeBody: "#0a0a0c", codeBorder: "rgba(255, 255, 255, 0.12)", codeDivider: "rgba(255, 255, 255, 0.08)", codeText: "#e8e8ea", codeMuted: "#a1a1aa",
         copyBorder: "rgba(255, 255, 255, 0.22)", ok: "#7ee787",
       }
     : {
@@ -606,7 +606,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
         text: "#3e3e3e", muted: "#6b6b73", placeholder: "#a1a1aa", chip: "transparent", chipBorder: "rgba(10, 10, 10, 0.18)",
         activeBg: "rgba(10, 10, 10, 0.06)", activeBorder: "#0a0a0a", activeText: "#0a0a0a",
         inlineCode: "rgba(10, 10, 10, 0.07)",
-        codeHead: "#18181b", codeBody: "#0e0e10", codeBorder: "rgba(10, 10, 10, 0.12)", codeText: "#e8e8ea", codeMuted: "#a1a1aa",
+        codeHead: "#18181b", codeBody: "#0e0e10", codeBorder: "rgba(10, 10, 10, 0.12)", codeDivider: "rgba(255, 255, 255, 0.08)", codeText: "#e8e8ea", codeMuted: "#a1a1aa",
         copyBorder: "rgba(255, 255, 255, 0.25)", ok: "#7ee787",
       };
   const line = `1px solid ${t.panelBorder}`;
@@ -654,7 +654,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
 
   const codeBlock = (key, label, code) => (
     <div key={key} style={{ margin: "10px 0", borderRadius: 10, overflow: "hidden", border: `1px solid ${t.codeBorder}` }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: t.codeHead, color: t.codeMuted, fontSize: 12, padding: "6px 10px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: t.codeHead, color: t.codeMuted, fontSize: 12, padding: "6px 10px", borderBottom: `1px solid ${t.codeDivider}` }}>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
         <button
           type="button"
@@ -664,8 +664,8 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
           {copiedKey === key ? "Copied" : "Copy"}
         </button>
       </div>
-      <pre style={{ margin: 0, padding: "12px 14px", background: t.codeBody, color: t.codeText, fontSize: 13, lineHeight: 1.5, overflowX: "auto", whiteSpace: "pre" }}>
-        <code style={{ background: "transparent", color: "inherit", padding: 0 }}>{code}</code>
+      <pre style={{ margin: 0, padding: "12px 14px", borderRadius: 0, border: "none", boxShadow: "none", background: t.codeBody, color: t.codeText, fontSize: 13, lineHeight: 1.5, overflowX: "auto", whiteSpace: "pre" }}>
+        <code style={{ background: "transparent", color: "inherit", padding: 0, border: "none", borderRadius: 0 }}>{code}</code>
       </pre>
     </div>
   );
