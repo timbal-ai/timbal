@@ -688,7 +688,7 @@ class ChatSession:
         self._store_failures = 0
         # Reads in a row that failed for the question a call left the session with (see _take_question).
         self._question_failures = 0
-        # The head a call left parked whose stored trace held no question when read (_question_appeared).
+        # The head a call left parked whose stored trace held no question when read (_dropped_question_holds).
         self._dropped_question: str | None = None
         # The restorable events last seen queued: one arriving through the task store is stored at once.
         self._queued_events: tuple[str, ...] = ()
@@ -1329,7 +1329,7 @@ class ChatSession:
         A run whose stored trace holds no question (not parked, or nothing stored of it where this
         session reads) is not waited for: nothing here could answer it, and no turn of this session
         can be taken for its answer (the turn reads the same trace). The session goes on from it,
-        and reads the run once more before each turn it starts on it (:meth:`_question_appeared`):
+        and reads the run once more before each turn it starts on it (:meth:`_dropped_question_holds`):
         the end of a run can be stored late (a save that failed and was sent again).
 
         False only when the run could not be read: that is not "no question" (a turn started now
@@ -1361,15 +1361,22 @@ class ChatSession:
             self._interrupt_now()
         return True
 
-    async def _question_appeared(self) -> bool:
-        """Whether the run whose question was dropped (nothing stored of it then) waits after all.
+    async def _dropped_question_holds(self) -> bool:
+        """Whether the turn about to start must wait for the run whose question was dropped.
 
-        Read right before a turn starts on that run, because the turn reads the same trace: found
-        parked by then, the turn would be taken for the answer and lose its prompt. True hands the
-        run back to the worker as a question to take (or, unreadable, to ask for again); False lets
-        the turn start. Also while a call has the session on that same head (the turn would chain
-        onto it there): the session comes back for its question. Forgotten once the head has moved
-        on: nothing chains onto that run any more.
+        That run held no question when it was read (nothing stored of it), but its end can be stored
+        late, and the turn reads the same trace: found parked by then, the turn would be taken for
+        the answer and lose its prompt. So it is read once more right before a turn starts on it,
+        also while a call has the session on that same head (the turn would chain onto it there).
+
+        - Still no question: False, the turn starts.
+        - Parked now: it is this session's question after all. True, and the run is handed back to
+          the worker to take (with the session, if a call has it).
+        - Unreadable: not known, which is neither of the above. True after a wait, so the turn does
+          not start and the worker asks again; nothing else changes (the call keeps the session,
+          nothing is marked as waiting for an answer).
+
+        Forgotten once the head has moved on: nothing chains onto that run any more.
         """
         run_id, scheduler = self._dropped_question, self._scheduler
         if run_id is None:
@@ -1378,15 +1385,33 @@ class ChatSession:
             self._dropped_question = None
             return False
         try:
-            if await self._parked_run(run_id) is None:
-                return False
+            found = await self._parked_run(run_id)
         except Exception as error:
             logger.warning("chat_session_question_unreadable", session_id=self.id, run_id=run_id, error=str(error))
+            await self._wait_to_read_again()
+            return True
+        self._question_failures = 0
+        if found is None:
+            return False
         self._dropped_question = None
         if self.closed or scheduler.session_head != run_id:
             return False
         scheduler.note_parked(run_id)
         return True
+
+    async def _wait_to_read_again(self) -> None:
+        """After a read of a question's run failed: a while (0.5 s doubling, up to 30 s), or until something
+        arrives or the session changes. Nothing else would bring the worker back to it.
+
+        Only a wait that ran its whole time makes the next one longer. One cut short (a message, a wake)
+        is followed by a read at once and is not counted: messages typed during an outage must not push
+        the next try out to the longest wait, since nothing tells the worker when the store is back.
+        """
+        delay = _TURN_RETRY_DELAY_S * 2 ** min(self._question_failures, 8)
+        try:
+            await asyncio.wait_for(self._until_scheduler_or_work(), min(delay, _RESTORE_RETRY_MAX_S))
+        except TimeoutError:
+            self._question_failures += 1
 
     def _wake_options(self, meta: dict[str, Any], trace: Any) -> _TurnOptions:
         """The options of a parked wake, from its prompt; a wake never resumes with more than it had.
@@ -1497,15 +1522,13 @@ class ChatSession:
                     continue
                 # The run that asked could not be read (the trace store is away). No turn starts on a run
                 # that may be waiting for an answer. Asked again after a while, as restore() does, and
-                # sooner when something arrives: nothing else would bring the worker back to it.
-                self._question_failures += 1
-                delay = _TURN_RETRY_DELAY_S * 2 ** (min(self._question_failures, 8) - 1)
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._until_scheduler_or_work(), min(delay, _RESTORE_RETRY_MAX_S))
+                # sooner when something arrives.
+                await self._wait_to_read_again()
                 continue
-            # No unread question any more (taken, answered by another client, the head moved): the next one
-            # that cannot be read starts its waits from the shortest again.
-            self._question_failures = 0
+            if self._dropped_question is None:
+                # No question left to read (taken, answered by another client, the head moved): the next
+                # one that cannot be read starts its waits from the shortest again.
+                self._question_failures = 0
             if scheduler.session_parked:
                 # Another client's run of this session waits for its caller (an approval, a question): a
                 # turn now would chain onto it, and that run's resume would drop the turn's prompt. Its
@@ -1518,7 +1541,7 @@ class ChatSession:
             # turn, and what is typed must not go ahead of it). Other wakes wait for the user, and for the
             # session: while a call has it the chat answers only what is typed, and an application's wake
             # runs once it is the chat's again (the call hands it back with its head).
-            if self._wakes and await self._question_appeared():
+            if self._wakes and await self._dropped_question_holds():
                 continue
             recovering = bool(self._wakes) and self._wakes[0].kind == RECOVERY_KIND
             if recovering and scheduler.other_turn_first():
@@ -1537,7 +1560,7 @@ class ChatSession:
                 continue
             if not await self._turn_due():
                 continue
-            if await self._question_appeared():
+            if await self._dropped_question_holds():
                 continue
             # Take and busy in one step: a foreign root turn either goes before it or meets a busy owner.
             followup = scheduler.take()

@@ -897,17 +897,78 @@ class TestAQuestionTheChatCannotRead:
 
         assert tools[0].runs == ["wired"] and "escrito 2" in _seen(model.calls[2])
 
+    async def test_a_re_read_that_fails_leaves_the_session_with_the_live_call(self, tmp_path) -> None:
+        # The question was dropped (nothing stored of its run) and a second call has the session. The
+        # chat's read before its next turn fails: that is "not known yet", not "the question appeared".
+        # The chat's turn waits and asks again; the call keeps the session, and nothing is parked.
+        slow = 30.0
+        provider = _LateJsonl.configured(_path=tmp_path / "traces.jsonl")
+        provider.failing = provider.unreadable = False
+        tools = _wire()
+        model = _Model("Hola por chat.", _tool_call("wire_money"), "Visto por chat.")
+        async with ChatSession(_agent(model, tools, provider=provider)) as chat:
+            chat.send("escrito 1")
+            await _until(lambda: chat.turns >= 1 and not chat.busy, slow)
+            first, stt = _call(model, tools, provider=provider, parent_run_id=chat.head)
+
+            async def asks(events: list[VoiceSessionEvent]) -> None:
+                provider.failing = True
+                await stt.inject(TranscriptEvent(type="committed", text="paga"))
+                await _until(lambda: bool(_asked(events)), slow)
+                await _until(lambda: first._current_turn_task.done(), slow)
+
+            await _run(first, stt, asks, timeout=4 * slow)
+            provider.failing = False
+            await _until(lambda: _owner(chat) is chat._scheduler and not chat._scheduler.head_parked, slow)
+            second, stt2 = _call(model, tools, provider=provider, parent_run_id=chat.head)
+
+            async def drive(_events: list[VoiceSessionEvent]) -> None:
+                await second.notify("dato", announce="silent")  # the second call asks for the session
+                await _until(lambda: _owner(chat) is second._scheduler, slow)
+                provider.unreadable = True
+                chat.send("escrito 2")
+                await asyncio.sleep(0.8)  # more than the first wait before it asks again
+                assert _owner(chat) is second._scheduler and chat._scheduler.lent
+                assert not second._scheduler.head_parked and not chat.parked
+                assert chat.turns == 1 and len(chat.pending_messages()) == 1
+                provider.unreadable = False
+                await _until(lambda: chat.turns >= 2 and not chat.busy, slow)
+                assert _owner(chat) is second._scheduler
+
+            await asyncio.create_task(_run(second, stt2, drive, timeout=4 * slow), context=contextvars.Context())
+
+        assert tools[0].runs == [] and "escrito 2" in _seen(model.calls[2])
+
+    async def test_only_a_wait_that_ran_out_makes_the_next_one_longer(self) -> None:
+        # Nothing tells the session when the store is back, so it asks again after a wait that grows.
+        # A wait cut short by a message is followed by a read at once and does not count: messages typed
+        # during an outage must not push the next try out to the longest wait.
+        async with ChatSession(_agent(_Model())) as chat:
+            chat._work.set()
+            await asyncio.wait_for(chat._wait_to_read_again(), 0.3)
+            assert chat._question_failures == 0
+            chat._work.clear()
+            await asyncio.wait_for(chat._wait_to_read_again(), 2)  # the whole first wait (0.5 s)
+            assert chat._question_failures == 1
+
 
 class _LateJsonl(JsonlTracingProvider):
-    """A trace file that refuses every save while ``failing`` (reads still answer)."""
+    """A trace file that refuses every save while ``failing``, and every strict read while ``unreadable``."""
 
     failing = False
+    unreadable = False
 
     @classmethod
     async def _store(cls, run_context) -> None:
         if cls.failing:
             raise ConnectionError("503")
         await super()._store(run_context)
+
+    @classmethod
+    async def get_strict(cls, run_context):
+        if cls.unreadable:
+            raise ConnectionError("trace store away")
+        return await super().get_strict(run_context)
 
 
 async def _collect(stream) -> tuple[OutputEvent, list[ApprovalEvent]]:
