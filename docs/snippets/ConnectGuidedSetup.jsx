@@ -595,7 +595,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
   const t = dark
     ? {
         panel: "#0e0e10", panelBorder: "rgba(255, 255, 255, 0.12)", field: "#000000", fieldBorder: "rgba(255, 255, 255, 0.22)",
-        text: "#f2f2f2", muted: "#a1a1aa", chip: "transparent", chipBorder: "rgba(255, 255, 255, 0.16)",
+        text: "#f2f2f2", muted: "#a1a1aa", placeholder: "#80808a", chip: "transparent", chipBorder: "rgba(255, 255, 255, 0.16)",
         activeBg: "rgba(255, 255, 255, 0.10)", activeBorder: "rgba(255, 255, 255, 0.7)", activeText: "#ffffff",
         inlineCode: "rgba(255, 255, 255, 0.10)",
         codeHead: "#161619", codeBody: "#0a0a0c", codeBorder: "rgba(255, 255, 255, 0.12)", codeText: "#e8e8ea", codeMuted: "#a1a1aa",
@@ -603,7 +603,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
       }
     : {
         panel: "#ffffff", panelBorder: "rgba(10, 10, 10, 0.12)", field: "#ffffff", fieldBorder: "rgba(10, 10, 10, 0.25)",
-        text: "#3e3e3e", muted: "#6b6b73", chip: "transparent", chipBorder: "rgba(10, 10, 10, 0.18)",
+        text: "#3e3e3e", muted: "#6b6b73", placeholder: "#a1a1aa", chip: "transparent", chipBorder: "rgba(10, 10, 10, 0.18)",
         activeBg: "rgba(10, 10, 10, 0.06)", activeBorder: "#0a0a0a", activeText: "#0a0a0a",
         inlineCode: "rgba(10, 10, 10, 0.07)",
         codeHead: "#18181b", codeBody: "#0e0e10", codeBorder: "rgba(10, 10, 10, 0.12)", codeText: "#e8e8ea", codeMuted: "#a1a1aa",
@@ -708,6 +708,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
       <span style={{ display: "block", marginBottom: 3, color: t.text, fontWeight: 500 }}>{label}</span>
       <input
         type="text"
+        className="cgs-input"
         value={value}
         placeholder={placeholder || ""}
         onChange={(e) => onChange(e.target.value)}
@@ -746,7 +747,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
       });
       return { ...prev, source, o: keep };
     });
-  const val = (key, fallback) => (o[key] !== undefined ? o[key] : fallback);
+  const val = (key) => (o[key] !== undefined ? o[key] : "");
 
   const plan = buildPlan(c);
   const trouble = buildTroubleshooting(c);
@@ -754,6 +755,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
 
   return (
     <div style={{ margin: "20px 0" }}>
+      <style>{`.cgs-input::placeholder { color: ${t.placeholder}; opacity: 1; }`}</style>
       <div style={{ border: line, background: t.panel, color: t.text, borderRadius: 16, padding: 20 }}>
         {group("1. Where is the connector installed?", choice(OS_LIST, s.os, (os) => set({ os })))}
 
@@ -783,17 +785,20 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
         {c.isDb
           ? group(
               "3. Connection details",
-              grid(
+              <>
+                <div style={{ fontSize: 12, color: t.muted }}>Grey values are the defaults. Type to replace one; leave it empty to keep the default.</div>
+                {grid(
                 <>
-                  {field("name", "Connection name", val("name", c.src.name), (v) => setO("name", v), "The name Timbal sees")}
-                  {field("host", "Host", val("host", c.src.host), (v) => setO("host", v), "As the connector server sees it")}
+                  {field("name", "Connection name", val("name"), (v) => setO("name", v), "The name Timbal sees", c.src.name)}
+                  {field("host", "Host", val("host"), (v) => setO("host", v), "As the connector server sees it", c.src.host)}
                   {c.isSqlServer && s.reach === "named_browser"
-                    ? field("instance", "Instance name", val("instance", "INSTANCE"), (v) => setO("instance", v))
-                    : field("port", "Port", val("port", c.port), (v) => setO("port", v))}
-                  {field("db", c.source === "mysql" || c.source === "mariadb" ? "Database (schema)" : "Database", val("db", c.src.db), (v) => setO("db", v))}
-                  {c.auth === "sql" ? field("user", "Login", val("user", c.src.user), (v) => setO("user", v), "A read-only login") : null}
+                    ? field("instance", "Instance name", val("instance"), (v) => setO("instance", v), undefined, "INSTANCE")
+                    : field("port", "Port", val("port"), (v) => setO("port", v), undefined, c.port)}
+                  {field("db", c.source === "mysql" || c.source === "mariadb" ? "Database (schema)" : "Database", val("db"), (v) => setO("db", v), undefined, c.src.db)}
+                  {c.auth === "sql" ? field("user", "Login", val("user"), (v) => setO("user", v), "A read-only login", c.src.user) : null}
                 </>
-              )
+                )}
+              </>
             )
           : null}
 
@@ -831,12 +836,12 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
                 ) : null}
                 {c.auth === "integrated" ? (
                   <div style={{ maxWidth: 380, marginTop: 8 }}>
-                    {field("svc", "Service account", val("svcAccount", "CORP\\svc_timbal$"), (v) => setO("svcAccount", v), "Ends with $ for a group managed service account")}
+                    {field("svc", "Service account", val("svcAccount"), (v) => setO("svcAccount", v), "Ends with $ for a group managed service account", "CORP\\svc_timbal$")}
                   </div>
                 ) : null}
                 {c.auth === "windows" ? (
                   <div style={{ maxWidth: 380, marginTop: 8 }}>
-                    {field("ntlm", "Domain account", val("ntlmUser", "CORP\\svc_timbal"), (v) => setO("ntlmUser", v), "DOMAIN\\user, typed with a single backslash")}
+                    {field("ntlm", "Domain account", val("ntlmUser"), (v) => setO("ntlmUser", v), "DOMAIN\\user, typed with a single backslash", "CORP\\svc_timbal")}
                   </div>
                 ) : null}
               </>
@@ -895,8 +900,8 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
               "Folder to share",
               grid(
                 <>
-                  {field("fsName", "Share name", val("fsName", "exports"), (v) => setO("fsName", v), "The name Timbal sees")}
-                  {field("fsPath", "Path on the server", val("fsPath", FS_PATHS[s.os]), (v) => setO("fsPath", v), "A local folder, or a share already mounted there")}
+                  {field("fsName", "Share name", val("fsName"), (v) => setO("fsName", v), "The name Timbal sees", "exports")}
+                  {field("fsPath", "Path on the server", val("fsPath"), (v) => setO("fsPath", v), "A local folder, or a share already mounted there", FS_PATHS[s.os])}
                 </>
               )
             )
@@ -905,7 +910,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
         {group(
           "Proxy (optional)",
           <div style={{ maxWidth: 420 }}>
-            {field("proxy", "Proxy URL", val("proxy", ""), (v) => setO("proxy", v), "Leave empty if the server connects directly. Needs connector 0.1.33 or newer; the service keeps using it after install", "http://proxy.corp.local:8080")}
+            {field("proxy", "Proxy URL", val("proxy"), (v) => setO("proxy", v), "Leave empty if the server connects directly. Needs connector 0.1.33 or newer; the service keeps using it after install", "http://proxy.corp.local:8080")}
           </div>
         )}
       </div>
