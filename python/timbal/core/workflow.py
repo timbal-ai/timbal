@@ -372,12 +372,18 @@ class Workflow(Runnable):
                             status.state = StepState.FAILED
                             status.signal = PauseRequired(event)
                             return
-                        if event.status.code == "cancelled" and event.status.reason == "cancelled":
-                            # A human cancelled this step via Cancel(); terminate the
-                            # whole workflow run rather than continuing other steps.
-                            logger.info(f"Step {step.name} cancelled by user.")
+                        if event.status.code == "cancelled" and event.status.reason in (
+                            "cancelled",
+                            "approval_already_claimed",
+                        ):
+                            # A human cancelled this step via Cancel(), or another run continuing the same
+                            # paused one already claimed its gate: terminate the whole workflow run rather
+                            # than continuing other steps.
+                            logger.info(f"Step {step.name} stopped the run ({event.status.reason}).")
                             status.state = StepState.FAILED
-                            status.signal = RunCancelled(event.status.message or "Run cancelled by user.")
+                            status.signal = RunCancelled(
+                                event.status.message or "Run cancelled by user.", reason=event.status.reason
+                            )
                             return
                         if event.error is not None:
                             logger.info(f"Step {step.name} completed with error.")

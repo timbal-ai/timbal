@@ -1,14 +1,18 @@
 import asyncio
+import contextlib
 import contextvars
+import copy
 import difflib
+import hashlib
 import inspect
 import json
 import math
 import re
+import threading
 import time
 import traceback
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -120,6 +124,18 @@ DEFAULT_DENIAL_NOTICE = (
 )
 """User message injected once ``max_consecutive_denials`` is reached, before a tool-less LLM call."""
 
+DEFAULT_DENIAL_WINDOW_NOTICE = (
+    "[System notice] {count} of your last {calls} tool calls were denied or blocked, so no tools are available "
+    "for this reply. Do not look for another way to do the same thing. Tell the user what you were trying to "
+    "do, what was refused, and what you need from them."
+)
+"""User message injected once ``max_denials_window`` is reached, before a tool-less LLM call."""
+
+# Session data key: per agent path, its last tool call outcomes for max_denials_window.
+_DENIAL_WINDOW_KEY = "__denial_window"
+# Session data key: per agent path, a window limit reached and not yet acted on (a batch that paused before its end).
+_DENIAL_CROSSED_KEY = "__denial_window_crossed"
+
 DEFAULT_STEER_BLOCKED_NOTICE = (
     "[System notice] A message the user sent during this turn was blocked by the '{rail}' guardrail and is "
     "not shown. Do not guess what it said. Carry on, and mention briefly that one message could not be accepted."
@@ -181,9 +197,162 @@ OnMaxIter = Literal["final_answer", "stop", "error"] | OnMaxIterHook
 # Status reasons that mean a child paused and must bubble up to pause the run —
 # an approval gate (approval_required) or a suspend() call (input_required).
 _PAUSE_REASONS = frozenset({"approval_required", "input_required"})
+# Why a tool call ended that stops the whole run, with nothing fed back to the model: a person cancelled it, or a
+# gate it left waiting was already claimed by another run continuing the same paused turn (that one goes on).
+_STOP_REASONS = frozenset({"cancelled", "approval_already_claimed"})
 
 # Consecutive turns that stored no memory (see Agent._previous_memory) a turn reaches back through.
 _MAX_TURNS_WITHOUT_MEMORY = 8
+
+# Session data key: per agent path, the compaction a turn prepared for the next one (memory_compaction_prepare_ratio).
+_PREPARED_KEY = "__prepared_compaction"
+# (run_id, agent path) -> the compaction that run prepares for the next turn, until the run is stored again with it.
+_PREPARING: "dict[tuple[str, str], _Handoff]" = {}
+
+
+@dataclass(eq=False)
+class _Handoff:
+    """A turn's compaction for the next one, on its way.
+
+    ``record`` resolves as soon as the result exists (None: nothing to hand on): what a turn in this process
+    takes, whatever the store is doing. ``stored`` ends once the run was stored again with it: what a turn that
+    reads the trace finds. The entry stays in ``_PREPARING`` until then."""
+
+    record: "asyncio.Future"
+    stored: "asyncio.Future | None" = None
+    # True for one that hands on nothing by construction: it only says a strategy of a dropped compaction is
+    # still on its worker thread. It keeps another background compaction from starting; nothing waits for it.
+    nothing: bool = False
+
+
+@dataclass(eq=False)
+class _Prepared:
+    """Compaction running in the background on a prefix of the history: the messages themselves, so a history
+    that changed under it (cut, steered, compacted) is told apart."""
+
+    task: "asyncio.Task"
+    prefix: list
+    utilization: float | None
+    # Finished with nothing to swap in: kept so the same prefix is not compacted again until the history grows.
+    futile: bool = False
+    # One per plain-function strategy sent to a worker thread: done when that call has returned. Cancelling
+    # ``task`` does not stop a thread, so these say whether the compaction is really over.
+    workers: list = field(default_factory=list)
+
+    def intact(self, memory: list) -> bool:
+        return len(memory) >= len(self.prefix) and all(a is b for a, b in zip(memory, self.prefix, strict=False))
+
+
+async def _on_worker_thread(compactor: Any, memory: list, workers: list) -> list:
+    """``compactor(memory)`` on a worker thread, for a strategy that is a plain function.
+
+    ``workers`` gets a future that is done once the call has returned. A thread cannot be stopped: when the task
+    waiting here is cancelled (the turn pauses, is cut, fails) a call that has begun goes on to its end, and the
+    future says when that is. One that had not begun is dropped, and never runs.
+    """
+    loop = asyncio.get_running_loop()
+    returned = loop.create_future()
+    lock = threading.Lock()
+    began = dropped = False
+
+    def settle() -> None:
+        if not returned.done():
+            returned.set_result(None)
+
+    def call() -> list:
+        nonlocal began
+        with lock:
+            if dropped:
+                return memory
+            began = True
+        try:
+            return compactor(memory)
+        finally:
+            with contextlib.suppress(RuntimeError):  # the loop is gone: nobody is left to tell
+                loop.call_soon_threadsafe(settle)
+
+    workers.append(returned)
+    try:
+        return await asyncio.to_thread(call)
+    except asyncio.CancelledError:
+        with lock:
+            if not began:
+                dropped = True
+                settle()
+        raise
+
+
+def _compaction_changed(prefix: list, compacted: list) -> bool:
+    """Whether the strategies changed the history: fewer messages, or the same number with different content (a
+    strategy such as ``compact_tool_results`` shrinks results in place and rebuilds the messages it keeps).
+
+    Compared structurally, never dumped: dumping a file needs async I/O. Kept content blocks are passed through by
+    reference; a block equal in fields but not identical counts as unchanged.
+    """
+    if len(compacted) != len(prefix):
+        return True
+    for new, old in zip(compacted, prefix, strict=True):
+        if new is old:
+            continue
+        if new.role != old.role or new.stop_reason != old.stop_reason or dict(new.metadata) != dict(old.metadata):
+            return True
+        if len(new.content) != len(old.content):
+            return True
+        if any(x is not y and x != y for x, y in zip(new.content, old.content, strict=True)):
+            return True
+    return False
+
+
+def _isolated(message: Message) -> Message:
+    """A copy a background compaction can change freely: its blocks are copied too (a strategy that edits one in
+    place and then fails must not leave the edit in the live history). Files stay shared: copying one keeps it."""
+    return Message(
+        role=message.role,
+        content=[block.model_copy(deep=True) for block in message.content],
+        stop_reason=message.stop_reason,
+        metadata=copy.deepcopy(dict(message.metadata)) if message.metadata else None,
+    )
+
+
+def _predecessors_handoff(run_context: Any, path: str) -> "_Handoff | None":
+    """The compaction the turn this one continues prepared for it, while this turn can still use it: on its way
+    in this process (running, or there and not stored yet), or held by this turn since it started without
+    waiting for it (its run may be stored and gone from ``_PREPARING`` by now). None once this turn took it, or
+    once it came to nothing. One background compaction per session: nothing starts another next to it, and a
+    turn that ends first takes it on for the next."""
+    parent_id = getattr(run_context, "parent_id", None)
+    if not parent_id or path in run_context.__dict__.get("_taken_handoffs", ()):
+        return None
+    handoff = _PREPARING.get((parent_id, path))
+    if handoff is None:
+        unwaited = run_context.__dict__.get("_unwaited_handoffs", {}).get(path)
+        handoff = unwaited[0] if unwaited is not None else None
+    if handoff is not None and handoff.record.done():
+        record = handoff.record
+        if record.cancelled() or record.exception() is not None or not isinstance(record.result(), dict):
+            return None  # it produced nothing to take
+    return handoff
+
+
+def _retrieve_result(task: "asyncio.Task") -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+def _fingerprint(dumped: list) -> str:
+    """The stored form of a history prefix, hashed: the turn after reads it back from the trace and compares."""
+    raw = json.dumps(dumped, sort_keys=True, default=str, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _join(head: list, tail: list) -> list:
+    """``head + tail``, folding two assistant messages at the seam into one (providers want alternation)."""
+    if head and tail and head[-1].role == "assistant" and tail[0].role == "assistant":
+        merged = Message(
+            role="assistant", content=[*head[-1].content, *tail[0].content], stop_reason=tail[0].stop_reason
+        )
+        return [*head[:-1], merged, *tail[1:]]
+    return [*head, *tail]
 
 
 def _is_pause(status: Any) -> bool:
@@ -445,7 +614,9 @@ def _has_deferred(tools: list[Any]) -> bool:
 
 def _empty_at_limit(message: Any) -> bool:
     """A final answer the output limit cut off before any visible text."""
-    return isinstance(message, Message) and message.stop_reason in _TRUNCATED_STOPS and not message_text(message).strip()
+    return (
+        isinstance(message, Message) and message.stop_reason in _TRUNCATED_STOPS and not message_text(message).strip()
+    )
 
 
 def _native_tool_search(model: Any) -> bool:
@@ -490,14 +661,16 @@ def _score_tools(tools: list[Any], query: str) -> list[tuple[int, Any]]:
         name = tool.name.lower()
         schema = getattr(tool, "input_schema", None) or getattr(tool, "params_model_schema", None) or {}
         params = " ".join(schema.get("properties", {}))
-        indexed.append((
-            name,
+        indexed.append(
             (
-                (3, set(_SEARCH_WORD.findall(name))),
-                (2, set(_SEARCH_WORD.findall(params.lower()))),
-                (1, set(_SEARCH_WORD.findall((tool.description or "").lower()))),
-            ),
-        ))
+                name,
+                (
+                    (3, set(_SEARCH_WORD.findall(name))),
+                    (2, set(_SEARCH_WORD.findall(params.lower()))),
+                    (1, set(_SEARCH_WORD.findall((tool.description or "").lower()))),
+                ),
+            )
+        )
     if len(indexed) > 1:
         # A word every tool has (an MCP server prefix like "timbal__") can't tell them apart.
         everywhere = set.intersection(*(set().union(*(f for _, f in fields)) for _, fields in indexed))
@@ -643,6 +816,16 @@ class Agent(Runnable):
     guardrail) before the agent stops trying: it is told not to route around the
     refusals, and its next model call gets no tools, so it answers the user. A tool call
     that succeeds resets the count. ``None`` turns the breaker off."""
+    max_denials_window: tuple[int, int] | None = None
+    """``(denied, calls)``: the same stop once ``denied`` of the agent's last ``calls`` tool calls were denied
+    or blocked, in a row or not (e.g. ``(10, 50)``). Counted across the session's turns (kept in its session
+    data), so a bot that keeps probing refused actions over many wakes is stopped too. ``None`` (default): off."""
+    approval_reviewer: SkipValidation[Any] = None
+    """Decides approval gates of this agent's tool calls before a person is asked: an
+    :class:`~timbal.core.approval_reviewer.ApprovalReviewer`, a model string (a cheap one), or a function
+    ``(ApprovalRequest) -> "approve" | "deny" | "escalate"``. ``escalate`` (and any failure) asks a person as
+    before, with the reviewer's reason on the card; a denial reaches the model like a person's. Covers
+    subagents without a reviewer of their own. Grants and resume values are honored first. ``None``: off."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
     memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
@@ -659,6 +842,16 @@ class Agent(Runnable):
     request and output, against the context window (from models.yaml) of the model the run
     calls. Set to 0.0 to always compact, or 1.0 to effectively disable auto-triggering.
     Default: 0.75 (75%)."""
+    memory_compaction_prepare_ratio: float | None = None
+    """Prepare compaction ahead of time, so no turn waits for a summarizer call. Past this
+    utilization (below ``memory_compaction_ratio``) the strategies run in the background on
+    the history so far, while the turn goes on: mid-turn the result is swapped in at the next
+    step, and a turn that ends past it hands the result to the next turn (stored in the run's
+    session data, so it works across processes). A history that changed under it (an
+    interrupt, a steer) discards it and compaction runs inline as before. Reaching
+    ``memory_compaction_ratio`` first waits for the one in progress instead of starting
+    another. Costs a summarizer call earlier than inline compaction would. ``None`` (default):
+    compaction only runs inline."""
     tool_result_limit: SkipValidation[ToolResultLimit | int | None] = None
     """Size limit applied to every tool result when it is produced (before it enters memory).
     An int is shorthand for ToolResultLimit(threshold=int). The default action (Spill) persists
@@ -709,6 +902,18 @@ class Agent(Runnable):
     def model_post_init(self, __context: Any) -> None:
         """Initialize agent after Pydantic model creation."""
         super().model_post_init(__context)
+        from .approval_reviewer import ApprovalReviewer
+
+        self._approval_reviewer = ApprovalReviewer.coerce(self.approval_reviewer)
+        window = self.max_denials_window
+        if window is not None and not (isinstance(window, tuple) and len(window) == 2 and 0 < window[0] <= window[1]):
+            raise ValueError(f"max_denials_window must be (denied, calls) with 0 < denied <= calls, got {window!r}")
+        prepare = self.memory_compaction_prepare_ratio
+        if prepare is not None and not 0.0 < prepare < self.memory_compaction_ratio:
+            raise ValueError(
+                "memory_compaction_prepare_ratio must be above 0 and below memory_compaction_ratio "
+                f"({self.memory_compaction_ratio}), got {prepare}."
+            )
         # Plain instance attributes (not PrivateAttr) — read on every agent turn.
         self._system_prompt_fn: Callable | None = None
         self._system_prompt_fn_is_async: bool = False
@@ -1142,8 +1347,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if has_followup_after_server_tool_use:
                     continue
                 if model_provider == "anthropic":
-                    kind = "tool_search_tool_result" if content.name.startswith("tool_search_tool") else (
-                        "web_search_tool_result"
+                    kind = (
+                        "tool_search_tool_result"
+                        if content.name.startswith("tool_search_tool")
+                        else ("web_search_tool_result")
                     )
                     memory[-1].content.append(
                         CustomContent(
@@ -1257,6 +1464,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # re-executed by the agent loop (see _find_pending_tool_uses), so we must
         # NOT inject synthetic "tool failed" results for them.
         is_resume = _is_pause(previous_span.status)
+        prepared = None
+        if (
+            self.memory_compaction is not None
+            and self.memory_compaction_prepare_ratio is not None
+            and not is_resume
+            and source is previous_span
+        ):
+            memory, prepared = await self._take_prepared(
+                run_context, source, memory, self._span_model(current_span), [prompt]
+            )
         if not is_resume:
             self._synthesize_missing_tool_results(memory)
         # On resume we are continuing the paused turn, not opening a new user turn.
@@ -1267,11 +1484,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # original prompt already lives in the loaded parent memory.
         tail = [] if is_resume else [prompt]
         merged: list[Message] = []
+        unwaited = run_context.__dict__.get("_unwaited_handoffs", {}).get(self._path)
+        images: dict[int, Message | None] = {}
         for msg in memory + tail:
             cleaned = msg.without_empty_text_blocks()
+            if unwaited is not None:
+                images[id(msg)] = cleaned
             if cleaned is not None:
                 merged.append(cleaned)
         current_span.memory = merged
+        if unwaited is not None:
+            # What this turn holds of each message it loaded: cleaning hands back another object (or drops the
+            # message), and ``_take_predecessors`` tells by identity whether the prefix is still in place.
+            handoff, stored_memory, loaded = unwaited
+            run_context.__dict__["_unwaited_handoffs"][self._path] = (
+                handoff,
+                stored_memory,
+                [images.get(id(message)) for message in loaded],
+            )
 
         # Re-dump prior turns so stored memory matches sanitized messages (no empty text blocks).
         current_span._prev_memory_dump = await dump(merged[:-1])
@@ -1291,6 +1521,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # file tokens must not disappear, nor may unmeasured tool results be skipped.
                 # The next measured LLM call replaces this deliberately high estimate.
                 measurement = {"usage": dict(source.usage), "messages": 0}
+            if prepared is not None:
+                # The turn before compacted this history for it: its measurement covers the history before that.
+                measurement = None
+                self._record_compaction(
+                    current_span,
+                    prepared.get("utilization"),
+                    prepared.get("steps") or [],
+                    background=True,
+                    prepared_by=run_context.parent_id,
+                )
             if measurement is not None:
                 # Sanitizing above may drop a message the measurement covered.
                 covered = memory[: measurement["messages"]]
@@ -1581,46 +1821,64 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         should_compact = self.memory_compaction_ratio <= 0.0
         utilization = None
         if not should_compact:
-            context_window = get_context_window(model)
-            if context_window is None:
+            utilization = self._context_utilization(model, messages, measurement)
+            if utilization is None:
                 # Unknown model — context window not in models.yaml.
-                # Estimate token count from message content as a best effort.
-                estimated_tokens = _estimate_tokens_from_memory(messages)
                 logger.warning(
                     "Context window unknown for model; token usage estimated from message content (1 token ≈ 4 chars). Compacting as safe fallback.",
                     model=model,
-                    estimated_tokens=estimated_tokens,
+                    estimated_tokens=_estimate_tokens_from_memory(messages),
                 )
                 should_compact = True
-            elif measurement:
-                # Anthropic's input_tokens excludes cached tokens: full context =
-                # input_tokens + cache reads + cache writes (disjoint buckets). The
-                # collector emits cache writes either as the aggregate
-                # `cache_creation_input_tokens` or as the per-TTL `ephemeral_*` units —
-                # never both — so every cache unit is counted exactly once. Pricing-tier
-                # suffixes (`_long_context`, `_fast`, `_flex`) are stripped first.
-                usage = measurement["usage"]
-                prev_input_tokens = sum(v for k, v in usage.items() if _is_context_input_unit(k))
-                prev_output_tokens = sum(v for k, v in usage.items() if _is_context_output_unit(k))
-                unsent_tokens = _estimate_tokens_from_memory(messages[measurement["messages"] :])
-                utilization = (prev_input_tokens + prev_output_tokens + unsent_tokens) / context_window
-                should_compact = utilization >= self.memory_compaction_ratio
             else:
-                # Known model but no usage data from previous run.
-                # Estimate utilization from message content.
-                estimated_tokens = _estimate_tokens_from_memory(messages)
-                utilization = estimated_tokens / context_window
-                logger.warning(
-                    "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",
-                    model=model,
-                    estimated_tokens=estimated_tokens,
-                    estimated_utilization=round(utilization, 4),
-                )
+                if not measurement:
+                    logger.warning(
+                        "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",
+                        model=model,
+                        estimated_tokens=_estimate_tokens_from_memory(messages),
+                        estimated_utilization=round(utilization, 4),
+                    )
                 should_compact = utilization >= self.memory_compaction_ratio
 
         if not should_compact:
             return
 
+        current_span.memory, compaction_steps = await self._run_compactors(current_span.memory, model)
+        self._record_compaction(current_span, utilization, compaction_steps)
+
+    def _context_utilization(self, model: str, messages: list[Message], measurement: dict | None) -> float | None:
+        """The share of ``model``'s context window ``messages`` take (None: the window is unknown).
+
+        With a measurement (the last LLM call that reported context tokens) its usage counts, plus an estimate of
+        the messages after the ones it covered; without one, every message is estimated (1 token ≈ 4 chars).
+        """
+        context_window = get_context_window(model)
+        if context_window is None:
+            return None
+        if measurement:
+            # Anthropic's input_tokens excludes cached tokens: full context =
+            # input_tokens + cache reads + cache writes (disjoint buckets). The
+            # collector emits cache writes either as the aggregate
+            # `cache_creation_input_tokens` or as the per-TTL `ephemeral_*` units —
+            # never both — so every cache unit is counted exactly once. Pricing-tier
+            # suffixes (`_long_context`, `_fast`, `_flex`) are stripped first.
+            usage = measurement["usage"]
+            prev_input_tokens = sum(v for k, v in usage.items() if _is_context_input_unit(k))
+            prev_output_tokens = sum(v for k, v in usage.items() if _is_context_output_unit(k))
+            unsent_tokens = _estimate_tokens_from_memory(messages[measurement["messages"] :])
+            return (prev_input_tokens + prev_output_tokens + unsent_tokens) / context_window
+        return _estimate_tokens_from_memory(messages) / context_window
+
+    async def _run_compactors(
+        self, memory: list[Message], model: str, *, workers: list | None = None
+    ) -> tuple[list[Message], list[dict]]:
+        """Every configured strategy over ``memory``, in order: the compacted memory and a step per strategy.
+
+        ``workers``: given, synchronous strategies run on a worker thread and it tracks them (see
+        ``_on_worker_thread``). For a compaction prepared in the background, which works on copies while turns go
+        on: on the loop it would hold every one of them up for as long as it takes. Inline, the turn waits for it
+        either way.
+        """
         compactors = (
             [self.memory_compaction] if not isinstance(self.memory_compaction, list) else self.memory_compaction
         )
@@ -1633,26 +1891,33 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 compactor._state["agent_model"] = model
                 if "store" in compactor._state and compactor._state["store"] is None:
                     compactor._state["store"] = getattr(self, "_offload_store", None)
-            before = len(current_span.memory)
+            before = len(memory)
             if asyncio.iscoroutinefunction(compactor):
-                current_span.memory = await compactor(current_span.memory)
+                memory = await compactor(memory)
+            elif workers is not None:
+                memory = await _on_worker_thread(compactor, memory, workers)
             else:
-                current_span.memory = compactor(current_span.memory)
+                memory = compactor(memory)
             compaction_steps.append(
                 {
                     "compactor": getattr(compactor, "__name__", repr(compactor)),
                     "before": before,
-                    "after": len(current_span.memory),
+                    "after": len(memory),
                 }
             )
+        return memory, compaction_steps
+
+    @staticmethod
+    def _record_compaction(current_span: Any, utilization: float | None, steps: list[dict], **extra: Any) -> None:
         prior = current_span.metadata.get("compaction")
         passes = (prior.get("passes", 1) + 1) if isinstance(prior, dict) else 1
         current_span.metadata["compaction"] = {
             "triggered": True,
             "utilization": round(utilization, 4) if utilization is not None else None,
-            "steps": compaction_steps,
+            "steps": steps,
             # Number of times compaction fired on this span (turn start + each mid-loop pass).
             "passes": passes,
+            **extra,
         }
 
     async def _resumed_denials(self, run_context: Any) -> int:
@@ -1670,18 +1935,336 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         session = await run_context.get_session()
         session.setdefault(_DENIAL_STREAK_KEY, {})[self._path] = {"run_id": run_context.id, "count": denials}
 
-    async def _stop_after_denials(self, current_span: Any, denials: int, append_memory: Any) -> None:
-        """After a tool batch past the denial limit: tell the model to stop routing around refusals (the caller
-        takes its tools away for the next call)."""
-        logger.warning("Agent reached max_consecutive_denials.", path=self._path, denials=denials)
-        current_span.metadata.setdefault("denial_limit", []).append({"denials": denials})
-        await append_memory(
-            Message(
-                role="user",
-                content=[TextContent(text=DEFAULT_DENIAL_NOTICE.format(count=denials))],
-                metadata={"source": "runtime", "kind": "denial_limit"},
+    # -- Compaction prepared in the background (memory_compaction_prepare_ratio) -----------------
+
+    def _span_model(self, current_span: Any) -> str:
+        return str(current_span.input.get("model") or self.model)
+
+    def _prepare_compaction(self, current_span: Any, prefix: list[Message], utilization: float) -> "_Prepared":
+        """Run the strategies on ``prefix`` on a task of its own, over copies of its messages: the live history only
+        changes when a finished result is swapped in. ``_Prepared.prefix`` keeps the originals, to tell whether
+        the history is still the one it covered."""
+        workers: list = []
+        task = asyncio.get_running_loop().create_task(
+            self._run_compactors(
+                [_isolated(message) for message in prefix], self._span_model(current_span), workers=workers
             )
         )
+        task.add_done_callback(_retrieve_result)
+        return _Prepared(task=task, prefix=list(prefix), utilization=utilization, workers=workers)
+
+    def _drop_prepared(self, run_context: Any, prepared: "_Prepared") -> bool:
+        """Cancel a prepared compaction that will not be used. True when a strategy of it is still running on a
+        worker thread: cancelling does not reach it, so until it returns it is still this session's background
+        compaction, and neither this turn nor the one that continues it starts another next to it."""
+        prepared.task.cancel()
+        running = [worker for worker in prepared.workers if not worker.done()]
+        if not running:
+            return False
+        self._hold_background_compaction(run_context, asyncio.gather(*running))
+        return True
+
+    def _hold_background_compaction(self, run_context: Any, until: "asyncio.Future") -> None:
+        """Keep an entry under this run until ``until`` is done, as a handoff that hands on nothing
+        (``_Handoff.nothing``): the turn continuing this one sees a background compaction on its way and starts
+        none, but does not wait for it, since no result will come of it."""
+        key = (run_context.id, self._path)
+        previous = _PREPARING.get(key)
+        if previous is not None and previous.record is until:
+            return
+        handoff = _Handoff(record=until, stored=until, nothing=True)
+
+        def over(_until: Any) -> None:
+            if _PREPARING.get(key) is handoff:
+                del _PREPARING[key]
+
+        until.add_done_callback(over)
+        _PREPARING[key] = handoff
+
+    def _swap_prepared(self, current_span: Any, prepared: "_Prepared", run_context: Any) -> bool:
+        """Put a finished prepared compaction in place of the history it covered, when that is still there."""
+        if prepared.task.cancelled() or prepared.task.exception() is not None:
+            if not prepared.task.cancelled():
+                logger.warning(
+                    "Background compaction failed; compacting inline when needed.",
+                    path=self._path,
+                    error=str(prepared.task.exception()),
+                )
+            return False
+        compacted, steps = prepared.task.result()
+        memory = current_span.memory
+        if not prepared.intact(memory):
+            run_context.update_usage("compaction:prepared_stale", 1)
+            return False
+        if not _compaction_changed(prepared.prefix, compacted):
+            prepared.futile = True
+            return False
+        current_span.memory = _join(compacted, memory[len(prepared.prefix) :])
+        self._record_compaction(current_span, prepared.utilization, steps, background=True)
+        run_context.update_usage("compaction:background", 1)
+        return True
+
+    async def _compaction_boundary(
+        self, current_span: Any, run_context: Any, prepared: "_Prepared | None"
+    ) -> "_Prepared | None":
+        """Between steps of a turn: swap in a prepared compaction that finished, wait for the one in progress once
+        the hard ratio is reached (instead of starting another inline), start one past the prepare ratio."""
+        measurement = current_span.metadata.get("context_measurement")
+        if prepared is not None and not prepared.futile and prepared.task.done():
+            if self._swap_prepared(current_span, prepared, run_context):
+                # The measurement predates the swap (an upper bound now): the next call measures again.
+                return None
+            if not prepared.futile:
+                prepared = None
+        if prepared is not None and not prepared.futile:
+            model = self._span_model(current_span)
+            utilization = self._context_utilization(model, current_span.memory, measurement)
+            if utilization is None or utilization >= self.memory_compaction_ratio:
+                # Until it ends, however it ends: one that failed or was cancelled is a preparation that came
+                # to nothing (inline below), not this turn's cancellation. Cancelling the turn still cancels
+                # the wait, and leaves the task alone.
+                await asyncio.wait([prepared.task])
+                if self._swap_prepared(current_span, prepared, run_context):
+                    return None
+                if not prepared.futile:
+                    prepared = None
+        running = prepared is not None and not prepared.futile
+        if not running:
+            if await self._take_predecessors(current_span, run_context, measurement):
+                return None  # the measurement predates it, as after a swap
+            before = current_span.memory
+            await self._compact_preserving_last_assistant(current_span, measurement=measurement)
+            # The measurement predates it: the history only looks big still. The next boundary measures again.
+            if current_span.memory is not before:
+                return None
+        if running or self.memory_compaction_prepare_ratio is None:
+            return prepared
+        memory = current_span.memory
+        split = next((i for i in range(len(memory) - 1, -1, -1) if memory[i].role == "assistant"), None)
+        head = memory[:split] if split else []
+        if prepared is not None and prepared.intact(memory) and len(head) <= len(prepared.prefix):
+            return prepared  # that prefix compacts to nothing: wait for the history to grow
+        utilization = self._context_utilization(self._span_model(current_span), memory, measurement)
+        if _predecessors_handoff(run_context, self._path) is not None:
+            return prepared  # one background compaction per session: the turn before's is still on its way
+        if (
+            head
+            and utilization is not None
+            and self.memory_compaction_prepare_ratio <= utilization < self.memory_compaction_ratio
+        ):
+            return self._prepare_compaction(current_span, head, utilization)
+        return prepared
+
+    async def _take_predecessors(self, current_span: Any, run_context: Any, measurement: dict | None) -> bool:
+        """At the hard ratio in a turn that started without waiting for the compaction the turn before prepared
+        (its history still fit then): take that one, waiting for it if it is still running, instead of compacting
+        the same history inline next to it. False when there is none, or it no longer covers this history."""
+        unwaited = run_context.__dict__.get("_unwaited_handoffs", {}).get(self._path)
+        if unwaited is None:
+            return False
+        if self.memory_compaction_ratio > 0.0:
+            utilization = self._context_utilization(self._span_model(current_span), current_span.memory, measurement)
+            if utilization is not None and utilization < self.memory_compaction_ratio:
+                return False
+        handoff, stored_memory, loaded = unwaited
+        record = None
+        with contextlib.suppress(Exception):
+            record = await asyncio.shield(handoff.record)
+        del run_context.__dict__["_unwaited_handoffs"][self._path]  # used or not, once
+        run_context.__dict__.setdefault("_taken_handoffs", set()).add(self._path)
+        memory = current_span.memory
+        covered = record.get("covered", 0) if isinstance(record, dict) else 0
+        if not covered:
+            return False
+        # What this turn holds of the messages the record covers (a message cleaned to nothing is not held).
+        held = [message for message in loaded[:covered] if message is not None]
+        if (
+            min(len(stored_memory), len(loaded)) < covered
+            or len(memory) < len(held)
+            # Still those messages, first and in order: nothing put between them, none replaced.
+            or not all(a is b for a, b in zip(memory, held, strict=False))
+            or _fingerprint(await dump(stored_memory[:covered])) != record.get("fingerprint")
+        ):
+            run_context.update_usage("compaction:prepared_stale", 1)
+            return False
+        compacted = [Message.validate(message) for message in record["memory"]]
+        current_span.memory = _join(compacted, memory[len(held) :])
+        self._record_compaction(
+            current_span,
+            record.get("utilization"),
+            record.get("steps") or [],
+            background=True,
+            prepared_by=run_context.parent_id,
+        )
+        run_context.update_usage("compaction:background", 1)
+        return True
+
+    def _prepare_for_next_turn(self, current_span: Any, run_context: Any, prepared: "_Prepared | None") -> None:
+        """A turn that ends past the prepare ratio: compact its history in the background and leave the result in
+        the run's session data for the next turn (``_take_prepared``). The run's trace is stored again once it
+        lands, like a background child's late output; the next turn in this process waits for it instead."""
+        memory = current_span.memory
+        if prepared is not None and not prepared.intact(memory):
+            if self._drop_prepared(run_context, prepared):
+                return  # its strategy is still running on a thread: nothing new until it is back
+            prepared = None
+        if prepared is not None and prepared.futile:
+            if len(memory) <= len(prepared.prefix):
+                return  # the whole history compacts to nothing
+            prepared = None
+        whole_dump = list(getattr(current_span, "_memory_dump", None) or [])
+        predecessor = None
+        if prepared is None:
+            utilization = self._context_utilization(
+                self._span_model(current_span), memory, current_span.metadata.get("context_measurement")
+            )
+            if utilization is None or utilization < self.memory_compaction_prepare_ratio:
+                return
+            # The turn before's is still on its way (this turn did not wait for it): take its result on for the
+            # next turn when it is there, instead of a second compaction of nearly the same history. Also when
+            # this turn ends at the hard ratio: the next one then waits for that result rather than compacting
+            # inline next to it.
+            predecessor = _predecessors_handoff(run_context, self._path)
+            if predecessor is not None and predecessor.nothing:
+                self._hold_background_compaction(run_context, predecessor.record)
+                return
+            if predecessor is not None and predecessor.record.done():
+                # Already there: taken on only if it still covers this history as stored (loading may have
+                # cleaned a message of it). If not, this turn prepares its own, as with none.
+                record = predecessor.record.result()
+                covered = record.get("covered", 0)
+                if len(whole_dump) < covered or _fingerprint(whole_dump[:covered]) != record.get("fingerprint"):
+                    predecessor = None
+            if predecessor is None:
+                if utilization >= self.memory_compaction_ratio:
+                    return  # the next turn compacts at its start, as before
+                prepared = self._prepare_compaction(current_span, memory, utilization)
+        if prepared is not None:
+            dumped = whole_dump[: len(prepared.prefix)]
+            if len(dumped) != len(prepared.prefix):
+                self._drop_prepared(run_context, prepared)
+                return
+        key = (run_context.id, self._path)
+        run_context._live_background += 1
+
+        async def produce() -> dict | None:
+            if predecessor is not None:
+                # Its result, not its store: a summary that is there must not wait for an older run's trace.
+                record = await asyncio.shield(predecessor.record)
+                covered = record.get("covered", 0) if isinstance(record, dict) else 0
+                # Still a prefix of this history (it only grew since): the next turn can use it as is.
+                if (
+                    not covered
+                    or len(whole_dump) < covered
+                    or _fingerprint(whole_dump[:covered]) != record.get("fingerprint")
+                ):
+                    return None
+                return record
+            await asyncio.wait([prepared.task])
+            if prepared.task.cancelled() or prepared.task.exception() is not None:
+                return None  # it came to nothing: there is nothing to hand on
+            compacted, steps = prepared.task.result()
+            if not _compaction_changed(prepared.prefix, compacted):
+                return None
+            return {
+                "covered": len(prepared.prefix),
+                "fingerprint": _fingerprint(dumped),
+                "memory": await dump(compacted),
+                "steps": steps,
+                "utilization": round(prepared.utilization, 4),
+            }
+
+        handoff = _Handoff(record=asyncio.get_running_loop().create_future())
+
+        async def finish() -> None:
+            try:
+                record = None
+                try:
+                    record = await produce()
+                    if record is not None:
+                        session = await run_context.get_session()
+                        # Copied, not updated in place: a child's session data shares its parent's nested dicts.
+                        session[_PREPARED_KEY] = {**(session.get(_PREPARED_KEY) or {}), self._path: record}
+                        run_context.update_usage("compaction:prepared", 1)
+                except Exception as e:
+                    record = None
+                    logger.warning("Background compaction for the next turn failed.", path=self._path, error=str(e))
+                finally:
+                    # There for this process from here on, whatever the store does next.
+                    if not handoff.record.done():
+                        handoff.record.set_result(record)
+            finally:
+                try:
+                    # Stores the run again with the record: a turn that reads the trace finds it there.
+                    await run_context._end_background_work()
+                finally:
+                    # Only then: once the entry is gone, the record must be in the trace.
+                    if _PREPARING.get(key) is handoff:
+                        del _PREPARING[key]
+
+        handoff.stored = asyncio.get_running_loop().create_task(finish())
+        _PREPARING[key] = handoff
+
+    async def _take_prepared(
+        self, run_context: Any, source: Any, memory: list[Message], model: str, incoming: list[Message]
+    ) -> tuple[list[Message], dict | None]:
+        """At a turn's start: the compaction the turn before prepared for this one, if its history is unchanged.
+        Returns the memory to use and the record taken (None: none, or stale).
+
+        One still running in this process is waited for only when the history plus ``incoming`` (the prompt this
+        turn adds) does not fit as it is (at the hard ratio, or unmeasurable): waiting then costs less than
+        compacting inline again. Below it the turn goes on with the history it has. Taken or not, it is removed
+        from this run's session data.
+        """
+        record = None
+        handoff = _PREPARING.get((run_context.parent_id, self._path))
+        if handoff is not None and handoff.nothing:
+            handoff = None  # no result will come of it: nothing to wait for, nothing to take later
+        if handoff is not None and not handoff.record.done():
+            measurement = (source.metadata or {}).get("context_measurement") if source is not None else None
+            # With the prompt this turn adds: it is what the first call sends.
+            utilization = self._context_utilization(model, [*memory, *incoming], measurement)
+            if utilization is not None and utilization < self.memory_compaction_ratio:
+                if isinstance(source.memory, list):
+                    # Not waited for. If this turn reaches the hard ratio later it takes that one instead of
+                    # compacting inline next to it (``_take_predecessors``): what it loaded, to tell then.
+                    run_context.__dict__.setdefault("_unwaited_handoffs", {})[self._path] = (
+                        handoff,
+                        source.memory,
+                        list(memory),
+                    )
+                handoff = None
+        if handoff is not None:
+            # Its result, not its store: this turn does not wait for an earlier run's trace to be written.
+            with contextlib.suppress(Exception):
+                record = await asyncio.shield(handoff.record)
+            # Taken (used or not): it is no longer on its way for this turn, which prepares its own from here.
+            run_context.__dict__.setdefault("_taken_handoffs", set()).add(self._path)
+        session = await run_context.get_session()
+        stored = session.get(_PREPARED_KEY)
+        if isinstance(stored, dict):
+            # Removed whether or not it is used (or the in-process task already gave it): a later turn must not
+            # find it, fail its fingerprint and count a false stale compaction. Copied, not popped in place: the
+            # dict may still be the parent run's (session data is a shallow copy).
+            stored = dict(stored)
+            leftover = stored.pop(self._path, None)
+            record = record or leftover
+            if stored:
+                session[_PREPARED_KEY] = stored
+            else:
+                session.pop(_PREPARED_KEY, None)
+        if not isinstance(record, dict) or not isinstance(source.memory, list):
+            return memory, None
+        covered = record.get("covered", 0)
+        # In its stored form: a provider that keeps live traces (in-memory) hands back Message objects.
+        if len(source.memory) < covered or _fingerprint(await dump(source.memory[:covered])) != record.get(
+            "fingerprint"
+        ):
+            run_context.update_usage("compaction:prepared_stale", 1)
+            return memory, None
+        compacted = [Message.validate(message) for message in record["memory"]]
+        run_context.update_usage("compaction:background", 1)
+        return _join(compacted, memory[covered:]), record
 
     async def _resolve_tools(self, i: int, tool_policy: Any = _UNSET_POLICY) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
@@ -1978,7 +2561,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             )
         elif policy == "final_answer":
             reply = Message(
-                role="user", content=[TextContent(text=DEFAULT_MAX_ITER_NOTICE.format(max_iter=self.max_iter))]
+                role="user",
+                content=[TextContent(text=DEFAULT_MAX_ITER_NOTICE.format(max_iter=self.max_iter))],
+                metadata={"source": "runtime", "kind": "max_iter"},
             )
         else:
             reply = policy(MaxIterContext(max_iter=self.max_iter, memory=tuple(memory), agent_path=self._path))
@@ -2352,6 +2937,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         run_context = get_run_context()
         assert run_context is not None, "Run context is not initialized"
         current_span = run_context.current_span()
+        if _PREPARING and run_context.parent_id:
+            predecessor = _PREPARING.get((run_context.parent_id, self._path))
+            if predecessor is not None and predecessor.nothing and not predecessor.record.done():
+                # This turn may pause again before it can prepare a handoff for the next one.
+                self._hold_background_compaction(run_context, predecessor.record)
 
         model = kwargs.pop("model", self.model)
 
@@ -2411,9 +3001,27 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         consecutive_denials = 0
         denials_resumed = False
 
+        denial_window: list[int] | None = None
+        # Set when a result takes the window to its limit, so a later result in the same batch cannot hide it.
+        denial_window_crossed: dict | None = None
+
+        async def _denial_window() -> list[int]:
+            """The agent's last tool call outcomes (1: denied or blocked), kept across turns in session data.
+
+            Copied into this run's own session data on first use: a run's session data is a shallow copy of its
+            parent's, so updating the nested window in place would count a sibling branch's denials too."""
+            nonlocal denial_window
+            if denial_window is None:
+                session = await run_context.get_session()
+                windows = dict(session.get(_DENIAL_WINDOW_KEY) or {})
+                denial_window = list(windows.get(self._path) or [])
+                windows[self._path] = denial_window
+                session[_DENIAL_WINDOW_KEY] = windows
+            return denial_window
+
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
-            nonlocal consecutive_denials
+            nonlocal consecutive_denials, denial_window_crossed
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
                 return
             # Native-event handlers (coding harness) forward their own OutputEvent
@@ -2432,8 +3040,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     return
                 if reason == "early_exit":
                     bail(status.message)
-                if reason == "cancelled":
-                    # A human cancelled via Cancel() on the resume channel. Terminal:
+                if reason in _STOP_REASONS:
+                    # A human cancelled via Cancel() on the resume channel, or another run
+                    # continuing the same paused turn already claimed this gate. Terminal:
                     # leave the tool_use unresolved (no tool_result) and let the caller
                     # yield the event before raising RunCancelled to stop the run.
                     return
@@ -2467,6 +3076,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 consecutive_denials += 1
             elif consecutive_denials:
                 consecutive_denials = 0
+            if self.max_denials_window is not None:
+                window = await _denial_window()
+                window.append(1 if denied else 0)
+                del window[: -self.max_denials_window[1]]
+                if denied and sum(window) >= self.max_denials_window[0]:
+                    denial_window_crossed = {"denials": sum(window), "window": len(window)}
+                    # Kept in session data too: a batch that pauses (an approval) must not lose it.
+                    session = await run_context.get_session()
+                    session[_DENIAL_CROSSED_KEY] = {
+                        **(session.get(_DENIAL_CROSSED_KEY) or {}),
+                        self._path: denial_window_crossed,
+                    }
             # Pin the result when the originating tool opted in (e.g. read_skill), so memory
             # compaction never strips this durable context. The tool name is the final path
             # segment of its OutputEvent.
@@ -2548,6 +3169,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             isinstance(t, ToolSet) or getattr(t, "defer_loading", False) for t in self.tools
         )
         # Fixed for the turn; checked after every tool batch.
+        denial_window_on = self.max_denials_window is not None
         denial_limit = self.max_consecutive_denials
         if denial_limit is None:
             denial_limit = math.inf
@@ -2604,6 +3226,47 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         last_output: Any = None
         last_output_stored = False
 
+        async def _check_denials() -> None:
+            """After a tool batch: past a denial limit (in a row, or in the window), tell the model to stop and
+            take its tools away."""
+            nonlocal consecutive_denials, withhold_tools, denial_window_crossed
+            limit = self.max_consecutive_denials
+            notice = record = None
+            if limit is not None and consecutive_denials >= limit:
+                notice = DEFAULT_DENIAL_NOTICE.format(count=consecutive_denials)
+                record = {"denials": consecutive_denials}
+            elif self.max_denials_window is not None:
+                if denial_window_crossed is None:  # reached in the paused run this one resumes
+                    denial_window_crossed = ((await run_context.get_session()).get(_DENIAL_CROSSED_KEY) or {}).get(
+                        self._path
+                    )
+                if denial_window_crossed is not None:
+                    record = denial_window_crossed
+                    notice = DEFAULT_DENIAL_WINDOW_NOTICE.format(count=record["denials"], calls=record["window"])
+            if notice is None:
+                return
+            denial_window_crossed = None
+            session = await run_context.get_session()
+            pending = dict(session.get(_DENIAL_CROSSED_KEY) or {})
+            if pending.pop(self._path, None) is not None:
+                if pending:
+                    session[_DENIAL_CROSSED_KEY] = pending
+                else:
+                    session.pop(_DENIAL_CROSSED_KEY, None)
+            logger.warning("Agent reached a denial limit.", path=self._path, **record)
+            current_span.metadata.setdefault("denial_limit", []).append(record)
+            await _append_memory(
+                Message(
+                    role="user",
+                    content=[TextContent(text=notice)],
+                    metadata={"source": "runtime", "kind": "denial_limit"},
+                )
+            )
+            consecutive_denials = 0
+            if self.max_denials_window is not None:
+                (await _denial_window()).clear()  # stopped once: the count starts again
+            withhold_tools = True
+
         i = 0
         need_retry = False
         _llm_memory_saved = False
@@ -2615,6 +3278,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Token usage reported by the previous LLM call this turn. None until the first LLM
         # call completes; mid-loop compaction waits for one.
         last_llm_usage: dict | None = None
+        # Compaction running in the background on this turn's history (memory_compaction_prepare_ratio).
+        prepared: _Prepared | None = None
         # Own the active nested iterator explicitly: closing this handler while
         # it is suspended at a yield must finish child cleanup before returning.
         active_events: AsyncGenerator | None = None
@@ -2721,9 +3386,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
                                             yield event
                                             raise PauseRequired(event)
-                                        if event.status.code == "cancelled" and event.status.reason == "cancelled":
+                                        if event.status.code == "cancelled" and event.status.reason in _STOP_REASONS:
                                             yield event
-                                            raise RunCancelled(event.status.message or "Run cancelled by user.")
+                                            raise RunCancelled(
+                                                event.status.message or "Run cancelled by user.",
+                                                reason=event.status.reason,
+                                            )
                                         current_span.memory.append(
                                             Message.validate(
                                                 {
@@ -2750,6 +3418,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         consecutive_denials = await self._resumed_denials(run_context)
                     tool_calls = pending_tool_uses
                     first_pending: OutputEvent | None = None
+                    lost_claim: OutputEvent | None = None
                     if run_context._before_tool_dispatch is not None:
                         await run_context._before_tool_dispatch(
                             self._path, [(call.id, call.name, call.input) for call in tool_calls]
@@ -2764,9 +3433,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         if (
                             isinstance(event, OutputEvent)
                             and event.status.code == "cancelled"
-                            and event.status.reason == "cancelled"
+                            and event.status.reason in _STOP_REASONS
                         ):
-                            raise RunCancelled(event.status.message or "Run cancelled by user.")
+                            if event.status.reason == "cancelled":
+                                raise RunCancelled(event.status.message or "Run cancelled by user.")
+                            # Lost to another run continuing the same turn. This run stops, but only once the
+                            # batch is over: a call of it this run did claim is running, and cutting it
+                            # would leave it claimed and never done.
+                            lost_claim = lost_claim or event
                         if (
                             isinstance(event, OutputEvent)
                             and event.status.code == "cancelled"
@@ -2775,13 +3449,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         ):
                             first_pending = event
                     active_events = None
+                    if lost_claim is not None:
+                        raise RunCancelled(lost_claim.status.message or "", reason=lost_claim.status.reason)
                     if first_pending is not None:
                         await self._save_denials(run_context, consecutive_denials)
                         raise PauseRequired(first_pending)
                     i += 1
-                    if consecutive_denials >= denial_limit:
-                        await self._stop_after_denials(current_span, consecutive_denials, _append_memory)
-                        consecutive_denials, withhold_tools = 0, True
+                    if denial_window_on or consecutive_denials >= denial_limit:
+                        await _check_denials()
                     if steering:
                         if cut is not None and cut.is_set():
                             await asyncio.sleep(NOW_COALESCE_SECS)
@@ -2802,9 +3477,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # context tokens, plus an estimate of the messages appended after it.
                 if self.memory_compaction is not None and last_llm_usage is not None:
                     mem_before = current_span.memory
-                    await self._compact_preserving_last_assistant(
-                        current_span, measurement=current_span.metadata.get("context_measurement")
-                    )
+                    prepared = await self._compaction_boundary(current_span, run_context, prepared)
                     if current_span.memory is not mem_before:
                         # Compaction rewrote memory out of lockstep with the dump; rebuild it.
                         current_span._memory_dump = await dump(current_span.memory)
@@ -2987,7 +3660,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     )
                                     await _append_memory(
                                         Message.validate(
-                                            {"role": "user", "content": [{"type": "text", "text": feedback}]}
+                                            {
+                                                "role": "user",
+                                                "content": [{"type": "text", "text": feedback}],
+                                                "metadata": {"source": "runtime", "kind": "guardrail_retry"},
+                                            }
                                         )
                                     )
                                     buffered_events.clear()
@@ -3075,6 +3752,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                                     ),
                                                 }
                                             ],
+                                            "metadata": {"source": "runtime", "kind": "output_validation"},
                                         }
                                     )
                                     await _append_memory(error_feedback)
@@ -3224,6 +3902,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if called_unloaded:
                     await self._load_tools(called_unloaded, current_span)
                 first_pending: OutputEvent | None = None
+                lost_claim: OutputEvent | None = None
                 if run_context._before_tool_dispatch is not None:
                     await run_context._before_tool_dispatch(
                         self._path, [(call.id, call.name, call.input) for call in tool_calls]
@@ -3238,9 +3917,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if (
                         isinstance(event, OutputEvent)
                         and event.status.code == "cancelled"
-                        and event.status.reason == "cancelled"
+                        and event.status.reason in _STOP_REASONS
                     ):
-                        raise RunCancelled(event.status.message or "Run cancelled by user.")
+                        if event.status.reason == "cancelled":
+                            raise RunCancelled(event.status.message or "Run cancelled by user.")
+                        # Lost to another run continuing the same turn: stop once the batch is over (see above).
+                        lost_claim = lost_claim or event
                     if (
                         isinstance(event, OutputEvent)
                         and event.status.code == "cancelled"
@@ -3249,13 +3931,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     ):
                         first_pending = event
                 active_events = None
+                if lost_claim is not None:
+                    raise RunCancelled(lost_claim.status.message or "", reason=lost_claim.status.reason)
                 if first_pending is not None:
                     await self._save_denials(run_context, consecutive_denials)
                     raise PauseRequired(first_pending)
                 i += 1
-                if consecutive_denials >= denial_limit:
-                    await self._stop_after_denials(current_span, consecutive_denials, _append_memory)
-                    consecutive_denials, withhold_tools = 0, True
+                if denial_window_on or consecutive_denials >= denial_limit:
+                    await _check_denials()
                 if steering:
                     if cut is not None and cut.is_set():
                         await asyncio.sleep(NOW_COALESCE_SECS)
@@ -3265,6 +3948,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # A user message is a new request: it gets the full tool budget, and its tools back
                         # even when the denial breaker took them away for this step.
                         i, max_iter_handled, withhold_tools = 0, False, False
+        except BaseException:
+            # A pause, a cut, a failure: the next turn (or the resume) compacts as it finds the history. Not in
+            # the background while a strategy of this one is still running on a thread (see _drop_prepared).
+            if prepared is not None:
+                self._drop_prepared(run_context, prepared)
+            raise
         finally:
             try:
                 if active_events is not None:
@@ -3272,3 +3961,5 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             finally:
                 if not _llm_memory_saved:
                     await self._salvage_interrupted_llm_output(run_context, current_span)
+        if self.memory_compaction is not None and self.memory_compaction_prepare_ratio is not None:
+            self._prepare_for_next_turn(current_span, run_context, prepared)
