@@ -8,10 +8,11 @@ import inspect
 import json
 import math
 import re
+import threading
 import time
 import traceback
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -231,9 +232,51 @@ class _Prepared:
     utilization: float | None
     # Finished with nothing to swap in: kept so the same prefix is not compacted again until the history grows.
     futile: bool = False
+    # One per plain-function strategy sent to a worker thread: done when that call has returned. Cancelling
+    # ``task`` does not stop a thread, so these say whether the compaction is really over.
+    workers: list = field(default_factory=list)
 
     def intact(self, memory: list) -> bool:
         return len(memory) >= len(self.prefix) and all(a is b for a, b in zip(memory, self.prefix, strict=False))
+
+
+async def _on_worker_thread(compactor: Any, memory: list, workers: list) -> list:
+    """``compactor(memory)`` on a worker thread, for a strategy that is a plain function.
+
+    ``workers`` gets a future that is done once the call has returned. A thread cannot be stopped: when the task
+    waiting here is cancelled (the turn pauses, is cut, fails) a call that has begun goes on to its end, and the
+    future says when that is. One that had not begun is dropped, and never runs.
+    """
+    loop = asyncio.get_running_loop()
+    returned = loop.create_future()
+    lock = threading.Lock()
+    began = dropped = False
+
+    def settle() -> None:
+        if not returned.done():
+            returned.set_result(None)
+
+    def call() -> list:
+        nonlocal began
+        with lock:
+            if dropped:
+                return memory
+            began = True
+        try:
+            return compactor(memory)
+        finally:
+            with contextlib.suppress(RuntimeError):  # the loop is gone: nobody is left to tell
+                loop.call_soon_threadsafe(settle)
+
+    workers.append(returned)
+    try:
+        return await asyncio.to_thread(call)
+    except asyncio.CancelledError:
+        with lock:
+            if not began:
+                dropped = True
+                settle()
+        raise
 
 
 def _compaction_changed(prefix: list, compacted: list) -> bool:
@@ -1824,13 +1867,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         return _estimate_tokens_from_memory(messages) / context_window
 
     async def _run_compactors(
-        self, memory: list[Message], model: str, *, off_loop: bool = False
+        self, memory: list[Message], model: str, *, workers: list | None = None
     ) -> tuple[list[Message], list[dict]]:
         """Every configured strategy over ``memory``, in order: the compacted memory and a step per strategy.
 
-        ``off_loop``: synchronous strategies run on a worker thread. For a compaction prepared in the background,
-        which works on copies while turns go on: on the loop it would hold every one of them up for as long as it
-        takes. Inline, the turn waits for it either way.
+        ``workers``: given, synchronous strategies run on a worker thread and it tracks them (see
+        ``_on_worker_thread``). For a compaction prepared in the background, which works on copies while turns go
+        on: on the loop it would hold every one of them up for as long as it takes. Inline, the turn waits for it
+        either way.
         """
         compactors = (
             [self.memory_compaction] if not isinstance(self.memory_compaction, list) else self.memory_compaction
@@ -1847,8 +1891,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             before = len(memory)
             if asyncio.iscoroutinefunction(compactor):
                 memory = await compactor(memory)
-            elif off_loop:
-                memory = await asyncio.to_thread(compactor, memory)
+            elif workers is not None:
+                memory = await _on_worker_thread(compactor, memory, workers)
             else:
                 memory = compactor(memory)
             compaction_steps.append(
@@ -1897,13 +1941,37 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """Run the strategies on ``prefix`` on a task of its own, over copies of its messages: the live history only
         changes when a finished result is swapped in. ``_Prepared.prefix`` keeps the originals, to tell whether
         the history is still the one it covered."""
+        workers: list = []
         task = asyncio.get_running_loop().create_task(
             self._run_compactors(
-                [_isolated(message) for message in prefix], self._span_model(current_span), off_loop=True
+                [_isolated(message) for message in prefix], self._span_model(current_span), workers=workers
             )
         )
         task.add_done_callback(_retrieve_result)
-        return _Prepared(task=task, prefix=list(prefix), utilization=utilization)
+        return _Prepared(task=task, prefix=list(prefix), utilization=utilization, workers=workers)
+
+    def _drop_prepared(self, run_context: Any, prepared: "_Prepared") -> bool:
+        """Cancel a prepared compaction that will not be used. True when a strategy of it is still running on a
+        worker thread: cancelling does not reach it, so until it returns it is still this session's background
+        compaction. It is kept under this run like one being handed on (it hands on nothing), and neither this
+        turn nor the one that continues it starts another next to it."""
+        prepared.task.cancel()
+        running = [worker for worker in prepared.workers if not worker.done()]
+        if not running:
+            return False
+        key = (run_context.id, self._path)
+        handoff = _Handoff(record=asyncio.get_running_loop().create_future())
+
+        def returned(_all: Any) -> None:
+            if not handoff.record.done():
+                handoff.record.set_result(None)
+            if _PREPARING.get(key) is handoff:
+                del _PREPARING[key]
+
+        handoff.stored = asyncio.gather(*running)
+        handoff.stored.add_done_callback(returned)
+        _PREPARING[key] = handoff
+        return True
 
     def _swap_prepared(self, current_span: Any, prepared: "_Prepared", run_context: Any) -> bool:
         """Put a finished prepared compaction in place of the history it covered, when that is still there."""
@@ -2029,7 +2097,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         lands, like a background child's late output; the next turn in this process waits for it instead."""
         memory = current_span.memory
         if prepared is not None and not prepared.intact(memory):
-            prepared.task.cancel()
+            if self._drop_prepared(run_context, prepared):
+                return  # its strategy is still running on a thread: nothing new until it is back
             prepared = None
         if prepared is not None and prepared.futile:
             if len(memory) <= len(prepared.prefix):
@@ -2062,7 +2131,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if prepared is not None:
             dumped = whole_dump[: len(prepared.prefix)]
             if len(dumped) != len(prepared.prefix):
-                prepared.task.cancel()
+                self._drop_prepared(run_context, prepared)
                 return
         key = (run_context.id, self._path)
         run_context._live_background += 1
@@ -3862,9 +3931,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # even when the denial breaker took them away for this step.
                         i, max_iter_handled, withhold_tools = 0, False, False
         except BaseException:
-            # A pause, a cut, a failure: the next turn (or the resume) compacts as it finds the history.
+            # A pause, a cut, a failure: the next turn (or the resume) compacts as it finds the history. Not in
+            # the background while a strategy of this one is still running on a thread (see _drop_prepared).
             if prepared is not None:
-                prepared.task.cancel()
+                self._drop_prepared(run_context, prepared)
             raise
         finally:
             try:

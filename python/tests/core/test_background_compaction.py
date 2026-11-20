@@ -397,6 +397,80 @@ class TestTheLoopAndTheTurnAreNotHeld:
         assert await fired < ended_at[0]  # the loop ran its timer while the strategy was still at work
         assert [message.collect_text() for message in compacted] == ["m4", "m5"]
 
+    async def test_a_strategy_still_on_its_thread_keeps_the_resumed_turn_from_starting_another(self):
+        """A turn pauses for an approval while a plain-function strategy is at work on a worker thread. The task
+        waiting for it is cancelled; the thread is not, and cannot be. The resumed turn passes the prepare ratio
+        again: it starts no second background compaction while the first is still running."""
+        import threading
+
+        from timbal.types.events import ApprovalEvent
+
+        lock, release = threading.Lock(), threading.Event()
+        active = peak = 0
+        sizes = []
+
+        def slow(memory):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                sizes.append(len(memory))
+            try:
+                release.wait(timeout=5)
+            finally:
+                with lock:
+                    active -= 1
+            return memory if len(memory) <= 3 else memory[-2:]
+
+        def model(messages):
+            results = sum(1 for message in messages if message.role == "tool")
+            if results < 4:  # the fourth step runs with 7 messages behind it: the compaction is at work by then
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id=f"s{results}", name="step", input={})],
+                    stop_reason="tool_use",
+                )
+            if results == 4:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="pay", name="charge", input={})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=model),
+            tools=[
+                Tool(name="step", handler=step),
+                Tool(name="charge", handler=lambda: "charged", requires_approval=True),
+            ],
+            tracing_provider=InMemoryTracingProvider,
+            memory_compaction=slow,
+            memory_compaction_prepare_ratio=0.3,
+            max_iter=30,
+        )
+
+        async def go(**kwargs):
+            context = RunContext(parent_id=kwargs.pop("parent_id", None), tracing_provider=InMemoryTracingProvider)
+            set_run_context(context)
+            events = [event async for event in agent(prompt="go", **kwargs)]
+            set_run_context(None)
+            return context, events
+
+        try:
+            paused, events = await go()
+            (card,) = [event for event in events if isinstance(event, ApprovalEvent)]
+            assert sizes and active == 1 and (paused.id, "agent") in agent_module._PREPARING  # still on its thread
+            resumed, events = await go(parent_id=paused.id, resume={card.approval_id: True})
+            await asyncio.sleep(0.05)  # anything the resumed turn started would be at work by now
+            assert peak == 1 and len(sizes) == 1
+        finally:
+            release.set()
+        for handoff in list(agent_module._PREPARING.values()):
+            await handoff.stored
+        assert active == 0 and not agent_module._PREPARING
+
 
 class TestNextTurn:
     async def test_a_turn_that_ends_past_the_ratio_hands_its_compaction_to_the_next(self):
