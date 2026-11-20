@@ -1092,11 +1092,19 @@ class TestReviewerGaps:
 
         provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
         charges, approving = Charges(), False
+        refund_ended, after_the_refund = asyncio.Event(), False
+
+        async def review(_request):
+            if after_the_refund:
+                # A workflow's status is its first pause: the declined refund's, for certain, not this gate's.
+                await refund_ended.wait()
+            return "approve" if approving else "escalate"
+
         biller = Agent(
             name="biller",
             model=TestModel(handler=lambda m: "done" if m[-1].role == "tool" else call("charge", amount=500)),
             tools=[Tool(name="charge", handler=charges.charge, requires_approval=True)],
-            approval_reviewer=lambda _r: "approve" if approving else "escalate",
+            approval_reviewer=review,
         )
         flow = (
             Workflow(name="flow", tracing_provider=provider)
@@ -1107,13 +1115,20 @@ class TestReviewerGaps:
         async def go(**kwargs):
             context = RunContext(tracing_provider=provider, parent_id=kwargs.pop("parent_id", None))
             set_run_context(context)
-            events = [event async for event in flow(**kwargs)]
+            events = []
+            async for event in flow(**kwargs):
+                events.append(event)
+                if isinstance(event, OutputEvent) and event.path == "flow.refund":
+                    refund_ended.set()
             set_run_context(None)
             return context, events
 
         first, events = await go()
         refund_card = next(e for e in events if isinstance(e, ApprovalEvent) and e.path.endswith("refund"))
+        refund_ended.clear()
+        after_the_refund = True
         second, _ = await go(parent_id=first.id, resume={refund_card.approval_id: False})
+        after_the_refund = False
         assert second.root_span().status.reason == "approval_denied"
         assert [a["path"] for a in second.pending_approvals()] == ["flow.biller.charge"]
         approving = True
