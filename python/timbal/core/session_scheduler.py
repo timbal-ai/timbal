@@ -124,11 +124,17 @@ def user_batch(events: list[SessionEvent]) -> list[SessionEvent]:
     Messages that interrupted (``announce="interrupt"``) go first, together.
     Otherwise a ``followup`` message gets its turn alone, and the leading run
     of ``steer`` / ``collect`` messages shares one.
+
+    Never a person's message together with one a running call's code posted
+    (``sent_by``): they become one message, and the person's words in it would
+    lose their standing with an approval reviewer (their latest say, a
+    retraction, read as part of a tool's request). The leading ones that share
+    a sender go; the rest wait for the next turn.
     """
     users = [event for event in events if event.source == "user"]
     urgent = [event for event in users if event.announce == "interrupt"]
     if urgent:
-        return urgent
+        return _one_sender(urgent)
     if not users or users[0].mode == "followup":
         return users[:1]
     batch: list[SessionEvent] = []
@@ -136,6 +142,15 @@ def user_batch(events: list[SessionEvent]) -> list[SessionEvent]:
         if event.mode == "followup":
             break
         batch.append(event)
+    return _one_sender(batch)
+
+
+def _one_sender(batch: list[SessionEvent]) -> list[SessionEvent]:
+    """The leading messages of ``batch`` posted the same way as its first: by a person, or by a call's code."""
+    by_code = batch[0].sent_by is not None
+    for index, event in enumerate(batch):
+        if (event.sent_by is not None) != by_code:
+            return batch[:index]
     return batch
 
 

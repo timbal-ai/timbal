@@ -650,6 +650,28 @@ class TestDelegation:
         assert request.user_messages == ["please charge me 5 euros"]
         assert request.delegation is None and request.attended
 
+    def test_a_persons_messages_are_never_batched_with_a_tools(self):
+        """One turn's prompt is one message: a person's words joined with a tool's would no longer be cited as
+        theirs (a retraction read as part of the tool's request). The leading ones that share a sender go."""
+        from timbal.core.session_scheduler import user_batch
+        from timbal.state.background import SessionEvent
+
+        def message(text, *, by_code=False, mode="collect", announce=None):
+            event = SessionEvent(text, key=None, source="user", mode=mode, announce=announce)
+            event.sent_by = {"run_id": "r", "call_id": "c"} if by_code else None
+            return event
+
+        def texts(events):
+            return [event.text for event in user_batch(events)]
+
+        assert texts([message("a"), message("b")]) == ["a", "b"]  # unchanged for a person's own messages
+        assert texts([message("a"), message("b"), message("tool", by_code=True), message("c")]) == ["a", "b"]
+        assert texts([message("tool", by_code=True), message("no, do not")]) == ["tool"]
+        assert texts([message("t1", by_code=True), message("t2", by_code=True), message("a")]) == ["t1", "t2"]
+        urgent = [message("stop", announce="interrupt"), message("tool", by_code=True, announce="interrupt")]
+        assert texts([message("a"), *urgent]) == ["stop"]
+        assert texts([message("a", mode="followup"), message("tool", by_code=True)]) == ["a"]
+
     async def test_a_stored_message_keeps_who_posted_it(self):
         """A queued message a tool posted comes back from a durable session's snapshot as the tool's."""
         from timbal.state.background import BackgroundTaskStore, format_user_message
@@ -1181,6 +1203,67 @@ class TestReviewerGaps:
         assert won.status.code == "success"
         assert (lost.status.code, lost.status.reason) == ("cancelled", "approval_already_claimed")
         assert [s.path for s in lost_context._trace.as_records()] == ["agent", "agent.charge"]  # no model call
+
+    async def test_a_lost_gate_does_not_cut_a_call_this_run_claimed(self, tmp_path):
+        """A paused pair, and another continuation already took the transfer. This run claims the charge and is
+        running it when it learns the transfer is lost: the charge finishes (it is claimed, so nothing else
+        could ever run it), and only then does the run stop."""
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        charged, transferred, approving = [], [], False
+
+        async def charge(amount: int) -> str:
+            """Charge the customer's card."""
+            await asyncio.sleep(0.05)  # still running when the other gate's answer comes back
+            charged.append(amount)
+            return f"charged {amount}"
+
+        def transfer(amount: int) -> str:
+            """Move money between accounts."""
+            transferred.append(amount)
+            return "ok"
+
+        def model(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            return Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id="c1", name="charge", input={"amount": 5}),
+                    ToolUseContent(id="c2", name="transfer", input={"amount": 7}),
+                ],
+                stop_reason="tool_use",
+            )
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=model),
+            tools=[
+                Tool(name="charge", handler=charge, requires_approval=True),
+                Tool(name="transfer", handler=transfer, requires_approval=True),
+            ],
+            tracing_provider=provider,
+            approval_reviewer=lambda _request: "approve" if approving else "escalate",
+        )
+
+        async def go(**kwargs):
+            context = RunContext(tracing_provider=provider, parent_id=kwargs.pop("parent_id", None))
+            set_run_context(context)
+            events = [event async for event in agent(prompt="pay", **kwargs)]
+            set_run_context(None)
+            return context, events
+
+        first, events = await go()
+        transfer_card = next(e for e in events if isinstance(e, ApprovalEvent) and e.path.endswith("transfer"))
+        assert await provider.claim_approval(first.id, transfer_card.approval_id, "another-continuation")
+        approving = True
+        context, events = await go(parent_id=first.id)
+        output = next(e for e in events if isinstance(e, OutputEvent) and e.path == "agent")
+        assert charged == [5] and transferred == []
+        assert (output.status.code, output.status.reason) == ("cancelled", "approval_already_claimed")
+        assert "charged 5" in await tool_results(context)  # recorded, though the run goes no further
+        assert [s.path for s in context._trace.as_records()].count("agent.llm") == 0
 
     async def test_resume_values_that_answer_nothing_claim_nothing(self, tmp_path):
         """Two turns from one finished run, each given a resume id no gate has (the runtime logs it as unused):

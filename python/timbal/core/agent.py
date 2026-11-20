@@ -3316,6 +3316,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         consecutive_denials = await self._resumed_denials(run_context)
                     tool_calls = pending_tool_uses
                     first_pending: OutputEvent | None = None
+                    lost_claim: OutputEvent | None = None
                     if run_context._before_tool_dispatch is not None:
                         await run_context._before_tool_dispatch(
                             self._path, [(call.id, call.name, call.input) for call in tool_calls]
@@ -3332,9 +3333,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             and event.status.code == "cancelled"
                             and event.status.reason in _STOP_REASONS
                         ):
-                            raise RunCancelled(
-                                event.status.message or "Run cancelled by user.", reason=event.status.reason
-                            )
+                            if event.status.reason == "cancelled":
+                                raise RunCancelled(event.status.message or "Run cancelled by user.")
+                            # Lost to another run continuing the same turn. This run stops, but only once the
+                            # batch is over: a call of it this run did claim is running, and cutting it
+                            # would leave it claimed and never done.
+                            lost_claim = lost_claim or event
                         if (
                             isinstance(event, OutputEvent)
                             and event.status.code == "cancelled"
@@ -3343,6 +3347,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         ):
                             first_pending = event
                     active_events = None
+                    if lost_claim is not None:
+                        raise RunCancelled(lost_claim.status.message or "", reason=lost_claim.status.reason)
                     if first_pending is not None:
                         await self._save_denials(run_context, consecutive_denials)
                         raise PauseRequired(first_pending)
@@ -3794,6 +3800,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if called_unloaded:
                     await self._load_tools(called_unloaded, current_span)
                 first_pending: OutputEvent | None = None
+                lost_claim: OutputEvent | None = None
                 if run_context._before_tool_dispatch is not None:
                     await run_context._before_tool_dispatch(
                         self._path, [(call.id, call.name, call.input) for call in tool_calls]
@@ -3810,7 +3817,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         and event.status.code == "cancelled"
                         and event.status.reason in _STOP_REASONS
                     ):
-                        raise RunCancelled(event.status.message or "Run cancelled by user.", reason=event.status.reason)
+                        if event.status.reason == "cancelled":
+                            raise RunCancelled(event.status.message or "Run cancelled by user.")
+                        # Lost to another run continuing the same turn: stop once the batch is over (see above).
+                        lost_claim = lost_claim or event
                     if (
                         isinstance(event, OutputEvent)
                         and event.status.code == "cancelled"
@@ -3819,6 +3829,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     ):
                         first_pending = event
                 active_events = None
+                if lost_claim is not None:
+                    raise RunCancelled(lost_claim.status.message or "", reason=lost_claim.status.reason)
                 if first_pending is not None:
                     await self._save_denials(run_context, consecutive_denials)
                     raise PauseRequired(first_pending)
