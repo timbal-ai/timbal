@@ -42,12 +42,12 @@ class Child:
             return _call("slow", {}, id=f"s{self.calls}")
         return "Did: " + " | ".join(_user_texts(messages))
 
-    def agent(self, **kwargs) -> Agent:
+    def agent(self, background_mode: str = "always", **kwargs) -> Agent:
         return Agent(
             name="researcher",
             model=TestModel(handler=self.model),
             tools=[Tool(name="slow", handler=self.slow)],
-            background_mode="always",
+            background_mode=background_mode,
             **kwargs,
         )
 
@@ -92,6 +92,54 @@ class TestMessageTask:
         assert last[-1].role == "user" and last[-1].metadata.get("steered") is True
         assert last[-1].metadata["sources"] == ["app"]
         assert last[-2].content[0].type == "tool_result"
+
+    @pytest.mark.asyncio
+    async def test_an_agent_the_model_sends_to_the_background_reads_its_messages(self):
+        # background_mode="auto": the model decides per call. Detached, it is a task from its first step.
+        child = Child()
+        parent = Agent(
+            name="lead",
+            model=TestModel(
+                responses=[_call("researcher", {"prompt": "research cats", "run_in_background": True}), "Started."]
+            ),
+            tools=[child.agent(background_mode="auto")],
+        )
+        result = await parent(prompt="go").collect()
+        (task,) = list_background_tasks()
+        await asyncio.wait_for(child.started.wait(), 2)
+        store = store_for_run(result.run_id)
+        assert store.list()[0]["takes_messages"] is True
+
+        receipt = store.message_task(task["task_id"], "focus on tigers")
+        child.gate.set()
+        snap = await _finish(result.run_id, task["task_id"])
+
+        assert receipt.state == "delivered"
+        assert _answer(snap) == "Did: research cats | focus on tigers"
+
+    @pytest.mark.asyncio
+    async def test_an_agent_running_in_the_foreground_is_never_moved_to_the_background(self):
+        # Whether a child reads messages is decided as its turn starts, so it has to be a task by then.
+        # It always is: an agent detaches only at its start ("always", or "auto" when the model asks).
+        # `collector.background()` parks a streaming tool mid-call, never an agent mid-turn, so no
+        # task exists whose agent started in the foreground with steering decided off.
+        child = Child()
+        parent = Agent(
+            name="lead",
+            model=TestModel(responses=[_call("researcher", {"prompt": "research cats"}), "Done."]),
+            tools=[child.agent(background_mode="auto")],
+        )
+        run = parent(prompt="go")
+        consumer = asyncio.create_task(run.collect())
+        await asyncio.wait_for(child.started.wait(), 2)
+        with pytest.raises(RuntimeError, match="No active foreground runnable"):
+            await run.background()
+        child.gate.set()
+        result = await asyncio.wait_for(consumer, 5)
+
+        assert result.status.code == "success"
+        store = store_for_run(result.run_id)
+        assert store is None or store.list() == []
 
     @pytest.mark.asyncio
     async def test_several_messages_join_as_one_and_restore_the_budget(self):

@@ -25,6 +25,7 @@ from ..state.background import (
     SessionEvent,
     adopt_background_store,
     forget_idle_background_store,
+    session_continues_from,
     store_for_run,
 )
 from ..state.chat_store import (
@@ -402,6 +403,18 @@ def _ended_parked(turn: asyncio.Task) -> bool:
     return _ended_by_itself(turn) and is_parked(turn.result().status)
 
 
+def _left_parked(turn: asyncio.Task | None) -> bool | None:
+    """Whether the run a finished turn left ended waiting on an approval or a question.
+
+    None for a turn that left no run (never started, failed before it did): the head is as it was, and so
+    is whether it waits for an answer.
+    """
+    if turn is None or not turn.done() or turn.cancelled() or turn.exception() is not None:
+        return None
+    output = turn.result()
+    return is_parked(output.status) if output is not None else None
+
+
 def _brief(value: Any, limit: int = 160) -> str:
     text = value if isinstance(value, str) else repr(value)
     text = " ".join(text.split())
@@ -613,6 +626,10 @@ class ChatSession:
         self._providers: dict[tuple[type, str], type] = {}
         store = store_for_run(parent_id) if parent_id is not None else None
         self._store = store if store is not None else BackgroundTaskStore()
+        if store is None and parent_id is not None:
+            # The session continues from a run that had no store: a turn another channel chains onto that
+            # run (a call joining, a plain client) is the session's, and asks this channel first.
+            session_continues_from(self._store, parent_id)
         self._scheduler = SessionScheduler(
             channel=self, on_busy="enqueue", can_interrupt=True, on_work=self._work_arrived, lends=True
         )
@@ -940,7 +957,8 @@ class ChatSession:
         False again once another client's run of the session answers it or goes past it (the head moved).
         """
         context = self._last_context
-        return self._parked and context is not None and self._scheduler.head == context.id
+        # The session's head: while a call has the session, the call's, not the one this channel last saw.
+        return self._parked and context is not None and self._scheduler.session_head == context.id
 
     def resume(self, values: dict[str, Any]) -> None:
         """Answer the parked turn: ``{approval_id: ...}`` / ``{interaction_id: value}``, as for ``resume=``.
@@ -1212,6 +1230,9 @@ class ChatSession:
                 left = leased_at + session_store.lease_ttl_s - time.monotonic()
                 await _answered_within(session_store.release_lease(session_id, process_owner()), left)
             raise
+        if session.parked:
+            # Restored on a question: the session is not lent to a call while it waits (see SessionScheduler).
+            session._scheduler.note_parked(session._last_context.id)
         session._record("restored", head=session.head, recovered=recovered, pending=len(snapshot.pending))
         session._persist()
         session._lease_task = asyncio.get_running_loop().create_task(session._renew_lease())
@@ -1253,29 +1274,73 @@ class ChatSession:
         run_id, self._restore_from = self._restore_from, None
         if run_id is None or self._last_context is not None:
             return
-        # The context resolves the agent's setting (TRACING_UNSET: auto-detected) into the provider runs use.
-        lookup = RunContext(parent_id=run_id, tracing_provider=self._agent.tracing_provider)
-        provider = lookup._tracing_provider
-        if provider is None:
-            return
         try:
             # Not get() / _get_parent_trace: they read a failed lookup as "no parent", and an unparked session
             # would resume the parked run with the next message's turn and drop that message.
-            trace = await provider.get_strict(lookup)
+            found = await self._parked_run(run_id)
         except Exception as error:
             self._restore_from = run_id
             self._record("restore_failed", run_id=run_id, error=str(error))
             raise
-        root = next((span for span in trace.values() if span.parent_call_id is None), None) if trace else None
-        if root is None or not is_parked(root.status) or self._last_context is not None:
+        if found is None or self._last_context is not None:
             return
+        self._park_on(*found)
+
+    async def _parked_run(self, run_id: str) -> tuple[RunContext, Any] | None:
+        """The stored run ``run_id`` if it ended on an approval or a question: a context holding its trace,
+        and its root span. Raises when the run cannot be read."""
+        # The context resolves the agent's setting (TRACING_UNSET: auto-detected) into the provider runs use.
+        lookup = RunContext(parent_id=run_id, tracing_provider=self._agent.tracing_provider)
+        provider = lookup._tracing_provider
+        if provider is None:
+            return None
+        trace = await provider.get_strict(lookup)
+        root = next((span for span in trace.values() if span.parent_call_id is None), None) if trace else None
+        if root is None or not is_parked(root.status):
+            return None
         context = RunContext(id=run_id, tracing_provider=self._agent.tracing_provider)
         context.__dict__["_trace"] = trace
+        return context, root
+
+    def _park_on(self, context: RunContext, root: Any, *, handed_over: bool = False) -> None:
+        """The question ``context``'s run ended on is this session's to answer: :meth:`resume`, :meth:`interrupt`."""
         prompt = (root.input or {}).get("prompt") or ""
         self._last_context, self._parked, self._last_prompt = context, True, prompt
+        # Its question is this session's to answer: not lent to a call while it waits (see SessionScheduler).
+        self._scheduler.note_parked(context.id)
         meta = prompt.get("metadata") if isinstance(prompt, dict) else getattr(prompt, "metadata", None)
         if meta and meta.get("kind") in (WAKE_KIND, RECOVERY_KIND):
-            self._last_options = self._wake_options(meta, trace)
+            self._last_options = self._wake_options(meta, context._trace)
+        elif handed_over:
+            # Another channel's turn: resumed as that ran, not under what this session's last turn was given.
+            self._last_options = _TurnOptions()
+
+    async def _take_question(self, run_id: str) -> bool:
+        """Take over the question the session came back with: a call hung up on one of its own.
+
+        Like the question of a run a session is opened on: ``state()`` lists it, :meth:`resume` answers
+        it, :meth:`interrupt` abandons it. Left to the call's client alone, the chat would hold everything
+        typed behind a question nobody here could answer. False when the run cannot be read, or is not
+        the head any more.
+        """
+        try:
+            found = await self._parked_run(run_id)
+        except Exception as error:
+            logger.warning("chat_session_question_unreadable", session_id=self.id, run_id=run_id, error=str(error))
+            return False
+        scheduler = self._scheduler
+        if found is None or self.closed or self._parked or scheduler.lent or scheduler.head != run_id:
+            return False
+        if self._last_context is not None:
+            scheduler.unmark(self._last_context)
+        self._park_on(*found, handed_over=True)
+        self.last_activity = time.monotonic()
+        self._record("parked", run_id=run_id)
+        self._persist()
+        if any(event.source == "user" and event.announce == "interrupt" for event in self._store.pending_events()):
+            # Sent while the question was still the call's: its user has already moved on from it.
+            self._interrupt_now()
+        return True
 
     def _wake_options(self, meta: dict[str, Any], trace: Any) -> _TurnOptions:
         """The options of a parked wake, from its prompt; a wake never resumes with more than it had.
@@ -1376,20 +1441,36 @@ class ChatSession:
                     # Another client's run answered the parked turn or went past it: go on from that run.
                     self._parked = False
                     parked_run = self._last_context.id if self._last_context is not None else None
-                    self._record("unparked", run_id=parked_run, head=scheduler.head)
+                    self._record("unparked", run_id=parked_run, head=scheduler.session_head)
                     continue
                 await self._until_scheduler_or_work()
                 continue
-            if scheduler.head_parked:
+            if scheduler.asking and not scheduler.lent and await self._take_question(scheduler.head):
+                # The call hung up on a question of its own and the session came back with it.
+                continue
+            if scheduler.session_parked:
                 # Another client's run of this session waits for its caller (an approval, a question): a
                 # turn now would chain onto it, and that run's resume would drop the turn's prompt. Its
                 # resume, or any newer head, lets the session go on; messages stay pending until then.
+                # (The session's head: a call that has the session moves it, and may be the one asking.)
                 await self._until_scheduler_or_work()
                 continue
             # A recovery turn goes before anything queued: it is about the turn the user saw cut, and the turns
-            # after it must find it settled. Other wakes wait for the user.
+            # after it must find it settled (also while a call has the session: it is this session's own cut
+            # turn, and what is typed must not go ahead of it). Other wakes wait for the user, and for the
+            # session: while a call has it the chat answers only what is typed, and an application's wake
+            # runs once it is the chat's again (the call hands it back with its head).
             recovering = bool(self._wakes) and self._wakes[0].kind == RECOVERY_KIND
-            if self._wakes and (recovering or scheduler.pending_turn() is None) and not scheduler.other_turn_first():
+            if recovering and scheduler.other_turn_first():
+                # Another turn is ahead (the call's, another client's): the recovery turn goes right after
+                # it, not after whatever was typed meanwhile.
+                await self._until_scheduler_or_work()
+                continue
+            if (
+                self._wakes
+                and (recovering or (not scheduler.lent and scheduler.pending_turn() is None))
+                and not scheduler.other_turn_first()
+            ):
                 wake = self._wakes.pop(0)
                 scheduler.turn_started()
                 await self._run_turn(wake=wake)
@@ -1446,7 +1527,7 @@ class ChatSession:
         """Hold a turn for collected messages until none has arrived for ``collect_window`` seconds, and while
         another client's run of the session waits for its caller (a turn would chain onto it, see _serve_turns)."""
         while True:
-            if self._scheduler.head_parked:
+            if self._scheduler.session_parked:
                 await self._scheduler._wait_change()
                 continue
             collected = [
@@ -1586,7 +1667,9 @@ class ChatSession:
                     raise
         finally:
             self._turn = None
-            scheduler.turn_finished()
+            # With how its run ended: a session left on a question is not lent to a call (only the chat
+            # can answer it), and the call's turns wait for the answer.
+            scheduler.turn_finished(_left_parked(turn))
             if followup is not None:
                 # Handed back unless a run started with it (then this does nothing). Here as well as in the
                 # turn's own task: one cancelled before its first step never runs any of its code.

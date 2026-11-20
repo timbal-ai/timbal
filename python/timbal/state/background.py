@@ -1856,6 +1856,13 @@ def _register_run(run_context: Any, store: BackgroundTaskStore) -> None:
         store._joined_from.add(parent_id)
 
 
+def session_continues_from(store: BackgroundTaskStore, run_id: str) -> None:
+    """``store``'s session continues from ``run_id``, a run from before it had a store (a channel opened
+    on that run, before any turn of its own): :func:`store_joined_from` finds it for a turn chained there."""
+    if run_id not in _STORES_BY_RUN_ID:
+        store._joined_from.add(run_id)
+
+
 def store_joined_from(run_id: str) -> BackgroundTaskStore | None:
     """The owned store whose session continued from ``run_id`` before it had a store.
 
