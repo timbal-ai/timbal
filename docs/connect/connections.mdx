@@ -3,10 +3,10 @@ title: "Configure connections"
 description: "Tell Timbal Connect which databases and file shares it may use"
 ---
 
-The connector only uses sources you list on the server. Each database has a name, a driver and a connection string. Timbal refers to the connection by its name only; the connection string, and any password in it, never leaves the server. File shares work the same way: Timbal sees the name of the share, never its path. See [File shares](#file-shares).
+The connector only uses sources you list on the server. Each database has a name, a driver and a connection string. Timbal refers to the connection by its name only; the connection string, and any password in it, stays on the server (the only exception is when you [push configuration from Timbal](/connect/operate#change-the-configuration-from-timbal)). File shares work the same way: Timbal sees the name of the share, never its path. See [File shares](#file-shares).
 
 <Note>
-If you're used to the Power BI gateway, this is the main difference: there is no screen in Timbal where you add a data source with its server and password. Connections are defined here, on the gateway server, and appear in Timbal by name once the service restarts.
+If you're used to the Power BI gateway, this is the main difference: the server and password of a data source are not entered in Timbal. Connections are defined here, on the gateway server, and appear in Timbal by name once the service restarts.
 </Note>
 
 <Tip>
@@ -65,7 +65,7 @@ You can list connections in either place. They are equivalent:
     }
     ```
 
-    On Windows and macOS the installer already created `config.json`: add the keys and leave the others alone. On Linux the control-plane settings live in `connector.env`, and `config.json` does not exist yet: create it with only the keys you need.
+    On Windows and macOS the installer already created `config.json`: add the keys and leave the others alone. On Linux the control-plane settings live in `connector.env`, and `config.json` does not exist yet: create it with only the keys you need. If `doctor` doesn't show the connections you put there, add `TIMBAL_CONNECT_CONFIG=/etc/timbal-connect/config.json` to `connector.env` so the connector reads that file, then restart.
   </Tab>
 </Tabs>
 
@@ -85,7 +85,7 @@ Sources are **never merged**. Setting both `connections` and `connections_path` 
 </Accordion>
 
 <Warning>
-Save every file as **UTF-8 without BOM**. Notepad on older Windows versions and PowerShell's `Set-Content -Encoding utf8` add a byte-order mark, and the file then fails to parse. Also remember that `\` must be doubled inside JSON strings: write `"CORP\\svc_timbal"`, not `"CORP\svc_timbal"`.
+Save every file as **UTF-8 without BOM**. Notepad on older Windows versions and PowerShell's `Set-Content -Encoding utf8` add a byte-order mark, and the file then fails to parse. In PowerShell write it with `[System.IO.File]::WriteAllText($p, $json)` instead. Also remember that `\` must be doubled inside JSON strings: write `"CORP\\svc_timbal"`, not `"CORP\svc_timbal"`.
 </Warning>
 
 ## Fields
@@ -93,7 +93,7 @@ Save every file as **UTF-8 without BOM**. Notepad on older Windows versions and 
 | Field | Required | Meaning |
 | ----- | -------- | ------- |
 | `kind` | Yes | `postgres`, `sql_server` or `mysql` (MySQL and MariaDB) |
-| `dsn` | Yes | Connection string. Never leaves the server |
+| `dsn` | Yes | Connection string. Stays on the server unless you push configuration from Timbal |
 | `auth` | No | SQL Server only. How to log in, see [SQL Server authentication](#sql-server-authentication). Default: credentials from the `dsn` |
 | `query` | No | What ad-hoc queries from Timbal may do on this connection: `"none"`, `"read"` (default) or `"write"` |
 
@@ -175,7 +175,7 @@ Give the database login only the privileges that queries should have. `"read"` i
 
 - The database in the connection string is the default schema. Wherever a request takes a `schema`, it means the database name. Leave it out to use the default.
 - Ad-hoc queries take one statement per request.
-- For a table, `doctor` expects `database.table`: `doctor --connection shop --table shopdb.orders`.
+- For a table, `doctor` takes `database.table` (a bare table name uses the default schema): `doctor --connection shop --table shopdb.orders`.
 
 ## SQL Server
 
@@ -197,7 +197,7 @@ The connection string is an ADO.NET string. Two choices are independent of each 
 | `Server=` | Use when |
 | --------- | -------- |
 | `tcp:sql01.corp.local,1433` | Default instance. Always prefer an explicit port |
-| `tcp:localhost,1433` | The database runs on the same machine as the connector |
+| `tcp:localhost,1433` (or `tcp:.,1433`) | The database runs on the same machine as the connector |
 | `tcp:sql01.corp.local,52001` | Named instance whose static port you know (SQL Server Configuration Manager, TCP/IP, IPAll) |
 | `tcp:sql01.corp.local\INSTANCE` | Named instance on a dynamic port. Needs the SQL Browser service and UDP 1434 open |
 
@@ -245,7 +245,7 @@ On locked-down networks, always use `,PORT`: it doesn't need the Browser.
         Restart-Service timbal-connect
         ```
 
-        For a normal domain user, pass its password instead of `""`.
+        For a normal domain user, pass its password instead of `""`: `sc.exe config timbal-connect obj= "CORP\svc_timbal" password= "<password>"`.
       </Step>
       <Step title="Grant it read access in SQL Server">
         ```sql
@@ -297,7 +297,7 @@ On locked-down networks, always use `,PORT`: it doesn't need the Browser.
 | `Encrypt=true;TrustServerCertificate=false` | Encrypted and verified. The certificate must be trusted and match the `Server=` host name |
 | `Encrypt=false` | Not encrypted. Avoid |
 
-With verification on and a self-signed certificate you get *"The certificate chain was issued by an authority that is not trusted"*. Install the certificate on the connector server, or trust it. Connecting by IP or short name also fails when the certificate names the FQDN: make `Server=` match.
+With verification on and a self-signed certificate you get *"The certificate chain was issued by an authority that is not trusted"*. Install the certificate in the connector server's trust store, or set `TrustServerCertificate=true`. Omitting `TrustServerCertificate` on newer drivers behaves like `false`. Connecting by IP or short name also fails when the certificate names the FQDN: make `Server=` match.
 
 ## Several sources on one connector
 

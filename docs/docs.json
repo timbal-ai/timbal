@@ -702,6 +702,10 @@
             "pages": ["connect/install-windows", "connect/install-linux-macos"]
           },
           {
+            "group": "Guided setup",
+            "pages": ["connect/guided-setup"]
+          },
+          {
             "group": "Configure and operate",
             "pages": [
               "connect/connections",
@@ -709,10 +713,6 @@
               "connect/operate",
               "connect/troubleshooting"
             ]
-          },
-          {
-            "group": "Guided setup",
-            "pages": ["connect/guided-setup"]
           },
           {
             "group": "Use your data",

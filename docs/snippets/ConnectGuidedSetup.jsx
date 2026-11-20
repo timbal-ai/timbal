@@ -228,7 +228,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     }
     if (c.auth === "sql") {
       return [
-        `-- sqlcmd -S ${c.host} -U sa -C   (or SQL Server Management Studio)`,
+        `-- sqlcmd -S ${c.reach === "named_browser" ? `${c.host}\\${c.instance}` : `${c.host},${c.port}`} -U sa -C   (or SQL Server Management Studio)`,
         `CREATE LOGIN [${c.user}] WITH PASSWORD = '${PLACEHOLDER}';`,
         `USE [${c.db}];`,
         `CREATE USER [${c.user}] FOR LOGIN [${c.user}];`,
@@ -360,12 +360,16 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
         });
       }
 
-      const loginNote =
+      const loginNote = [
         c.auth === "sql" && c.isSqlServer
           ? "This needs SQL Server to allow SQL logins (mixed mode). Many Business Central and NAV servers only allow Windows logins: pick Windows or integrated authentication above."
-          : c.query === "write"
+          : "",
+        c.query === "write"
           ? "This login is read-only. You chose to allow writes from Timbal, so also grant the write privileges you want (for example `INSERT`, `UPDATE`), and only on the tables that need them."
-          : "A read-only login limits the damage if anything is ever misused. The `query` setting is a second guard, not a replacement.";
+          : "A read-only login limits the damage if anything is ever misused. The `query` setting is a second guard, not a replacement.",
+      ]
+        .filter(Boolean)
+        .join(" ");
       steps.push({
         id: "login",
         title: c.auth === "sql" ? "Create a read-only login" : "Give the account read access",
@@ -406,12 +410,12 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     const configText = [];
     if (c.isDb && files.connections) {
       configText.push(
-        `Each entry is named: \`${c.name}\` is the name Timbal will see. The connection string never leaves this server.`
+        `Each entry is named: \`${c.name}\` is the name Timbal will see. The connection string stays on this server.`
       );
     }
     if (c.isDb && !files.connections) {
       configText.push(
-        `Connections go inside \`config.json\` under \`connections\` (version 0.1.27 or newer). \`${c.name}\` is the name Timbal will see; the connection string never leaves this server.`
+        `Connections go inside \`config.json\` under \`connections\` (version 0.1.27 or newer). \`${c.name}\` is the name Timbal will see; the connection string stays on this server.`
       );
     }
     if (c.withFiles) {
@@ -422,7 +426,12 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     const configNotes = [];
     if (files.connections) configNotes.push("This replaces `connections.json`. If it already has connections, add the entry to the existing file instead.");
     if (c.os === "windows") configNotes.push("Save files as UTF-8 **without** BOM. The commands above do. A byte-order mark makes the file fail to parse.");
-    if (c.os === "linux" && files.config) configNotes.push("If `config.json` already exists on this server, add the keys to it by hand instead of creating it.");
+    if (files.config) configNotes.push("Keep `connections_path` out of `config.json` when you use inline `connections`: setting both stops the connector from starting.");
+    if (files.connections) configNotes.push("An inline `connections` block already present in `config.json` takes precedence over `connections.json`.");
+    if (c.os === "linux" && files.config) {
+      configNotes.push("If `config.json` already exists on this server, add the keys to it by hand instead of creating it.");
+      configNotes.push("On Linux the connector settings live in `connector.env`. If `doctor` does not show your entries, add `TIMBAL_CONNECT_CONFIG=/etc/timbal-connect/config.json` to that file and restart.");
+    }
 
     steps.push({
       id: "config",
@@ -440,19 +449,19 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
         id: "secret",
         title: `Replace ${PLACEHOLDER} with the real password`,
         where: where.server,
-        text: `Open \`${target}\` and replace \`${PLACEHOLDER}\` with the password. In a URL connection string, percent-encode special characters (\`@\` becomes \`%40\`). In JSON, write \`\\\\\` for a backslash and \`\\"\` for a quote.`,
+        text: `Open \`${target}\` and replace \`${PLACEHOLDER}\` with the password. ${c.isSqlServer ? (c.auth === "windows" ? "The password is stored as written, with no connection-string quoting." : "In the connection string, wrap the password in double quotes if it contains a semicolon.") : "In the URL connection string, percent-encode special characters (`@` becomes `%40`)."} In JSON, write \`\\\\\` for a backslash and \`\\"\` for a quote.`,
         blocks: [
           {
-            label: c.os === "windows" ? "PowerShell" : "bash",
+            label: c.os === "windows" ? "PowerShell (elevated)" : "bash",
             code: c.os === "windows" ? `notepad "${target}"` : `sudo nano ${target}`,
           },
         ],
         note:
           c.os === "windows"
-            ? "Do not save as \"UTF-8 with BOM\". Notepad's default encoding is fine for this file."
+            ? "Do not save as \"UTF-8 with BOM\": the file would fail to parse."
             : c.os === "linux"
-            ? "To limit who can read it, find the service user with `systemctl show timbal-connect -p User`."
-            : "",
+            ? "This file holds a password. Make sure only root and the service account can read it; find the service user with `systemctl show timbal-connect -p User`."
+            : "This file holds a password. Make sure only root can read it.",
       });
     }
 
@@ -470,7 +479,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     if (c.isDb) {
       verifyBlocks.push({ label: `Only ${c.name}`, code: runBinary(c.os, `doctor --connection ${c.name}`) });
       const sampleTable = c.source === "sqlserver" ? "dbo.<table>" : c.source === "postgres" ? "public.<table>" : `${c.db}.<table>`;
-      verifyBlocks.push({ label: "A table's columns, primary key and cursor", code: runBinary(c.os, `doctor --connection ${c.name} --table ${sampleTable}`) });
+      verifyBlocks.push({ label: "A table's columns, primary key and cursor", code: runBinary(c.os, `doctor --connection ${c.name} --table "${sampleTable}"`) });
       verifyBlocks.push({ label: "A real query", code: runBinary(c.os, `query --connection ${c.name} "SELECT 1"`) });
     }
     verifyBlocks.push({ label: "Watch the log", code: logCmd(c.os) });
@@ -482,6 +491,10 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
         c.isDb ? `. \`[connection: ${c.name}]\` must connect and list tables` : ""
       }${c.withFiles ? `. The \`${c.fsName}\` share must be readable` : ""}. In the log you want \`connector enrolled and connected\`.`,
       blocks: verifyBlocks,
+      note:
+        c.os === "windows" && c.isSqlServer && c.auth === "integrated"
+          ? "`doctor` from your own PowerShell logs in as you, not as the service account. The real test is the `[connection]` result in the log after the service restart."
+          : "",
     });
 
     // 8. Verify from Timbal ----------------------------------------------------------------------------------
@@ -546,9 +559,11 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     if (c.isSqlServer && c.encrypt === "verify") {
       items.push(["TLS error: the certificate chain is not trusted", "Install the CA on this server, make `Server=` match the certificate's name, or use `TrustServerCertificate=true` for a self-signed certificate."]);
     }
+    if (c.isDb || c.withFiles) {
+      items.push(["`doctor` mentions a remote local-config override", "A map pushed from Timbal replaces this one until you run `timbal-connect local-config clear` and restart."]);
+    }
     if (c.withFiles) {
       items.push(["The share is listed but not readable", c.os === "windows" ? "The service runs as `NT AUTHORITY\\NetworkService`: give it read access to the folder, or run the service as an account that has it." : c.os === "linux" ? "The service runs as the `timbal-connect` user and the unit sets `ProtectHome=true`, so anything under `/home` is hidden. Use another path and give that user read access." : "Check the folder is readable by the service (it runs as root under launchd) and not blocked by macOS privacy settings."]);
-      items.push(["`doctor` mentions a remote local-config override", "A map pushed from Timbal replaces this one until you run `timbal-connect local-config clear` and restart."]);
     }
     return items;
   };
@@ -560,8 +575,41 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
   // declared inside another one is a new type on every render and would reset the inputs.
   // -------------------------------------------------------------------------
 
-  const line = "1px solid rgba(128, 128, 128, 0.35)";
-  const soft = "rgba(128, 128, 128, 0.12)";
+  const [s, setS] = useState(INITIAL_STATE);
+  const [copiedKey, setCopiedKey] = useState(null);
+  const [dark, setDark] = useState(false);
+
+  // Follow the site's light/dark switch (Mintlify toggles a `dark` class on <html>).
+  useEffect(() => {
+    const root = document.documentElement;
+    const read = () => setDark(root.classList.contains("dark"));
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+
+  // Palette taken from the docs theme (Mintlify "mint", monochrome): near-black cards with hairline
+  // borders in dark mode, white cards in light mode. The selected option is shown by a stronger
+  // border and a soft tint, not by inverting the colours.
+  const t = dark
+    ? {
+        panel: "#0e0e10", panelBorder: "rgba(255, 255, 255, 0.12)", field: "#000000", fieldBorder: "rgba(255, 255, 255, 0.22)",
+        text: "#f2f2f2", muted: "#a1a1aa", chip: "transparent", chipBorder: "rgba(255, 255, 255, 0.16)",
+        activeBg: "rgba(255, 255, 255, 0.10)", activeBorder: "rgba(255, 255, 255, 0.7)", activeText: "#ffffff",
+        inlineCode: "rgba(255, 255, 255, 0.10)",
+        codeHead: "#161619", codeBody: "#0a0a0c", codeBorder: "rgba(255, 255, 255, 0.12)", codeText: "#e8e8ea", codeMuted: "#a1a1aa",
+        copyBorder: "rgba(255, 255, 255, 0.22)", ok: "#7ee787",
+      }
+    : {
+        panel: "#ffffff", panelBorder: "rgba(10, 10, 10, 0.12)", field: "#ffffff", fieldBorder: "rgba(10, 10, 10, 0.25)",
+        text: "#3e3e3e", muted: "#6b6b73", chip: "transparent", chipBorder: "rgba(10, 10, 10, 0.18)",
+        activeBg: "rgba(10, 10, 10, 0.06)", activeBorder: "#0a0a0a", activeText: "#0a0a0a",
+        inlineCode: "rgba(10, 10, 10, 0.07)",
+        codeHead: "#18181b", codeBody: "#0e0e10", codeBorder: "rgba(10, 10, 10, 0.12)", codeText: "#e8e8ea", codeMuted: "#a1a1aa",
+        copyBorder: "rgba(255, 255, 255, 0.25)", ok: "#7ee787",
+      };
+  const line = `1px solid ${t.panelBorder}`;
 
   const rich = (text) => {
     // Minimal inline markup: `code`, **bold** and [label](href).
@@ -575,7 +623,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
       const tok = m[0];
       if (tok.startsWith("`")) {
         out.push(
-          <code key={i++} style={{ background: soft, borderRadius: 4, padding: "1px 5px", fontSize: "0.88em" }}>
+          <code key={i++} style={{ background: t.inlineCode, color: t.text, borderRadius: 4, padding: "1px 5px", fontSize: "0.88em" }}>
             {tok.slice(1, -1)}
           </code>
         );
@@ -595,9 +643,6 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     return out;
   };
 
-  const [s, setS] = useState(INITIAL_STATE);
-  const [copiedKey, setCopiedKey] = useState(null);
-
   const copy = (key, code) => {
     if (typeof navigator !== "undefined" && navigator.clipboard) {
       navigator.clipboard.writeText(code).then(() => {
@@ -608,18 +653,18 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
   };
 
   const codeBlock = (key, label, code) => (
-    <div key={key} style={{ margin: "10px 0", borderRadius: 10, overflow: "hidden", border: "1px solid #2a2d34" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#1a1d23", color: "#9aa0ab", fontSize: 12, padding: "6px 10px" }}>
+    <div key={key} style={{ margin: "10px 0", borderRadius: 10, overflow: "hidden", border: `1px solid ${t.codeBorder}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: t.codeHead, color: t.codeMuted, fontSize: 12, padding: "6px 10px" }}>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
         <button
           type="button"
           onClick={() => copy(key, code)}
-          style={{ background: "transparent", color: copiedKey === key ? "#7ee787" : "#c9d1d9", border: "1px solid #3a3f47", borderRadius: 6, padding: "2px 8px", fontSize: 12, cursor: "pointer", marginLeft: 10 }}
+          style={{ background: "transparent", color: copiedKey === key ? t.ok : t.codeText, border: `1px solid ${t.copyBorder}`, borderRadius: 6, padding: "2px 8px", fontSize: 12, cursor: "pointer", marginLeft: 10 }}
         >
           {copiedKey === key ? "Copied" : "Copy"}
         </button>
       </div>
-      <pre style={{ margin: 0, padding: "12px 14px", background: "#0f1115", color: "#e6e6e6", fontSize: 13, lineHeight: 1.5, overflowX: "auto", whiteSpace: "pre" }}>
+      <pre style={{ margin: 0, padding: "12px 14px", background: t.codeBody, color: t.codeText, fontSize: 13, lineHeight: 1.5, overflowX: "auto", whiteSpace: "pre" }}>
         <code style={{ background: "transparent", color: "inherit", padding: 0 }}>{code}</code>
       </pre>
     </div>
@@ -640,14 +685,15 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
             onClick={() => onChange(opt.id)}
             style={{
               padding: "6px 12px",
-              borderRadius: 8,
-              border: active ? "1.5px solid currentColor" : line,
-              background: active ? soft : "transparent",
-              color: "inherit",
+              borderRadius: 10,
+              border: `1px solid ${active ? t.activeBorder : t.chipBorder}`,
+              background: active ? t.activeBg : t.chip,
+              boxShadow: active ? `0 0 0 1px ${t.activeBorder}` : "none",
+              color: active ? t.activeText : t.text,
               fontWeight: active ? 600 : 400,
               fontSize: 14,
               cursor: off ? "not-allowed" : "pointer",
-              opacity: off ? 0.4 : 1,
+              opacity: off ? 0.35 : 1,
             }}
           >
             {opt.label}
@@ -659,7 +705,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
 
   const field = (key, label, value, onChange, hint, placeholder) => (
     <label key={key} style={{ display: "block", fontSize: 13 }}>
-      <span style={{ display: "block", marginBottom: 3, opacity: 0.75 }}>{label}</span>
+      <span style={{ display: "block", marginBottom: 3, color: t.text, fontWeight: 500 }}>{label}</span>
       <input
         type="text"
         value={value}
@@ -667,21 +713,21 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
         onChange={(e) => onChange(e.target.value)}
         spellCheck={false}
         autoComplete="off"
-        style={{ width: "100%", boxSizing: "border-box", padding: "6px 9px", borderRadius: 8, border: line, background: "transparent", color: "inherit", fontSize: 14, fontFamily: "inherit" }}
+        style={{ width: "100%", boxSizing: "border-box", padding: "6px 9px", borderRadius: 8, border: `1px solid ${t.fieldBorder}`, background: t.field, color: t.text, fontSize: 14, fontFamily: "inherit" }}
       />
-      {hint ? <span style={{ display: "block", marginTop: 2, fontSize: 12, opacity: 0.6 }}>{hint}</span> : null}
+      {hint ? <span style={{ display: "block", marginTop: 2, fontSize: 12, color: t.muted }}>{hint}</span> : null}
     </label>
   );
 
   const group = (title, children) => (
     <div style={{ marginBottom: 14 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{title}</div>
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6, color: t.text }}>{title}</div>
       {children}
     </div>
   );
 
   const grid = (children) => (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10, marginTop: 8 }}>{children}</div>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12, marginTop: 8, alignItems: "start" }}>{children}</div>
   );
 
   // -------------------------------------------------------------------------
@@ -708,7 +754,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
 
   return (
     <div style={{ margin: "20px 0" }}>
-      <div style={{ border: line, borderRadius: 14, padding: 18 }}>
+      <div style={{ border: line, background: t.panel, color: t.text, borderRadius: 16, padding: 20 }}>
         {group("1. Where is the connector installed?", choice(OS_LIST, s.os, (os) => set({ os })))}
 
         {group(
@@ -726,7 +772,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
               changeSource
             )}
             {s.source !== "none" ? (
-              <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14, marginTop: 10 }}>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14, marginTop: 10, color: t.text }}>
                 <input type="checkbox" checked={s.withFiles} onChange={(e) => set({ withFiles: e.target.checked })} />
                 Also share a folder
               </label>
@@ -739,7 +785,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
               "3. Connection details",
               grid(
                 <>
-                  {field("name", "Connection name (what Timbal sees)", val("name", c.src.name), (v) => setO("name", v))}
+                  {field("name", "Connection name", val("name", c.src.name), (v) => setO("name", v), "The name Timbal sees")}
                   {field("host", "Host", val("host", c.src.host), (v) => setO("host", v), "As the connector server sees it")}
                   {c.isSqlServer && s.reach === "named_browser"
                     ? field("instance", "Instance name", val("instance", "INSTANCE"), (v) => setO("instance", v))
@@ -779,7 +825,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
                   isWin ? [] : ["integrated", "windows"]
                 )}
                 {!isWin ? (
-                  <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
+                  <div style={{ fontSize: 12, color: t.muted, marginTop: 4 }}>
                     Windows authentication only exists on Windows connectors. On Linux and macOS use a SQL login.
                   </div>
                 ) : null}
@@ -823,7 +869,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
                   s.query,
                   (query) => set({ query })
                 )}
-                <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
+                <div style={{ fontSize: 12, color: t.muted, marginTop: 4 }}>
                   Only for ad-hoc queries. Extracting data and browsing schemas are not affected. This server always has the last word.
                 </div>
               </>
@@ -849,7 +895,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
               "Folder to share",
               grid(
                 <>
-                  {field("fsName", "Name (what Timbal sees)", val("fsName", "exports"), (v) => setO("fsName", v))}
+                  {field("fsName", "Share name", val("fsName", "exports"), (v) => setO("fsName", v), "The name Timbal sees")}
                   {field("fsPath", "Path on the server", val("fsPath", FS_PATHS[s.os]), (v) => setO("fsPath", v), "A local folder, or a share already mounted there")}
                 </>
               )
@@ -857,31 +903,31 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
           : null}
 
         {group(
-          "Proxy for the installer (optional)",
+          "Proxy (optional)",
           <div style={{ maxWidth: 420 }}>
-            {field("proxy", "Proxy URL", val("proxy", ""), (v) => setO("proxy", v), "Leave empty if the server connects directly", "http://proxy.corp.local:8080")}
+            {field("proxy", "Proxy URL", val("proxy", ""), (v) => setO("proxy", v), "Leave empty if the server connects directly. Needs connector 0.1.33 or newer; the service keeps using it after install", "http://proxy.corp.local:8080")}
           </div>
         )}
       </div>
 
-      <div style={{ marginTop: 24 }}>
+      <div style={{ marginTop: 18 }}>
         {plan.map((step, idx) => (
-          <div key={step.id} style={{ display: "flex", gap: 12, marginBottom: 22 }}>
-            <div style={{ flex: "0 0 28px", height: 28, borderRadius: 14, background: soft, border: line, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 600 }}>{idx + 1}</div>
+          <div key={step.id} style={{ display: "flex", gap: 12, marginBottom: 12, padding: "16px 16px 14px", border: line, borderRadius: 16, background: t.panel, color: t.text }}>
+            <div style={{ flex: "0 0 28px", height: 28, borderRadius: 14, background: t.activeBg, border: `1px solid ${t.chipBorder}`, color: t.activeText, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 600 }}>{idx + 1}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-                <div style={{ fontSize: 17, fontWeight: 600 }}>{step.title}</div>
-                <span style={{ fontSize: 11, border: line, borderRadius: 999, padding: "1px 8px", opacity: 0.75 }}>{step.where}</span>
+                <div style={{ fontSize: 17, fontWeight: 600, color: t.text }}>{step.title}</div>
+                <span style={{ fontSize: 11, border: `1px solid ${t.chipBorder}`, background: t.panel, color: t.muted, borderRadius: 999, padding: "1px 8px", fontWeight: 600 }}>{step.where}</span>
               </div>
-              {step.text ? <p style={{ margin: "6px 0 0", lineHeight: 1.55 }}>{rich(step.text)}</p> : null}
+              {step.text ? <p style={{ margin: "6px 0 0", lineHeight: 1.55, color: t.text }}>{rich(step.text)}</p> : null}
               {step.blocks.map((b, i) => codeBlock(`${step.id}-${i}`, b.label, b.code))}
-              {step.note ? <p style={{ margin: "6px 0 0", fontSize: 13, lineHeight: 1.5, opacity: 0.8 }}>{rich(step.note)}</p> : null}
+              {step.note ? <p style={{ margin: "6px 0 0", fontSize: 13, lineHeight: 1.5, color: t.muted }}>{rich(step.note)}</p> : null}
             </div>
           </div>
         ))}
       </div>
 
-      <details style={{ border: line, borderRadius: 12, padding: "10px 14px" }}>
+      <details style={{ border: line, background: t.panel, color: t.text, borderRadius: 16, padding: "12px 16px" }}>
         <summary style={{ cursor: "pointer", fontWeight: 600 }}>If something fails, for this setup</summary>
         <ul style={{ margin: "10px 0 0", paddingLeft: 18, lineHeight: 1.55 }}>
           {trouble.map(([problem, fix]) => (
@@ -890,7 +936,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
             </li>
           ))}
         </ul>
-        <p style={{ margin: "10px 0 0", fontSize: 13, opacity: 0.8 }}>
+        <p style={{ margin: "10px 0 0", fontSize: 13, color: t.muted }}>
           More in <a href="/connect/troubleshooting" style={{ textDecoration: "underline" }}>Troubleshooting</a>.
         </p>
       </details>

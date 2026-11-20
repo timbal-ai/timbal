@@ -148,6 +148,15 @@ In an elevated PowerShell:
 & "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" service uninstall --purge
 ```
 
+If the binary is gone or `service uninstall` fails, remove everything by hand:
+
+```powershell
+sc.exe stop timbal-connect
+sc.exe delete timbal-connect
+Remove-Item -Recurse -Force "$env:ProgramData\TimbalConnect" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "$env:ProgramFiles\TimbalConnect" -ErrorAction SilentlyContinue
+```
+
 Uninstalling doesn't revoke the connector in Timbal; it just goes offline. Revoke it too if the server leaves your control: [Revoke connector](/api-reference/connectors/revoke). Reinstalling always needs a new enrollment token.
 
 ## Files on the server

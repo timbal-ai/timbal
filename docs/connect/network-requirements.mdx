@@ -37,7 +37,7 @@ A proxy that `auto` found but that fails is retried **directly**, so a stale mac
 
 You can set it three ways:
 
-- When installing: `-Proxy http://proxy.corp.local:8080` (Windows) or `--proxy http://proxy.corp.local:8080` (Linux and macOS). It applies to the downloads, the network check **and** the service.
+- When installing: `-Proxy http://proxy.corp.local:8080` (Windows) or `--proxy http://proxy.corp.local:8080` (Linux and macOS). It applies to the downloads and the service, and on Windows also to the installer's network check.
 - In `config.json`: `{ "proxy": "http://proxy.corp.local:8080" }`
 - With the environment variable `TIMBAL_CONNECT_PROXY`
 

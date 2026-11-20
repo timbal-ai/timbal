@@ -86,6 +86,21 @@ sudo /opt/timbal-connect/current/timbal-connect service uninstall           # ke
 sudo /opt/timbal-connect/current/timbal-connect service uninstall --purge   # removes everything
 ```
 
+If the binary is gone or `service uninstall` fails, remove everything by hand:
+
+```bash
+# Linux
+sudo systemctl disable --now timbal-connect
+sudo rm -f /etc/systemd/system/timbal-connect.service
+sudo systemctl daemon-reload
+sudo rm -rf /etc/timbal-connect /var/lib/timbal-connect /opt/timbal-connect
+
+# macOS
+sudo launchctl bootout system/ai.timbal.connect
+sudo rm -f /Library/LaunchDaemons/ai.timbal.connect.plist /Library/Logs/timbal-connect.log
+sudo rm -rf /etc/timbal-connect /var/lib/timbal-connect /opt/timbal-connect
+```
+
 Uninstalling doesn't revoke the connector in Timbal; revoke it too if the server leaves your control: [Revoke connector](/api-reference/connectors/revoke). Reinstalling always needs a new enrollment token.
 
 ## Files on the server

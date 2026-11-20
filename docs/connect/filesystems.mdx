@@ -5,7 +5,7 @@ description: "Explore a folder on your server and copy its files into a knowledg
 
 After you [list a folder](/connect/connections#file-shares) in `config.json`, Timbal can explore it and copy its files into a knowledge base. The connector reads the files itself, in read-only mode, and only the share's **name** and **paths relative to it** cross the connection.
 
-Every request needs the connector **online** and the `fs:browse` capability (copying needs `fs:copy`), both reported by connector 0.1.27 or newer and only when at least one share is configured. Otherwise you get `fs_unsupported`.
+Every request needs the connector **online** and the `fs:browse` capability (copying needs `fs:copy`), both reported by connector 0.1.27 or newer and only when at least one share is configured. Otherwise browse requests answer `browse_unsupported` (or `fs_unsupported`) and copy answers `fs_unsupported`.
 
 | Operation | Request (under `/orgs/{org_id}/connectors/{connector_id}`) | Role needed |
 | --------- | ---------------------------------------------------------- | ----------- |
@@ -44,7 +44,7 @@ Searching needs more than membership because reading file contents is data leavi
     # -> { "entries": [{ "name", "path", "kind", "size_bytes", "mtime_epoch_secs" }, ...], "truncated": false }
     ```
 
-    Parameters: `filesystem_ref`, `path` (relative to the share), `sort` (`name`, `size` or `mtime`), `glob`, `depth`, `limit`, `timeout_ms`.
+    Parameters: `filesystem_ref`, `path` (relative to the share), `all`, `sort` (`name`, `size` or `mtime`), `glob`, `depth` (default 0, so one level), `limit`, `timeout_ms`.
   </Step>
   <Step title="Search file contents (optional)">
     ```bash
@@ -52,17 +52,19 @@ Searching needs more than membership because reading file contents is data leavi
       -H "Authorization: Bearer $API_KEY"
     # -> { "matches": [{ "path", "line_number", "line" }, ...], "files_scanned", "files_matched", "truncated" }
     ```
+
+    Parameters: `filesystem_ref`, `path`, `pattern` (a regular expression, matched per line), `glob`, `max_matches`, `timeout_ms`.
   </Step>
 </Steps>
 
 ### Limits and partial answers
 
 - Each request has a time budget on the server: **20 seconds** by default. `timeout_ms` changes it, up to **30 seconds**. On a big or slow mount, pass a short one (`5000`) so you fail fast.
-- An answer can be **partial**. When `truncated` is `true` the walk stopped at a limit. That is a normal result, not an error, and `truncated_reason` says why.
+- An answer can be **partial**. When `truncated` is `true` the walk stopped at a limit. That is a normal result, not an error. `summary` also returns a `truncated_reason`.
 - `depth` is capped at 8. List one level at a time instead of walking a deep tree.
 - A browse request **can't be cancelled** once sent, and a single stuck network read can hold it until the operating system gives up. Copy jobs can be stopped; browse requests can't.
 
-Errors: `connector_offline`, `browse_timeout`, `browse_unsupported`, and `fs_unsupported` (no `fs:browse` or `fs:copy`, no shares configured, or a connector older than 0.1.27).
+Errors (HTTP 422): `connector_offline`, `browse_timeout`, `browse_unsupported` (the connector lacks `fs:browse`), and `fs_unsupported` (no shares configured, or a connector older than 0.1.27). Copy answers `404` for an unknown connector or knowledge base.
 
 ## Copy files to a knowledge base
 
@@ -89,7 +91,7 @@ curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/filesy
 | `recursive` | No | `false` | Must be `true` when `path` is a folder |
 | `kb_id` | Yes | | Target knowledge base |
 | `directory` | No | Root | Folder in the knowledge base. A recursive copy recreates the tree under it |
-| `parse` | No | `false` | `true` also parses and embeds. Files are only stored by default |
+| `parse` | No | `false` | `true` also parses and embeds, whatever the knowledge base's automatic processing is set to. Files are only stored by default |
 | `metadata` | No | `{}` | Added to every file |
 | `max_files` | No | 5,000 | The job is refused before it starts if the folder holds more |
 | `max_total_bytes` | No | 2 GiB | Same, for the total size |

@@ -72,7 +72,7 @@ When asking Timbal for help, send the message you saw and these log files.
     The proxy found in `HTTPS_PROXY` or in the Windows machine-wide settings doesn't work for Timbal (the message says why), but a direct connection does. The connector falls back on every connection. Fix the proxy, or set `"proxy": "none"` to skip it.
   </Accordion>
   <Accordion title="doctor shows proxy: none, direct, but the network needs a proxy">
-    `auto` found nothing: no `HTTPS_PROXY` in the service's environment and no machine-wide WinHTTP proxy (`netsh winhttp show proxy`). Set `proxy` explicitly in `config.json` or with `TIMBAL_CONNECT_PROXY`. On Windows, per-user browser proxy settings are not used by the service.
+    `auto` found nothing: no `HTTPS_PROXY` in the service's environment and no machine-wide WinHTTP proxy (`netsh winhttp show proxy`). Set `proxy` explicitly in `config.json` or with `TIMBAL_CONNECT_PROXY`, or on Windows set a machine-wide proxy with `netsh winhttp set proxy`. On Windows, per-user browser proxy settings are not used by the service.
   </Accordion>
   <Accordion title="Connections were changed in Timbal and the files on the server seem ignored">
     A configuration pushed from Timbal replaces the local `connections` and `filesystems` until you run `timbal-connect local-config clear` and restart. `doctor` says when one is active. See [Change the configuration from Timbal](/connect/operate#change-the-configuration-from-timbal).

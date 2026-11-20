@@ -3,7 +3,7 @@ title: "Connect your IDE"
 description: "Browse a connector's schemas and folders, and run bounded SQL, from Cursor or any MCP client"
 ---
 
-Every connector has its own [MCP](/mcp-integration/index) endpoint. Point an IDE or an agent at it and you can browse that server's databases, run bounded SQL and explore its shares, without writing `curl`.
+Every connector has its own [MCP](/mcp-integration/index) endpoint (streamable HTTP). Point an IDE or an agent at it and you can browse that server's databases, run bounded SQL and explore its shares, without writing `curl`.
 
 ```text
 https://api.timbal.ai/orgs/{org_id}/connectors/{connector_id}/mcp
@@ -33,7 +33,7 @@ curl "https://api.timbal.ai/orgs/$ORG_ID/connectors" -H "Authorization: Bearer $
 ```
 
 <Warning>
-The API key in `mcp.json` is an **organization-wide** key. Protect the file like a credential and never commit it to version control.
+The API key in `mcp.json` is an **organization-wide** key. Protect the file like a credential and never commit it to version control. Keys limited to one connector are planned.
 </Warning>
 
 ## Tools
@@ -61,7 +61,7 @@ Try a prompt such as: *"Using the timbal-connector-erp tools, list the tables in
 
 - The tools do exactly what the equivalent [HTTP requests](/connect/sync-data) do: same limits, same capability checks, same audit entry for `query` (marked `via=mcp`).
 - The connection's [`query` setting](/connect/connections#the-query-setting) on the server still decides what `query` may do.
-- A connector that is offline, or lacks a capability, returns a tool error with the same message as the API. Nothing here can reach a server the connection can't.
+- Every tool except `connector_status` needs the connector online; `connector_status` still answers when it is offline. A connector that is offline, or lacks a capability, returns a tool error with the same message as the API. Nothing here can reach a server the connection can't.
 - It does **not** start jobs or syncs, copy files into a knowledge base, or push configuration. For those, use the [API](/connect/sync-data).
 
 ## Next steps

@@ -30,7 +30,7 @@ Nothing you type here leaves your browser, and the page never asks for a passwor
     Both work. `connections.json` has been there from the start and keeps credentials apart from the control-plane settings. Putting `connections` inside `config.json` (from connector 0.1.27) keeps everything in one file. File shares always go in `config.json`. If both are set, the inline connections win and `connections.json` is ignored: see [Where the connector looks](/connect/connections#where-the-connector-looks).
   </Accordion>
   <Accordion title="What stays on the server?">
-    Connection strings, passwords and real folder paths. Timbal only receives the names you chose (`connection_ref` and `filesystem_ref`), table and column metadata, and the rows or files you ask it to extract.
+    Connection strings, passwords and real folder paths. The one exception is configuration you push from Timbal yourself, which carries the connection strings down to the server. Timbal otherwise only receives the names you chose (`connection_ref` and `filesystem_ref`), table and column metadata, and the rows or files you ask it to extract.
   </Accordion>
 </AccordionGroup>
 

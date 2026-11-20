@@ -5,7 +5,7 @@ description: "Timbal's on-premises data gateway: use databases and file shares o
 
 Timbal Connect is Timbal's **on-premises data gateway**: a service you install on a server inside your network that acts as a bridge between your databases and file shares and Timbal. It opens one outbound, encrypted connection to Timbal and waits for instructions: browse a schema, run a read-only query, sync a table into a knowledge base, or copy files.
 
-You never open an inbound port, and **database credentials never leave the server**. Timbal only knows each connection by the name you give it; the connection string lives in a file on the server.
+You never open an inbound port, and **database credentials stay on the server** (unless you choose to [push configuration from Timbal](/connect/operate#change-the-configuration-from-timbal)). Timbal only knows each connection by the name you give it; the connection string lives in a file on the server.
 
 ## How it works
 
@@ -43,7 +43,7 @@ If you've set up Microsoft's on-premises data gateway for Power BI or Fabric, yo
 
 Two differences matter when you set it up:
 
-- **Connections live on the server, not in the cloud.** There is no "add data source" screen in Timbal where you type a server name and password. You list connections in a file on the gateway server, and Timbal refers to them by name. Your database passwords are never stored in Timbal.
+- **Connections live on the server, not in the cloud.** There is no "add data source" screen in Timbal where you type a server name and password. You list connections in a file on the gateway server, and Timbal refers to them by name. Your database passwords are not stored in Timbal.
 - **Some gateway features aren't available yet.** There are no gateway clusters: each server is its own connector, and the queries and syncs you assign to a connector run only on that server. HTTP proxies work (connector 0.1.33 or newer) as long as they don't require NTLM or Kerberos authentication (see [Network requirements](/connect/network-requirements#proxies)).
 
 ## Before you start

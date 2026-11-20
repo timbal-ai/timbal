@@ -169,7 +169,9 @@ To go back to the files on the server:
 timbal-connect local-config clear
 ```
 
-Then restart the service.
+Run it as the service user or root, then restart the service.
+
+The pushed configuration is stored next to the state file as `config.override.json`. It is refused while an update or rebind restart is in progress, a corrupt override is deleted when the connector starts, and there is no trial or automatic revert: to undo a bad push, push again or run `local-config clear`. If `config.json` sets both `connections` and `connections_path`, the connector fails to start before it reads the override.
 
 <Warning>
 This is the one action that sends connection strings, with their passwords, from Timbal to the server. They pass through Timbal's control plane. If your rule is that credentials never leave the server, edit the files on the server by hand and don't use this endpoint. See [Push local config](/api-reference/connectors/local-config).
@@ -185,7 +187,7 @@ curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/rebind
   -d '{"url": "wss://api.timbal.ai/v1/connect/channel"}'
 ```
 
-It needs the **ConnectorsManage** role and connector 0.1.14 or newer, and is refused while jobs are running. The connector checks the address (`wss://` and a `*.timbal.ai` host), restarts, and is **on trial**: it must enroll at the new address within about 90 seconds, three attempts, or it goes back to the previous one. A wrong address can't strand the server. See [Rebind connector](/api-reference/connectors/rebind).
+It needs the connector **online**, the **ConnectorsManage** role and connector 0.1.14 or newer, and answers `202 { "url", "dispatched": true }`. It is refused while jobs are running (`rebind refused: N job(s) in flight`). The connector checks the address (`wss://` and a `*.timbal.ai` host), saves it in `rebind.json` in its install folder, restarts, and is **on trial**: it must enroll at the new address within about 90 seconds per attempt, three attempts, or it goes back to the previous one. A wrong address can't strand the server. Once it enrolls, the new address is confirmed and stays until the next rebind. The fleet list shows the connector going offline and coming back with the same id, and `doctor` on the server shows the effective address and whether it is on trial or confirmed. See [Rebind connector](/api-reference/connectors/rebind).
 
 ## Retire or revoke
 
@@ -205,10 +207,10 @@ It needs the **ConnectorsManage** role and connector 0.1.14 or newer, and is ref
     & "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" service uninstall --purge
     ```
 
-    Back up `state.json` before `--purge` if you want to keep the identity. If the binary is gone, remove the service by hand: [Install on Windows](/connect/install-windows#uninstall) or [Install on Linux and macOS](/connect/install-linux-macos#uninstall).
+    Back up `state.json` before `--purge` if you want to keep the identity. If the binary is gone or `service uninstall` fails, remove the service by hand: [Install on Windows](/connect/install-windows#uninstall) or [Install on Linux and macOS](/connect/install-linux-macos#uninstall).
   </Tab>
   <Tab title="Revoke in Timbal">
-    Uninstalling doesn't revoke the connector in Timbal; it only goes offline. **Revoke** kills its credential from Timbal, needs nothing from the server, and is what you want for a server that was lost, stolen or decommissioned without you.
+    Uninstalling doesn't revoke the connector in Timbal; it only goes offline. **Revoke** needs the **ConnectorsManage** role, kills its credential from Timbal, needs nothing from the server, and is what you want for a server that was lost, stolen or decommissioned without you.
 
     ```bash
     curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/revoke" \
@@ -216,9 +218,9 @@ It needs the **ConnectorsManage** role and connector 0.1.14 or newer, and is ref
     # -> { "connector_id": "...", "disconnected": true, "stopped_syncs": 3 }
     ```
 
-    Its credential stops working, the open connection is dropped, and running jobs fail. The connector disappears from the list. Syncs that pointed at it are **not deleted**: they stop being scheduled. Create them again on the replacement connector with the same `dest_table`, and they pick up where the table ends.
+    Its credential stops working, the open connection is dropped (immediately, or on the connector's next heartbeat, 30 seconds at most by default), and running jobs fail. The connector disappears from the list and every later request for it returns `404`. `disconnected: false` only means it was already offline. Syncs that pointed at it are **not deleted**: they stop being scheduled. Create them again on the replacement connector with the same `dest_table`, and they pick up where the table ends.
 
-    **There is no undo.** To bring the server back you need a new enrollment token, which creates a new connector with a new id. See [Revoke connector](/api-reference/connectors/revoke).
+    **There is no undo.** To bring the server back you need a new enrollment token, which creates a new connector with a new id. Errors: `403` without ConnectorsManage, `404` for an unknown or already revoked connector. See [Revoke connector](/api-reference/connectors/revoke).
   </Tab>
 </Tabs>
 
