@@ -49,7 +49,8 @@ The tools send that person's access token, so Qlik enforces their permissions. L
 `setup_credentials.py` signs you in once and saves a refresh token to a token file; the tools
 turn it into access tokens as needed and write the newest refresh token back to that file,
 because Qlik can rotate refresh tokens on each use (the old one then stops working). On the
-Timbal platform, a personal Qlik integration supplies the user's token instead.
+Timbal platform, a personal Qlik integration supplies the user's access token instead; the
+platform refreshes it, so the tools never exchange an integration's refresh token themselves.
 
 ### Method 2: Service (machine-to-machine)
 
@@ -163,11 +164,12 @@ Every tool takes the same optional fields, which win over the environment:
 | `token_file` | `QLIK_TOKEN_FILE` | personal: where the newest refresh token is kept |
 | `client_id`, `client_secret` | `QLIK_CLIENT_ID`, `QLIK_CLIENT_SECRET` | service (and personal refresh) |
 | `api_key` | `QLIK_API_KEY` | service (a Qlik API key instead of OAuth) |
-| `integration` | | a Timbal platform integration supplying any of the above |
+| `integration` | | a Timbal platform integration: `tenant_url` plus either a user's `token` (personal; the platform refreshes it) or `client_id` + `client_secret` / `api_key` (service). The env vars above are not read when it is set |
 
 When `mode` is not set, a person's token is tried before the service credentials. Set
 `mode="personal"` wherever a user without a Qlik sign-in must be refused rather than answered
-through the service identity.
+through the service identity. An integration that carries a user's token is treated as personal unless it
+sets `mode`.
 
 ## Troubleshooting
 

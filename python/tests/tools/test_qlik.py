@@ -204,7 +204,7 @@ async def test_client_credentials_from_tool_fields(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("timbal.tools.qlik.get_token_from_client_credentials", cc)
     tool = _tool(client_id="cid", client_secret=SecretStr("secret"))
     assert await _resolve_auth(tool) == QlikAuth(TENANT, "service-token", "service")
-    cc.assert_awaited_once_with(TENANT, "cid", "secret")
+    cc.assert_awaited_once_with(TENANT, "cid", "secret", qlik.SERVICE_SCOPES)
 
 
 @pytest.mark.asyncio
@@ -221,6 +221,100 @@ async def test_client_credentials_from_integration(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("timbal.tools.qlik.get_token_from_client_credentials", AsyncMock(return_value="svc"))
     integration = _integration({"tenant_url": TENANT, "client_id": "cid", "client_secret": "secret"})
     assert (await _resolve_auth(_tool(tenant_url=None, integration=integration))).mode == "service"
+
+
+def _no_http(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected request to {request.url}")
+
+    return _mock_http(monkeypatch, refuse)
+
+
+@pytest.mark.asyncio
+async def test_integration_refresh_token_is_never_spent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The platform stores this refresh token and rotates it; spending it here would kill its copy.
+    seen = _no_http(monkeypatch)
+    creds = {"tenant_url": TENANT, "refresh_token": "platform-rt", "client_id": "cid", "client_secret": "secret"}
+    with pytest.raises(CredentialNotAvailable, match="must refresh it and return `token`"):
+        await _resolve_auth(_tool(tenant_url=None, integration=_integration(creds)))
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_personal_integration_does_not_fall_back_to_its_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No mode set: a user credential in the integration pins personal, so its OAuth client is
+    # not used for the wider client_credentials identity.
+    seen = _no_http(monkeypatch)
+    creds = {"tenant_url": TENANT, "refresh_token": "rt", "client_id": "cid", "client_secret": "s", "api_key": "k"}
+    with pytest.raises(CredentialNotAvailable):
+        await _resolve_auth(_tool(tenant_url=None, integration=_integration(creds)))
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_integration_refresh_token_beats_a_local_token_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    # The tool's token file holds another person's sign-in; the integration names this call's user.
+    seen = _no_http(monkeypatch)
+    token_file = tmp_path / "token.json"
+    qlik.write_token_file(token_file, {"tenant_url": TENANT, "client_id": "cid", "refresh_token": "developer-rt"})
+    creds = {"tenant_url": TENANT, "refresh_token": "user-rt", "client_id": "cid", "client_secret": "secret"}
+    tool = _tool(tenant_url=None, integration=_integration(creds), token_file=str(token_file))
+    with pytest.raises(CredentialNotAvailable, match="must refresh it"):
+        await _resolve_auth(tool)
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_integration_ignores_service_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A shared server's service credentials must not answer for a user whose integration has none.
+    seen = _no_http(monkeypatch)
+    monkeypatch.setenv("QLIK_API_KEY", "server-key")
+    monkeypatch.setenv("QLIK_CLIENT_ID", "server-cid")
+    monkeypatch.setenv("QLIK_CLIENT_SECRET", "server-secret")
+    monkeypatch.setenv("QLIK_ACCESS_TOKEN", "someone-else")
+    monkeypatch.setenv("QLIK_REFRESH_TOKEN", "someone-elses-rt")
+    with pytest.raises(CredentialNotAvailable) as exc:
+        await _resolve_auth(_tool(tenant_url=None, integration=_integration({"tenant_url": TENANT})))
+    assert exc.value.env_vars == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_integration_ignores_tenant_and_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("QLIK_TENANT_URL", "https://other.eu.qlikcloud.com")
+    monkeypatch.setenv("QLIK_AUTH_MODE", "service")
+    with pytest.raises(CredentialNotAvailable, match="tenant_url") as exc:
+        await _resolve_auth(_tool(tenant_url=None, integration=_integration({"token": "user"})))
+    assert exc.value.env_vars == []
+    auth = await _resolve_auth(_tool(tenant_url=None, integration=_integration({"tenant_url": TENANT, "token": "u"})))
+    assert auth == QlikAuth(TENANT, "u", "personal")
+
+
+@pytest.mark.asyncio
+async def test_service_integration_uses_its_own_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    grant = AsyncMock(return_value="svc")
+    monkeypatch.setattr("timbal.tools.qlik.get_token_from_client_credentials", grant)
+    monkeypatch.setenv("QLIK_ACCESS_TOKEN", "someone-else")
+    monkeypatch.setenv("QLIK_CLIENT_ID", "server-cid")
+    monkeypatch.setenv("QLIK_SERVICE_SCOPES", "admin_classic")
+    creds = {"tenant_url": TENANT, "client_id": "cid", "client_secret": "secret"}
+    auth = await _resolve_auth(_tool(tenant_url=None, integration=_integration(creds)))
+    assert auth == QlikAuth(TENANT, "svc", "service")
+    grant.assert_awaited_once_with(TENANT, "cid", "secret", qlik.SERVICE_SCOPES)
+
+
+@pytest.mark.asyncio
+async def test_explicit_tool_fields_still_apply_with_an_integration(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("timbal.tools.qlik.get_token_from_refresh_token", AsyncMock(return_value="at"))
+    tool = _tool(
+        integration=_integration({"tenant_url": TENANT}),
+        refresh_token=SecretStr("rt"),
+        client_id="cid",
+        client_secret=SecretStr("secret"),
+    )
+    assert await _resolve_auth(tool) == QlikAuth(TENANT, "at", "personal")
 
 
 @pytest.mark.asyncio

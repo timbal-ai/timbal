@@ -5,8 +5,8 @@ Two connection modes, the same split as Power BI's:
 - **personal** (user-delegated OAuth): the tools act as one person, with that person's
   Qlik roles, space access and Section Access. Token from ``Integration("qlik")``
   (``token`` / ``access_token``), tool field ``token``, or env ``QLIK_ACCESS_TOKEN``;
-  or a ``refresh_token`` (integration, tool field, env ``QLIK_REFRESH_TOKEN``) that is
-  exchanged with the OAuth client's ``client_id`` + ``client_secret``. Qlik can rotate
+  or a ``refresh_token`` (tool field or env ``QLIK_REFRESH_TOKEN``, never an integration's)
+  that is exchanged with the OAuth client's ``client_id`` + ``client_secret``. Qlik can rotate
   refresh tokens on each use, so point ``token_file`` / env ``QLIK_TOKEN_FILE`` at a file
   to keep the newest one across restarts (``examples/qlik/setup_credentials.py`` writes it).
 - **service** (machine-to-machine): the tools act as the OAuth client itself.
@@ -25,11 +25,15 @@ rather than served through the wider service identity.
 
 Integration credentials (type: oauth or credentials):
 - tenant_url: Qlik Cloud tenant URL
-- token / access_token: a user's OAuth access token (personal)
-- refresh_token: a user's OAuth refresh token (personal, needs client_id + client_secret)
-- client_id / client_secret: the Qlik OAuth client
+- token / access_token: a user's OAuth access token (personal). The platform refreshes it and
+  keeps the rotated refresh token; a ``refresh_token`` alone is refused, never exchanged here,
+  since that would spend the token the platform stores.
+- client_id / client_secret: the Qlik OAuth client (service)
 - api_key: a Qlik API key (service)
-- mode: "personal" or "service"
+- mode: "personal" or "service". Unset, an integration carrying a user token is personal.
+
+With an integration, credentials come from it and the tool's own fields only: ``QLIK_*``
+environment variables are not read, so a shared server's settings never stand in for a user.
 """
 
 from __future__ import annotations
@@ -42,7 +46,7 @@ import math
 import os
 import time
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Annotated, Any, Literal, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
@@ -121,20 +125,28 @@ def normalize_tenant_url(value: str) -> str:
     return f"https://{parsed.netloc}"
 
 
-def _tenant_url(tool: Any, creds: dict[str, Any]) -> str:
+EnvLookup = Callable[[str], str | None]
+
+
+def _no_env(_name: str) -> None:
+    return None
+
+
+def _tenant_url(tool: Any, creds: dict[str, Any], env: EnvLookup = os.getenv) -> str:
     raw = _first(
         getattr(tool, "tenant_url", None),
         creds.get("tenant_url"),
         creds.get("tenant"),
-        os.getenv("QLIK_TENANT_URL"),
+        env("QLIK_TENANT_URL"),
     )
     if not raw:
-        raise CredentialNotAvailable("Qlik", missing=["tenant_url"], env_vars=["QLIK_TENANT_URL"])
+        env_vars = ["QLIK_TENANT_URL"] if env is os.getenv else []
+        raise CredentialNotAvailable("Qlik", missing=["tenant_url"], env_vars=env_vars)
     return normalize_tenant_url(raw)
 
 
-def _mode(tool: Any, creds: dict[str, Any]) -> Mode | None:
-    raw = _first(getattr(tool, "mode", None), creds.get("mode"), os.getenv("QLIK_AUTH_MODE"))
+def _mode(tool: Any, creds: dict[str, Any], env: EnvLookup = os.getenv) -> Mode | None:
+    raw = _first(getattr(tool, "mode", None), creds.get("mode"), env("QLIK_AUTH_MODE"))
     if raw is None:
         return None
     mode = raw.lower()
@@ -143,11 +155,9 @@ def _mode(tool: Any, creds: dict[str, Any]) -> Mode | None:
     return mode  # type: ignore[return-value]
 
 
-def _client_parts(tool: Any, creds: dict[str, Any]) -> tuple[str, str] | None:
-    client_id = _first(getattr(tool, "client_id", None), creds.get("client_id"), os.getenv("QLIK_CLIENT_ID"))
-    client_secret = _first(
-        getattr(tool, "client_secret", None), creds.get("client_secret"), os.getenv("QLIK_CLIENT_SECRET")
-    )
+def _client_parts(tool: Any, creds: dict[str, Any], env: EnvLookup = os.getenv) -> tuple[str, str] | None:
+    client_id = _first(getattr(tool, "client_id", None), creds.get("client_id"), env("QLIK_CLIENT_ID"))
+    client_secret = _first(getattr(tool, "client_secret", None), creds.get("client_secret"), env("QLIK_CLIENT_SECRET"))
     if client_id and client_secret:
         return client_id, client_secret
     return None
@@ -312,9 +322,14 @@ def _expires_at(body: dict[str, Any]) -> float:
     return time.time() + max(60, lifetime)
 
 
-async def get_token_from_client_credentials(tenant_url: str, client_id: str, client_secret: str) -> str:
-    """Service mode: an access token for the OAuth client itself, cached until shortly before it expires."""
-    key = _cache_key("client_credentials", tenant_url, client_id, client_secret)
+async def get_token_from_client_credentials(
+    tenant_url: str, client_id: str, client_secret: str, scopes: str | None = None
+) -> str:
+    """Service mode: an access token for the OAuth client itself, cached until shortly before it expires.
+
+    ``scopes`` defaults to env ``QLIK_SERVICE_SCOPES``, else ``SERVICE_SCOPES``."""
+    scopes = scopes or os.getenv("QLIK_SERVICE_SCOPES") or SERVICE_SCOPES
+    key = _cache_key("client_credentials", tenant_url, client_id, client_secret, scopes)
     async with _lock(key):
         cached = _TOKEN_CACHE.get(key)
         if cached and cached[1] - time.time() > _TOKEN_SKEW:
@@ -325,7 +340,7 @@ async def get_token_from_client_credentials(tenant_url: str, client_id: str, cli
                 "grant_type": "client_credentials",
                 "client_id": client_id,
                 "client_secret": client_secret,
-                "scope": os.getenv("QLIK_SERVICE_SCOPES", SERVICE_SCOPES),
+                "scope": scopes,
             },
         )
         _TOKEN_CACHE[key] = (body["access_token"], _expires_at(body), None)
@@ -455,12 +470,27 @@ async def exchange_refresh_token(
 
 async def _resolve_auth(tool: Any) -> QlikAuth:
     """Tenant URL and Bearer token for this tool (see the module docstring for the order)."""
-    creds: dict[str, Any] = {}
-    if isinstance(getattr(tool, "integration", None), Integration):
-        creds = await tool.integration.resolve() or {}
+    integration = getattr(tool, "integration", None)
+    from_integration = isinstance(integration, Integration)
+    creds: dict[str, Any] = (await integration.resolve() or {}) if from_integration else {}
+    # With a platform integration, credentials come from it and the tool's own fields only. The
+    # process environment of a shared server holds some other identity's QLIK_* settings, which
+    # must never answer for a user whose integration lacks a credential.
+    env: EnvLookup = _no_env if from_integration else os.getenv
 
-    tenant_url = _tenant_url(tool, creds)
-    mode = _mode(tool, creds)
+    tenant_url = _tenant_url(tool, creds, env)
+    mode = _mode(tool, creds, env)
+    personal_creds = any(_first(creds.get(k)) for k in ("token", "access_token", "refresh_token"))
+    if mode is None and personal_creds:
+        # A personal integration stays personal: without a usable user token it is refused,
+        # not answered through the client's wider service identity.
+        mode = "personal"
+    # The platform refreshes a personal integration's token itself and stores the newest refresh
+    # token. Exchanging it here would spend it (Qlik rotates refresh tokens), so the next resolve
+    # would hand out a dead one; an integration has to supply the access token.
+    integration_refresh_only = bool(_first(creds.get("refresh_token"))) and not _first(
+        creds.get("token"), creds.get("access_token")
+    )
     token_file_missing: str | None = None
 
     if mode != "service":
@@ -468,46 +498,54 @@ async def _resolve_auth(tool: Any) -> QlikAuth:
             getattr(tool, "token", None),
             creds.get("token"),
             creds.get("access_token"),
-            os.getenv("QLIK_ACCESS_TOKEN"),
+            env("QLIK_ACCESS_TOKEN"),
         )
         if token:
             return QlikAuth(tenant_url, token, "personal")
-        refresh = _first(
-            getattr(tool, "refresh_token", None), creds.get("refresh_token"), os.getenv("QLIK_REFRESH_TOKEN")
-        )
-        token_file = _first(getattr(tool, "token_file", None), os.getenv("QLIK_TOKEN_FILE"))
+        if integration_refresh_only:
+            # Refused before the tool's own refresh token or token file, which hold some
+            # other sign-in: the integration names the user this call is for.
+            raise CredentialNotAvailable(
+                "Qlik",
+                missing=["token"],
+                message="The Qlik integration supplied a refresh token but no access token. The platform "
+                "must refresh it and return `token`: exchanging it here would spend the refresh token it stores.",
+            )
+        refresh = _first(getattr(tool, "refresh_token", None), env("QLIK_REFRESH_TOKEN"))
+        token_file = _first(getattr(tool, "token_file", None), env("QLIK_TOKEN_FILE"))
         if token_file and not refresh and read_token_file(token_file) is None:
             token_file_missing = token_file
             token_file = None
-        client = _client_parts(tool, creds)
+        client = _client_parts(tool, creds, env)
         if (refresh or token_file) and client:
             token = await get_token_from_refresh_token(tenant_url, *client, refresh, token_file=token_file)
             return QlikAuth(tenant_url, token, "personal")
 
     if mode != "personal":
-        api_key = _first(getattr(tool, "api_key", None), creds.get("api_key"), os.getenv("QLIK_API_KEY"))
+        api_key = _first(getattr(tool, "api_key", None), creds.get("api_key"), env("QLIK_API_KEY"))
         if api_key:
             return QlikAuth(tenant_url, api_key, "service")
-        client = _client_parts(tool, creds)
+        client = _client_parts(tool, creds, env)
         if client:
-            token = await get_token_from_client_credentials(tenant_url, *client)
+            scopes = env("QLIK_SERVICE_SCOPES") or SERVICE_SCOPES
+            token = await get_token_from_client_credentials(tenant_url, *client, scopes)
             return QlikAuth(tenant_url, token, "service")
 
     if token_file_missing and mode != "service":
         raise CredentialNotAvailable(
             "Qlik",
             missing=["refresh_token"],
-            env_vars=["QLIK_TOKEN_FILE"],
+            env_vars=[] if from_integration else ["QLIK_TOKEN_FILE"],
             message=f"Qlik token file {token_file_missing!r} is missing or holds no refresh token: "
             "sign in first (examples/qlik/setup_credentials.py writes it).",
         )
     if mode == "personal":
-        missing = ["token", "refresh_token + client_id + client_secret"]
+        missing = ["token"] if from_integration else ["token", "refresh_token + client_id + client_secret"]
     elif mode == "service":
         missing = ["client_id + client_secret", "api_key"]
     else:
         missing = ["token", "refresh_token", "client_id + client_secret", "api_key"]
-    raise CredentialNotAvailable("Qlik", missing=missing, env_vars=_ENV_VARS)
+    raise CredentialNotAvailable("Qlik", missing=missing, env_vars=[] if from_integration else _ENV_VARS)
 
 
 def _raise_for_access(auth: QlikAuth, status: int, *, app: bool) -> None:

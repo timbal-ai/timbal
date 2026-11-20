@@ -75,7 +75,7 @@ The complete example lives in [`examples/qlik`](https://github.com/timbal-ai/tim
     QLIK_TOKEN_FILE=.qlik_token.json
     ```
 
-    The tools exchange the refresh token for access tokens as needed. Qlik can rotate refresh tokens on each use, so the newest one is written back to the token file; without the file it would live only in memory and a restart would reuse a spent token. On the Timbal platform, a personal Qlik integration supplies the user's token instead (pass `integration=`).
+    The tools exchange the refresh token for access tokens as needed. Qlik can rotate refresh tokens on each use, so the newest one is written back to the token file; without the file it would live only in memory and a restart would reuse a spent token. On the Timbal platform, a personal Qlik integration supplies the user's access token instead (pass `integration=`). The platform refreshes it and keeps the rotated refresh token, so the tools never exchange an integration's refresh token themselves.
   </Tab>
   <Tab title="Service (machine-to-machine)">
     **Use this if** the agent runs unattended, or everyone using it may see the same data.
@@ -151,10 +151,10 @@ Every tool takes the same optional fields, which win over the environment:
 | `token_file` | `QLIK_TOKEN_FILE` | personal: where the newest refresh token is kept |
 | `client_id`, `client_secret` | `QLIK_CLIENT_ID`, `QLIK_CLIENT_SECRET` | service (and personal refresh) |
 | `api_key` | `QLIK_API_KEY` | service (a Qlik API key instead of OAuth) |
-| `integration` | | a Timbal platform integration supplying any of the above |
+| `integration` | | a Timbal platform integration: `tenant_url` plus either a user's `token` (personal; the platform refreshes it) or `client_id` + `client_secret` / `api_key` (service). The env vars above are not read when it is set |
 
 <Note>
-When `mode` is not set, a person's token is tried before the service credentials. Set `mode="personal"` wherever a user without a Qlik sign-in must be refused rather than answered through the service identity.
+When `mode` is not set, a person's token is tried before the service credentials. Set `mode="personal"` wherever a user without a Qlik sign-in must be refused rather than answered through the service identity. An integration that carries a user's token is treated as personal unless it sets `mode`.
 </Note>
 
 ## Troubleshooting
