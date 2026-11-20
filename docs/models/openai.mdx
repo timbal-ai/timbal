@@ -70,6 +70,19 @@ description: "GPT-6, GPT-5, GPT-4, and o-series models with specs, pricing, and 
   - [Model reference](https://developers.openai.com/api/docs/models/gpt-6.1-sol), crosschecked against [API pricing](https://developers.openai.com/api/docs/pricing) and [release notes](https://developers.openai.com/api/docs/changelog)
   </Card>
 
+  <Card title="gpt-6.1-terra">
+  `openai/gpt-6.1-terra`
+
+  Fast, efficient model for visual reasoning, precise computer use, and clear writing, priced between Sol and Luna.
+
+  - &#36;1 input / &#36;5 output per 1M tokens; cached input &#36;0.05; cache writes &#36;1.25 (30m)
+  - Above 272K input tokens, the full request costs &#36;2 / &#36;7.50; cached input &#36;0.10; cache writes &#36;2.50
+  - 1.05M context; 128K max output; text and image input, text output; knowledge cutoff Jun 1, 2026
+  - Reasoning: `none`, `low`, `medium` (default), `high`, `xhigh`, `max`
+  - Function tools require Responses. Chat Completions supports requests without tools. Ultrafast is not offered
+  - [Model reference](https://developers.openai.com/api/docs/models/gpt-6.1-terra), crosschecked against [API pricing](https://developers.openai.com/api/docs/pricing)
+  </Card>
+
   <Card title="gpt-6-sol">
   `openai/gpt-6-sol`
 
@@ -129,7 +142,7 @@ Sol and Luna launched September 22, 2026. Specs and prices verified September 23
 
 ### How long-context and cache pricing is tracked
 
-GPT-6.2 Astra/Sol, GPT-6.1 Sol, GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5/Pro, GPT-5.4 and GPT-5.4 Pro bill the **entire request** at long-context rates once the prompt exceeds **272K input tokens** — including cache reads, cache writes, and output. (GPT-5.5 Pro also has a long-context tier in the pricing table, although its model card omits it; no cache discount is published.) Timbal's collectors decide the tier from the raw prompt size reported by OpenAI (cache hits included; exactly 272K is still short context) and emit distinct usage units so each tier can be priced separately:
+GPT-6.2 Astra/Sol, GPT-6.1 Sol/Terra, GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5/Pro, GPT-5.4 and GPT-5.4 Pro bill the **entire request** at long-context rates once the prompt exceeds **272K input tokens** — including cache reads, cache writes, and output. (GPT-5.5 Pro also has a long-context tier in the pricing table, although its model card omits it; no cache discount is published.) Timbal's collectors decide the tier from the raw prompt size reported by OpenAI (cache hits included; exactly 272K is still short context) and emit distinct usage units so each tier can be priced separately:
 
 | Request | Usage keys on `OutputEvent.usage` |
 | --- | --- |

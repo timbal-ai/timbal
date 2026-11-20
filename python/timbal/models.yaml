@@ -364,6 +364,32 @@ models:
     ultrafast: 6.0
   context_window: 1050000
   capabilities: [vision, tools, reasoning]
+- id: openai/gpt-6.1-terra
+  provider: openai
+  display_name: GPT-6.1 Terra
+  description: OpenAI model for fast, efficient visual reasoning, precise computer use, and clear writing, priced between Sol and Luna.
+  notes: 'Verified 2026-11-20 against the model reference and API pricing (release date not published there). Standard rates
+    per 1M tokens are $1 input, $0.05 cache reads, $1.25 cache writes (30m; 12h writes $2.50), and $5 output. Above 272K
+    input tokens the full request costs $2/$7.50, cached $0.10, cache writes $2.50. Batch/Flex cost 50% of Standard (Flex is
+    being wound down and will not be added to new models); Fast costs 2x; Ultrafast is not offered. Reasoning accepts
+    none, low, medium (default), high, xhigh, max. Tool calling requires Responses; Chat Completions supports text without
+    tools. 1.05M context (922K max input), 128K max output, Jun 1, 2026 knowledge cutoff. Regional processing adds 10%
+    where eligible. ZDR support is not stated on the model page.'
+  input_price: 1.0
+  output_price: 5.0
+  cached_input_price: 0.05
+  cache_write_price: 1.25
+  long_context:
+    threshold: 272000
+    input_price: 2.0
+    output_price: 7.5
+    cached_input_price: 0.1
+    cache_write_price: 2.5
+  service_tiers:
+    flex: 0.5
+    fast: 2.0
+  context_window: 1050000
+  capabilities: [vision, tools, reasoning]
 - id: openai/gpt-6-sol
   provider: openai
   display_name: GPT-6 Sol
