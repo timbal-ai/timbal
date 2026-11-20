@@ -423,8 +423,12 @@ def _tool_calls(context: RunContext, dispatched: list[dict[str, Any]] | tuple = 
     The model's requests come from its stored calls' outputs as well as the agent's memory: a save can land
     between a model call ending and its tool spans (or the memory) being stored. ``dispatched``: the calls the
     session recorded before the agent ran them (``in_flight.dispatched``). One the trace does not show at all
-    (saved before that step, or not since) is unconfirmed too: it may have run.
+    (saved before that step, or not since) is unconfirmed too: it may have run. A ``call_tool`` request
+    (``tool_search="dispatch"``) ran as the tool it names, under that tool's span: the two are one call.
     """
+    from .agent import _CALL_TOOL_FALLBACKS, CALL_TOOL_NAME
+
+    dispatchers = (CALL_TOOL_NAME, *_CALL_TOOL_FALLBACKS)
     root = context.root_span()
     llm_path = f"{root.path}.llm"
     children = [span for span in context._trace.as_records() if span.parent_call_id == root.call_id]
@@ -445,7 +449,12 @@ def _tool_calls(context: RunContext, dispatched: list[dict[str, Any]] | tuple = 
     completed, unconfirmed = [], []
     for request_id, (name, args) in requests.items():
         call = f"{name}({_brief(args, 80)})"
-        span = spans[name].pop(0) if spans.get(name) else None
+        ran = name
+        if name in dispatchers and not spans.get(name) and isinstance(args, dict):
+            target = args.get("name")
+            if isinstance(target, str) and spans.get(target):
+                ran = target
+        span = spans[ran].pop(0) if spans.get(ran) else None
         if request_id in results:
             text = " ".join(b.get("text", "") for b in _blocks(results[request_id], "text")) or "done"
             completed.append(f"{call} → {_brief(text)}")

@@ -754,6 +754,51 @@ class TestRestore:
         assert "Started but not confirmed (each may or may not have run): work({})." in notice
         await restored.close()
 
+    async def test_the_notice_names_a_dispatched_call_once(self, db):
+        """``tool_search="dispatch"``: the model asks for ``call_tool(name=…)`` and the tool runs under its own
+        span. The notice pairs the two, so one call is not listed twice (once completed, once unconfirmed)."""
+        provider, store = db
+        gate = Gate()
+
+        def through_call_tool(messages):
+            if "cut off by a server restart" in last_user_text(messages):
+                return "recovered"
+            results = [m for m in messages if m.role == "tool"]
+            name = "lookup" if not results else "work"
+            return Message(
+                role="assistant",
+                content=[ToolUseContent(id=f"call-{name}", name="call_tool", input={"name": name, "arguments": {}})],
+                stop_reason="tool_use",
+            )
+
+        def agent():
+            return Agent(
+                name="agent",
+                model=TestModel(handler=through_call_tool),
+                tools=[
+                    Tool(name="lookup", handler=lambda: "2 unread", defer_loading=True),
+                    Tool(name="work", handler=gate.work, defer_loading=True),
+                ],
+                tool_search="dispatch",
+                tracing_provider=provider,
+            )
+
+        session = ChatSession(agent(), session_store=store)
+        session.send("go")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        dispatched = (await store.load(session.id)).in_flight["dispatched"]
+        assert [call["name"] for call in dispatched] == ["call_tool", "call_tool"]  # as the model asked for them
+        await crash(session)
+        provider.crashed = False
+
+        restored = await ChatSession.from_store(agent(), store, session.id)
+        notice = restored._wakes[0].text
+        assert notice.count("lookup") == 1 and "→ 2 unread" in notice
+        assert notice.count("work") == 1
+        completed, unconfirmed = notice.split("Started but not confirmed")
+        assert "lookup" in completed and "work" in unconfirmed
+        await restored.close()
+
     async def test_a_turn_that_asked_for_tools_and_left_no_trace_is_not_run_again(self, db):
         """A provider that saves a run at its end (or in the background) holds nothing of a turn cut mid-tool.
         The session stored that the model had asked for tools before any ran: the input is not queued again."""
