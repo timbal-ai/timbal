@@ -479,6 +479,16 @@ def _record_tool_search(span: Any, mode: str, loaded: list[str], query: str | No
 _READ_EVENT, _READ_END, _READ_ERROR = 0, 1, 2
 
 
+def _stores_before_acting(run_context: Any) -> bool:
+    """Whether the run's provider buffers mid-run saves and asks for the run stored before acting tools run."""
+    provider = run_context._tracing_provider
+    if provider is None or not getattr(provider, "store_before_acting", False):
+        return False
+    from ..state.tracing import uploads
+
+    return uploads.durability(provider) == "buffered"
+
+
 class _CallTool(Tool):
     """``call_tool`` (``tool_search="dispatch"``): runs a deferred tool by name.
 
@@ -2690,6 +2700,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         )
 
     @staticmethod
+    def _acts(tools: list[Tool], tool_calls: list[ToolUseContent]) -> bool:
+        """Whether a batch calls any tool that is not declared read-only (unknown names count as acting)."""
+        by_name = {tool.name: tool for tool in tools}
+        return any(not getattr(by_name.get(call.name), "read_only", False) for call in tool_calls)
+
+    @staticmethod
     def _dispatched(tools: list[Tool], tool_call: ToolUseContent) -> ToolUseContent:
         """A ``call_tool`` call as the call it stands for (same id, so its result answers it); else unchanged."""
         if tool_call.name != CALL_TOOL_NAME and tool_call.name not in _CALL_TOOL_FALLBACKS:
@@ -3295,6 +3311,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         denial_limit = self.max_consecutive_denials
         if denial_limit is None:
             denial_limit = math.inf
+        stores_first = _stores_before_acting(run_context)
         tool_policy = run_context._tool_policy
         # Set by ChatSession when a 'now' message arrives: cut the model's answer or the
         # interruptible tools in flight, then steer the message in (see _multiplex_tools).
@@ -4023,6 +4040,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 )
                 if called_unloaded:
                     await self._load_tools(called_unloaded, current_span)
+                if stores_first and self._acts(tools, tool_calls):
+                    # Buffered saves lag the run: store the calls before what they do, so a crash between the
+                    # two can never leave a tool's effects with no record of the call (recovery reads it).
+                    await run_context._save_trace(barrier=True)
                 first_pending: OutputEvent | None = None
                 lost_claim: OutputEvent | None = None
                 if run_context._before_tool_dispatch is not None:
