@@ -219,7 +219,7 @@ class _Handoff:
     reads the trace finds. The entry stays in ``_PREPARING`` until then."""
 
     record: "asyncio.Future"
-    stored: "asyncio.Task | None" = None
+    stored: "asyncio.Future | None" = None
     # True for one that hands on nothing by construction: it only says a strategy of a dropped compaction is
     # still on its worker thread. It keeps another background compaction from starting; nothing waits for it.
     nothing: bool = False
@@ -1969,15 +1969,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         (``_Handoff.nothing``): the turn continuing this one sees a background compaction on its way and starts
         none, but does not wait for it, since no result will come of it."""
         key = (run_context.id, self._path)
-        handoff = _Handoff(record=asyncio.get_running_loop().create_future(), nothing=True)
+        previous = _PREPARING.get(key)
+        if previous is not None and previous.record is until:
+            return
+        handoff = _Handoff(record=until, stored=until, nothing=True)
 
         def over(_until: Any) -> None:
-            if not handoff.record.done():
-                handoff.record.set_result(None)
             if _PREPARING.get(key) is handoff:
                 del _PREPARING[key]
 
-        handoff.stored = until
         until.add_done_callback(over)
         _PREPARING[key] = handoff
 
@@ -2126,8 +2126,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # inline next to it.
             predecessor = _predecessors_handoff(run_context, self._path)
             if predecessor is not None and predecessor.nothing:
-                # A strategy of the turn before is still on its thread: no result to take on, and no other
-                # background compaction until it is back, for this turn or the next.
                 self._hold_background_compaction(run_context, predecessor.record)
                 return
             if predecessor is not None and predecessor.record.done():
@@ -2939,6 +2937,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         run_context = get_run_context()
         assert run_context is not None, "Run context is not initialized"
         current_span = run_context.current_span()
+        if _PREPARING and run_context.parent_id:
+            predecessor = _PREPARING.get((run_context.parent_id, self._path))
+            if predecessor is not None and predecessor.nothing and not predecessor.record.done():
+                # This turn may pause again before it can prepare a handoff for the next one.
+                self._hold_background_compaction(run_context, predecessor.record)
 
         model = kwargs.pop("model", self.model)
 

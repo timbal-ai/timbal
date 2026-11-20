@@ -472,7 +472,12 @@ class TestTheLoopAndTheTurnAreNotHeld:
             paused, events = await go()
             (card,) = [event for event in events if isinstance(event, ApprovalEvent)]
             assert sizes and active == 1 and (paused.id, "agent") in agent_module._PREPARING  # still on its thread
-            resumed, events = await go(parent_id=paused.id, resume={card.approval_id: True})
+            # An unanswered resume parks again while the same worker is still running.
+            parked_again, events = await go(parent_id=paused.id)
+            (reissued,) = [event for event in events if isinstance(event, ApprovalEvent)]
+            assert reissued.approval_id == card.approval_id
+            resumed, events = await go(parent_id=parked_again.id, resume={reissued.approval_id: True})
+            assert root(resumed).status.code == "success"
             await asyncio.sleep(0.05)  # anything the resumed turn started would be at work by now
             assert peak == 1 and len(sizes) == 1
         finally:
