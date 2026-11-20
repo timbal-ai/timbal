@@ -702,8 +702,21 @@
             "pages": ["connect/install-windows", "connect/install-linux-macos"]
           },
           {
+            "group": "Guided setup",
+            "pages": ["connect/guided-setup"]
+          },
+          {
             "group": "Configure and operate",
-            "pages": ["connect/connections", "connect/troubleshooting"]
+            "pages": [
+              "connect/connections",
+              "connect/filesystems",
+              "connect/operate",
+              "connect/troubleshooting"
+            ]
+          },
+          {
+            "group": "Use your data",
+            "pages": ["connect/sync-data", "connect/mcp"]
           }
         ]
       }
