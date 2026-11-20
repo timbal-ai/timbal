@@ -691,9 +691,10 @@ class SessionEvent:
     fired on client text; the receiving run records them. ``lane`` is when a
     turn takes it (:data:`SessionEventLane`); ``mode`` is set on user messages
     only (:data:`UserMessageMode`). ``sent_by`` is set on a user message that a
-    running call's code posted (``{"run_id", "call_id"}``, taken where it is
-    posted): text a tool or a model wrote, not a person, whatever the channel
-    calls it. The message it becomes carries it (``metadata["sent_by"]``), and
+    call's code posted, or a task that code left running (``{"run_id",
+    "call_id"}``, taken where it is posted; ``run_id`` None when the call's run
+    cannot be told): text a tool or a model wrote, not a person, whatever the
+    channel calls it. The message it becomes carries it (``metadata["sent_by"]``), and
     an approval reviewer does not read it as the user's words.
     """
 
@@ -1532,15 +1533,21 @@ class BackgroundTaskStore:
         key = (key or "").strip() or None
         event = SessionEvent(text, key=key, source=source, announce=announce, task_id=task_id, lane=lane, mode=mode)
         if source == "user":
-            # Posted from inside a running call (a tool's code, with text a model may have written): taken
-            # here, in the poster's own context, since the turn that receives it runs elsewhere.
-            from . import get_call_id
+            # Posted by a call's code (a tool, with text a model may have written), or by something that code
+            # started: a call id is ambient there, also in a task the call left running after it ended. Taken
+            # here, in the poster's own context, since the turn that receives it runs elsewhere. (The id a
+            # stream abandoned mid-way leaves in its consumer's task reads the same: a message posted from
+            # that task is then taken for a call's too, which only costs it its standing as evidence.)
+            from . import get_call_id, get_run_context
             from .context import _running_call
 
             call_id = get_call_id()
-            sender = _running_call(call_id)
-            if sender is not None:
-                event.sent_by = {"run_id": str(sender.id), "call_id": call_id}
+            if call_id is not None:
+                sender = _running_call(call_id)
+                if sender is None:
+                    ambient = get_run_context()
+                    sender = ambient if ambient is not None and call_id in ambient._trace else None
+                event.sent_by = {"run_id": str(sender.id) if sender is not None else None, "call_id": call_id}
         loop = self._loop
         if loop is not None and not loop.is_closed() and _running_loop() is not loop:
             loop.call_soon_threadsafe(self._queue_event, event)

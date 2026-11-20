@@ -2,7 +2,7 @@ import asyncio
 import os
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -32,7 +32,7 @@ def _get_logger():
 # What a run without resume values holds. Read-only and shared by every context: a call
 # installs a new mapping (``Runnable._stream``), nothing ever writes into one in place.
 _NO_RESUME_VALUES: MappingProxyType[str, Any] = MappingProxyType({})
-_NOTHING_WAITING: frozenset[str] = frozenset()
+_NOTHING_WAITING: Mapping[str, str] = MappingProxyType({})
 
 # call id -> the run context of every call whose stream has not ended (``Runnable._stream`` keeps it). An ambient
 # call id found here is a call still running, whatever run context is set by now: a run minted under it, or a
@@ -42,6 +42,20 @@ _LIVE_CALLS: "dict[str, RunContext]" = {}
 # The same for a detached call (a background child), from the task that runs its code being made until it ends:
 # its stream is over, its handler is not.
 _DETACHED_CALLS: "dict[str, RunContext]" = {}
+
+
+# Ids of calls whose stream its consumer closed before its end (``GeneratorExit``: an ``async for`` left mid-way
+# is closed by the loop, from another task). Such an id stays behind in the consumer's task, where it means
+# nobody's code. Any other ambient id of a call that has ended can only be a copy in something that call's code
+# started. Bounded: an id matters until the consumer's next run in that task, which clears it.
+_ABANDONED_CALLS: "dict[str, None]" = {}
+_ABANDONED_CALLS_MAX = 4096
+
+
+def _note_abandoned_call(call_id: str) -> None:
+    _ABANDONED_CALLS[call_id] = None
+    if len(_ABANDONED_CALLS) > _ABANDONED_CALLS_MAX:
+        del _ABANDONED_CALLS[next(iter(_ABANDONED_CALLS))]
 
 
 def _running_call(call_id: str | None) -> "RunContext | None":
@@ -286,15 +300,17 @@ class RunContext(BaseModel):
     #   _invoked_by: dict | None — ``{"run_id", "call_id"}`` of the call whose
     #       code started this run (an Agent called inside a tool or step body);
     #       stamped on the root span. Not ``parent_id``: that chains turns.
-    #   _invoker: (RunContext, call_id) | None — the run and the call whose code started this
-    #       one: set when the run's root span is minted while a call still running is ambient
-    #       (``Runnable._LIVE_CALLS``: an Agent called inside a tool or step body, forked or on
-    #       a context the handler built and set), or by a background child after its turn
-    #       ended. The way up the call chain across runs: an approval reviewer follows it to
-    #       the agent the person talks to, since this run's own root agent got its prompt from
-    #       that call's code. ``_invoked_by`` is the fork's link as ids, for the trace
-    #   _parent_pending: (parent_id, frozenset[approval_id]) | None — the approvals the run this
-    #       one continues left waiting, read once when a gate asks (``_left_waiting``)
+    #   _invoker: (RunContext | None, call_id) | None — the run and the call whose code started
+    #       this one: set when the run's root span is minted while a call is ambient that is
+    #       still running (``_LIVE_CALLS`` / ``_DETACHED_CALLS``: an Agent called inside a tool
+    #       or step body, forked or on a context the handler built and set; a background
+    #       child), or that has ended other than by its stream being left mid-way (a task it
+    #       left running; ``_ABANDONED_CALLS``). The run is None when it cannot be told. The
+    #       way up the call chain across runs: an approval reviewer follows it to the agent the
+    #       person talks to, since this run's own root agent got its prompt from that call's
+    #       code. ``_invoked_by`` is the fork's link as ids, for the trace
+    #   _parent_pending: (parent_id, {approval_id: run it first waited in}) | None — the approvals
+    #       the run this one continues left waiting, read once when a gate asks (``_left_waiting``)
     #   _live_background: int — background work (spawned tasks, handed-off
     #       continuations) running on this context; it can outlive the root run.
     # Do not add class-level annotations for them — pydantic would turn any
@@ -623,10 +639,14 @@ class RunContext(BaseModel):
                     self._session_data.update(root_span.session)
         return self._session_data
 
-    async def _left_waiting(self) -> "frozenset[str] | None":
+    async def _left_waiting(self) -> "Mapping[str, str] | None":
         """The approvals the run this one continues left waiting: this run is running those calls again, and so
         may any other run continuing the same one, with resume values or without. Empty when it left none (or
         this run continues nothing); None when that cannot be told.
+
+        Each with the run it first waited in, which is what a claim on it is made under: a gate a partial resume
+        carried forward (answered one, asked again for the other) still waits in the run before as well, and
+        runs continuing either must claim the same thing.
 
         Read from the parent's trace, once per run, when a gate first asks (never with a provider that keeps no
         claims: there is nothing to decide). Read with ``get_strict``: the built-in providers' ``get`` answers a
@@ -650,11 +670,11 @@ class RunContext(BaseModel):
                     error=str(e),
                 )
                 return None
-            waiting = frozenset(
-                approval["id"]
+            waiting = {
+                approval["id"]: str(approval.get("pending_since") or parent_id)
                 for span in (trace.values() if trace is not None else ())
                 if (approval := _waiting_approval(span))
-            )
+            }
             known = self.__dict__["_parent_pending"] = (parent_id, waiting)
         return known[1]
 

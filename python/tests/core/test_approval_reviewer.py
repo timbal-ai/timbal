@@ -181,11 +181,12 @@ def charge_and_transfer(provider, review):
     return go, charges, transfers
 
 
-# A run is known to be started by a call's code when its root is minted while that call is still running and
-# ambient (an agent called in a tool or step body, whatever run context the handler set), or by a background
-# child; a message posted to a chat session, where it is posted. One way leaves nothing to read: a plain task a
-# tool left running, calling an agent once the tool has returned and its turn has ended. The reviewer then takes
-# a model's or code's text for the user's. Kept as a failing test so it is not forgotten.
+# A run is known to be started by a call's code when its root is minted while that call's id is ambient: the
+# call still running (an agent called in a tool or step body, whatever run context the handler set; a
+# background child), or ended with a task it left running. A message posted to a chat session, where it is
+# posted. One case reads otherwise: the id of a call whose stream was left mid-way stays behind in its
+# consumer's task, where it is nobody's code, so a task started by a tool whose own stream was then cut is
+# taken for that consumer. The reviewer then reads a model's text as the user's. Kept as a failing test.
 known_gap = pytest.mark.xfail(strict=True, reason="approval evidence: a run started by a call's code, unseen")
 
 
@@ -650,6 +651,35 @@ class TestDelegation:
         assert request.user_messages == ["please charge me 5 euros"]
         assert request.delegation is None and request.attended
 
+    async def test_a_task_a_tool_left_running_posts_to_a_session_as_that_tool(self):
+        """The tool has returned, and its turn has ended, when the task it started sends the worker's session a
+        message: who posted it does not depend on the call still running."""
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+        turn_over, started, receipts = asyncio.Event(), [], []
+        async with ChatSession(worker) as desk:
+
+            async def later(task: str) -> None:
+                await turn_over.wait()
+                receipts.append(desk.send(task))
+
+            async def delegate(task: str) -> str:
+                """Start a job that will ask the billing desk later."""
+                started.append(asyncio.create_task(later(task)))
+                return "started"
+
+            context, _, _ = await run(delegating_agent(delegate), prompt="what is my balance?")
+            turn_over.set()
+            await asyncio.gather(*started)
+            async for item in desk.events():
+                if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                    break
+        (request,) = seen
+        assert request.user_messages == [] and request.delegation == "charge 500 euros"
+        assert not request.attended and charges.made == []
+        tool_span = next(s for s in context._trace.as_records() if s.path == "agent.delegate")
+        assert receipts[0].sent_by == {"run_id": context.id, "call_id": tool_span.call_id}
+
     def test_a_persons_messages_are_never_batched_with_a_tools(self):
         """One turn's prompt is one message: a person's words joined with a tool's would no longer be cited as
         theirs (a retraction read as part of the tool's request). The leading ones that share a sender go."""
@@ -814,6 +844,37 @@ class TestDelegation:
         assert not request.attended and charges.made == []
 
     @known_gap
+    async def test_a_task_started_by_a_tool_whose_stream_was_cut_is_delegated(self):
+        """A streaming tool starts a task; its consumer leaves the stream mid-way (a client going away); the task
+        then calls the worker. The tool's id reads as one an abandoned stream left behind."""
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+        cut, jobs = asyncio.Event(), []
+
+        async def later(task: str) -> None:
+            await cut.wait()
+            await worker(prompt=task).collect()
+
+        async def delegate(task: str):
+            """Start the billing job and stream its progress."""
+            jobs.append(asyncio.create_task(later(task)))
+            yield "started"
+            await asyncio.sleep(30)
+            yield "still going"
+
+        set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+        async for event in delegating_agent(delegate)(prompt="what is my balance?"):
+            if event.path == "agent.delegate" and event.type != "START":
+                break  # the client went away
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        await asyncio.sleep(0.05)
+        cut.set()
+        await asyncio.gather(*jobs)
+        (request,) = seen
+        assert "charge 500 euros" not in request.user_messages
+
     async def test_an_agent_in_a_task_a_tool_left_running_is_delegated(self):
         """The tool has returned and its turn has ended when the task it started calls the worker: still that
         tool's doing (while the turn runs, the call is seen: the run is forked from it)."""
@@ -1203,6 +1264,37 @@ class TestReviewerGaps:
         assert won.status.code == "success"
         assert (lost.status.code, lost.status.reason) == ("cancelled", "approval_already_claimed")
         assert [s.path for s in lost_context._trace.as_records()] == ["agent", "agent.charge"]  # no model call
+
+    @pytest.mark.parametrize("answered_by", ["the reviewer", "a person"])
+    async def test_a_gate_carried_through_a_partial_resume_is_claimed_once(self, tmp_path, answered_by):
+        """Two gates wait. A resume answers the charge only: the transfer is asked again, and now waits in both
+        the first run and the partial resume. Continuing both must not run it twice: it is claimed under the
+        run it first waited in, whichever of the two is continued, and whoever answers."""
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        approving = False
+        go, charges, transfers = charge_and_transfer(
+            SqliteTracingProvider.configured(_path=tmp_path / "t.db"),
+            lambda r: "approve" if approving and r.tool == "transfer" else "escalate",
+        )
+        first, events = await go()
+        cards = {e.path.rsplit(".", 1)[-1]: e for e in events if isinstance(e, ApprovalEvent)}
+        partial, events = await go(parent_id=first.id, resume={cards["charge"].approval_id: True})
+        (asked_again,) = [e for e in events if isinstance(e, ApprovalEvent)]
+        assert charges.made == [5] and asked_again.approval_id == cards["transfer"].approval_id
+        carried = next(s for s in partial._trace.as_records() if s.path == "agent.transfer")
+        assert carried.metadata["approval"]["pending_since"] == first.id
+
+        if answered_by == "the reviewer":
+            approving, answer = True, {}
+        else:
+            answer = {"resume": {cards["transfer"].approval_id: True}}
+        await go(parent_id=first.id, **answer)
+        lost, _ = await go(parent_id=partial.id, **answer)
+        assert transfers == [7]
+        assert next(s for s in lost._trace.as_records() if s.path == "agent.transfer").status.reason == (
+            "approval_already_claimed"
+        )
 
     async def test_a_lost_gate_does_not_cut_a_call_this_run_claimed(self, tmp_path):
         """A paused pair, and another continuation already took the transfer. This run claims the charge and is

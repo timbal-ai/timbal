@@ -45,7 +45,15 @@ from ..state import (
     set_parent_call_id,
     set_run_context,
 )
-from ..state.context import _DETACHED_CALLS, _LIVE_CALLS, RunContext, _EmitSink, _running_call
+from ..state.context import (
+    _ABANDONED_CALLS,
+    _DETACHED_CALLS,
+    _LIVE_CALLS,
+    RunContext,
+    _EmitSink,
+    _note_abandoned_call,
+    _running_call,
+)
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
 from ..state.tracing.providers import TRACING_UNSET
 from ..state.tracing.span import Span
@@ -1524,8 +1532,12 @@ class Runnable(ABC, BaseModel):
             """Claim the gate for this run; False (and the span closed as already claimed) when another run did."""
             if run_context._tracing_provider is None:
                 return True
+            # Under the run the gate first waited in, not always the one this run continues: a partial resume
+            # carries an unanswered gate forward, and it then waits in both runs. Runs continuing either one
+            # must be after the same claim.
+            waiting = await run_context._left_waiting()
             claimed = await run_context._tracing_provider.claim_approval(
-                str(run_context.parent_id) if run_context.parent_id else None,
+                (waiting or {}).get(approval_id) or (str(run_context.parent_id) if run_context.parent_id else None),
                 approval_id,
                 str(run_context.id),
             )
@@ -1586,6 +1598,11 @@ class Runnable(ABC, BaseModel):
                     )
 
         if approval_resolution is None:
+            # Waiting again in a run that continues one it already waited in: it keeps the run it first
+            # waited in (see ``_claim``), for whoever continues this run to claim it under.
+            carried = (await run_context._left_waiting() or {}).get(approval_id)
+            if carried is not None:
+                span.metadata["approval"]["pending_since"] = carried
             # Status/output MUST be set BEFORE the caller yields the event.
             # If the consumer breaks the stream right after seeing the
             # ApprovalEvent, GeneratorExit fires at the yield and we'd
@@ -1739,11 +1756,12 @@ class Runnable(ABC, BaseModel):
             if above is None:
                 if top_context._invoker is None:
                     break
-                top_context, invoking_call_id = top_context._invoker
-                above = top_context._trace.get(invoking_call_id)
+                invoking_context, invoking_call_id = top_context._invoker
+                above = invoking_context._trace.get(invoking_call_id) if invoking_context is not None else None
                 if above is None:
                     outermost = None  # the call that started this run cannot be found: nobody to cite
                     break
+                top_context = invoking_context
             top_span = above
             if isinstance(top_span.memory, list):
                 outermost = top_span
@@ -2280,12 +2298,20 @@ class Runnable(ABC, BaseModel):
                 # context the handler built and set, or with none set. If that call is still running (or
                 # detached, its code still running), its code started this run all the same.
                 invoking = _running_call(_entry_call_id)
-                if invoking is not None:
+                if invoking is None and _entry_call_id not in _ABANDONED_CALLS:
+                    # The call has ended, and not by its stream being left mid-way (that leaves its id in
+                    # the consumer's task, where it is nobody's code): its id is ambient here because
+                    # something its code started is still going, a task it left running. Its run is the
+                    # context that task carries, when that holds the call.
+                    held = _entry_run_context is not None and _entry_call_id in _entry_run_context._trace
+                    run_context.__dict__["_invoker"] = (_entry_run_context if held else None, _entry_call_id)
+                    invoking = _entry_run_context if held else None
+                elif invoking is not None:
                     run_context.__dict__["_invoker"] = (invoking, _entry_call_id)
-                    if run_context._tool_policy is None:
-                        # Its tools are the caller's run's here too: a read-only tool cannot run an agent
-                        # with write tools by building it a context of its own.
-                        _inherit_tool_policy(run_context, invoking, _entry_call_id)
+                if invoking is not None and run_context._tool_policy is None:
+                    # Its tools are the caller's run's here too: a read-only tool cannot run an agent
+                    # with write tools by building it a context of its own.
+                    _inherit_tool_policy(run_context, invoking, _entry_call_id)
             if run_context._invoked_by is not None:
                 metadata["invoked_by"] = run_context._invoked_by
             if run_context._tool_policy is not None:
@@ -2615,6 +2641,7 @@ class Runnable(ABC, BaseModel):
 
         except GeneratorExit:
             _generator_closed = True
+            _note_abandoned_call(_new_call_id)
             # Only overwrite status if no earlier branch (e.g. approval gate)
             # already set it. This keeps approval_required, early_exit etc.
             # intact when a consumer breaks the stream right after their event.
