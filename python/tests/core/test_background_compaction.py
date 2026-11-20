@@ -130,6 +130,16 @@ async def settled(context):
         await handoff.stored
 
 
+async def no_compaction_left():
+    """Wait until nothing is registered as on its way any more (entries leave on a callback, a tick after what
+    they wait for is done), and say whether that happened."""
+    for _ in range(200):
+        if not agent_module._PREPARING:
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
 async def test_the_summarizer_sends_no_temperature(monkeypatch):
     """Claude Haiku 5.5 rejects ``temperature`` ("deprecated for this model"): summarize() must not send one."""
     from timbal.core import llm
@@ -467,9 +477,67 @@ class TestTheLoopAndTheTurnAreNotHeld:
             assert peak == 1 and len(sizes) == 1
         finally:
             release.set()
-        for handoff in list(agent_module._PREPARING.values()):
-            await handoff.stored
-        assert active == 0 and not agent_module._PREPARING
+        assert await no_compaction_left() and active == 0
+
+    async def test_a_strategy_still_on_its_thread_is_not_waited_for(self, monkeypatch):
+        """A turn fails while its background compaction is at work on a worker thread. The next turn starts at
+        the hard ratio: it does not wait for that thread, which will hand on nothing, before going on."""
+        import threading
+
+        release, calls = threading.Event(), []
+
+        def slow(memory):
+            calls.append(len(memory))
+            if len(calls) == 1:
+                release.wait(timeout=3)  # the background one, still at work when its turn fails
+            return memory if len(memory) <= 3 else memory[-2:]
+
+        def model(messages):
+            if messages[-1].role == "user" and messages[-1].collect_text() == "again":
+                return "again done"
+            results = sum(1 for message in messages if message.role == "tool")
+            if results < 4:  # the fourth step runs with 7 messages behind it: the compaction is at work by then
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id=f"s{results}", name="step", input={})],
+                    stop_reason="tool_use",
+                )
+            raise RuntimeError("the provider went away")
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=model),
+            tools=[Tool(name="step", handler=step)],
+            tracing_provider=InMemoryTracingProvider,
+            memory_compaction=slow,
+            memory_compaction_prepare_ratio=0.3,
+            max_iter=30,
+        )
+        try:
+            failed = RunContext(tracing_provider=InMemoryTracingProvider)
+            set_run_context(failed)
+            output = await agent(prompt="go").collect()
+            set_run_context(None)
+            assert output.status.code == "error" and (failed.id, "agent") in agent_module._PREPARING
+            real = Agent._take_prepared
+
+            async def at_the_limit(self, run_context, source, memory, model, incoming):
+                monkeypatch.setattr(Agent, "_context_utilization", lambda *_args: 0.8)  # does not fit as it is
+                try:
+                    return await real(self, run_context, source, memory, model, incoming)
+                finally:
+                    monkeypatch.setattr(
+                        Agent, "_context_utilization", lambda _s, _m, messages, _x: 0.05 * len(messages)
+                    )
+
+            monkeypatch.setattr(Agent, "_take_prepared", at_the_limit)
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            await run(agent, prompt="again", parent_id=failed.id)
+            assert loop.time() - started < 1.0 and not release.is_set()  # went on while the thread was still out
+        finally:
+            release.set()
+        assert await no_compaction_left()
 
 
 class TestNextTurn:

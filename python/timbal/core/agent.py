@@ -220,6 +220,9 @@ class _Handoff:
 
     record: "asyncio.Future"
     stored: "asyncio.Task | None" = None
+    # True for one that hands on nothing by construction: it only says a strategy of a dropped compaction is
+    # still on its worker thread. It keeps another background compaction from starting; nothing waits for it.
+    nothing: bool = False
 
 
 @dataclass(eq=False)
@@ -1953,25 +1956,30 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     def _drop_prepared(self, run_context: Any, prepared: "_Prepared") -> bool:
         """Cancel a prepared compaction that will not be used. True when a strategy of it is still running on a
         worker thread: cancelling does not reach it, so until it returns it is still this session's background
-        compaction. It is kept under this run like one being handed on (it hands on nothing), and neither this
-        turn nor the one that continues it starts another next to it."""
+        compaction, and neither this turn nor the one that continues it starts another next to it."""
         prepared.task.cancel()
         running = [worker for worker in prepared.workers if not worker.done()]
         if not running:
             return False
-        key = (run_context.id, self._path)
-        handoff = _Handoff(record=asyncio.get_running_loop().create_future())
+        self._hold_background_compaction(run_context, asyncio.gather(*running))
+        return True
 
-        def returned(_all: Any) -> None:
+    def _hold_background_compaction(self, run_context: Any, until: "asyncio.Future") -> None:
+        """Keep an entry under this run until ``until`` is done, as a handoff that hands on nothing
+        (``_Handoff.nothing``): the turn continuing this one sees a background compaction on its way and starts
+        none, but does not wait for it, since no result will come of it."""
+        key = (run_context.id, self._path)
+        handoff = _Handoff(record=asyncio.get_running_loop().create_future(), nothing=True)
+
+        def over(_until: Any) -> None:
             if not handoff.record.done():
                 handoff.record.set_result(None)
             if _PREPARING.get(key) is handoff:
                 del _PREPARING[key]
 
-        handoff.stored = asyncio.gather(*running)
-        handoff.stored.add_done_callback(returned)
+        handoff.stored = until
+        until.add_done_callback(over)
         _PREPARING[key] = handoff
-        return True
 
     def _swap_prepared(self, current_span: Any, prepared: "_Prepared", run_context: Any) -> bool:
         """Put a finished prepared compaction in place of the history it covered, when that is still there."""
@@ -2117,6 +2125,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # this turn ends at the hard ratio: the next one then waits for that result rather than compacting
             # inline next to it.
             predecessor = _predecessors_handoff(run_context, self._path)
+            if predecessor is not None and predecessor.nothing:
+                # A strategy of the turn before is still on its thread: no result to take on, and no other
+                # background compaction until it is back, for this turn or the next.
+                self._hold_background_compaction(run_context, predecessor.record)
+                return
             if predecessor is not None and predecessor.record.done():
                 # Already there: taken on only if it still covers this history as stored (loading may have
                 # cleaned a message of it). If not, this turn prepares its own, as with none.
@@ -2207,6 +2220,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """
         record = None
         handoff = _PREPARING.get((run_context.parent_id, self._path))
+        if handoff is not None and handoff.nothing:
+            handoff = None  # no result will come of it: nothing to wait for, nothing to take later
         if handoff is not None and not handoff.record.done():
             measurement = (source.metadata or {}).get("context_measurement") if source is not None else None
             # With the prompt this turn adds: it is what the first call sends.
