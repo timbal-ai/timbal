@@ -112,7 +112,7 @@ output:
 |-----------|------|-------------|
 | value | list \| string \| dict | Criteria list, a markdown rubric (bullet lines become criteria), or a dict with options |
 | pass_threshold | float | Weighted fraction of criteria that must pass. Default `1.0` (all) |
-| model | string | Judge model. Default `openai/gpt-6.1-terra` |
+| model | string | Judge model. Default `anthropic/claude-haiku-5-5` |
 | context | string | Optional task description shown to every judge |
 
 When the rubric fails, the eval report lists **every failing criterion with the judge's reason** — you see exactly which requirement broke, not a single opaque fail.
@@ -433,7 +433,7 @@ output:
 
 ## Choosing Models
 
-LLM validators use Timbal agents under the hood. By default they use `openai/gpt-6.1-terra`, but you can override the model per-validator in YAML.
+LLM validators use Timbal agents under the hood. By default they use `anthropic/claude-haiku-5-5`, but you can override the model per-validator in YAML.
 
 ```yaml
 output:
