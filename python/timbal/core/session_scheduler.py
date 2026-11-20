@@ -540,6 +540,14 @@ class SessionScheduler:
                 owner._return_to_asker()
             self._notify()
 
+    def not_waiting(self, run_id: str) -> None:
+        """The head ``run_id`` holds no question this channel can find (its stored trace is not parked,
+        or holds nothing of it): turns may start on it, and a call may be lent the session."""
+        if self.head == run_id and self.head_parked:
+            self.head_parked = False
+            self._notify()
+            self._maybe_lend()
+
     @contextlib.contextmanager
     def holding(self) -> Iterator[None]:
         """Keep queued turns waiting while the owner cuts its own turn to start another.

@@ -1,6 +1,7 @@
 """One conversation typed in a ChatSession and spoken on a VoiceSession call at the same time."""
 
 import asyncio
+import contextvars
 
 import pytest
 from timbal import Agent
@@ -30,6 +31,18 @@ async def _turns(chat: ChatSession, n: int) -> None:
     await _until(lambda: chat.turns >= n and not chat.busy)
 
 
+async def _said(call: VoiceSession, events: list[VoiceSessionEvent], text: str, timeout: float = 5.0) -> None:
+    """The call said ``text``, and that turn is over.
+
+    Not the text alone: it is announced before the turn has ended (its run recorded as the call's last,
+    the session free for the next utterance), and how long that takes differs by machine. A step that
+    follows on the text may find the turn still going: an utterance injected then is not a new turn, and
+    ``_last_run_context`` is still the turn before.
+    """
+    await _until(lambda: text in _texts(events), timeout)
+    await _until(lambda: call._current_turn_task is None or call._current_turn_task.done(), timeout)
+
+
 class TestCallJoinsAChat:
     async def test_one_line_across_both_channels(self) -> None:
         model = _Model("Hola por chat.", "Hola por voz.", "Otra vez por chat.")
@@ -40,7 +53,7 @@ class TestCallJoinsAChat:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
                 await _until(lambda: call._current_turn_task is None or call._current_turn_task.done())
                 chat.send("escrito 2")
                 await _turns(chat, 2)
@@ -65,11 +78,11 @@ class TestTheCallHasTheSessionWhileLive:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 assert chat._scheduler.lent
                 await call.notify("informe listo")
-                await _until(lambda: "El informe está listo." in _texts(events))
+                await _said(call, events, "El informe está listo.")
 
             await _run(call, stt, drive)
             assert chat.turns == 1  # the call spoke the event; the chat started nothing
@@ -90,13 +103,13 @@ class TestTheCallHasTheSessionWhileLive:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 chat.send("escrito 2")
                 await _turns(chat, 2)
                 assert "Respondido por chat." not in _texts(events)  # answered in the chat, not spoken
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-                await _until(lambda: "Visto por voz." in _texts(events))
+                await _said(call, events, "Visto por voz.")
 
             await _run(call, stt, drive)
 
@@ -121,7 +134,7 @@ class TestBothBusy:
                 await asyncio.sleep(0.3)
                 assert len(model.calls) == 1  # the caller's turn waits for the chat's
                 model.opened.set()
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
 
             await _run(call, stt, drive)
 
@@ -144,7 +157,7 @@ class TestBothBusy:
                 # Not started: what the caller's turn ends on (a question) decides whether it may.
                 assert not chat.busy and len(chat.pending_messages()) == 1
                 model.opened.set()
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
                 await _turns(chat, 2)
 
             await _run(call, stt, drive)
@@ -161,7 +174,7 @@ class TestChatOpensOnACall:
         async def drive(events: list[VoiceSessionEvent]) -> None:
             await call.notify("dato de la app", announce="silent")  # the call owns a store now
             await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-            await _until(lambda: "Hola por voz." in _texts(events))
+            await _said(call, events, "Hola por voz.")
             await _until(lambda: call._current_turn_task.done())
             chat = ChatSession(_agent(model), parent_id=call._last_run_context.id)
             chats.append(chat)
@@ -169,7 +182,7 @@ class TestChatOpensOnACall:
             chat.send("escrito 1")
             await _turns(chat, 1)
             await call.notify("aviso")
-            await _until(lambda: "Aviso por voz." in _texts(events))
+            await _said(call, events, "Aviso por voz.")
 
         await _run(call, stt, drive)
         chat = chats[0]
@@ -187,14 +200,14 @@ class TestChatOpensOnACall:
 
         async def drive(events: list[VoiceSessionEvent]) -> None:
             await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-            await _until(lambda: "Hola por voz." in _texts(events))
+            await _said(call, events, "Hola por voz.")
             await _until(lambda: call._current_turn_task.done())
             async with ChatSession(_agent(model), parent_id=call._last_run_context.id) as chat:
                 chat.send("escrito 1")
                 await _turns(chat, 1)
                 seen_chat.append(chat.last_status)
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-                await _until(lambda: "Otra vez por voz." in _texts(events))
+                await _said(call, events, "Otra vez por voz.")
 
         await _run(call, stt, drive)
         assert _seen(model.calls[1])[-3:] == ["hablado 1", "Hola por voz.", "escrito 1"]
@@ -255,7 +268,7 @@ class TestAQuestionWaitsInTheChat:
                 chat.resume({_approval(chat): True})
                 await _turns(chat, 2)
                 # Answered: the call has the session now, and speaks the event the question held back.
-                await _until(lambda: "El informe está listo." in _texts(events))
+                await _said(call, events, "El informe está listo.")
                 assert _owner(chat) is call._scheduler and chat._scheduler.lent
 
             await _run(call, stt, drive)
@@ -279,7 +292,7 @@ class TestAQuestionWaitsInTheChat:
                 assert len(model.calls) == 1 and chat.parked and not _asked(events)
                 assert _owner(chat) is chat._scheduler
                 chat.resume({_approval(chat): True})
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
                 assert not _asked(events)
 
             await _run(call, stt, drive)
@@ -297,7 +310,7 @@ class TestAQuestionWaitsInTheChat:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 chat.send("paga")
                 await _until(lambda: chat.parked)
@@ -307,7 +320,7 @@ class TestAQuestionWaitsInTheChat:
                 await _until(lambda: chat._scheduler.other_turn_active)
                 assert len(model.calls) == 3 and not _asked(events)
                 chat.resume({_approval(chat): True})
-                await _until(lambda: "Visto por voz." in _texts(events))
+                await _said(call, events, "Visto por voz.")
                 # Answered, and the call's turn has run: lent again.
                 await _until(lambda: _owner(chat) is call._scheduler)
 
@@ -357,7 +370,7 @@ class TestAQuestionWaitsInTheChat:
                 await _until(lambda: chat._scheduler.other_turn_active)
                 assert _owner(chat) is chat._scheduler and len(model.calls) == 1 and not _asked(events)
                 chat.resume({_approval(chat): True})
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
 
             await _run(call, stt, drive)
 
@@ -400,7 +413,7 @@ class TestACallWithNoStoreOfItsOwn:
 
         async def drive(events: list[VoiceSessionEvent]) -> None:
             await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-            await _until(lambda: "Hola por voz." in _texts(events))
+            await _said(call, events, "Hola por voz.")
             await _until(lambda: call._current_turn_task.done())
             assert call._scheduler.store is None
             async with ChatSession(_agent(model, tools), parent_id=call._last_run_context.id) as chat:
@@ -410,7 +423,7 @@ class TestACallWithNoStoreOfItsOwn:
                 await _until(lambda: chat._scheduler.other_turn_active)
                 assert chat.parked and not _asked(events) and len(model.calls) == 2
                 chat.resume({_approval(chat): True})
-                await _until(lambda: "Visto por voz." in _texts(events))
+                await _said(call, events, "Visto por voz.")
 
         await _run(call, stt, drive)
         assert tools[0].runs == ["wired"]
@@ -433,7 +446,7 @@ class TestACallWithNoStoreOfItsOwn:
                 await _until(lambda: chat._scheduler.other_turn_active)
                 assert chat.parked and not _asked(events) and len(model.calls) == 1
                 chat.resume({_approval(chat): True})
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
 
         await _run(call, stt, drive)
         assert tools[0].runs == ["wired"]
@@ -445,13 +458,13 @@ class TestACallWithNoStoreOfItsOwn:
 
         async def drive(events: list[VoiceSessionEvent]) -> None:
             await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-            await _until(lambda: "Hola por voz." in _texts(events))
+            await _said(call, events, "Hola por voz.")
             await _until(lambda: call._current_turn_task.done())
             async with ChatSession(_agent(model), parent_id=call._last_run_context.id) as chat:
                 chat.send("escrito 1")
                 await _turns(chat, 1)
                 await call.notify("aviso")
-                await _until(lambda: "Aviso por voz." in _texts(events))
+                await _said(call, events, "Aviso por voz.")
                 # One session, not a second store for the call next to the chat's.
                 assert call._scheduler.store is chat.store
                 chat.send("escrito 2")
@@ -467,17 +480,17 @@ class TestACallWithNoStoreOfItsOwn:
 
         async def drive(events: list[VoiceSessionEvent]) -> None:
             await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-            await _until(lambda: "Voz uno." in _texts(events))
+            await _said(call, events, "Voz uno.")
             await _until(lambda: call._current_turn_task.done())
             first_run = call._last_run_context.id
             await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-            await _until(lambda: "Voz dos." in _texts(events))
+            await _said(call, events, "Voz dos.")
             await _until(lambda: call._current_turn_task.done())
             # A client that had only seen the first reply: its chat branches from there, as a plain
             # run on that id would. The call goes on from its own last turn.
             async with ChatSession(_agent(model), parent_id=first_run) as chat:
                 await call.notify("aviso")
-                await _until(lambda: "Aviso por voz." in _texts(events))
+                await _said(call, events, "Aviso por voz.")
                 assert call._scheduler.store is not chat.store and _owner(chat) is chat._scheduler
 
         await _run(call, stt, drive)
@@ -700,7 +713,7 @@ class TestAQuestionWaitsOnTheCall:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 # One chat per session, as when the chat owns it: the call hands it back to one channel.
                 with pytest.raises(RuntimeError):
@@ -734,6 +747,169 @@ class TestAQuestionWaitsOnTheCall:
         assert tools[0].runs == ["wired"] and chats[0].last_status["code"] == "success"
 
 
+class _Elsewhere(InMemoryTracingProvider):
+    """A trace store of its own: what is stored here, a session reading the default one does not find."""
+
+    _storage: dict = {}
+
+
+class _Flaky(InMemoryTracingProvider):
+    """A trace store whose strict reads fail while ``down``."""
+
+    _storage: dict = {}
+    down = False
+
+    @classmethod
+    async def get_strict(cls, run_context):
+        if cls.down:
+            raise ConnectionError("trace store away")
+        return await super().get_strict(run_context)
+
+
+class TestAQuestionTheChatCannotRead:
+    """The call hung up on its question, and the chat cannot load the run that asked."""
+
+    async def test_a_run_it_does_not_find_does_not_hold_it(self) -> None:
+        # The call's runs are stored where the chat does not read. Nothing the chat starts can be taken
+        # for that run's answer (its own turns read the same store and find no question either), and
+        # nobody could answer it from here: the session goes on.
+        tools = _wire()
+        model = _Model("Hola por chat.", _tool_call("wire_money"), "Visto por chat.")
+        async with ChatSession(_agent(model, tools)) as chat:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            call, stt = _call(model, tools, provider=_Elsewhere, parent_run_id=chat.head)
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="paga"))
+                await _until(lambda: bool(_asked(events)))
+                await _until(lambda: call._current_turn_task.done())
+
+            await _run(call, stt, drive)
+            await _until(lambda: _owner(chat) is chat._scheduler)
+            chat.send("escrito 2")
+            await _turns(chat, 2)
+            assert not chat.parked and chat.last_status["code"] == "success"
+
+        assert tools[0].runs == [] and _seen(model.calls[2])[-1] == "escrito 2"
+
+    async def test_a_run_it_cannot_read_yet_is_asked_for_again(self) -> None:
+        _Flaky.down = False
+        tools = _wire()
+        model = _Model("Hola por chat.", _tool_call("wire_money"), "Hecho.")
+        async with ChatSession(_agent(model, tools, provider=_Flaky)) as chat:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            call, stt = _call(model, tools, provider=_Flaky, parent_run_id=chat.head)
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="paga"))
+                await _until(lambda: bool(_asked(events)))
+                await _until(lambda: call._current_turn_task.done())
+                _Flaky.down = True
+
+            await _run(call, stt, drive)
+            await _until(lambda: _owner(chat) is chat._scheduler)
+            chat.send("escrito 2")
+            await asyncio.sleep(0.3)
+            # Unreadable is not "no question": a turn now could be taken for the approval's answer.
+            assert chat.turns == 1 and not chat.parked and len(chat.pending_messages()) == 1
+            _Flaky.down = False
+            # Nothing new arrives: the session asks again by itself, and has the question.
+            await _until(lambda: chat.parked)
+            chat.resume({_approval(chat): True})
+            await _turns(chat, 2)
+
+        assert tools[0].runs == ["wired"] and _seen(model.calls[2])[-1] == "escrito 2"
+
+    async def test_a_run_stored_late_is_its_question_again_before_a_turn_starts_on_it(self, tmp_path) -> None:
+        # The trace store refuses every save during the call's last turn, so the chat finds nothing of
+        # the run that asked and goes on. Its end is stored afterwards (a provider sends a failed save
+        # again): the next turn would read it parked and be taken for the answer.
+        slow = 30.0
+        provider = _LateJsonl.configured(_path=tmp_path / "traces.jsonl")
+        provider.failing = False
+        tools = _wire()
+        model = _Model("Hola por chat.", _tool_call("wire_money"), "Hecho.")
+        async with ChatSession(_agent(model, tools, provider=provider)) as chat:
+            chat.send("escrito 1")
+            await _until(lambda: chat.turns >= 1 and not chat.busy, slow)
+            call, stt = _call(model, tools, provider=provider, parent_run_id=chat.head)
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                provider.failing = True
+                await stt.inject(TranscriptEvent(type="committed", text="paga"))
+                await _until(lambda: bool(_asked(events)), slow)
+                await _until(lambda: call._current_turn_task.done(), slow)
+
+            await _run(call, stt, drive, timeout=4 * slow)
+            provider.failing = False
+            await _until(lambda: _owner(chat) is chat._scheduler and not chat._scheduler.head_parked, slow)
+            assert not chat.parked
+            await call._last_run_context._save_trace(barrier=True)  # the save that failed, sent again
+            chat.send("escrito 2")
+            # Read again before the turn: the question is there now, and is the chat's to answer.
+            await _until(lambda: chat.parked, slow)
+            assert chat.turns == 1 and len(chat.pending_messages()) == 1
+            chat.resume({_approval(chat): True})
+            await _until(lambda: chat.turns >= 2 and not chat.busy, slow)
+
+        assert tools[0].runs == ["wired"] and _seen(model.calls[2])[-1] == "escrito 2"
+
+    async def test_a_run_stored_late_brings_the_session_back_from_the_next_call(self, tmp_path) -> None:
+        # As above, and a second call has the session by the time the run's end is stored: what is
+        # typed would chain onto that run at the call. The chat reads it first and takes the session
+        # back for the question.
+        slow = 30.0
+        provider = _LateJsonl.configured(_path=tmp_path / "traces.jsonl")
+        provider.failing = False
+        tools = _wire()
+        model = _Model("Hola por chat.", _tool_call("wire_money"), "Hecho.")
+        async with ChatSession(_agent(model, tools, provider=provider)) as chat:
+            chat.send("escrito 1")
+            await _until(lambda: chat.turns >= 1 and not chat.busy, slow)
+            first, stt = _call(model, tools, provider=provider, parent_run_id=chat.head)
+
+            async def asks(events: list[VoiceSessionEvent]) -> None:
+                provider.failing = True
+                await stt.inject(TranscriptEvent(type="committed", text="paga"))
+                await _until(lambda: bool(_asked(events)), slow)
+                await _until(lambda: first._current_turn_task.done(), slow)
+
+            await _run(first, stt, asks, timeout=4 * slow)
+            provider.failing = False
+            await _until(lambda: _owner(chat) is chat._scheduler and not chat._scheduler.head_parked, slow)
+            second, stt2 = _call(model, tools, provider=provider, parent_run_id=chat.head)
+
+            async def drive(_events: list[VoiceSessionEvent]) -> None:
+                await second.notify("dato", announce="silent")  # the second call asks for the session
+                await _until(lambda: _owner(chat) is second._scheduler, slow)
+                await first._last_run_context._save_trace(barrier=True)  # the save that failed, sent again
+                chat.send("escrito 2")
+                await _until(lambda: chat.parked, slow)
+                assert _owner(chat) is chat._scheduler and chat.turns == 1 and len(chat.pending_messages()) == 1
+                chat.resume({_approval(chat): True})
+                await _until(lambda: chat.turns >= 2 and not chat.busy, slow)
+
+            # In a context of its own, as a call is: the first call ran in this task and left its last
+            # run as the ambient one, which a second call started here would take for its own.
+            await asyncio.create_task(_run(second, stt2, drive, timeout=4 * slow), context=contextvars.Context())
+
+        assert tools[0].runs == ["wired"] and "escrito 2" in _seen(model.calls[2])
+
+
+class _LateJsonl(JsonlTracingProvider):
+    """A trace file that refuses every save while ``failing`` (reads still answer)."""
+
+    failing = False
+
+    @classmethod
+    async def _store(cls, run_context) -> None:
+        if cls.failing:
+            raise ConnectionError("503")
+        await super()._store(run_context)
+
+
 async def _collect(stream) -> tuple[OutputEvent, list[ApprovalEvent]]:
     """A run's final event and the approvals it asked for."""
     events = [event async for event in stream]
@@ -750,7 +926,7 @@ class TestOnlyWhatIsTypedWhileLent:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 chat.wake("rutina de la mañana")
                 await asyncio.sleep(0.3)
@@ -796,7 +972,7 @@ class TestOnlyWhatIsTypedWhileLent:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 # The session's own cut turn: settled before what is typed, also while the call has it.
                 chat._wakes.append(
@@ -828,7 +1004,7 @@ class TestOnlyWhatIsTypedWhileLent:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
                 await asyncio.wait_for(model.entered.wait(), 2)
@@ -890,7 +1066,7 @@ class TestATurnCutAsItEnds:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await _until(lambda: "Hola por voz." in _texts(events))
+                await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 _SlowEnd.hold = "escrito 2"
                 chat.send("escrito 2")
@@ -903,7 +1079,7 @@ class TestATurnCutAsItEnds:
                 chat.send("escrito 3")
                 await _turns(chat, 3)
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-                await _until(lambda: "Otra vez por voz." in _texts(events))
+                await _said(call, events, "Otra vez por voz.")
 
             await _run(call, stt, drive)
 
@@ -938,7 +1114,7 @@ class TestATurnCutAsItEndsOnAStoredTrace:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await _until(lambda: "Hola por voz." in _texts(events), slow)
+                await _said(call, events, "Hola por voz.", slow)
                 await _until(lambda: _owner(chat) is call._scheduler, slow)
                 provider.hold = "escrito 2"
                 chat.send("escrito 2")
@@ -947,7 +1123,7 @@ class TestATurnCutAsItEndsOnAStoredTrace:
                 await _until(lambda: call._scheduler.busy, slow)
                 chat.interrupt()  # lands in the save that ends the chat's run: nothing of it is stored yet
                 provider.gate.set()
-                await _until(lambda: "Visto por voz." in _texts(events), slow)
+                await _said(call, events, "Visto por voz.", slow)
 
             await _run(call, stt, drive, timeout=4 * slow)
 

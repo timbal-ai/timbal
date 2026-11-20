@@ -686,6 +686,10 @@ class ChatSession:
         self._kept_events: dict[str, SessionEvent] = {}
         # Turns in a row the store would not record the start of: they did not run (see _write_ahead).
         self._store_failures = 0
+        # Reads in a row that failed for the question a call left the session with (see _take_question).
+        self._question_failures = 0
+        # The head a call left parked whose stored trace held no question when read (_question_appeared).
+        self._dropped_question: str | None = None
         # The restorable events last seen queued: one arriving through the task store is stored at once.
         self._queued_events: tuple[str, ...] = ()
         # App and client events still queued that the session follows until a turn takes them (_work_arrived).
@@ -1320,8 +1324,17 @@ class ChatSession:
 
         Like the question of a run a session is opened on: ``state()`` lists it, :meth:`resume` answers
         it, :meth:`interrupt` abandons it. Left to the call's client alone, the chat would hold everything
-        typed behind a question nobody here could answer. False when the run cannot be read, or is not
-        the head any more.
+        typed behind a question nobody here could answer.
+
+        A run whose stored trace holds no question (not parked, or nothing stored of it where this
+        session reads) is not waited for: nothing here could answer it, and no turn of this session
+        can be taken for its answer (the turn reads the same trace). The session goes on from it,
+        and reads the run once more before each turn it starts on it (:meth:`_question_appeared`):
+        the end of a run can be stored late (a save that failed and was sent again).
+
+        False only when the run could not be read: that is not "no question" (a turn started now
+        might resume it and lose its prompt), so the caller asks again later. True otherwise: taken,
+        found not to wait, or no longer this session's to settle (the head moved, the session closed).
         """
         try:
             found = await self._parked_run(run_id)
@@ -1329,8 +1342,14 @@ class ChatSession:
             logger.warning("chat_session_question_unreadable", session_id=self.id, run_id=run_id, error=str(error))
             return False
         scheduler = self._scheduler
-        if found is None or self.closed or self._parked or scheduler.lent or scheduler.head != run_id:
-            return False
+        if self.closed or self._parked or scheduler.lent or scheduler.head != run_id:
+            return True
+        if found is None:
+            logger.warning("chat_session_question_missing", session_id=self.id, run_id=run_id)
+            scheduler.not_waiting(run_id)
+            self._dropped_question = run_id
+            return True
+        self._dropped_question = None
         if self._last_context is not None:
             scheduler.unmark(self._last_context)
         self._park_on(*found, handed_over=True)
@@ -1340,6 +1359,33 @@ class ChatSession:
         if any(event.source == "user" and event.announce == "interrupt" for event in self._store.pending_events()):
             # Sent while the question was still the call's: its user has already moved on from it.
             self._interrupt_now()
+        return True
+
+    async def _question_appeared(self) -> bool:
+        """Whether the run whose question was dropped (nothing stored of it then) waits after all.
+
+        Read right before a turn starts on that run, because the turn reads the same trace: found
+        parked by then, the turn would be taken for the answer and lose its prompt. True hands the
+        run back to the worker as a question to take (or, unreadable, to ask for again); False lets
+        the turn start. Also while a call has the session on that same head (the turn would chain
+        onto it there): the session comes back for its question. Forgotten once the head has moved
+        on: nothing chains onto that run any more.
+        """
+        run_id, scheduler = self._dropped_question, self._scheduler
+        if run_id is None:
+            return False
+        if scheduler.session_head != run_id:
+            self._dropped_question = None
+            return False
+        try:
+            if await self._parked_run(run_id) is None:
+                return False
+        except Exception as error:
+            logger.warning("chat_session_question_unreadable", session_id=self.id, run_id=run_id, error=str(error))
+        self._dropped_question = None
+        if self.closed or scheduler.session_head != run_id:
+            return False
+        scheduler.note_parked(run_id)
         return True
 
     def _wake_options(self, meta: dict[str, Any], trace: Any) -> _TurnOptions:
@@ -1445,9 +1491,21 @@ class ChatSession:
                     continue
                 await self._until_scheduler_or_work()
                 continue
-            if scheduler.asking and not scheduler.lent and await self._take_question(scheduler.head):
+            if scheduler.asking and not scheduler.lent:
                 # The call hung up on a question of its own and the session came back with it.
+                if await self._take_question(scheduler.head):
+                    continue
+                # The run that asked could not be read (the trace store is away). No turn starts on a run
+                # that may be waiting for an answer. Asked again after a while, as restore() does, and
+                # sooner when something arrives: nothing else would bring the worker back to it.
+                self._question_failures += 1
+                delay = _TURN_RETRY_DELAY_S * 2 ** (min(self._question_failures, 8) - 1)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._until_scheduler_or_work(), min(delay, _RESTORE_RETRY_MAX_S))
                 continue
+            # No unread question any more (taken, answered by another client, the head moved): the next one
+            # that cannot be read starts its waits from the shortest again.
+            self._question_failures = 0
             if scheduler.session_parked:
                 # Another client's run of this session waits for its caller (an approval, a question): a
                 # turn now would chain onto it, and that run's resume would drop the turn's prompt. Its
@@ -1460,6 +1518,8 @@ class ChatSession:
             # turn, and what is typed must not go ahead of it). Other wakes wait for the user, and for the
             # session: while a call has it the chat answers only what is typed, and an application's wake
             # runs once it is the chat's again (the call hands it back with its head).
+            if self._wakes and await self._question_appeared():
+                continue
             recovering = bool(self._wakes) and self._wakes[0].kind == RECOVERY_KIND
             if recovering and scheduler.other_turn_first():
                 # Another turn is ahead (the call's, another client's): the recovery turn goes right after
@@ -1476,6 +1536,8 @@ class ChatSession:
                 await self._run_turn(wake=wake)
                 continue
             if not await self._turn_due():
+                continue
+            if await self._question_appeared():
                 continue
             # Take and busy in one step: a foreign root turn either goes before it or meets a busy owner.
             followup = scheduler.take()
