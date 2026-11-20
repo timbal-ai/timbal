@@ -148,6 +148,7 @@ def has_cache_write_pricing(model_id: str) -> bool:
 # ---------------------------------------------------------------------------
 # Model type with provider prefixes
 Model = Literal[
+    "anthropic/claude-fable-5-2",
     "anthropic/claude-fable-5-1",
     "anthropic/claude-fable-5",
     "anthropic/claude-opus-5-5",
@@ -162,6 +163,8 @@ Model = Literal[
     "anthropic/claude-sonnet-4-5",
     "anthropic/claude-haiku-5-5",
     "anthropic/claude-haiku-4-5",
+    "openai/gpt-6.2-astra",
+    "openai/gpt-6.2-sol",
     "openai/gpt-6-astra",
     "openai/gpt-6.1-sol",
     "openai/gpt-6-sol",

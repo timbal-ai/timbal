@@ -1,6 +1,6 @@
 ---
 title: "Anthropic"
-description: "Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 models with specs, pricing, and capabilities"
+description: "Claude Fable 5.2, Opus 5.5, Sonnet 5.5, and Haiku 5.5 models with specs, pricing, and capabilities"
 ---
 
 <Note>Source: [Anthropic model docs](https://platform.claude.com/docs/en/about-claude/models/overview) · [Release notes](https://platform.claude.com/docs/en/release-notes/overview) · [Pricing](https://platform.claude.com/docs/en/about-claude/pricing)</Note>
@@ -12,7 +12,7 @@ Claude 4.6 and later models bill the full 1M window at standard rates, except Ha
 | Anthropic `usage` field | Usage key on `OutputEvent.usage` | Rate |
 | --- | --- | --- |
 | `input_tokens` | `input_tokens` | 1x |
-| `cache_read_input_tokens` | `cache_read_input_tokens` | 0.1x (0.05x on Opus 5.5 and Sonnet 5.5; 0.025x on Fable 5.1) |
+| `cache_read_input_tokens` | `cache_read_input_tokens` | 0.1x (0.05x on Opus 5.5 and Sonnet 5.5; 0.025x on Fable 5.2 and 5.1) |
 | `cache_creation.ephemeral_5m_input_tokens` | `ephemeral_5m_input_tokens` | 1.25x |
 | `cache_creation.ephemeral_1h_input_tokens` | `ephemeral_1h_input_tokens` | 2x |
 | `cache_creation_input_tokens` (only when no valid per-TTL breakdown is reported) | `cache_creation_input_tokens` | 1.25x fallback; assumes 5m TTL |
@@ -30,12 +30,30 @@ The catalog stores global standard input, output, cache-read, and both cache-wri
 ## Latest
 
 <CardGroup cols={2}>
+  <Card title="claude-fable-5-2">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> Speed
+
+  `anthropic/claude-fable-5-2`
+
+  Anthropic's most capable generally available model. Successor to Fable 5.1 for long-running agentic coding, knowledge work, and research, at a 20% lower price. Released November 9, 2026.
+
+  - &#36;8 / &#36;40 per 1M tokens (input / output); cache reads &#36;0.20 (0.025x input); 5m / 1h cache writes &#36;10 / &#36;16; batch &#36;4 / &#36;20
+  - Fast mode &#36;16 / &#36;80 (Claude API; not combinable with Batch)
+  - <Icon icon="window-maximize" size={14} /> 1M context at standard rates
+  - <Icon icon="right-from-bracket" size={14} /> 128K max output
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Adaptive thinking (always on); effort `low` to `max`, default `high`
+  - <Icon icon="globe" size={14} /> Web search
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2026
+  - <Icon icon="triangle-exclamation" size={14} /> `tool_choice` `any` / `tool` and disabled/budgeted thinking return 400; omit `temperature`, `top_p`, `top_k`; requires 30-day data retention (no ZDR)
+  </Card>
+
   <Card title="claude-fable-5-1">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> Speed
 
   `anthropic/claude-fable-5-1`
 
-  Anthropic's most capable generally available model. Successor to Fable 5 for long-running agentic coding, knowledge work, and research, with fewer false-positive safety refusals in multi-turn agent loops. Same price as Fable 5; cache reads are 75% cheaper.
+  Previous Fable generation for long-running agentic coding, knowledge work, and research, with fewer false-positive safety refusals in multi-turn agent loops. Same price as Fable 5; cache reads are 75% cheaper. Superseded by Fable 5.2, which is 20% cheaper.
 
   - &#36;10 / &#36;50 per 1M tokens (input / output); cache reads &#36;0.25 (0.025x input); batch &#36;5 / &#36;25
   - <Icon icon="window-maximize" size={14} /> 1M context
@@ -207,7 +225,7 @@ The catalog stores global standard input, output, cache-read, and both cache-wri
 
   `anthropic/claude-fable-5`
 
-  Previous Fable generation for long-horizon agentic work, complex reasoning, and ambitious multi-day coding tasks. Superseded by Fable 5.1 at the same price.
+  Previous Fable generation for long-horizon agentic work, complex reasoning, and ambitious multi-day coding tasks. Superseded by Fable 5.1 and Fable 5.2.
 
   - &#36;10 / &#36;50 per 1M tokens (input / output)
   - <Icon icon="window-maximize" size={14} /> 1M context

@@ -31,11 +31,31 @@
 #     ultrafast: 6.0
 
 models:
+- id: anthropic/claude-fable-5-2
+  provider: anthropic
+  display_name: Claude Fable 5.2
+  description: Anthropic's most capable generally available model — successor to Fable 5.1 for long-running agentic coding,
+    knowledge work, and research, at a 20% lower price.
+  notes: 'Released Nov 9, 2026; verified 2026-11-20 against the model reference and pricing. Adaptive thinking is always on
+    (disabled/budgeted thinking return 400); effort accepts low|medium|high|xhigh|max, default high. `tool_choice`
+    any/tool return 400 — use strict tools or structured outputs instead. Omit temperature, top_p, top_k. Cache reads
+    are $0.20 per 1M tokens (0.025x input). Batch is $4/$20. Fast mode (Claude API) is $16/$80 and cannot be combined
+    with Batch. 1M context at standard rates, 128K max output, Jun 2026 knowledge cutoff. Requires 30-day data retention;
+    not available under ZDR. Refusals return stop_reason refusal; server-side fallback targets are Opus 4.8 and Opus 5.'
+  input_price: 8.0
+  output_price: 40.0
+  cached_input_price: 0.2
+  cache_write_price: 10.0
+  cache_write_1h_price: 16.0
+  service_tiers:
+    fast: 2.0
+  context_window: 1000000
+  capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-fable-5-1
   provider: anthropic
   display_name: Claude Fable 5.1
-  description: Anthropic's most capable generally available model — successor to Fable 5 for long-running agentic coding,
-    knowledge work, and research, with fewer false-positive safety refusals in multi-turn agent loops.
+  description: Previous Fable generation for long-running agentic coding, knowledge work, and research, with fewer
+    false-positive safety refusals in multi-turn agent loops. Superseded by Fable 5.2 at a 20% lower price.
   notes: Adaptive thinking is always on. Cache reads are $0.25 per 1M tokens (0.025x input).
     `tool_choice` any/tool return 400 — use strict tools or structured outputs instead. Requires 30-day data retention;
     not available under ZDR.
@@ -234,11 +254,66 @@ models:
   cache_write_1h_price: 2.0
   context_window: 200000
   capabilities: [vision, tools, reasoning]
+- id: openai/gpt-6.2-astra
+  provider: openai
+  display_name: GPT-6.2 Astra
+  description: OpenAI's flagship model for the hardest end-to-end work — complex reasoning, agentic coding, computer
+    use, research, and document creation. Successor to GPT-6 Astra at 20% lower prices.
+  notes: 'Released Nov 17, 2026; verified 2026-11-20 against the model reference and API pricing. Standard short-context
+    pricing is $8/$40 per 1M tokens; cached input $0.40, 30m cache writes $10 (12h writes $20). Prompts over 272K input
+    tokens bill the full request at long-context rates ($16/$60, cached $0.80, cache writes $20). Batch is 50% of
+    Standard; Fast mode (`service_tier: "fast"`) is 2x. Ultrafast is promotionally 3x through Feb 28, 2027 and 6x from
+    Mar 1, 2027 (the 6x list rate is catalogued). Flex is not supported. `reasoning.effort` accepts
+    low|medium|high|xhigh|max (`none` returns 400; no default published — start with medium). Function tools require
+    the Responses API (Timbal default). 1.05M context (922K max input), 128K max output, May 18, 2026 knowledge cutoff.
+    Supports ZDR for approved organizations. Regional processing adds 10%.'
+  input_price: 8.0
+  output_price: 40.0
+  cached_input_price: 0.4
+  cache_write_price: 10.0
+  long_context:
+    threshold: 272000
+    input_price: 16.0
+    output_price: 60.0
+    cached_input_price: 0.8
+    cache_write_price: 20.0
+  service_tiers:
+    fast: 2.0
+    ultrafast: 6.0
+  context_window: 1050000
+  capabilities: [vision, tools, reasoning]
+- id: openai/gpt-6.2-sol
+  provider: openai
+  display_name: GPT-6.2 Sol
+  description: OpenAI model for complex coding, computer use, and professional work at a lower cost than Astra.
+  notes: 'Released Nov 17, 2026; verified 2026-11-20 against the model reference and API pricing. Standard rates per 1M
+    tokens are $2 input, $0.10 cache reads, $2.50 cache writes (30m; 12h writes $5), and $10 output. Above 272K input
+    tokens the full request costs $4/$15, cached $0.20, cache writes $5. Batch is 50% of Standard; Fast costs 2x.
+    Ultrafast is promotionally 3x through Feb 28, 2027 and 6x from Mar 1, 2027 (the 6x list rate is catalogued).
+    Flex is not supported. Reasoning accepts low, medium, high, xhigh, max; `none` returns 400 and no default is
+    published (start with medium). Tool calling requires Responses; Chat Completions supports text without tools.
+    1.05M context (922K max input), 128K max output, Jun 1, 2026 knowledge cutoff. Supports ZDR for approved
+    organizations. Regional processing adds 10%.'
+  input_price: 2.0
+  output_price: 10.0
+  cached_input_price: 0.1
+  cache_write_price: 2.5
+  long_context:
+    threshold: 272000
+    input_price: 4.0
+    output_price: 15.0
+    cached_input_price: 0.2
+    cache_write_price: 5.0
+  service_tiers:
+    fast: 2.0
+    ultrafast: 6.0
+  context_window: 1050000
+  capabilities: [vision, tools, reasoning]
 - id: openai/gpt-6-astra
   provider: openai
   display_name: GPT-6 Astra
-  description: OpenAI's most capable model, built for the hardest end-to-end work — complex reasoning, agentic coding, computer
-    use, research, and document creation. Successor to GPT-5.6 Sol.
+  description: Previous Astra generation for the hardest end-to-end work — complex reasoning, agentic coding, computer
+    use, research, and document creation. Successor to GPT-5.6 Sol; superseded by GPT-6.2 Astra at 20% lower prices.
   notes: 'Standard short-context pricing is $10/$50 per 1M tokens; cached input $1 (0.1x), cache writes $12.50 (1.25x). Prompts
     over 272K input tokens bill the full request at long-context rates ($20/$75, cached $2, cache writes $25). Batch/Flex are
     50% of Standard; Fast mode (`service_tier: "fast"`) is 2x; Ultrafast is 6x. `reasoning.effort` accepts low|medium|high|xhigh|max (API
@@ -264,7 +339,7 @@ models:
 - id: openai/gpt-6.1-sol
   provider: openai
   display_name: GPT-6.1 Sol
-  description: OpenAI model for complex coding, computer use, and professional work at a lower cost than Astra.
+  description: Previous Sol generation for complex coding, computer use, and professional work. Superseded by GPT-6.2 Sol at the same price.
   notes: 'Verified 2026-10-03 against the model card and API pricing. Standard rates per 1M tokens are $2 input,
     $0.10 cache reads, $2.50 cache writes, and $10 output. Above 272K input tokens the full request costs
     $4/$15, cached $0.20, cache writes $5. Batch/Flex cost 50% of Standard; Fast costs 2x.
