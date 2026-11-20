@@ -30,6 +30,9 @@ import httpx
 from dotenv import load_dotenv
 from timbal.tools.qlik import PERSONAL_SCOPES, QlikWhoAmI, normalize_tenant_url, write_token_file
 
+# Before the settings below are read, so QLIK_CALLBACK_PORT and QLIK_TOKEN_FILE from .env apply.
+load_dotenv()
+
 PORT = int(os.getenv("QLIK_CALLBACK_PORT", "8765"))
 REDIRECT_URI = f"http://localhost:{PORT}/callback"
 TOKEN_FILE = os.getenv("QLIK_TOKEN_FILE") or ".qlik_token.json"
@@ -75,7 +78,6 @@ def _wait_for_code(expected_state: str) -> str:
 
 
 async def main() -> None:
-    load_dotenv()
     tenant = normalize_tenant_url(os.environ["QLIK_TENANT_URL"])
     client_id = os.environ["QLIK_CLIENT_ID"]
     client_secret = os.environ["QLIK_CLIENT_SECRET"]

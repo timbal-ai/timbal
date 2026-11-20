@@ -1,6 +1,8 @@
 """Tests for Qlik Cloud tools: personal (user OAuth) + service (M2M) auth, REST wiring, Engine hypercube."""
 
 import asyncio
+import errno
+import importlib.util
 import json
 import os
 import sys
@@ -27,6 +29,11 @@ from timbal.tools.qlik import (
     engine_hypercube,
     normalize_tenant_url,
     page_plan,
+)
+
+# The Engine API runs on `websockets`, an optional dependency (timbal[server]).
+needs_websockets = pytest.mark.skipif(
+    importlib.util.find_spec("websockets") is None, reason="qlik_query needs the optional websockets package"
 )
 
 TENANT = "https://example.eu.qlikcloud.com"
@@ -518,6 +525,7 @@ class _FakeEngine:
         return self.outbox.pop(0)
 
 
+@needs_websockets
 @pytest.mark.asyncio
 async def test_engine_hypercube(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = _FakeEngine(total=5)
@@ -535,6 +543,7 @@ async def test_engine_hypercube(monkeypatch: pytest.MonkeyPatch) -> None:
     }
 
 
+@needs_websockets
 @pytest.mark.asyncio
 async def test_engine_error_is_raised(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = _FakeEngine(error_on="GetLayout")
@@ -543,6 +552,7 @@ async def test_engine_error_is_raised(monkeypatch: pytest.MonkeyPatch) -> None:
         await engine_hypercube(QlikAuth(TENANT, "tok", "service"), "app-1", ["Region"], ["Sum(X"], 10)
 
 
+@needs_websockets
 @pytest.mark.asyncio
 async def test_query_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = _FakeEngine(total=2)
@@ -714,6 +724,7 @@ async def test_client_errors_are_explained(monkeypatch: pytest.MonkeyPatch, code
         await qlik.get_token_from_client_credentials(TENANT, "cid", "secret")
 
 
+@needs_websockets
 @pytest.mark.parametrize(
     ("status", "message"),
     [(401, "rejected the personal credentials"), (403, "may not open it"), (404, "may not open it")],
@@ -799,3 +810,33 @@ def test_processes_sharing_a_token_file_spend_it_once(monkeypatch: pytest.Monkey
         thread.join(10)
     assert results == ["at-1", "at-1"]
     assert spent == ["rt1"]
+
+
+def _fake_msvcrt(monkeypatch: pytest.MonkeyPatch, failures: list[OSError]) -> list[int]:
+    """Run ``_file_lock``'s Windows branch on any OS: ``locking`` raises ``failures`` in turn, then succeeds."""
+    calls: list[int] = []
+
+    def locking(_fd: int, mode: int, _nbytes: int) -> None:
+        calls.append(mode)
+        if mode == 1 and failures:
+            raise failures.pop(0)
+
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=locking))
+    monkeypatch.setattr(qlik.os, "name", "nt")
+    return calls
+
+
+def test_windows_file_lock_waits_out_contention(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    held = OSError(errno.EACCES, "held by another process")
+    calls = _fake_msvcrt(monkeypatch, [held, held])
+    with qlik._file_lock(str(tmp_path / "token.json")):
+        pass
+    assert calls == [1, 1, 1, 0]
+
+
+def test_windows_file_lock_raises_other_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    calls = _fake_msvcrt(monkeypatch, [OSError(errno.EINVAL, "locking not supported")])
+    with pytest.raises(OSError, match="locking not supported"):
+        with qlik._file_lock(str(tmp_path / "token.json")):
+            pass
+    assert calls == [1]
