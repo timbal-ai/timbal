@@ -39,7 +39,7 @@ Hello from Timbal.
 
 The tracing line is logged before the prints. The run id changes every execution. Debug lines about platform config only show when debug logging is on.
 
-`collect()` is a method of the object `agent(...)` returns, not of `Agent`. Pass `responses` or a `handler(messages)`; do not pass both. `model.call_count` increments once per model call. Swap the same agent to a string model (`openai/gpt-5-mini` and an `OPENAI_API_KEY`, or platform auth from `timbal configure`) when you want a live answer. A voice session cannot use `TestModel` for speech; see [Your first voice agent](/voice/quickstart).
+`collect()` is a method of the object `agent(...)` returns, not of `Agent`. Pass `responses` or a `handler(messages)`; do not pass both. `model.call_count` increments once per model call. Swap the same agent to a string model (`openai/gpt-6.1-terra` and an `OPENAI_API_KEY`, or platform auth from `timbal configure`) when you want a live answer. A voice session cannot use `TestModel` for speech; see [Your first voice agent](/voice/quickstart).
 
 ## Create a Timbal Project
 
@@ -107,7 +107,7 @@ from timbal import Agent
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-5-mini"
+    model="openai/gpt-6.1-terra"
 )
 ```
 
@@ -134,7 +134,7 @@ from timbal.tools import WebSearch
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     tools=[WebSearch()]
 )
 ```
@@ -154,7 +154,7 @@ def get_datetime() -> str:
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     tools=[WebSearch(), get_datetime]
 )
 ```
