@@ -340,6 +340,64 @@ class TestMidTurn:
         assert live[0].metadata["nested"]["seen"] == "original"
 
 
+class TestTheLoopAndTheTurnAreNotHeld:
+    async def test_a_cancelled_background_compaction_does_not_cancel_the_turn(self):
+        """At the hard ratio the turn waits for the compaction being prepared. That one being cancelled (something
+        it awaited was) is a preparation that came to nothing: the turn compacts inline and goes on."""
+        loop = asyncio.get_running_loop()
+        dependency, sizes, steps = loop.create_future(), [], 0
+
+        async def summarize_old(memory):
+            sizes.append(len(memory))
+            if len(sizes) == 1:
+                await dependency  # the background one: cancelled while the turn waits for it
+            if len(memory) <= 3:
+                return memory
+            return [Message(role="user", content=[TextContent(text=SUMMARY)]), *memory[-2:]]
+
+        async def last_step_cancels() -> str:
+            nonlocal steps
+            steps += 1
+            if steps == 7:  # the result that takes the turn to the hard ratio: it will wait for the compaction
+                loop.call_later(0.05, dependency.cancel)
+            return "ok"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=stepping({"go": 7})),  # 15 messages after the seventh result
+            tools=[Tool(name="step", handler=last_step_cancels)],
+            tracing_provider=InMemoryTracingProvider,
+            memory_compaction=summarize_old,
+            memory_compaction_prepare_ratio=0.3,
+            max_iter=30,
+        )
+        context, output = await run(agent)  # asserts the turn ended in success
+        assert len(sizes) == 2 and root(context).metadata["compaction"].get("background") is None
+        assert any(message.collect_text() == SUMMARY for message in root(context).memory)
+
+    async def test_a_synchronous_strategy_prepared_in_the_background_does_not_hold_the_loop(self):
+        """Prepared on a task, a strategy that is a plain function would still run on the loop's thread and
+        stop every other turn for as long as it takes: it goes to a worker thread."""
+        import time
+
+        ended_at = []
+
+        def slow(memory):
+            time.sleep(0.2)
+            ended_at.append(time.monotonic())
+            return memory[-2:]
+
+        agent = Agent(name="agent", model=TestModel(), memory_compaction=slow, memory_compaction_prepare_ratio=0.3)
+        live = [Message(role="user", content=[TextContent(text=f"m{i}")]) for i in range(6)]
+        loop = asyncio.get_running_loop()
+        fired = loop.create_future()
+        loop.call_later(0.01, lambda: fired.set_result(time.monotonic()))
+        prepared = agent._prepare_compaction(SimpleNamespace(input={}), live, 0.4)
+        compacted, _steps = await prepared.task
+        assert await fired < ended_at[0]  # the loop ran its timer while the strategy was still at work
+        assert [message.collect_text() for message in compacted] == ["m4", "m5"]
+
+
 class TestNextTurn:
     async def test_a_turn_that_ends_past_the_ratio_hands_its_compaction_to_the_next(self):
         summarizer = Summarizer(released=False)

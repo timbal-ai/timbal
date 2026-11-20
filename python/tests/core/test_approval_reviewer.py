@@ -1363,6 +1363,53 @@ class TestReviewerGaps:
             "approval_already_claimed"
         )
 
+    async def test_a_second_identical_call_is_a_gate_of_its_own(self, tmp_path):
+        """The model reads the same status twice: same path, same arguments, so the same approval id. The first
+        read waited in the paused run and is claimed there. The second is another tool call: its card is its
+        own, and a person can approve it."""
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        reads, verdicts = [], iter(["escalate", "approve", "escalate"])
+
+        def status(of: str) -> str:
+            """Read the status of an order."""
+            reads.append(of)
+            return "shipped"
+
+        def model(messages):
+            results = sum(1 for message in messages if message.role == "tool")
+            return call("status", f"read-{results + 1}", of="order 7") if results < 2 else "done"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=model),
+            tools=[Tool(name="status", handler=status, requires_approval=True)],
+            tracing_provider=provider,
+            approval_reviewer=lambda _request: next(verdicts),
+        )
+
+        async def go(**kwargs):
+            context = RunContext(tracing_provider=provider, parent_id=kwargs.pop("parent_id", None))
+            set_run_context(context)
+            events = [event async for event in agent(prompt="where is my order?", **kwargs)]
+            set_run_context(None)
+            return context, events
+
+        first, events = await go()
+        (first_card,) = [e for e in events if isinstance(e, ApprovalEvent)]
+        second, events = await go(parent_id=first.id)  # the reviewer approves the first read, escalates the second
+        (second_card,) = [e for e in events if isinstance(e, ApprovalEvent)]
+        assert reads == ["order 7"]
+        assert second_card.approval_id == first_card.approval_id and second_card.tool_call_id != first_card.tool_call_id
+        waiting = next(
+            s for s in second._trace.as_records() if s.status.reason == "approval_required" and s.path == "agent.status"
+        )
+        assert "pending_since" not in waiting.metadata["approval"]  # it first waits here, not in the run before
+        _, events = await go(parent_id=second.id, resume={second_card.approval_id: True})
+        output = next(e for e in events if isinstance(e, OutputEvent) and e.path == "agent")
+        assert reads == ["order 7", "order 7"] and output.status.code == "success"
+
     async def test_a_grant_that_approves_a_waiting_gate_claims_it(self, tmp_path):
         """Two charges wait. A resume approves one "for the session"; the other is asked again and waits in
         that resume, whose session now holds the grant. Resuming it twice finds the grant twice: the charge

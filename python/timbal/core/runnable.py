@@ -1486,6 +1486,9 @@ class Runnable(ABC, BaseModel):
             "metadata": approval_decision.metadata,
             "input": redacted_input,
         }
+        # What this gate is, among those the run being continued left waiting: this tool call's. The approval
+        # id alone is the call's path and arguments, which a second, identical call shares.
+        waited = (approval_id, tool_call_id)
         approval_resolution = None
         approval_cancel: Cancel | None = None
         granted_by: ApprovalGrant | None = None
@@ -1541,7 +1544,7 @@ class Runnable(ABC, BaseModel):
             # must be after the same claim.
             waiting = await run_context._left_waiting()
             claimed = await run_context._tracing_provider.claim_approval(
-                waiting.get(approval_id) or (str(run_context.parent_id) if run_context.parent_id else None),
+                waiting.get(waited) or (str(run_context.parent_id) if run_context.parent_id else None),
                 approval_id,
                 str(run_context.id),
             )
@@ -1565,7 +1568,7 @@ class Runnable(ABC, BaseModel):
         if approval_resolution is not None or approval_cancel is not None:
             # A grant claims too when it resolves a gate the run this one continues left waiting: that call
             # is being run again here, and another run continuing the same one would find the same grant.
-            if granted_by is None or approval_id in await run_context._left_waiting():
+            if granted_by is None or waited in await run_context._left_waiting():
                 if not await _claim():
                     return False, None, validated_input
 
@@ -1592,7 +1595,7 @@ class Runnable(ABC, BaseModel):
                     # like a person's answer, so the call runs at most once. The run that loses a claim
                     # stops there (see ``RunCancelled``), so what would follow is not done twice either.
                     # A call that waited nowhere has nothing to race for.
-                    if approval_id in await run_context._left_waiting() and not await _claim():
+                    if waited in await run_context._left_waiting() and not await _claim():
                         return False, None, validated_input
                     approved = review.verdict == "approve"
                     approval_resolution = ApprovalResolution(
@@ -1606,7 +1609,7 @@ class Runnable(ABC, BaseModel):
         if approval_resolution is None:
             # Waiting again in a run that continues one it already waited in: it keeps the run it first
             # waited in (see ``_claim``), for whoever continues this run to claim it under.
-            carried = (await run_context._left_waiting()).get(approval_id)
+            carried = (await run_context._left_waiting()).get(waited)
             if carried is not None:
                 span.metadata["approval"]["pending_since"] = carried
             # Status/output MUST be set BEFORE the caller yields the event.

@@ -33,7 +33,7 @@ def _get_logger():
 # What a run without resume values holds. Read-only and shared by every context: a call
 # installs a new mapping (``Runnable._stream``), nothing ever writes into one in place.
 _NO_RESUME_VALUES: MappingProxyType[str, Any] = MappingProxyType({})
-_NOTHING_WAITING: Mapping[str, str] = MappingProxyType({})
+_NOTHING_WAITING: Mapping[tuple[str, str | None], str] = MappingProxyType({})
 # Waits before reading the parent's trace again when the read failed (a locked database, a busy file).
 _PARENT_READ_RETRIES_S = (0.05, 0.2)
 
@@ -330,7 +330,7 @@ class RunContext(BaseModel):
     #       way up the call chain across runs: an approval reviewer follows it to the agent the
     #       person talks to, since this run's own root agent got its prompt from that call's
     #       code. ``_invoked_by`` is the fork's link as ids, for the trace
-    #   _parent_pending: (parent_id, {approval_id: run it first waited in}) | None — the approvals
+    #   _parent_pending: (parent_id, {(approval_id, tool_call_id): run it first waited in}) — the approvals
     #       the run this one continues left waiting, read once when a gate asks (``_left_waiting``)
     #   _live_background: int — background work (spawned tasks, handed-off
     #       continuations) running on this context; it can outlive the root run.
@@ -660,14 +660,16 @@ class RunContext(BaseModel):
                     self._session_data.update(root_span.session)
         return self._session_data
 
-    async def _left_waiting(self) -> "Mapping[str, str]":
+    async def _left_waiting(self) -> "Mapping[tuple[str, str | None], str]":
         """The approvals the run this one continues left waiting: this run is running those calls again, and so
         may any other run continuing the same one, with resume values or without. Empty when it left none (or
         this run continues nothing).
 
-        Each with the run it first waited in, which is what a claim on it is made under: a gate a partial resume
-        carried forward (answered one, asked again for the other) still waits in the run before as well, and
-        runs continuing either must claim the same thing.
+        Keyed by ``(approval_id, tool_call_id)``: the approval id alone is the call's path and arguments, and a
+        second call with the same ones (the model reads the same status again) is another call, with a gate of
+        its own. Each with the run it first waited in, which is what a claim on it is made under: a gate a
+        partial resume carried forward (answered one, asked again for the other) still waits in the run before
+        as well, and runs continuing either must claim the same thing.
 
         Read from the parent's trace, once per run, when a gate first asks (never with a provider that keeps no
         claims: there is nothing to decide). Read with ``get_strict``: the built-in providers' ``get`` answers a
@@ -703,7 +705,7 @@ class RunContext(BaseModel):
                         ) from e
                     await asyncio.sleep(pause)
             waiting = {
-                approval["id"]: str(approval.get("pending_since") or parent_id)
+                (approval["id"], approval.get("tool_call_id")): str(approval.get("pending_since") or parent_id)
                 for span in (trace.values() if trace is not None else ())
                 if (approval := _waiting_approval(span))
             }

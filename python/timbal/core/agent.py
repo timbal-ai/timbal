@@ -1823,8 +1823,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return (prev_input_tokens + prev_output_tokens + unsent_tokens) / context_window
         return _estimate_tokens_from_memory(messages) / context_window
 
-    async def _run_compactors(self, memory: list[Message], model: str) -> tuple[list[Message], list[dict]]:
-        """Every configured strategy over ``memory``, in order: the compacted memory and a step per strategy."""
+    async def _run_compactors(
+        self, memory: list[Message], model: str, *, off_loop: bool = False
+    ) -> tuple[list[Message], list[dict]]:
+        """Every configured strategy over ``memory``, in order: the compacted memory and a step per strategy.
+
+        ``off_loop``: synchronous strategies run on a worker thread. For a compaction prepared in the background,
+        which works on copies while turns go on: on the loop it would hold every one of them up for as long as it
+        takes. Inline, the turn waits for it either way.
+        """
         compactors = (
             [self.memory_compaction] if not isinstance(self.memory_compaction, list) else self.memory_compaction
         )
@@ -1840,6 +1847,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             before = len(memory)
             if asyncio.iscoroutinefunction(compactor):
                 memory = await compactor(memory)
+            elif off_loop:
+                memory = await asyncio.to_thread(compactor, memory)
             else:
                 memory = compactor(memory)
             compaction_steps.append(
@@ -1889,7 +1898,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         changes when a finished result is swapped in. ``_Prepared.prefix`` keeps the originals, to tell whether
         the history is still the one it covered."""
         task = asyncio.get_running_loop().create_task(
-            self._run_compactors([_isolated(message) for message in prefix], self._span_model(current_span))
+            self._run_compactors(
+                [_isolated(message) for message in prefix], self._span_model(current_span), off_loop=True
+            )
         )
         task.add_done_callback(_retrieve_result)
         return _Prepared(task=task, prefix=list(prefix), utilization=utilization)
@@ -1933,8 +1944,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             model = self._span_model(current_span)
             utilization = self._context_utilization(model, current_span.memory, measurement)
             if utilization is None or utilization >= self.memory_compaction_ratio:
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(prepared.task)
+                # Until it ends, however it ends: one that failed or was cancelled is a preparation that came
+                # to nothing (inline below), not this turn's cancellation. Cancelling the turn still cancels
+                # the wait, and leaves the task alone.
+                await asyncio.wait([prepared.task])
                 if self._swap_prepared(current_span, prepared, run_context):
                     return None
                 if not prepared.futile:
@@ -2067,7 +2080,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 ):
                     return None
                 return record
-            await asyncio.shield(prepared.task)
+            await asyncio.wait([prepared.task])
+            if prepared.task.cancelled() or prepared.task.exception() is not None:
+                return None  # it came to nothing: there is nothing to hand on
             compacted, steps = prepared.task.result()
             if not _compaction_changed(prepared.prefix, compacted):
                 return None
