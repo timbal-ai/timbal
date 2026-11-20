@@ -6,7 +6,7 @@ from typing import Any
 
 import structlog
 
-from ..errors import FallbackExhausted
+from ..errors import FallbackExhausted, ModelStreamStalled
 from .provider_errors import provider_error_classes
 
 logger = structlog.get_logger("timbal.core.fallback_model")
@@ -154,6 +154,9 @@ class FallbackModel:
 def is_retryable_provider_error(exc: BaseException) -> bool:
     # Classes resolved lazily — this runs on an LLM error path, where the SDK
     # that raised is already imported (see provider_errors).
+    if isinstance(exc, ModelStreamStalled):
+        # Silent before its first chunk: transient, like a timeout. After it, never (nothing may be repeated).
+        return not exc.after_output
     err_cls = provider_error_classes()
     if isinstance(exc, err_cls["rate_limit"]):
         return True

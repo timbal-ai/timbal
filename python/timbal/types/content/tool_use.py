@@ -37,6 +37,9 @@ class ToolUseContent(BaseContent):
     input: dict[str, Any]
     thought_signature: str | None = None
     is_server_tool_use: bool = False
+    namespace: str | None = None
+    """OpenAI Responses namespace the call came from (a function hosted tool search loaded
+    carries its own name). Must be replayed with the call or the API rejects it."""
 
     @field_validator("input", mode="before")
     def validate_input(cls, v: Any):
@@ -51,12 +54,15 @@ class ToolUseContent(BaseContent):
         # assistant text already carries the results.
         if self.is_server_tool_use:
             return None
-        return {
+        item = {
             "call_id": self.id,
             "type": "function_call",
             "name": self.name,
             "arguments": json.dumps(self.input, sort_keys=True),
         }
+        if self.namespace:
+            item["namespace"] = self.namespace
+        return item
 
     @override
     def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any] | None:

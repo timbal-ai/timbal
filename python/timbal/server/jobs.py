@@ -31,9 +31,11 @@ class RunIdInUse(Exception):
     the reaper.
     """
 
-    def __init__(self, job_id: str) -> None:
-        super().__init__(f"run id {job_id!r} is already in use by a running job")
+    def __init__(self, job_id: str, *, finished: bool = False) -> None:
+        state = "a finished job (require_new)" if finished else "a running job"
+        super().__init__(f"run id {job_id!r} is already in use by {state}")
         self.job_id = job_id
+        self.finished = finished
 
 
 class Job:
@@ -266,6 +268,9 @@ class JobStore:
         max_bytes: int | None = DEFAULT_MAX_BYTES,
     ) -> None:
         self._jobs: dict[str, Job] = {}
+        # Ids of finished jobs dropped before their window lapsed (non-replayable ones go as they end), and
+        # when: what ``require_new`` refuses besides the jobs still held.
+        self._finished_ids: dict[str, float] = {}
         self._retention_secs = retention_secs
         self._max_events = max_events
         self._max_bytes = max_bytes
@@ -276,20 +281,25 @@ class JobStore:
         params,
         job_id: str | None = None,
         replayable: bool = True,
+        require_new: bool = False,
     ) -> tuple[str, Job]:
         """Start ``runnable`` on its own task, tracked under ``job_id``.
 
-        Raises `RunIdInUse` if a running job already holds that id. Pass
-        ``replayable=False`` for a consumer that reads the run to completion in
-        one pass and needs no reconnection (see `Job`).
+        Raises `RunIdInUse` if a running job already holds that id, or, with
+        ``require_new``, any job this store still knows (finished ones within the
+        retention window: a caller retrying after a lost response must not start
+        the run twice). Pass ``replayable=False`` for a consumer that reads the
+        run to completion in one pass and needs no reconnection (see `Job`).
         """
         _job_id: str = job_id if job_id is not None else uuid7(as_type="hex")  # type: ignore
         # `get_job` expires lazily, one id at a time; sweep here as well so the
         # dict itself stays bounded when finished jobs are never read back.
         self.reap()
         existing = self.get_job(_job_id)
-        if existing is not None and not existing.done:
-            raise RunIdInUse(_job_id)
+        if existing is not None and (not existing.done or require_new):
+            raise RunIdInUse(_job_id, finished=existing.done)
+        if require_new and _job_id in self._finished_ids:
+            raise RunIdInUse(_job_id, finished=True)
 
         job = Job(
             replayable=replayable,
@@ -342,11 +352,15 @@ class JobStore:
             job_id for job_id, job in self._jobs.items() if job.expired(self._retention_secs, now)
         ]:
             del self._jobs[job_id]
+        for job_id in [job_id for job_id, at in self._finished_ids.items() if now - at >= self._retention_secs]:
+            del self._finished_ids[job_id]
 
     def _forget(self, job_id: str, job: Job) -> None:
         """Drop ``job_id``, but only while it still refers to ``job``."""
         if self._jobs.get(job_id) is job:
             del self._jobs[job_id]
+            # From when it ended, not now: a job dropped once its window lapsed must not refuse its id for another.
+            self._finished_ids[job_id] = job.finished_at if job.finished_at is not None else time.monotonic()
 
     async def _run(self, runnable, params, job: Job):
         from ..platform._http_session import platform_http_session

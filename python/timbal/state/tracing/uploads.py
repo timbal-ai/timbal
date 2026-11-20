@@ -62,10 +62,19 @@ def _env_float(name: str, scale: float = 1.0) -> float | None:
         return None
 
 
-def durability(provider: type[TracingProvider]) -> str:
-    """``sync`` (the default, and any value it does not know), ``buffered`` or ``end``."""
-    mode = (getattr(provider, "durability", None) or os.environ.get(DURABILITY_ENV) or "sync").strip().lower()
+def _explicit_durability(provider: type[TracingProvider]) -> str | None:
+    return getattr(provider, "durability", None) or os.environ.get(DURABILITY_ENV) or None
+
+
+def _mode(raw: str) -> str:
+    mode = raw.strip().lower()
     return mode if mode in ("buffered", "end") else "sync"
+
+
+def durability(provider: type[TracingProvider]) -> str:
+    """``sync``, ``buffered`` or ``end`` (any value it does not know reads as ``sync``): the provider's
+    ``durability``, else ``TIMBAL_TRACE_DURABILITY``, else the provider's ``default_durability``."""
+    return _mode(_explicit_durability(provider) or getattr(provider, "default_durability", None) or "sync")
 
 
 def buffered(provider: type[TracingProvider]) -> bool:
@@ -73,8 +82,12 @@ def buffered(provider: type[TracingProvider]) -> bool:
 
 
 def metrics_on(provider: type[TracingProvider]) -> bool:
-    """Counters go into usage only when asked: they are new usage keys for every run."""
-    return durability(provider) != "sync" or os.environ.get(METRICS_ENV, "").strip().lower() in ("1", "true", "yes")
+    """Counters go into usage only when asked: they are new usage keys for every run, so a provider's
+    default mode does not turn them on."""
+    explicit = _explicit_durability(provider)
+    if explicit is not None and _mode(explicit) != "sync":
+        return True
+    return os.environ.get(METRICS_ENV, "").strip().lower() in ("1", "true", "yes")
 
 
 def _flush_interval(provider: type[TracingProvider]) -> float:
@@ -203,8 +216,16 @@ def _finished(run_context: RunContext) -> bool:
     return root is not None and root.t1 is not None and run_context._live_background == 0
 
 
-async def flush_all(timeout: float | None = 10.0) -> None:
-    """Store every buffered run's latest state now (process shutdown)."""
+async def flush_all(timeout: float | None = None) -> None:
+    """Store every buffered run's latest state now, then wait for the platform saves still owed
+    (process shutdown). One bound for both: ``timeout``, default ``TIMBAL_TRACE_FLUSH_TIMEOUT_SECS``
+    (5 s), inside a pod's termination grace period."""
+    from .providers.platform import PlatformTracingProvider, _flush_timeout
+
+    if timeout is None:
+        timeout = _flush_timeout()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     runs = list(_RUNS.values())
 
     async def flush(run: _RunUploads) -> None:
@@ -218,6 +239,7 @@ async def flush_all(timeout: float | None = 10.0) -> None:
             await asyncio.wait_for(asyncio.gather(*map(flush, runs)), timeout)
         except TimeoutError:
             logger.error("trace_flush_timed_out", runs=[run.context.id for run in runs], timeout_s=timeout)
+    await PlatformTracingProvider.flush(max(0.0, deadline - loop.time()))
 
 
 async def _drain(run: _RunUploads) -> None:

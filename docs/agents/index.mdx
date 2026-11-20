@@ -223,6 +223,10 @@ A `TimeoutError` raised inside a handler, such as a slow HTTP call, is still rep
 
 **Performance.** An unset timeout has negligible overhead: the per-call check remains, but the stream relay and timers are bypassed. Enabling a timeout adds timer and relay work per streamed event. The `benchmarks/timeout/bench_streaming.py` benchmark measures this cost separately from network and LLM latency.
 
+### Empty answers at the output limit
+
+A final answer (no tool calls) that hits the output limit — `max_tokens`, `max_output_tokens`, or `length` — with no visible text is dropped and retried once. A reasoning model can spend the whole budget thinking. The retry uses `max_tokens` ×4, capped at 32,000, and records `metadata.max_tokens_retry` with `from` (the previous budget) and `to` (the retry). Agents with an [`output_model`](/agents/structured-output) are retried the same way. If the answer is still empty, no `max_tokens` was set, or the budget is already at 32,000, the run fails with `timbal.errors.ModelOutputTruncated` and `status.code == "error"`. A truncated answer that does have text is kept, and `status.reason` is that stop reason.
+
 ### Approval-Required Tools
 
 Any runnable — Tool, Agent, or Workflow step — can pause for human approval before it runs. Mark it with `requires_approval`, listen for `ApprovalEvent`, and resume by calling the runnable again with `resume`:

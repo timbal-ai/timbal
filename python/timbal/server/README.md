@@ -17,6 +17,20 @@ Two things are documented here: [running a runnable over HTTP](#runs-run-stream-
 
 Set `context.id` on the request to choose the run id; otherwise one is generated and you can read it off the first event. Naming an id that a *running* run already holds is a `409` — the alternative is silently orphaning that run, leaving it executing with nothing able to read or cancel it.
 
+Set `context.tool_policy` to narrow the tools the run's agents offer their models, as a chat wake does:
+
+- `"read_only"`: tools declared `read_only`, MCP tools whose server says `readOnlyHint`, and the agent's own readers;
+- a list of tool names: those tools. Names match in every agent of the run (`["send_email"]` allows a subagent's `send_email` too), and `[]` allows none (the model can only think and answer);
+- `null`: all tools (the default).
+
+A call to a hidden tool gets the usual `tool_not_found` result, and any other value is a `400`. The policy covers every agent in the run: subagents, agents a tool or step body starts, and those started by background tools, also after the run that spawned them has ended. Each agent records it on its span (`metadata.tool_policy`, plus `tool_policy_allowed`, the paths of the tools it was offered at its latest step), so a trace shows after the fact what was enforced. A resume (`resume` with `context.parent_id`) that leaves `tool_policy` out keeps the paused run's policy, recorded on its root span (`metadata.tool_policy`); naming one, `null` included, replaces it. A failed read of the paused run is a `503` (`Retry-After`) before any run starts, never "all tools".
+
+The policy applies to agents only: it filters what each agent offers its model. Workflow steps are not filtered, so on a workflow app `read_only` covers the agents inside it (agent steps, agents a step starts) but not a plain step that sends an email. Check enforcement on the agent spans' `metadata.tool_policy`; a workflow app's root span is the workflow's.
+
+An SDK without this support ignores `context.tool_policy` instead of refusing it, so check before relying on it: `GET /meta` answers `{"version", "capabilities"}` (`"context.tool_policy"`, `"context.require_new"`), `/healthcheck` sends the same as `X-Timbal-Version` / `X-Timbal-Capabilities`, and a run that applied a policy confirms it on its response (`X-Timbal-Tool-Policy: read_only`, `names`, or `custom` when a resume kept a paused run's policy that is neither).
+
+Set `context.require_new: true` to refuse (`409`) an `id` this server still knows, a finished run's included (within the retention window; a restart forgets, and so does another worker: each process has its own job store, see [Limits](#limits), so with several workers or replicas a retry can start a second run). Without it, an id whose run has finished starts a new run under it, as before: for a caller that retries after a lost response, that is a second run whose trace collides with the first.
+
 Reusing the id of a run that has *finished* but is still inside its retention window is allowed, and rebinds the id: anything still polling `/runs/{run_id}/events` for the old run starts receiving the new one's events, with seqs counting from 1 again. Use fresh ids per run unless you mean that.
 
 ### A dropped connection does not stop the run
@@ -71,6 +85,60 @@ Same meaning as the field: terminal, possibly incomplete. A `/run` in that posit
 A run whose process dies has nothing to replay. A replayable log is a ring: default 50 000 events or 32 MiB, whichever hits first (`JobStore(max_events=…, max_bytes=…)`). Older events are dropped and a reconnect whose cursor is behind the floor reports `expired: true` rather than silently skipping to the new head. Durable, cross-process replay needs a backing store behind this same cursor contract.
 
 **No authorization.** These routes carry none of their own, and CORS is wide open, so anything that can reach the port can replay any run whose id it can name — and ids are client-chosen, so they are guessable. Deploy behind something that authenticates and scopes by run.
+
+---
+
+## Chat sessions: `/chat/sessions`
+
+A run is one turn. A chat session is a conversation that stays open while its turns run: post messages at any time, and the session decides what happens to each one that arrives while a turn is running (`timbal.core.ChatSession`; the served runnable must be an `Agent`).
+
+| Route | Purpose |
+|---|---|
+| `GET /chat/` | The chat playground (below). |
+| `POST /chat/sessions` | Open a session. Body: `{"parent_id"?, "busy_mode"?, "collect_window"?}` → `201` state (`parked: true` with the pending approvals/questions when `parent_id` is a run waiting for an answer). `503` when that run cannot be read. |
+| `POST /chat/sessions/{id}/messages` | `{"text", "mode"?}` → `202` with the message receipt. |
+| `POST /chat/sessions/{id}/interrupt` | Cut the running turn, or, while the session is parked, cancel what it waits for (the gated tool never runs). `{"interrupted": false}` when there is neither. |
+| `POST /chat/sessions/{id}/wake` | A turn for the application (routine, heartbeat): `{"text", "key"?, "tool_policy"?, "silent_ok"?}` → `202` with `wake_id`. `tool_policy` defaults to `"read_only"`; `null` gives every tool, a list only those. It runs when the user has nothing pending, never inside a user's turn, and may answer `NO_REPLY` to stay silent. |
+| `POST /chat/sessions/{id}/resume` | Answer a parked turn: `{"resume": {approval_id: true \| {...}, interaction_id: value}}`. Answers sent before the turn resumes are merged (one per pending id; the same id answered differently is a `409`). `409` while a turn runs or when nothing waits. `400` for an answer a durable session cannot store (`NaN`, `Infinity`). |
+| `GET /chat/sessions/{id}/events?after=` | The session log as SSE (a `GET`, so `EventSource` works; `Last-Event-ID` is honored). Each `id:` is that event's own cursor, also after `event: gapped` (whose `next_cursor` is where the replay starts). |
+| `GET /chat/sessions/{id}/log?after=&wait_ms=` | The same log as JSON pages, long-polled. |
+| `GET` / `DELETE /chat/sessions/{id}` | State (`busy`, `parked`, `head`, `pending`, pending approvals while parked) / close. |
+
+A `TIMBAL_CHAT_STORE` the server cannot honour (a value it does not understand, a SQLite store for an agent whose traces are process-local) does not stop the server: `/run`, `/stream` and the rest work, the error is logged (`chat_store_misconfigured`), and every session route answers `503` with the reason, without `Retry-After`. Sessions are not served without a store instead. `GET /chat/meta` reports it as `store_error`.
+
+On a durable session a `201` / `202` means the change is stored and survives a restart. When the store fails, the route answers `503`:
+
+- **with `Retry-After`** when the store holds nothing of the change and the route took it back here too (a message or wake no turn has taken yet, answers no turn has used, a session never opened). Nothing was accepted, so a retry cannot run it twice. A message sent with `now` or `interrupt` has not cut the running turn either: the cut happens once the message is stored.
+- **without it** when a turn already has the change (it runs, but would not survive a restart: do not resend), or for `/interrupt` (the turn was interrupted; that state is not stored).
+
+**A store that hangs.** A store that does not answer at all (a stalled network mount) is given `TIMBAL_CHAT_STORE_TIMEOUT_S` (default 10 s; `0`: no limit) by every chat route, then the route answers `503` instead of waiting with it:
+
+- **with `Retry-After`** when no write holds the change (it came after the write that is out), so taking it back leaves nothing of it anywhere; also for a session that could not be opened, restored or deleted in time.
+- **without it** when the write that is out holds the change: that write may still land, so the change is kept and runs once the store is back. Do not resend: a retry could run it twice.
+
+Startup, shutdown and idle reaping wait for the store once, not once per session, and go on without it. That covers a restore still in flight at shutdown: it gets 5 s to finish, is cancelled, and gets the store's bound once more to let go of its lease; past that it is left behind and the lease runs out on its own (30 s). A restore cut this way never serves its session.
+
+A change the store already holds is acknowledged as usual, even if a later write failed. `DELETE` answers `503` with `Retry-After` when the store could neither mark the session closed nor remove it (it would come back); a retry finishes it. `409` when another process took the session meanwhile, also on `DELETE` (nothing is deleted: it goes on there; the delete is conditional on the version and lease this process last held). A session being deleted answers `404` to other requests from the moment its close starts.
+
+**Written ahead.** A durable session does nothing it has not recorded first. A turn starts only once the store holds that it took its input, and each tool call runs only once the store holds it (the agent tells the session which calls it is about to run: a model's, a slash command's, those an answered approval left pending). While the store is down, no turn starts (`turn_failed` with `reason: "not_stored"` in the log; the work is kept and tried again, with a backoff up to 30 s) and a turn that reached its first tool call waits there. A turn is not over until its trace is stored either: the next turn reads it from the trace store, so one whose last save failed is held open, retrying, until a save lands. Only a durable session waits like this: one without a session store logs the failed save, counts it (`tracing:save_failed`) and goes on to the next turn, as a single run does. After a restart, a turn that had run no tool call is run again from its input, whatever was stored of it (answers to a parked turn are put back): a restart during a model call costs nothing but the call. One that had gets a recovery turn — read-only, and never wider than the dead turn's own tool policy — that is told what completed and what may or may not have run — the calls the session recorded and the trace does not show included — and, when the trace provider had stored nothing of it (as with `durability="end"`), what it was answering. A turn that was acting on an answer to a parked question is never answered again: the question is closed (cancelled) and the recovery turn says so. A stop that reached a turn before any of its calls ran is stored with it, so a restart closes that question too instead of replaying the answers. A session is created with its lease in one write. Events posted to the session (`post_session_event`, a client's `notify`) are stored when they arrive, like messages. A session that cannot renew its lease stops shortly before the lease runs out (27 s after its last renewal was sent, for the 30 s lease), whether the store refuses, fails or never answers: its turn is cancelled and its stored state kept for whichever process serves it next, which the store lets in only after that.
+
+**Modes** for a message sent while a turn runs (`busy_mode` when the body names none, default `steer`):
+
+- `steer` — the running turn takes it after its current tool call, as a user message, and does not end before answering it. Messages a turn ends without taking start the next turn together.
+- `now` — like `steer`, without waiting: the answer being streamed is cut where it is (its text kept, marked interrupted), also while the model is silent between two chunks or has stalled, and running tools that allow it (`Tool.interruptible`, default: read-only ones) are cancelled; the others finish first. Same turn.
+- `followup` — a turn of its own once the running one ends.
+- `collect` — one turn for every collected message, once none has arrived for `collect_window` seconds.
+- `interrupt` — cancels the running turn (it ends `cancelled` / `interrupted`, keeping what it produced) and runs this message first.
+
+With nothing running, any mode starts a turn. A turn that ends waiting on an approval or `ask_user` parks the session: new messages wait until `/resume` answers it, and an `interrupt` (message or route) cancels the pending question instead (also when it arrives just as the turn ends on the question, before the session reports `parked`). A steered message an input guardrail blocks is dropped on its own; the turn carries on.
+
+**The log** holds every event of every turn in order (the same `START` / `DELTA` / `OUTPUT` / `APPROVAL` / … events `/stream` sends) plus session records `{"type": "SESSION", "kind": ...}`: `message` (sent, with `mode` and whether a turn was running), `message_settled` (`delivered` with the `run_id` that took it — recorded before anything that run does next — `superseded`, or `withdrawn` when a `503` took it back), `wake` / `wake_superseded` / `wake_withdrawn`, `turn_started` (`run_id`, `parent_id`, `trigger`: `user_message` with its `event_ids`, `resume`, `wake`, `session_event`, `background_completion`), `turn_finished` (`status`, `parked`, `silent`), `turn_failed`, `unparked` (another client answered the parked turn), `resume_dropped` (answers for a turn that no longer waits), `restore_failed` (the run a session continues could not be read; nothing is admitted until it can), `interrupt`, `closed`. Turns the runtime starts (events, finished tasks, wakes) may answer `NO_REPLY`: `silent: true` means there is nothing to show the user. A message whose id is not in its turn's `trigger.event_ids` was steered into it. SSE frames carry the cursor as `id:`; `event: gapped` means the ring dropped entries past your cursor. The JSON route returns `{events: [{seq, data}], next_cursor, gapped, closed}`.
+
+Same limits as runs: single process (a session another worker holds is a `404`), no authorization. Sessions idle for `TIMBAL_CHAT_SESSION_TTL_S` (default 3600) are closed when the next one opens — never one with a turn running, and never one with a turn due (a message still inside its collect window, a wake, queued answers, an event that asks for a turn, a background tool still running whose result will start one), whose work nothing would run until a request asked for the session again. What starts no turn does not keep a session in memory: a silent event, or a silent background tool, rides with the next turn and is kept in the store. With SQLite traces the session store is the same file, whether or not `/chat` is used. Looking in it for sessions to bring back is best effort: if it cannot be read when the server starts (a mount that is away), the server starts all the same, `/run` and `/stream` work as before, chat requests answer `503` until it is back, and the server looks again in the background (after 1, 2, 5, 10 s, then every 30 s). `TIMBAL_CHAT_STORE=sqlite:///path.db` is refused when the agent's traces are process-local: a restored session reads its history, and the question a parked one waits on, from the trace of its last run.
+
+### Bundled chat playground
+
+`GET /chat` on a running `timbal.server` (`python -m timbal.server --import_spec path/to/agent.py::agent`). One timeline per session: user bubbles with live badges (`queued · followup`, `↳ steered into turn 2`, `started turn 3`), streamed assistant text and thinking, tool cards (input, result, timing), approval and `ask_user` cards that resume the turn, turn dividers with their final status. The composer's mode picker applies while a turn runs; `Esc` interrupts. The right panel is the raw log (deltas hidden unless ticked). The session id lives in the URL hash, so a reload re-attaches and replays.
 
 ---
 

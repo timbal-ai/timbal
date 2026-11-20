@@ -4,6 +4,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -26,6 +27,11 @@ def _get_logger():
     import structlog
 
     return structlog.get_logger("timbal.state.context")
+
+
+# What a run without resume values holds. Read-only and shared by every context: a call
+# installs a new mapping (``Runnable._stream``), nothing ever writes into one in place.
+_NO_RESUME_VALUES: MappingProxyType[str, Any] = MappingProxyType({})
 
 
 class _NoDefault:
@@ -218,10 +224,32 @@ class RunContext(BaseModel):
     #   _foreign_turn_of: SessionScheduler | None — the scheduler that admitted this
     #       root run into a session it owns, told when the run ends (strong until
     #       then: a release it defers completes there)
-    #   _resume_values: dict — active resume values keyed by id, supplied via
-    #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
-    #       approval gate (value normalized to ``ApprovalResolution``) or a
-    #       suspension_id for a ``suspend()`` call (value is arbitrary).
+    #   _steering: bool | None — the channel that started this run asks its root agent to
+    #       take ``lane="next"`` session events between steps (``Agent.steering=None``),
+    #       or, False, forbids it for this turn whatever the agent says (a wake)
+    #   _tool_policy: "read_only" | Collection[str] | Callable | ReadOnlyWithin | None — narrows
+    #       the tools every agent in this run offers its model (``Agent._tool_allowed``)
+    #   _tool_policy_origin: (RunContext, call_id) | None — for a run started inside a call
+    #       under a callable policy, the outermost such call: its agents note what the policy
+    #       let through on that call's span too (``timbal.core.tool_policy``)
+    #   _silence_token: str | None — a root agent whose final answer is exactly this
+    #       marks its span ``metadata.silent`` (a turn the runtime started may stay quiet)
+    #   _cut: asyncio.Event | None — set by the channel on a 'now' message: the steering
+    #       root agent cuts its answer or its interruptible tools and takes the message
+    #   _trace_unsaved: bool — the latest write-through save of the trace failed (cleared by the
+    #       next one that lands): what the provider holds is behind the run. A chat session does
+    #       not go on to the next turn while it is (the next turn reads this one from the provider)
+    #   _before_tool_dispatch: async (agent_path, [(tool_use_id, name, input)]) | None — awaited
+    #       by every agent of the run right before it runs tool calls (a model's, a slash
+    #       command's, those a resume left pending): a durable chat session records them
+    #       first, so a restart knows what may have run
+    #   _resume_values: read-only mapping — active resume values keyed by id,
+    #       supplied via ``resume=`` to fulfill a paused run. The id is an approval_id
+    #       for an approval gate (value normalized to ``ApprovalResolution``) or a
+    #       suspension_id for a ``suspend()`` call (value is arbitrary). A
+    #       ``MappingProxyType``: the call that brings values installs a new mapping
+    #       and puts the previous one back, so writing into one in place would outlive
+    #       that call (an approval decision staying on the context).
     #   _used_resume_ids: set — resume ids that matched a gate or ``suspend()``
     #       during this run; used to warn about unrecognized resume values.
     #   _invoked_by: dict | None — ``{"run_id", "call_id"}`` of the call whose
@@ -318,19 +346,28 @@ class RunContext(BaseModel):
         from .background import bind_background_store
         from .config_loader import resolve_platform_config
 
-        # Plain instance attributes (see NOTE above).
-        self._base_path: Path | None = None
-        self._session_data: dict[str, Any] | None = None
-        # Captured once per run so off-loop emit() can marshal onto it.
-        # None until the first Runnable._stream on this context.
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._resume_values: dict[str, Any] = {}
-        self._used_resume_ids: set[str] = set()
-        self._invoked_by: dict[str, str] | None = None
-        self._live_background = 0
-        self._trace = Trace()
-        self._continuation_owner = None
-        self._foreign_turn_of = None
+        # Plain instance attributes (see NOTE above), set in one go: BaseModel.__setattr__ costs ~1 µs each.
+        self.__dict__.update(
+            _base_path=None,
+            _session_data=None,
+            # Captured once per run so off-loop emit() can marshal onto it.
+            # None until the first Runnable._stream on this context.
+            _loop=None,
+            _resume_values=_NO_RESUME_VALUES,
+            _used_resume_ids=set(),
+            _invoked_by=None,
+            _live_background=0,
+            _trace=Trace(),
+            _continuation_owner=None,
+            _foreign_turn_of=None,
+            _steering=None,
+            _tool_policy=None,
+            _tool_policy_origin=None,
+            _silence_token=None,
+            _cut=None,
+            _before_tool_dispatch=None,
+            _trace_unsaved=False,
+        )
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
         # Allocates nothing unless this session actually has children.
@@ -351,7 +388,7 @@ class RunContext(BaseModel):
             if self.platform_config is None and self.tracing_provider is not None:
                 self.platform_config = getattr(self.tracing_provider, "platform_config", None)
             self.platform_config = resolve_platform_config(self.platform_config)
-            self._tracing_provider = self.tracing_provider
+            self.__dict__["_tracing_provider"] = self.tracing_provider
             return
 
         # Platform credentials are also used by model proxies and tools, even
@@ -367,7 +404,7 @@ class RunContext(BaseModel):
                     event_name="tracing_setup",
                     run_id=self.id,
                 )
-                self._tracing_provider = PlatformTracingProvider
+                self.__dict__["_tracing_provider"] = PlatformTracingProvider
                 return
             if self.platform_config.sync_traces_enabled is False:
                 _get_logger().info(
@@ -387,7 +424,7 @@ class RunContext(BaseModel):
             event_name="tracing_setup",
             run_id=self.id,
         )
-        self._tracing_provider = InMemoryTracingProvider
+        self.__dict__["_tracing_provider"] = InMemoryTracingProvider
 
     async def _get_parent_trace(self, run_id: str | None = None) -> Trace | None:
         """Load the trace data for the parent run, or for ``run_id`` further up the chain.
@@ -478,10 +515,12 @@ class RunContext(BaseModel):
                 error=str(e),
             )
             self.update_usage("tracing:save_failed", 1)
+            self.__dict__["_trace_unsaved"] = True
             return False
         finally:
             uploads.count(self, "tracing:wait_ms", round((time.monotonic() - t0) * 1000))
         uploads.count(self, "tracing:saves")
+        self.__dict__["_trace_unsaved"] = False
         return True
 
     async def _end_background_work(self) -> None:
@@ -508,7 +547,7 @@ class RunContext(BaseModel):
         """
         requested = self.parent_id
         self.parent_id = run_id
-        self._session_data = None
+        self.__dict__["_session_data"] = None
         await self.get_session()
         root = self.root_span()
         if root is not None:
@@ -517,7 +556,7 @@ class RunContext(BaseModel):
     async def get_session(self) -> dict[str, Any]:
         """Get session data that persists across runs."""
         if self._session_data is None:
-            self._session_data = {}
+            self.__dict__["_session_data"] = {}
             if self.parent_id and self._tracing_provider is not None:
                 try:
                     trace = await self._tracing_provider.get(self)

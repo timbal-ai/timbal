@@ -1,7 +1,7 @@
 """OpenAI Responses API request adapter (openai, xai)."""
 
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Collection
 from typing import TYPE_CHECKING, Any
 
 from ...types.message import Message
@@ -28,6 +28,77 @@ def _responses_tool_schema(tool: "Runnable", provider: str, model_name: str) -> 
     if getattr(type(tool), "openai_responses_schema_for", None) is not None:
         return tool.openai_responses_schema_for(provider, model_name)
     return tool.openai_responses_schema
+
+
+def _with_tool_search(
+    tools: "list[Runnable]", deferred: set[str], provider: str, model_name: str
+) -> list[dict[str, Any]]:
+    """Tool schemas with the deferred ones behind hosted ``tool_search``.
+
+    Deferred tools sharing a ``search_group`` (an MCP server) become one namespace:
+    until the model searches it sees the namespace entry, not every tool's description.
+    """
+    schemas: list[dict[str, Any]] = []
+    namespaces: dict[str, dict[str, Any]] = {}
+    for tool in tools:
+        schema = _responses_tool_schema(tool, provider, model_name)
+        if tool.name not in deferred:
+            schemas.append(schema)
+            continue
+        schema = {**schema, "defer_loading": True}
+        group = getattr(tool, "search_group", None)
+        if not group:
+            schemas.append(schema)
+            continue
+        if group not in namespaces:
+            namespaces[group] = {"type": "namespace", "name": group, "description": "", "tools": []}
+            schemas.append(namespaces[group])
+        namespaces[group]["tools"].append(schema)
+    for group, namespace in namespaces.items():
+        names = ", ".join(t["name"] for t in namespace["tools"])
+        namespace["description"] = f"{group} tools ({len(namespace['tools'])}): {names}."
+    if deferred.intersection(tool.name for tool in tools):
+        schemas.append({"type": "tool_search"})
+    return schemas
+
+
+def _offered_names(tools: list[dict[str, Any]]) -> set[str]:
+    names = set()
+    for tool in tools:
+        inner = tool.get("tools") if tool.get("type") == "namespace" else [tool]
+        names.update(t.get("name") for t in inner or [] if t.get("name"))
+    return names
+
+
+def _drop_stale_loaded_tools(input_items: list[dict[str, Any]], offered: set[str]) -> None:
+    """Drop past ``tool_search_output`` definitions of tools this request doesn't offer.
+
+    Tools a hosted search loaded stay callable in later requests through the replayed output
+    item, whatever ``tools`` says; removing them from it is how OpenAI says to disable them.
+    A tool can be gone since: a narrower ``tool_policy``, a forced tool-less final call, the
+    denial breaker. Items are the stored memory's own dicts, so a changed one is replaced by a
+    copy; an output whose tools are all still offered is sent as stored (prompt-cache friendly).
+    """
+    for index, item in enumerate(input_items):
+        if item.get("type") != "tool_search_output" or not item.get("tools"):
+            continue
+        kept, changed = [], False
+        for tool in item["tools"]:
+            if tool.get("type") != "namespace":
+                if tool.get("name") in offered:
+                    kept.append(tool)
+                else:
+                    changed = True
+                continue
+            inner = [t for t in tool.get("tools") or [] if t.get("name") in offered]
+            if len(inner) == len(tool.get("tools") or []):
+                kept.append(tool)
+                continue
+            changed = True
+            if inner:
+                kept.append({**tool, "tools": inner})
+        if changed:
+            input_items[index] = {**item, "tools": kept}
 
 
 def normalize_responses_params(provider_params: dict[str, Any]) -> dict[str, Any]:
@@ -75,8 +146,13 @@ def prepare_responses_request(
     temperature: float | None,
     output_model: "type[BaseModel] | None",
     provider_params: dict[str, Any],
+    deferred_tools: "Collection[str] | None" = None,
 ) -> tuple[Callable[[], AsyncIterator[Any]], str]:
-    """Build the Responses API kwargs and return (create_stream, context_label)."""
+    """Build the Responses API kwargs and return (create_stream, context_label).
+
+    ``deferred_tools``: names sent with ``defer_loading`` behind OpenAI's hosted
+    ``tool_search`` (``Agent.tool_search``), which is added when any are.
+    """
     include = ["web_search_call.action.sources"]
     if supports_encrypted_reasoning(model_name):
         include.append(REASONING_ENCRYPTED_CONTENT_INCLUDE)
@@ -111,7 +187,10 @@ def prepare_responses_request(
     responses_kwargs["input"] = input_items
 
     if tools:
-        responses_tools = [_responses_tool_schema(tool, provider, model_name) for tool in tools]
+        if deferred_tools:
+            responses_tools = _with_tool_search(tools, set(deferred_tools), provider, model_name)
+        else:
+            responses_tools = [_responses_tool_schema(tool, provider, model_name) for tool in tools]
         if responses_tools:
             responses_kwargs["tools"] = responses_tools
             responses_kwargs["parallel_tool_calls"] = True
@@ -145,6 +224,7 @@ def prepare_responses_request(
     responses_kwargs.update(provider_params)
     if extra_tools:
         responses_kwargs["tools"] = [*responses_kwargs.get("tools", []), *extra_tools]
+    _drop_stale_loaded_tools(responses_kwargs["input"], _offered_names(responses_kwargs.get("tools") or []))
 
     async def _create_stream():
         res = await client.responses.create(extra_headers=request_headers, **responses_kwargs)

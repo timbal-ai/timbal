@@ -17,7 +17,10 @@ not drain. Raw events are ``read_background_transcript(after=)`` or
 When a child reaches a terminal status, the store enqueues a one-shot
 completion notice. The parent agent drains that inbox at the **start** of the
 next turn and injects a synthetic user message so the LLM learns without
-polling — never mid-turn while the parent is still talking.
+polling — never mid-turn while the parent is still talking. Posted session
+events wait the same way, except those on lane ``"next"``, which a turn that
+steers (``Agent.steering``) takes after its current tool batch. User messages
+(``source="user"``) start turns of their own through the session's channel.
 
 Optional ``timeout`` (seconds) on a child cancels it as ``timed_out`` when the
 deadline elapses (Task cancel + handler ``aclose`` + ``on_background_cancel``).
@@ -44,7 +47,10 @@ import weakref
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, Literal
 
+import structlog
 from uuid_extensions import uuid7
+
+logger = structlog.get_logger("timbal.state.background")
 
 _SUMMARY_TEXT_CHARS = 1_000
 _COMPLETION_SUMMARY_CHARS = 300
@@ -162,10 +168,7 @@ class BackgroundHandoff:
         if call_id is not None:
             if call_id not in self._active:
                 names = ", ".join(sorted(self._active.values())) or "none"
-                raise RuntimeError(
-                    f"No active foreground runnable with call_id {call_id!r}. "
-                    f"Eligible: {names}."
-                )
+                raise RuntimeError(f"No active foreground runnable with call_id {call_id!r}. Eligible: {names}.")
             self.target_call_id = call_id
         else:
             if len(self._active) != 1:
@@ -631,11 +634,41 @@ def _completion_notice_text(notifications: list[dict[str, Any]]) -> str:
     return header + "\n\n".join(blocks)
 
 
+def format_user_message(events: Sequence[SessionEvent], *, steered: bool = False) -> Any:
+    """The ``user`` message carrying messages the user posted to a session (``source="user"``).
+
+    Not runtime: it is what the user said, so transcripts show it and input
+    guardrails screen it. Several join into one message, oldest first.
+    ``steered``: a running turn took them after a tool batch.
+    """
+    from ..types.content import TextContent
+    from ..types.message import USER_MESSAGE_KIND, Message
+
+    metadata: dict[str, Any] = {"kind": USER_MESSAGE_KIND, "event_ids": [event.id for event in events]}
+    if steered:
+        metadata["steered"] = True
+    return Message(
+        role="user",
+        content=[TextContent(text="\n\n".join(event.text for event in events))],
+        metadata=metadata,
+    )
+
+
 #: Longest text one session event may carry: it is prompt text written outside the run.
+#: A user message (``source="user"``) is a prompt and has no cap of its own.
 MAX_SESSION_EVENT_CHARS = 4_000
 
-SessionEventSource = Literal["app", "client"]
-SessionEventState = Literal["pending", "delivered", "superseded"]
+SessionEventSource = Literal["app", "client", "user"]
+SessionEventState = Literal["pending", "delivered", "superseded", "withdrawn"]
+SessionEventLane = Literal["next", "later"]
+"""When a session event reaches a turn. ``"later"``: at the start of the next one.
+``"next"``: the running turn takes it after its current tool batch, when it steers
+(``Agent.steering``); otherwise the next turn does."""
+UserMessageMode = Literal["steer", "followup", "collect"]
+"""How a user message waits while a turn runs. ``"steer"`` (lane ``"next"``): joins
+the running turn. ``"followup"``: a turn of its own after it. ``"collect"``: one later
+turn for every collected message, once they stop arriving (the channel's quiet window)."""
+USER_MESSAGE_MODES: tuple[str, ...] = ("steer", "followup", "collect")
 
 
 class SessionEvent:
@@ -644,13 +677,16 @@ class SessionEvent:
     ``state`` leaves ``"pending"`` once: ``"delivered"`` when a turn takes the
     event into its memory (``run_id`` names that run once it has started), or
     ``"superseded"`` when a later event with the same ``key`` replaces it while
-    still pending. Delivered means the model got it, not that the user saw or
+    still pending, or ``"withdrawn"`` when its poster took it back before any
+    turn did (:meth:`BackgroundTaskStore.withdraw_event`). Delivered means the model got it, not that the user saw or
     heard anything.
 
     ``announce`` is the event's own policy (None: the receiving channel's
     default). ``task_id`` marks progress from a still-running background task
     (:func:`report_progress`). ``guardrails`` holds the screening rails that
-    fired on client text; the receiving run records them.
+    fired on client text; the receiving run records them. ``lane`` is when a
+    turn takes it (:data:`SessionEventLane`); ``mode`` is set on user messages
+    only (:data:`UserMessageMode`).
     """
 
     __slots__ = (
@@ -660,11 +696,14 @@ class SessionEvent:
         "source",
         "announce",
         "task_id",
+        "lane",
+        "mode",
         "guardrails",
         "posted_at",
         "state",
         "run_id",
         "_settled",
+        "_on_settle",
     )
 
     def __init__(
@@ -675,6 +714,8 @@ class SessionEvent:
         source: SessionEventSource,
         announce: Announce | None = None,
         task_id: str | None = None,
+        lane: SessionEventLane = "later",
+        mode: UserMessageMode | None = None,
     ) -> None:
         self.id: str = uuid7(as_type="hex")  # type: ignore[assignment]
         self.text = text
@@ -682,11 +723,27 @@ class SessionEvent:
         self.source: SessionEventSource = source
         self.announce: Announce | None = announce
         self.task_id = task_id
+        self.lane: SessionEventLane = lane
+        self.mode: UserMessageMode | None = mode
         self.guardrails: list[Any] = []
         self.posted_at = time.time()
         self.state: SessionEventState = "pending"
         self.run_id: str | None = None
         self._settled: asyncio.Event | None = None
+        self._on_settle: list[Callable[[SessionEvent], None]] | None = None
+
+    def on_settle(self, callback: Callable[[SessionEvent], None]) -> None:
+        """Call ``callback(event)`` the moment it leaves ``pending`` (at once if it already has).
+
+        Synchronous, on the loop that settles it: a channel can record the
+        delivery before anything the receiving run does next.
+        """
+        if self.state != "pending":
+            callback(self)
+            return
+        if self._on_settle is None:
+            self._on_settle = []
+        self._on_settle.append(callback)
 
     def __repr__(self) -> str:
         return f"SessionEvent(id={self.id!r}, key={self.key!r}, state={self.state!r}, run_id={self.run_id!r})"
@@ -699,8 +756,25 @@ class SessionEvent:
             await self._settled.wait()
         return self.state
 
+    def to_dict(self) -> dict[str, Any]:
+        """What restores it (:meth:`BackgroundTaskStore.restore_event`): a durable session's pending events."""
+        return {
+            "id": self.id,
+            "text": self.text,
+            "key": self.key,
+            "source": self.source,
+            "announce": self.announce,
+            "task_id": self.task_id,
+            "lane": self.lane,
+            "mode": self.mode,
+            "posted_at": self.posted_at,
+        }
+
     def receipt(self) -> dict[str, Any]:
-        return {"event_id": self.id, "key": self.key, "state": self.state, "run_id": self.run_id}
+        receipt = {"event_id": self.id, "key": self.key, "state": self.state, "run_id": self.run_id}
+        if self.mode is not None:
+            receipt["mode"] = self.mode
+        return receipt
 
     def _settle(self, state: SessionEventState, run_id: str | None = None) -> None:
         self.state = state
@@ -708,6 +782,12 @@ class SessionEvent:
             self.run_id = run_id
         if self._settled is not None:
             self._settled.set()
+        callbacks, self._on_settle = self._on_settle, None
+        for callback in callbacks or ():
+            try:
+                callback(self)
+            except Exception:
+                logger.exception("session_event_settle_callback_failed", event_id=self.id)
 
 
 class BackgroundEventLog:
@@ -739,6 +819,14 @@ class BackgroundEventLog:
     def cursor_end(self) -> int:
         """Next logical index to pass as ``after`` (total events appended)."""
         return self.forgotten_through + len(self._events)
+
+    def restart_at(self, cursor: int) -> None:
+        """Continue numbering from ``cursor`` with nothing held (a session restored in a new process): a
+        reader with an older cursor gets a gap, then what this log appends."""
+        self._events.clear()
+        self._sizes.clear()
+        self._nbytes = 0
+        self.forgotten_through = cursor
 
     def put_nowait(self, event: Any) -> None:
         if self._closed:
@@ -807,31 +895,44 @@ class BackgroundEventLog:
     def empty(self) -> bool:
         return not self._events
 
-    async def subscribe(self, after: int = 0) -> AsyncIterator[Any]:
+    async def subscribe(self, after: int = 0, *, numbered: bool = False) -> AsyncIterator[Any]:
         """Replay from logical ``after``, then yield live events until :meth:`close`.
 
         When ``after < forgotten_through``, yields :data:`BACKGROUND_LOG_GAPPED` once
         (matching ``gapped=True`` on :meth:`read`/``peek``), replays from the ring
         head, then continues with live events — never returns an empty iterator.
+
+        ``numbered``: yield ``(cursor, event)``, ``cursor`` being the event's own
+        position (resume with ``subscribe(cursor)``), and the gap marker as
+        ``(cursor the replay starts after, BACKGROUND_LOG_GAPPED)``. Taken from the
+        snapshot this subscription replays, so appends and trims meanwhile cannot
+        shift them.
         """
         gapped = after < self.forgotten_through
         replay_from = self.forgotten_through if gapped else after
         queue: asyncio.Queue = asyncio.Queue()
+        if self._closed:
+            # Nothing more will be appended: end after the replay.
+            queue.put_nowait(_DONE)
         self._subscribers.append(queue)
         # Snapshot before any yield — the ring may trim while the consumer handles
         # BACKGROUND_LOG_GAPPED, which would make a post-yield offset negative.
         offset = replay_from - self.forgotten_through
         replay = list(self._events[offset:])
+        # Past the tip (a cursor from the future): live events still number from the tip.
+        cursor = self.forgotten_through + min(offset, len(self._events))
         try:
             if gapped:
-                yield _GAPPED
+                yield (cursor, _GAPPED) if numbered else _GAPPED
             for event in replay:
-                yield event
+                cursor += 1
+                yield (cursor, event) if numbered else event
             while True:
                 event = await queue.get()
                 if event is _DONE:
                     return
-                yield event
+                cursor += 1
+                yield (cursor, event) if numbered else event
         finally:
             if queue in self._subscribers:
                 self._subscribers.remove(queue)
@@ -1376,27 +1477,47 @@ class BackgroundTaskStore:
         source: SessionEventSource = "app",
         announce: Announce | None = None,
         task_id: str | None = None,
+        lane: SessionEventLane | None = None,
+        mode: UserMessageMode | None = None,
     ) -> SessionEvent:
         """Queue an event for this session's next turn and wake a waiting scheduler.
 
         Returns at once with the event's receipt. A pending event with the same
         ``key`` is superseded; one a turn has already taken is not. ``source``
         is ``"client"`` for text a user's device sent, which the model is told
-        to treat as information only. ``announce`` overrides the receiving
-        channel's default policy. Safe to call from another thread.
+        to treat as information only, and ``"user"`` for a message the user
+        wrote (``mode=`` instead of ``lane=``, default ``"followup"``; no ``key``).
+        ``announce`` overrides the receiving channel's default policy.
+        ``lane="next"`` lets a running turn that steers take it after its
+        current tool batch. Safe to call from another thread.
         """
-        if source not in ("app", "client"):
-            raise ValueError(f"source must be 'app' or 'client', got {source!r}")
+        if source not in ("app", "client", "user"):
+            raise ValueError(f"source must be 'app', 'client' or 'user', got {source!r}")
         _check_announce(announce)
         if key is not None and not isinstance(key, str):
             raise TypeError("key must be a string or None")
+        if source == "user":
+            if lane is not None:
+                raise ValueError("A user message takes mode=, not lane=.")
+            if key is not None:
+                raise ValueError("A user message cannot carry a key: one never supersedes another.")
+            mode = mode or "followup"
+            if mode not in USER_MESSAGE_MODES:
+                raise ValueError(f"mode must be one of {list(USER_MESSAGE_MODES)}, got {mode!r}")
+            lane = "next" if mode == "steer" else "later"
+        else:
+            if mode is not None:
+                raise ValueError("mode= is for user messages (source='user').")
+            lane = lane or "later"
+            if lane not in ("next", "later"):
+                raise ValueError(f"lane must be 'next' or 'later', got {lane!r}")
         text = text.strip() if isinstance(text, str) else ""
         if not text:
             raise ValueError("A session event needs non-empty text.")
-        if len(text) > MAX_SESSION_EVENT_CHARS:
+        if source != "user" and len(text) > MAX_SESSION_EVENT_CHARS:
             raise ValueError(f"A session event is limited to {MAX_SESSION_EVENT_CHARS} characters.")
         key = (key or "").strip() or None
-        event = SessionEvent(text, key=key, source=source, announce=announce, task_id=task_id)
+        event = SessionEvent(text, key=key, source=source, announce=announce, task_id=task_id, lane=lane, mode=mode)
         loop = self._loop
         if loop is not None and not loop.is_closed() and _running_loop() is not loop:
             loop.call_soon_threadsafe(self._queue_event, event)
@@ -1420,13 +1541,57 @@ class BackgroundTaskStore:
         """Peek the events no turn has taken yet."""
         return list(self._events)
 
-    def drain_events(self, run_id: str | None = None, *, settle: bool = True) -> list[SessionEvent]:
-        """Take every pending event for a turn.
+    def withdraw_event(self, event_id: str) -> bool:
+        """Take back an event no turn has taken yet (settled ``"withdrawn"``). False once one has."""
+        for event in self._events:
+            if event.id == event_id:
+                self._events.remove(event)
+                event._settle("withdrawn")
+                return True
+        return False
+
+    def restore_event(self, data: dict[str, Any], *, held: SessionEvent | None = None) -> SessionEvent:
+        """Queue an event saved with :meth:`SessionEvent.to_dict` (a durable session coming back after a
+        restart): same id and posting time, so its receipt and its order among the others hold.
+
+        ``held``: the event itself, still pending, when this process has it (the session is restored where
+        it was closed, and took its events out with ``drain_events(settle=False)``): queued again as it is,
+        so the receipt its sender holds is the one that settles."""
+        if held is not None and held.state == "pending":
+            self._queue_event(held)
+            return held
+        event = SessionEvent(
+            data["text"],
+            key=data.get("key"),
+            source=data.get("source", "app"),
+            announce=data.get("announce"),
+            task_id=data.get("task_id"),
+            lane=data.get("lane", "later"),
+            mode=data.get("mode"),
+        )
+        event.id = data["id"]
+        event.posted_at = data.get("posted_at", event.posted_at)
+        self._queue_event(event)
+        return event
+
+    def drain_events(
+        self,
+        run_id: str | None = None,
+        *,
+        settle: bool = True,
+        where: Callable[[SessionEvent], bool] | None = None,
+    ) -> list[SessionEvent]:
+        """Take every pending event for a turn (only those ``where`` accepts, when given).
 
         ``settle=False`` when the receiving run has not started yet: the taker
         settles them as delivered once it has, or hands them back (:meth:`requeue`).
         """
-        events, self._events = self._events, []
+        if where is None:
+            events, self._events = self._events, []
+        else:
+            events = [event for event in self._events if where(event)]
+            if events:
+                self._events = [event for event in self._events if not where(event)]
         if settle:
             for event in events:
                 event._settle("delivered", run_id)
@@ -1508,7 +1673,7 @@ def bind_background_store(run_context: Any) -> BackgroundTaskStore | None:
         if store is not None:
             # Keep the chain alive: the next turn parented on this run finds it.
             _STORES_BY_RUN_ID[run_context.id] = store
-    run_context._bg_store = store
+    run_context.__dict__["_bg_store"] = store
     return store
 
 
@@ -1522,16 +1687,18 @@ def apply_background_limits(
     task_retention_secs: float | object = _UNSET,
 ) -> None:
     """Stash session caps on the RunContext and update an existing store."""
+    # Plain attributes (see RunContext's NOTE), set once per agent turn: skip BaseModel.__setattr__.
+    caps = run_context.__dict__
     if max_concurrent is not _UNSET:
-        run_context._bg_max_concurrent = max_concurrent
+        caps["_bg_max_concurrent"] = max_concurrent
     if max_depth is not _UNSET:
-        run_context._bg_max_depth = max_depth
+        caps["_bg_max_depth"] = max_depth
     if max_log_events is not _UNSET:
-        run_context._bg_max_log_events = max_log_events
+        caps["_bg_max_log_events"] = max_log_events
     if max_log_bytes is not _UNSET:
-        run_context._bg_max_log_bytes = max_log_bytes
+        caps["_bg_max_log_bytes"] = max_log_bytes
     if task_retention_secs is not _UNSET:
-        run_context._bg_task_retention_secs = task_retention_secs
+        caps["_bg_task_retention_secs"] = task_retention_secs
     store = getattr(run_context, "_bg_store", None)
     if store is None:
         return
@@ -1606,16 +1773,20 @@ def post_session_event(
     key: str | None = None,
     source: SessionEventSource = "app",
     announce: Announce | None = None,
+    lane: SessionEventLane | None = None,
+    mode: UserMessageMode | None = None,
     create: bool = False,
 ) -> SessionEvent:
     """Post an event to the session ``run_id`` belongs to (process-local, thread-safe).
 
     The next turn of that session receives it, and a scheduler waiting on the
-    session wakes. Any run id of a session that has a store reaches it, and so
-    does a run an owned session continued from before it had one. A session
-    without one raises ``LookupError`` unless ``create=True``: then a store is
-    registered under ``run_id``, which only the turn chained directly on
-    ``run_id`` will find, so pass the session's latest run.
+    session wakes; with ``lane="next"`` a running turn that steers takes it
+    first (``source="user"`` messages pick that with ``mode="steer"``). Any
+    run id of a session that has a store reaches it, and so does a run an
+    owned session continued from before it had one. A session without one
+    raises ``LookupError`` unless ``create=True``: then a store is registered
+    under ``run_id``, which only the turn chained directly on ``run_id`` will
+    find, so pass the session's latest run.
     """
     store = _STORES_BY_RUN_ID.get(run_id)
     if store is None:
@@ -1627,7 +1798,7 @@ def post_session_event(
             )
         store = BackgroundTaskStore()
         _STORES_BY_RUN_ID[run_id] = store
-    return store.post_event(text, key=key, source=source, announce=announce)
+    return store.post_event(text, key=key, source=source, announce=announce, lane=lane, mode=mode)
 
 
 def report_progress(text: str, *, announce: Announce | None = None) -> SessionEvent:

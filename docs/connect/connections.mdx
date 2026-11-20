@@ -1,0 +1,157 @@
+---
+title: "Configure connections"
+description: "Tell Timbal Connect which databases and file shares it may use"
+---
+
+The connector only uses sources you list on the server. Databases go in `connections.json`. Each entry has a name, a driver and a connection string. Timbal refers to the connection by its name only; the connection string, and any password in it, never leaves the server. File shares are separate: see [File shares](#file-shares).
+
+<Note>
+If you're used to the Power BI gateway, this is the main difference: there is no screen in Timbal where you add a data source with its server and password. Connections are defined here, on the gateway server, and appear in Timbal by name once the service restarts.
+</Note>
+
+| Platform | File |
+| -------- | ---- |
+| Windows | `C:\ProgramData\TimbalConnect\connections.json` |
+| Linux / macOS | `/etc/timbal-connect/connections.json` |
+
+```json
+{
+  "erp": {
+    "kind": "sql_server",
+    "dsn": "Server=tcp:sql01.corp.local,1433;Database=ERP;Encrypt=true;TrustServerCertificate=true",
+    "auth": { "mode": "integrated" }
+  },
+  "warehouse": {
+    "kind": "postgres",
+    "dsn": "postgres://timbal_ro:secret@10.0.0.12:5432/warehouse"
+  },
+  "shop": {
+    "kind": "mysql",
+    "dsn": "mysql://timbal_ro:secret@127.0.0.1:3306/shop"
+  }
+}
+```
+
+After editing, restart the service and check the result:
+
+<Tabs>
+  <Tab title="Windows">
+    ```powershell
+    Restart-Service timbal-connect
+    & "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" doctor
+    ```
+  </Tab>
+  <Tab title="Linux">
+    ```bash
+    sudo systemctl restart timbal-connect
+    sudo bash -c 'set -a; . /etc/timbal-connect/connector.env; exec /opt/timbal-connect/current/timbal-connect doctor'
+    ```
+  </Tab>
+  <Tab title="macOS">
+    ```bash
+    sudo launchctl kickstart -k system/ai.timbal.connect
+    sudo /opt/timbal-connect/current/timbal-connect doctor
+    ```
+  </Tab>
+</Tabs>
+
+`doctor` really connects to every database in the file and reports, per connection, whether it worked and why not.
+
+<Warning>
+Save the file as **UTF-8 without BOM**. Notepad on older Windows versions and PowerShell's `Set-Content -Encoding utf8` add a byte-order mark, and the file then fails to parse. Also remember that `\` must be doubled inside JSON strings: write `"CORP\\svc_timbal"`, not `"CORP\svc_timbal"`.
+</Warning>
+
+## Fields
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `kind` | Yes | `postgres`, `sql_server` or `mysql` (MySQL and MariaDB) |
+| `dsn` | Yes | Connection string. URL form for PostgreSQL and MySQL, ADO.NET form for SQL Server |
+| `auth` | No | SQL Server only. How to log in, see below. Default: credentials from the `dsn` |
+| `query` | No | What ad-hoc queries from Timbal may do on this connection: `"none"`, `"read"` (default) or `"write"`. This setting on the server always wins over what Timbal asks for |
+
+Use a database account with **read-only** permissions unless you need writes.
+
+## SQL Server authentication
+
+| `auth.mode` | Logs in as | Works on |
+| ----------- | ---------- | -------- |
+| `sql` (default) | `User Id` and `Password` from the `dsn` | All platforms |
+| `integrated` | The Windows account the service runs as, no password stored | Windows |
+| `windows` | An explicit domain account, `{"mode": "windows", "user": "CORP\\svc", "password": "..."}` | Windows |
+
+Many Business Central and NAV databases only allow Windows logins, so `sql` fails with `Login failed for user`. Use `integrated` with a dedicated service account:
+
+<Steps>
+  <Step title="Run the service as a domain account">
+    A group managed service account (gMSA) is best because no password is stored. Note the trailing `$` and the empty password:
+
+    ```powershell
+    sc.exe config timbal-connect obj= "CORP\svc_timbal$" password= ""
+    Restart-Service timbal-connect
+    ```
+
+    For a normal domain user, pass its password instead of `""`.
+  </Step>
+  <Step title="Grant it read access in SQL Server">
+    ```sql
+    CREATE LOGIN [CORP\svc_timbal$] FROM WINDOWS;
+    CREATE USER  [CORP\svc_timbal$] FOR LOGIN [CORP\svc_timbal$];
+    ALTER ROLE db_datareader ADD MEMBER [CORP\svc_timbal$];
+    ```
+  </Step>
+</Steps>
+
+By default the service runs as `NT AUTHORITY\NetworkService`, which reaches a SQL Server on *another* machine as the computer account (`CORP\SERVERNAME$`). That account rarely has a login, hence `Login failed for user 'CORP\SERVERNAME$'`.
+
+### Reaching the server
+
+| `Server=` | Use when |
+| --------- | -------- |
+| `tcp:sql01.corp.local,1433` | Default instance. Always prefer an explicit port |
+| `tcp:sql01.corp.local,52001` | Named instance whose static port you know (SQL Server Configuration Manager, TCP/IP, IPAll) |
+| `tcp:sql01.corp.local\INSTANCE` | Named instance on a dynamic port. Needs the SQL Browser service and UDP 1434 open |
+
+### Encryption
+
+| In the `dsn` | Meaning |
+| ------------ | ------- |
+| `Encrypt=true;TrustServerCertificate=true` | Encrypted, certificate not verified. The usual choice for on-premises servers with self-signed certificates |
+| `Encrypt=true;TrustServerCertificate=false` | Encrypted and verified. The certificate must be trusted and match the `Server=` host name |
+| `Encrypt=false` | Not encrypted. Avoid |
+
+## File shares
+
+Directories the connector may read are listed in `config.json`, under `filesystems`. They are not entries in `connections.json`. The key is the name Timbal uses for that share; the path stays on the server.
+
+| Platform | File |
+| -------- | ---- |
+| Windows | `C:\ProgramData\TimbalConnect\config.json` |
+| Linux / macOS | `/etc/timbal-connect/config.json` |
+
+On Windows and macOS the installer already created this file. Add `filesystems` and leave the other keys alone (the control-plane URL and the enrollment token). On Linux those live in `connector.env` and `config.json` does not exist yet: create it with only the map.
+
+```json
+{
+  "filesystems": {
+    "exports": { "path": "/srv/exports" }
+  }
+}
+```
+
+`path` is the only field. It is a directory on the server: a local folder, or a share already mounted there. In JSON, double Windows backslashes (`"D:\\Shares\\invoices"`). Save as UTF-8 without BOM, same as `connections.json`.
+
+The service account has to be able to read the directory. On Windows that is `NT AUTHORITY\NetworkService` unless you changed the service account. On Linux it is the `timbal-connect` user, and the unit sets `ProtectHome=true`, so a path under `/home` is hidden from the service.
+
+Restart the service as above. `doctor` checks each share and reports whether the directory is readable. If it says a remote local-config override is active, that override replaces this map until you run `timbal-connect local-config clear` and restart.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Troubleshooting" icon="wrench" href="/connect/troubleshooting">
+    When `doctor` or the service log names a failure.
+  </Card>
+  <Card title="Network requirements" icon="network-wired" href="/connect/network-requirements">
+    If the connector stays offline after it starts.
+  </Card>
+</CardGroup>

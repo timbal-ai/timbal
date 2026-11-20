@@ -114,14 +114,18 @@ async def test_buffered_coalesces_and_the_end_of_the_run_lands_last():
 
 
 async def test_a_slow_store_no_longer_holds_the_run():
-    sync = make_storage(delay=0.1)
-    _, sync_seconds = await run_agent(sync, rounds=3, per_round=2)
-    buffered = make_storage(delay=0.1).configured(durability="buffered", flush_interval_s=0.5)
+    # Counted, not timed: two runs timed against each other race whatever else the runner is doing.
+    sync = make_storage()
+    await run_agent(sync, rounds=3, per_round=2)
+    delay = 0.4
+    awaiting_every_save = len(sync.stored) * delay  # ~4.4 s: what a run holding on each store would take
+    buffered = make_storage(delay=delay).configured(durability="buffered", flush_interval_s=0.5)
     output, buffered_seconds = await run_agent(buffered, rounds=3, per_round=2)
-    assert buffered_seconds < sync_seconds / 2, (buffered_seconds, sync_seconds)
+    # The run waits for its end barrier and an upload in flight then: ~2 stores (~0.8 s), not one per span.
+    # The bound leaves the runner over a second of slack and still fails a run that waits per span.
+    assert buffered_seconds < awaiting_every_save / 2, (buffered_seconds, awaiting_every_save)
+    assert output.usage["tracing:wait_ms"] < awaiting_every_save * 1000 / 2
     assert buffered.stored[-1]["finished"]
-    # The run waited only for its end barrier (and an upload in flight then), not per span.
-    assert output.usage["tracing:wait_ms"] < sync_seconds * 1000 / 2
 
 
 async def test_a_barrier_save_is_stored_before_it_returns():
@@ -551,3 +555,43 @@ async def test_flush_all_stores_what_is_pending():
     await uploads.flush_all(timeout=1.0)
     assert stored == ["run-1", "run-1"]
     assert uploads.pending_runs() == []
+
+
+class TestDefaultDurability:
+    """A provider's ``default_durability`` applies only when neither it nor the environment chooses."""
+
+    def test_platform_buffers_and_the_others_await(self, monkeypatch):
+        from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+        monkeypatch.delenv(uploads.DURABILITY_ENV, raising=False)
+        assert uploads.durability(PlatformTracingProvider) == "buffered"
+        assert uploads.durability(InMemoryTracingProvider) == "sync"
+        assert uploads.durability(JsonlTracingProvider) == "sync"
+
+    def test_an_explicit_choice_wins(self, monkeypatch):
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+        monkeypatch.setenv(uploads.DURABILITY_ENV, "sync")
+        assert uploads.durability(PlatformTracingProvider) == "sync"
+        monkeypatch.setenv(uploads.DURABILITY_ENV, "buffered")
+        assert uploads.durability(PlatformTracingProvider.configured(durability="sync")) == "sync"
+        assert uploads.durability(make_storage().configured(durability="end")) == "end"
+
+    def test_the_default_adds_no_usage_keys(self, monkeypatch):
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+        monkeypatch.delenv(uploads.DURABILITY_ENV, raising=False)
+        monkeypatch.delenv(uploads.METRICS_ENV, raising=False)
+        assert not uploads.metrics_on(PlatformTracingProvider)
+        assert uploads.metrics_on(PlatformTracingProvider.configured(durability="buffered"))
+
+    async def test_a_buffered_default_does_not_hold_the_run(self, monkeypatch):
+        monkeypatch.delenv(uploads.DURABILITY_ENV, raising=False)
+        sync = make_storage(delay=0.1)
+        _, sync_seconds = await run_agent(sync, rounds=3, per_round=2)
+        by_default = make_storage(delay=0.1).configured(default_durability="buffered", flush_interval_s=0.5)
+        output, default_seconds = await run_agent(by_default, rounds=3, per_round=2)
+        assert default_seconds < sync_seconds / 2, (default_seconds, sync_seconds)
+        assert by_default.stored[-1]["finished"]
+        assert not any(key.startswith("tracing:") for key in output.usage)

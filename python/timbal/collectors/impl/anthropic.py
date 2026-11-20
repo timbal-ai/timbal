@@ -232,6 +232,14 @@ class AnthropicCollector(BaseCollector):
                 id=content_block_id,
                 text=event.content_block.text,
             )
+        elif getattr(event.content_block, "type", None) == "tool_search_tool_result":
+            # Kept verbatim: the next request must send it back unchanged so the API can
+            # expand its tool_reference blocks into the tools Claude found.
+            block = event.content_block
+            raw = block.model_dump(mode="json", exclude_none=True) if hasattr(block, "model_dump") else dict(block)
+            self.content.append(
+                {"type": "tool_search_tool_result", "tool_use_id": raw["tool_use_id"], "content": raw["content"]}
+            )
         else:
             logger.warning("Unhandled content block start event", raw_content_block_start_event=event)
 
@@ -408,7 +416,7 @@ class AnthropicCollector(BaseCollector):
                         is_server_tool_use=True,
                     )
                 )
-            elif content_block["type"] == "web_search_tool_result":
+            elif content_block["type"] in ("web_search_tool_result", "tool_search_tool_result"):
                 content.append(CustomContent(value=content_block))
             elif content_block["type"] == "thinking":
                 content.append(

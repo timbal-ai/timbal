@@ -1,0 +1,110 @@
+---
+title: "Install on Linux and macOS"
+description: "Install Timbal Connect as a systemd or launchd service"
+---
+
+## Requirements
+
+- Linux on x86_64 or aarch64 (any distribution; the binary is static) with systemd, or macOS on Intel or Apple silicon
+- `root` or `sudo`
+- `curl` and `sha256sum` (Linux) or `shasum` (macOS)
+- The [network requirements](/connect/network-requirements) in place: direct outbound TCP 443 to `api.timbal.ai`, no TLS inspection
+- An [enrollment token](/api-reference/connectors/enrollment-tokens/create), unused and not expired
+
+## Install
+
+```bash
+curl -fsSL https://api.timbal.ai/v1/connect/releases/install.sh | sudo bash -s -- --token <TOKEN>
+```
+
+The script detects the OS and architecture, downloads the connector, verifies its SHA-256 checksum, and registers and starts the service.
+
+| Option | Effect |
+| ------ | ------ |
+| `--token <token>` | Enrollment token. Required on first install. Omit it to upgrade; pass a new one to re-enroll |
+| `--url <wss://...>` | Control plane, if Timbal gave you a non-default one. On an existing install it defaults to the one the server is configured for |
+| `--version <vX.Y.Z>` | Pin a connector version (default `latest`) |
+
+Then add your databases and file shares: [Configure connections](/connect/connections).
+
+### Without the install script
+
+If you can't pipe a script into a shell, download the binary for your platform from `https://api.timbal.ai/v1/connect/releases/latest/` along with `SHA256SUMS`, check the hash, and run:
+
+```bash
+chmod +x ./timbal-connect-x86_64-linux
+sudo ./timbal-connect-x86_64-linux service install --url wss://api.timbal.ai/v1/connect/channel --token <TOKEN>
+```
+
+Binaries: `timbal-connect-x86_64-linux`, `timbal-connect-aarch64-linux`, `timbal-connect-x86_64-darwin`, `timbal-connect-aarch64-darwin`.
+
+## Check that it's running
+
+<Tabs>
+  <Tab title="Linux">
+    ```bash
+    systemctl status timbal-connect
+    journalctl -fu timbal-connect
+    ```
+  </Tab>
+  <Tab title="macOS">
+    ```bash
+    sudo launchctl print system/ai.timbal.connect | head
+    tail -f /Library/Logs/timbal-connect.log
+    ```
+  </Tab>
+</Tabs>
+
+You want to see `connector enrolled and connected`. For a full check of the network and every configured database, run `doctor` with the service's configuration:
+
+<Tabs>
+  <Tab title="Linux">
+    ```bash
+    sudo bash -c 'set -a; . /etc/timbal-connect/connector.env; exec /opt/timbal-connect/current/timbal-connect doctor'
+    ```
+  </Tab>
+  <Tab title="macOS">
+    ```bash
+    sudo /opt/timbal-connect/current/timbal-connect doctor
+    ```
+  </Tab>
+</Tabs>
+
+## Upgrade
+
+The connector normally updates itself when Timbal pushes a new version. To upgrade by hand, re-run the install command without `--token`. Configuration and credentials are kept.
+
+## Re-enroll
+
+If the first attempt used an expired or already-used token, or the connector was revoked in Timbal, re-run the install command with a **new** `--token`. Without `--url`, the server stays on the Timbal environment it is configured for. The server registers as a new connector: the token is written into the existing configuration, the previous identity is moved aside (`state.json.pre-reenroll-<number>`, kept as a backup) and the service restarts. Connections and other settings are kept. Revoke the old connector if it had been connected before.
+
+## Uninstall
+
+```bash
+sudo /opt/timbal-connect/current/timbal-connect service uninstall           # keeps configuration and credentials
+sudo /opt/timbal-connect/current/timbal-connect service uninstall --purge   # removes everything
+```
+
+Uninstalling doesn't revoke the connector in Timbal; revoke it too if the server leaves your control: [Revoke connector](/api-reference/connectors/revoke). Reinstalling always needs a new enrollment token.
+
+## Files on the server
+
+| Path | Contents |
+| ---- | -------- |
+| `/opt/timbal-connect/` | Connector binaries |
+| `/etc/timbal-connect/connector.env` | Linux: control-plane URL and enrollment token |
+| `/etc/timbal-connect/config.json` | File shares (`filesystems`). On macOS this file also holds the control-plane URL and enrollment token |
+| `/etc/timbal-connect/connections.json` | Database connections |
+| `/var/lib/timbal-connect/state.json` | The connector's credential and sync progress |
+| journald (Linux), `/Library/Logs/timbal-connect.log` (macOS) | Service log |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configure connections" icon="database" href="/connect/connections">
+    Databases in `connections.json`, file shares in `config.json`.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/connect/troubleshooting">
+    Installer messages and what to do about them.
+  </Card>
+</CardGroup>

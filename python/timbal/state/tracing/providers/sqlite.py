@@ -1,9 +1,12 @@
 import asyncio
 import json
+import os
 import sqlite3
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 try:
     from typing import override
@@ -17,12 +20,173 @@ if TYPE_CHECKING:
     from ...context import RunContext
 
 
+class _Database:
+    """One connection per database file, shared by every configured provider on it.
+
+    All access runs on worker threads and is serialized here: SQLite has one writer
+    at a time anyway, and a queue in the process beats retrying ``SQLITE_BUSY``.
+    """
+
+    def __init__(self, path: Path, synchronous: str) -> None:
+        self.path = path
+        self.lock = threading.Lock()
+        self.conn = sqlite3.connect(str(path), timeout=10, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute(f"PRAGMA synchronous={synchronous}")
+        _ensure_schema(self.conn)
+        # Which file this is a connection to: the path can come to name another one (see alive()).
+        self._file = self._file_at_path()
+        # Per run: which spans are finished and committed to this file (not rewritten until the root ends),
+        # and the order spans were first seen. Kept per connection: a file recreated after being deleted
+        # holds none of them. Bounded: a run whose process died never ends.
+        self.runs: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+    def _file_at_path(self) -> tuple[int, int] | None:
+        try:
+            found = os.stat(self.path)
+        except OSError:
+            return None
+        return (found.st_dev, found.st_ino)
+
+    def alive(self) -> bool:
+        """Whether the path still names the file this connection opened.
+
+        Not just whether a file is there: one deleted and written again (by another connection, by a
+        restore) is a different file, and this connection would go on writing to the one that is gone.
+        """
+        return self._file is not None and self._file_at_path() == self._file
+
+    def run_state(self, run_id: str) -> dict[str, Any]:
+        state = self.runs.get(run_id)
+        if state is None:
+            state = self.runs[run_id] = {"stored": set(), "seq": {}}
+            while len(self.runs) > _RUN_STATE_MAX:
+                self.runs.popitem(last=False)
+        else:
+            self.runs.move_to_end(run_id)
+        return state
+
+
+_DATABASES: dict[tuple[str, str], _Database] = {}
+_DATABASES_LOCK = threading.Lock()
+_RUN_STATE_MAX = 2048
+# The parent's connections, in a forked child: kept referenced so that they are never closed there.
+_INHERITED_AFTER_FORK: list[_Database] = []
+
+
+def _forget_databases_after_fork() -> None:
+    """In a forked child (a server that opened a file and then forked its workers): open again.
+
+    A connection shared across a fork is two processes on one connection's file locks and WAL index, which
+    SQLite does not support (lock errors, a corrupted WAL). And a lock a parent thread held at the fork,
+    the registry's or a connection's, stays held in the child with nobody left to let go of it.
+
+    The inherited connections are not closed: closing one here would let go of the file locks the parent
+    holds through it. They are kept referenced instead, so that collecting them never closes them either.
+    """
+    global _DATABASES_LOCK
+    _INHERITED_AFTER_FORK.extend(_DATABASES.values())
+    _DATABASES.clear()
+    _DATABASES_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_databases_after_fork)
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            run_id    TEXT    PRIMARY KEY,
+            parent_id TEXT,
+            spans     TEXT    NOT NULL,
+            stored_at INTEGER NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_parent_id ON runs (parent_id)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS spans (
+            run_id  TEXT    NOT NULL,
+            call_id TEXT    NOT NULL,
+            seq     INTEGER NOT NULL,
+            span    TEXT    NOT NULL,
+            PRIMARY KEY (run_id, call_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS approval_claims (
+            parent_id         TEXT    NOT NULL,
+            approval_id       TEXT    NOT NULL,
+            claimed_by_run_id TEXT    NOT NULL,
+            claimed_at        INTEGER NOT NULL,
+            PRIMARY KEY (parent_id, approval_id)
+        )
+    """)
+    # Durable chat sessions (timbal.state.chat_store.SqliteChatSessionStore): one mutable row per session.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            session_id  TEXT    PRIMARY KEY,
+            agent       TEXT    NOT NULL,
+            snapshot    TEXT    NOT NULL,
+            version     INTEGER NOT NULL,
+            lease_owner TEXT,
+            lease_until REAL,
+            updated_at  INTEGER NOT NULL,
+            has_work    INTEGER
+        )
+    """)
+    # has_work: 1 when the session would run something without a client asking (SessionSnapshot.has_work),
+    # 0 when not, written with every save. NULL only in a row from before the column, until it is written
+    # again. Startup asks for the sessions with work: idle ones stay in the table until deleted and soon
+    # outnumber them, so that question is answered from an index over the rows that are not 0.
+    if "has_work" not in {column[1] for column in conn.execute("PRAGMA table_info(chat_sessions)")}:
+        try:
+            conn.execute("ALTER TABLE chat_sessions ADD COLUMN has_work INTEGER")
+        except sqlite3.OperationalError:
+            # Another process opening the file added it first.
+            if "has_work" not in {column[1] for column in conn.execute("PRAGMA table_info(chat_sessions)")}:
+                raise
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_sessions_work ON chat_sessions (session_id) WHERE has_work IS NOT 0"
+    )
+    conn.commit()
+
+
+def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
+    """The process's one connection to the SQLite file at ``path`` (created with the schema if absent)."""
+    mode = synchronous.upper()
+    if mode not in ("NORMAL", "FULL"):
+        raise ValueError(f"synchronous must be 'NORMAL' or 'FULL', got {synchronous!r}")
+    key = (str(Path(path).resolve()), mode)
+    with _DATABASES_LOCK:
+        db = _DATABASES.get(key)
+    if db is not None and db.alive():  # not alive: the file was deleted under us, don't write to the old inode
+        return db
+    # Opened outside the registry's lock, which every database of the process goes through: a file that
+    # cannot be opened now (a stalled mount) holds up its own callers, not those of every other file.
+    opened = _Database(Path(path), mode)
+    with _DATABASES_LOCK:
+        current = _DATABASES.get(key)
+        if current is not None and current is not db and current.alive():
+            # Another thread opened it meanwhile: one connection per file, theirs. Only while theirs is
+            # still to the file at the path: one that went stale since (the file deleted under it) is
+            # replaced by this one, as a stale one always is.
+            opened.conn.close()
+            return current
+        _DATABASES[key] = opened
+        return opened
+
+
 class SqliteTracingProvider(TracingProvider):
     """SQLite tracing provider — local, persistent, and performant.
 
-    Stores one row per run keyed by ``run_id``. Intermediate snapshots during
-    a run are upserted in-place via ``INSERT OR REPLACE`` — O(log n) versus the
-    O(n) full-file rewrite of ``JsonlTracingProvider``.
+    Stores one row per span, so a save writes what changed since the last one
+    instead of the whole run: the spans not yet stored finished, plus every span
+    once the root has ended (a background child's late output lands then).
+    One connection per file, WAL, ``synchronous=NORMAL`` by default: a commit
+    survives the process crashing or being killed, not a power cut or kernel
+    panic (``synchronous="FULL"`` for that, ~10x slower per save). Single
+    process; several workers on one file serialize on SQLite's one writer.
 
     Configure via the base-class ``configured()`` method::
 
@@ -32,94 +196,82 @@ class SqliteTracingProvider(TracingProvider):
     Class-level attributes:
 
     - ``_path`` (Path | None): database file. Created on first write if absent.
+    - ``synchronous`` (str): ``"NORMAL"`` (default) or ``"FULL"``.
 
-    The database is created automatically if it does not exist. WAL journal
-    mode is enabled so concurrent reads never block writes. Uses only the
-    stdlib ``sqlite3`` module — no extra dependencies.
+    Uses only the stdlib ``sqlite3`` module — no extra dependencies.
 
     Schema::
 
-        runs (
-            run_id    TEXT PRIMARY KEY,
-            parent_id TEXT,
-            spans     TEXT NOT NULL,   -- JSON array of span dicts
-            stored_at INTEGER NOT NULL -- Unix ms timestamp
-        )
+        runs (run_id PRIMARY KEY, parent_id, spans, stored_at)
+            -- spans: the whole trace as a JSON array once the run has ended
+            -- ('' while it runs); earlier versions wrote it on every save
+        spans (run_id, call_id, seq, span, PRIMARY KEY (run_id, call_id))
+        approval_claims (parent_id, approval_id, claimed_by_run_id, claimed_at)
     """
 
     _path: Path | None = None
-    _lock: asyncio.Lock | None = None
+    synchronous: str = "NORMAL"
 
     @classmethod
-    def _get_lock(cls) -> asyncio.Lock:
-        if cls._lock is None:
-            cls._lock = asyncio.Lock()
-        return cls._lock
-
-    @classmethod
-    def _connect(cls) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(cls._path), timeout=10, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
-
-    @classmethod
-    def _ensure_schema(cls, conn: sqlite3.Connection) -> None:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS runs (
-                run_id    TEXT    PRIMARY KEY,
-                parent_id TEXT,
-                spans     TEXT    NOT NULL,
-                stored_at INTEGER NOT NULL
+    def _db(cls) -> _Database:
+        if cls._path is None:
+            raise RuntimeError(
+                "SqliteTracingProvider._path is not set. "
+                "Use SqliteTracingProvider.configured(path=Path(...)) to create a configured provider."
             )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_parent_id ON runs (parent_id)")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS approval_claims (
-                parent_id         TEXT    NOT NULL,
-                approval_id       TEXT    NOT NULL,
-                claimed_by_run_id TEXT    NOT NULL,
-                claimed_at        INTEGER NOT NULL,
-                PRIMARY KEY (parent_id, approval_id)
-            )
-        """)
+        return database(cls._path, cls.synchronous)
 
     @classmethod
     @override
     async def get(cls, run_context: "RunContext") -> Trace | None:
-        """Retrieve the parent run's trace from the SQLite database.
+        """Retrieve the parent run's trace (indexed lookups on ``run_id``).
 
-        Performs an indexed primary-key lookup on ``run_id``.
         Returns None if the database does not exist or no matching record is found.
         """
-        if cls._path is None or not cls._path.exists():
+        try:
+            return await cls.get_strict(run_context)
+        except (OSError, sqlite3.Error, json.JSONDecodeError, ValueError):
+            return None
+
+    @classmethod
+    @override
+    async def get_strict(cls, run_context: "RunContext") -> Trace | None:
+        """See base class: database and decoding errors raise."""
+        if cls._path is None:
+            return None
+        try:
+            # Not Path.exists(): it reads a failed stat (a permission error) as "no database". Checked at all
+            # because connecting would create one.
+            Path(cls._path).stat()
+        except FileNotFoundError:
             return None
         parent_id = run_context.parent_id
         if parent_id is None:
             return None
 
-        def _query() -> tuple[str, str | None] | None:
-            conn = cls._connect()
-            try:
-                row = conn.execute(
-                    "SELECT spans, parent_id FROM runs WHERE run_id = ?",
-                    (str(parent_id),),
+        def _query() -> tuple[list[str], str, str | None] | None:
+            db = cls._db()
+            with db.lock:
+                row = db.conn.execute(
+                    "SELECT spans, parent_id FROM runs WHERE run_id = ?", (str(parent_id),)
                 ).fetchone()
-            finally:
-                conn.close()
-            return (row[0], row[1]) if row else None
+                if row is None:
+                    return None
+                spans = [
+                    span
+                    for (span,) in db.conn.execute(
+                        "SELECT span FROM spans WHERE run_id = ? ORDER BY seq", (str(parent_id),)
+                    )
+                ]
+            return spans, row[0], row[1]
 
-        try:
-            row = await asyncio.to_thread(_query)
-        except (OSError, sqlite3.Error):
+        found = await asyncio.to_thread(_query)
+        if found is None:
             return None
-
-        if row is None:
-            return None
-
-        try:
-            return Trace(json.loads(row[0]), parent_id=row[1])
-        except (json.JSONDecodeError, ValueError):
-            return None
+        spans, legacy, grandparent = found
+        if spans:
+            return Trace([json.loads(span) for span in spans], parent_id=grandparent)
+        return Trace(json.loads(legacy), parent_id=grandparent) if legacy else None
 
     @classmethod
     @override
@@ -133,74 +285,78 @@ class SqliteTracingProvider(TracingProvider):
         """
         if parent_id is None:
             return True
-        if cls._path is None:
-            raise RuntimeError(
-                "SqliteTracingProvider._path is not set. "
-                "Use SqliteTracingProvider.configured(path=Path(...)) to create a configured provider."
-            )
 
         def _claim() -> bool:
-            conn = cls._connect()
-            try:
-                cls._ensure_schema(conn)
-                claimed_at = int(time.time() * 1000)
-                cursor = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO approval_claims
-                        (parent_id, approval_id, claimed_by_run_id, claimed_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (str(parent_id), approval_id, run_id, claimed_at),
-                )
-                conn.commit()
+            db = cls._db()
+            with db.lock:
+                with db.conn:  # committed, or rolled back on error: the shared connection never stays mid-transaction
+                    cursor = db.conn.execute(
+                        """
+                        INSERT OR IGNORE INTO approval_claims
+                            (parent_id, approval_id, claimed_by_run_id, claimed_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (str(parent_id), approval_id, run_id, int(time.time() * 1000)),
+                    )
                 if cursor.rowcount == 1:
                     return True
-                row = conn.execute(
-                    """
-                    SELECT claimed_by_run_id FROM approval_claims
-                    WHERE parent_id = ? AND approval_id = ?
-                    """,
+                row = db.conn.execute(
+                    "SELECT claimed_by_run_id FROM approval_claims WHERE parent_id = ? AND approval_id = ?",
                     (str(parent_id), approval_id),
                 ).fetchone()
-                return bool(row and row[0] == run_id)
-            finally:
-                conn.close()
+            return bool(row and row[0] == run_id)
 
-        async with cls._get_lock():
-            return await asyncio.to_thread(_claim)
+        return await asyncio.to_thread(_claim)
 
     @classmethod
     @override
     async def _store(cls, run_context: "RunContext") -> None:
-        """Upsert the current run's trace into the SQLite database.
+        """Store the spans of the current run that changed since its last save.
 
         Raises:
             RuntimeError: If ``_path`` has not been set via ``configured()``.
         """
-        if cls._path is None:
-            raise RuntimeError(
-                "SqliteTracingProvider._path is not set. "
-                "Use SqliteTracingProvider.configured(path=Path(...)) to create a configured provider."
-            )
-
+        db = cls._db()
         run_id = str(run_context.id)
         parent_id = str(run_context.parent_id) if run_context.parent_id else None
-        spans_json = json.dumps(run_context._trace.model_dump(), default=str)
+        spans = run_context._trace.as_records()
+        root = next((span for span in spans if span.parent_call_id is None), None)
+        ended = root is not None and root.t1 is not None
+
+        state = db.run_state(run_id)
+        order: dict[str, int] = state["seq"]
+        rows = []
+        finished = []
+        for span in spans:
+            seq = order.setdefault(span.call_id, len(order))
+            if not ended and span.call_id in state["stored"]:
+                continue
+            rows.append((run_id, span.call_id, seq, json.dumps(span.model_dump(), default=str)))
+            if span.t1 is not None:
+                finished.append(span.call_id)
         stored_at = int(time.time() * 1000)
+        # An ended run also gets the whole trace in runs.spans, as before: one write per run
+        # keeps readers of that column working. While it runs, only its span rows are current.
+        blob = "[" + ",".join(row[3] for row in rows) + "]" if ended else ""
 
         def _write() -> None:
-            conn = cls._connect()
-            try:
-                # Schema operations are idempotent — SQLite caches the schema
-                # after the first call so this is effectively free later.
-                cls._ensure_schema(conn)
-                conn.execute(
-                    "INSERT OR REPLACE INTO runs (run_id, parent_id, spans, stored_at) VALUES (?, ?, ?, ?)",
-                    (run_id, parent_id, spans_json, stored_at),
+            with db.lock, db.conn:  # one transaction: committed whole, or rolled back on any error
+                db.conn.execute(
+                    """
+                    INSERT INTO runs (run_id, parent_id, spans, stored_at) VALUES (?, ?, ?, ?)
+                    ON CONFLICT (run_id) DO UPDATE SET parent_id = excluded.parent_id, spans = excluded.spans,
+                        stored_at = excluded.stored_at
+                    """,
+                    (run_id, parent_id, blob, stored_at),
                 )
-                conn.commit()
-            finally:
-                conn.close()
+                db.conn.executemany(
+                    "INSERT OR REPLACE INTO spans (run_id, call_id, seq, span) VALUES (?, ?, ?, ?)", rows
+                )
 
-        async with cls._get_lock():
-            await asyncio.to_thread(_write)
+        await asyncio.to_thread(_write)
+        # Only once committed: a save that failed leaves them for the next one to write.
+        if ended:
+            # Later saves (background work outliving the root) rewrite everything again.
+            state["stored"].clear()
+        else:
+            state["stored"].update(finished)

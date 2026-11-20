@@ -173,6 +173,7 @@ zero provider-specific code in user land.
 
 | Directory | What it compares | Status |
 |-----------|-----------------|--------|
+| `instructions/` | Bytecode instructions per run, this checkout vs a base revision — load-independent, the CI perf gate | stable |
 | `timeout/` | Foreground timeout disabled vs enabled — token-like streaming overhead | stable |
 | `langchain/` | Timbal vs LangGraph + LangSmith — agents and DAG workflows | stable |
 | `crewai/` | Timbal vs CrewAI + AgentOps — multi-agent pipelines | stable |

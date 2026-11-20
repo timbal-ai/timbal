@@ -11,6 +11,7 @@ import traceback
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any, Literal
 
 from pydantic import (
@@ -67,6 +68,7 @@ from ..types.events.delta import Custom, DeltaEvent, DeltaItem
 from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import dump, invalidate_message_dump_caches, sync_to_async_gen
+from .tool_policy import describe_tool_policy
 
 
 def _get_logger():
@@ -217,6 +219,20 @@ on any sync handler; raise it (or set very high) to silence."""
 ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, Any]]
 ApprovalPrompt = str | Callable[..., str | None] | None
 ApprovalUi = dict[str, Any] | BaseModel | Callable[..., dict[str, Any] | BaseModel | None] | None
+
+
+def _inherit_tool_policy(run_context: RunContext, entry_run_context: RunContext, entry_call_id: str) -> None:
+    """Give a run started inside a call (``entry_call_id`` of ``entry_run_context``) that run's tool policy.
+
+    A callable policy also gets an origin: the outermost call it came through, on whose span the new run's
+    agents note what they were offered (``Agent._record_allowed_tools``), since a session continuing the
+    parked outer run rebuilds the callable from that trace alone.
+    """
+    policy = entry_run_context._tool_policy
+    run_context.__dict__["_tool_policy"] = policy
+    if callable(policy):
+        origin = entry_run_context.__dict__.get("_tool_policy_origin") or (entry_run_context, entry_call_id)
+        run_context.__dict__["_tool_policy_origin"] = origin
 
 
 def _normalize_resume_values(raw: Any) -> dict[str, Any]:
@@ -2053,6 +2069,10 @@ class Runnable(ABC, BaseModel):
                         tracing_provider=self.tracing_provider,
                         platform_config=_inherited_platform_config,
                     )
+                    if _entry_call_id is not None:
+                        # Started by a call that outlived its run (a background tool): its tools are still
+                        # that run's, so a read-only tool cannot run an agent with write tools.
+                        _inherit_tool_policy(run_context, _entry_run_context, _entry_call_id)
                 else:
                     run_context = RunContext(
                         parent_id=explicit_parent_id,
@@ -2063,6 +2083,8 @@ class Runnable(ABC, BaseModel):
                         # Started by a running call's code (an Agent inside a tool or step
                         # body): link the two runs both ways so a trace viewer can follow it.
                         run_context._invoked_by = {"run_id": _entry_run_context.id, "call_id": _entry_call_id}
+                        # Its tools are the caller's run's: a read-only tool cannot run an agent with write tools.
+                        _inherit_tool_policy(run_context, _entry_run_context, _entry_call_id)
                         caller_span = _entry_run_context._trace.get(_entry_call_id)
                         if caller_span is not None:
                             caller_span.metadata.setdefault("invoked_runs", []).append(run_context.id)
@@ -2075,11 +2097,6 @@ class Runnable(ABC, BaseModel):
             # produce an orphan parent_call_id that trace validation rejects.
             _parent_call_id = None
             _call_id = None
-        previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
-        if _background_handoff_control is not None:
-            run_context._background_handoff_control = _background_handoff_control
-        previous_resume_values = dict(run_context._resume_values)
-        run_context._resume_values.update(resume_values)
         set_run_context(run_context)
 
         _new_parent_call_id = _call_id
@@ -2109,8 +2126,12 @@ class Runnable(ABC, BaseModel):
 
         assert _new_call_id not in run_context._trace, f"Call ID {_new_call_id} already exists in trace."
         metadata = {**self.metadata}  # Shallow copy
-        if _new_parent_call_id is None and run_context._invoked_by is not None:
-            metadata["invoked_by"] = run_context._invoked_by
+        if _new_parent_call_id is None:
+            if run_context._invoked_by is not None:
+                metadata["invoked_by"] = run_context._invoked_by
+            if run_context._tool_policy is not None:
+                # What a run resuming this one restores when it does not say (see server/http.py).
+                metadata["tool_policy"] = describe_tool_policy(run_context._tool_policy)
         span = Span(
             path=self._path,
             call_id=_new_call_id,
@@ -2124,7 +2145,7 @@ class Runnable(ABC, BaseModel):
         # it. The per-call sink itself is allocated lazily on first emit() —
         # benches never emit, so this is a pointer compare, not an object.
         if run_context._loop is None:
-            run_context._loop = asyncio.get_running_loop()
+            run_context.__dict__["_loop"] = asyncio.get_running_loop()
 
         def _restore_context():
             """Restore this invocation's context vars.
@@ -2158,6 +2179,15 @@ class Runnable(ABC, BaseModel):
         # first so finally closes *this* object, not the child's.
         emit_sink = None
         spawned_background = False
+        # Installed last, with nothing that can raise before the ``try`` whose ``finally`` takes them
+        # back off: a call that fails while it is being set up leaves neither on the context.
+        previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
+        if _background_handoff_control is not None:
+            run_context.__dict__["_background_handoff_control"] = _background_handoff_control
+        # A read-only mapping (see RunContext's NOTE), so a call without resume values shares it.
+        previous_resume_values = run_context._resume_values
+        if resume_values:
+            run_context.__dict__["_resume_values"] = MappingProxyType({**previous_resume_values, **resume_values})
         handoff_control = (
             getattr(run_context, "_background_handoff_control", None)
             if self.background_mode == "auto" and self._is_async_gen and not self._is_orchestrator
@@ -2432,6 +2462,12 @@ class Runnable(ABC, BaseModel):
                 span.status = RunStatus(code="cancelled", reason="interrupted", message="")
                 if collector is not None:
                     span.output = _collector_output_on_interrupt(collector)
+                    # Stored from its dump, like every other way a call ends: without it the trace says
+                    # the call produced nothing, whatever it had streamed. (Plain data: no suspension.)
+                    try:
+                        span._output_dump = await dump(span.output)
+                    except Exception as dump_err:
+                        _get_logger().warning("output_dump_failed_on_exit", error=str(dump_err))
             if collector is not None and not handed_off:
                 # Closing a parent must also close a suspended nested handler;
                 # async-for does not propagate aclose() to its inner iterator.
@@ -2526,6 +2562,14 @@ class Runnable(ABC, BaseModel):
             # the original assignment, leaving span.status=None and causing a Pydantic
             # ValidationError in the finally block (OutputEvent.status is required).
             span.status = RunStatus(code="cancelled", reason="interrupted", message=str(e))
+            if span._input_dump is None and span.input is not None:
+                # Cut before its input was resolved (admission, session data, the params themselves): stored
+                # as it was given. A turn that stored neither its memory nor its input would take its prompt
+                # out of the conversation: the next turn rebuilds a cut turn from it (Agent._previous_memory).
+                try:
+                    span._input_dump = await dump(span.input)
+                except Exception:
+                    span._input_dump = None
             if isinstance(e, InterruptError):
                 _get_logger().warning(
                     "Interrupted",
@@ -2678,6 +2722,10 @@ class Runnable(ABC, BaseModel):
             # them. Only check the IDs introduced by THIS call; nested children
             # don't re-introduce them.
             if resume_values:
+                # Only a call that installed values takes them off (a plain attribute, see RunContext's
+                # NOTE). A call that brought none has nothing to undo, and writing back what it saw when
+                # it started would reinstall them if it outlived the call that did (a background child).
+                run_context.__dict__["_resume_values"] = previous_resume_values
                 unused = [rid for rid in resume_values if rid not in run_context._used_resume_ids]
                 if unused:
                     _get_logger().warning(
@@ -2686,7 +2734,6 @@ class Runnable(ABC, BaseModel):
                         unused_resume_ids=unused,
                         runnable_path=self._path,
                     )
-            run_context._resume_values = previous_resume_values
             if _background_handoff_control is not None:
                 _background_handoff_control.close()
                 if previous_handoff_control is None:

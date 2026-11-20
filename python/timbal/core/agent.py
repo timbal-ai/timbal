@@ -3,13 +3,15 @@ import contextvars
 import difflib
 import inspect
 import json
+import math
+import re
 import time
 import traceback
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -31,7 +33,15 @@ from pydantic import (
 from uuid_extensions import uuid7
 
 from ..collectors.harmony_leak import LEAKED_TOOL_CALL_UNRECOVERED
-from ..errors import GuardrailBlocked, InterruptError, MaxIterExceeded, PauseRequired, RunCancelled, bail
+from ..errors import (
+    GuardrailBlocked,
+    InterruptError,
+    MaxIterExceeded,
+    ModelOutputTruncated,
+    PauseRequired,
+    RunCancelled,
+    bail,
+)
 from ..guardrails.apply import (
     build_guardrail_events,
     message_text,
@@ -53,6 +63,7 @@ from ..state.background import (
     READ_BACKGROUND_TRANSCRIPT_DESCRIPTION,
     current_background_store,
     format_session_notice,
+    format_user_message,
 )
 from ..types.content import (
     CustomContent,
@@ -75,6 +86,7 @@ from .runnable import Runnable, RunnableLike
 from .session_scheduler import record_delivery
 from .skill import ReadSkill, Skill
 from .tool import Tool
+from .tool_policy import READ_ONLY_POLICY, ReadOnlyWithin, describe_tool_policy
 from .tool_result_offload import (
     LEGACY_READ_OFFLOADED_NAMES,
     LocalOffloadStore,
@@ -98,9 +110,58 @@ DEFAULT_MAX_ITER_NOTICE = (
 )
 """User message injected before the final tool-less LLM call (``on_max_iter="final_answer"``)."""
 
+# Session data: per agent path, the denial streak a paused run left, for the run that resumes it.
+_DENIAL_STREAK_KEY = "denial_streak"
+
+DEFAULT_DENIAL_NOTICE = (
+    "[System notice] Your last {count} tool calls were denied or blocked, so no tools are available "
+    "for this reply. Do not look for another way to do the same thing. Tell the user what you were "
+    "trying to do, what was refused, and what you need from them."
+)
+"""User message injected once ``max_consecutive_denials`` is reached, before a tool-less LLM call."""
+
+DEFAULT_STEER_BLOCKED_NOTICE = (
+    "[System notice] A message the user sent during this turn was blocked by the '{rail}' guardrail and is "
+    "not shown. Do not guess what it said. Carry on, and mention briefly that one message could not be accepted."
+)
+"""Runtime message that stands in for a steered user message an input guardrail blocked."""
+
+DEFAULT_STEERED_TOOL_RESULT = "[Interrupted] Stopped before it finished: the user sent a new message."
+# For a call of an interrupted batch that has no result at all: nobody saw how it ended.
+INTERRUPTED_TOOL_RESULT = (
+    "[Interrupted] The turn was cut before this call's result was recorded. It may have run: "
+    "check before running it again."
+)
+"""Tool result for a call a 'now' message cut (``ChatSession.send(mode="now")``)."""
+# How long a 'now' cut waits before taking the messages, so a burst of them becomes one cut.
+NOW_COALESCE_SECS = 0.25
+
+SEARCH_TOOLS_NAME = "search_tools"
+# Used when an agent tool already has the name (e.g. an unprefixed MCP server's own search_tools).
+_SEARCH_TOOLS_FALLBACKS = ("find_tools", "load_tools", "search_deferred_tools")
+# Session key: tools search_tools loaded, per agent path, in load order.
+_LOADED_TOOLS_KEY = "__loaded_tools"
+# Models with provider-side tool search: Claude 4.5 and later; OpenAI gpt-5.4 and later (Responses API).
+_NATIVE_TOOL_SEARCH_MODEL = re.compile(
+    r"^(anthropic/claude-(opus|sonnet|haiku)-(4-[5-9]|[5-9])|openai/gpt-(5\.([4-9]|[1-9]\d)|[6-9]))"
+)
+_SEARCH_WORD = re.compile(r"[a-z0-9]+")
+# Searches in one run that find nothing before search_tools tells the model to stop looking.
+_FRUITLESS_SEARCHES = 2
+
+# Stop reasons meaning the model hit its output limit (Anthropic, OpenAI Responses, Chat Completions).
+_TRUNCATED_STOPS = frozenset({"max_tokens", "max_output_tokens", "length"})
+# An empty truncated answer is retried once with this many times the budget, up to the cap.
+_MAX_TOKENS_RETRY_FACTOR = 4
+_MAX_TOKENS_RETRY_CAP = 32_000
+
+# Agent-provided tools that only read (their constructors do not take ``read_only``).
+_READ_ONLY_BUILTINS = frozenset(
+    {"read_skill", "read_offloaded", "get_background_task", "list_background_tasks", "read_background_transcript"}
+)
+
 DEFAULT_MAX_ITER_STOP_MESSAGE = (
-    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final "
-    "answer was produced.]"
+    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final answer was produced.]"
 )
 """Assistant reply returned without an LLM call (``on_max_iter="stop"``)."""
 
@@ -232,6 +293,225 @@ def _extract_fallbacks(model: Any) -> list[dict[str, Any]]:
     return out
 
 
+_UNSET_POLICY: Any = object()
+
+
+def _record_tool_search(span: Any, mode: str, loaded: list[str], query: str | None = None) -> None:
+    """``span.metadata.tool_search``: what each search (or direct call) loaded this run."""
+    record = span.metadata.setdefault("tool_search", {"mode": mode, "loaded": [], "searches": []})
+    record["loaded"].extend(name for name in loaded if name not in record["loaded"])
+    record["searches"].append({"query": query, "loaded": list(loaded)})
+
+
+_READ_EVENT, _READ_END, _READ_ERROR = 0, 1, 2
+
+
+class _CuttableModelEvents:
+    """The model's events, read so that a 'now' cut does not wait for the next one.
+
+    ``async for event in stream`` can only look at the cut when an event arrives, and a provider that has
+    stalled (or is slow with its next token) sends none: the message that cut the answer would wait for the
+    provider's own timeout. Here the stream is read by a task of its own, and the agent waits for that read
+    and for the cut at once. When the cut comes first, the reading task is cancelled where it waits, which
+    is inside the stream: the model call ends as interrupted and keeps what it had produced on its span, as
+    it does when the turn itself is cancelled there.
+
+    One task for the whole stream, asked for one event at a time:
+
+    - one task, not one per event, so the stream keeps its context variables and its task from one event to
+      the next (a deadline taken with ``asyncio.timeout`` belongs to the task that took it);
+    - one event at a time, so the stream never runs ahead of the agent: closed between two events, it stops
+      at the event the agent stopped at, as when the agent iterated it itself.
+
+    A cancellation of the turn while it reads (an interrupt, a close) is passed on to the stream, which is
+    where it landed when the agent awaited the stream directly.
+    """
+
+    __slots__ = ("_asked", "_cut_waiter", "_done", "_reader", "_slot", "_stream", "cut_while_waiting", "last")
+
+    def __init__(self, stream: AsyncGenerator, cut: asyncio.Event) -> None:
+        self._stream = stream
+        self._asked = asyncio.Event()
+        self._slot: asyncio.Future | None = None
+        self._done = False
+        self.cut_while_waiting = False
+        """The cut ended a read: the stream had nothing for the agent when it came."""
+        self.last: Any = None
+        """What the stream said as it was cut (the call's interrupted OUTPUT), if anything."""
+        self._cut_waiter = asyncio.ensure_future(cut.wait())
+        self._reader = asyncio.create_task(self._read())
+        # However the reader ends (cancelled before its first step included), a pending read is answered.
+        self._reader.add_done_callback(lambda _task: self._answer(_READ_END, None))
+
+    def _answer(self, kind: int, value: Any) -> None:
+        slot = self._slot
+        if slot is not None and not slot.done():
+            slot.set_result((kind, value))
+
+    async def _read(self) -> None:
+        stream = self._stream
+        try:
+            while True:
+                await self._asked.wait()  # cancelled here: between two events, the stream is closed below
+                self._asked.clear()
+                try:
+                    event = await stream.__anext__()  # cancelled here: the stream takes it, and says how it ended
+                except StopAsyncIteration:
+                    return
+                self._answer(_READ_EVENT, event)
+        except asyncio.CancelledError:
+            return  # the agent is done with the stream, or the stream let a cancellation through
+        except BaseException as error:  # the stream's own failure: raised where the agent reads it
+            self._answer(_READ_ERROR, error)
+        finally:
+            await stream.aclose()
+
+    def __aiter__(self) -> "_CuttableModelEvents":
+        return self
+
+    def _taken(self, kind: int, value: Any) -> Any:
+        if kind == _READ_EVENT:
+            return value
+        self._done = True
+        if kind == _READ_ERROR:
+            raise value
+        raise StopAsyncIteration
+
+    async def __anext__(self) -> Any:
+        if self._done or self._reader.done():
+            self._done = True
+            raise StopAsyncIteration
+        slot = self._slot = asyncio.get_running_loop().create_future()
+        self._asked.set()
+        try:
+            await asyncio.wait({slot, self._cut_waiter}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            if slot.done():
+                # The read had already ended: its event was on its way to the agent (a task of its own reads
+                # the stream, so an event arrives a moment after it was produced). The cancellation never
+                # reached the stream. It is the agent's, as it is when it lands on any other of its awaits:
+                # handing the event over instead would take the cancellation away, and a turn its user
+                # stopped would go on to run the tools the model had just asked for.
+                self._done = True
+                raise
+            # The turn is cancelled while the model is read. Passed on to the stream: it ends the call as
+            # interrupted and says so with its last event, which the agent then handles as it always did.
+            self._reader.cancel()
+            kind, value = await slot
+            if kind == _READ_END:
+                self._done = True
+                raise  # the stream let the cancellation through: so does this
+            return self._taken(kind, value)
+        if slot.done():
+            return self._taken(*slot.result())
+        # The cut came first, and the stream has nothing for the agent: the call ends where it is.
+        self.cut_while_waiting = True
+        self._reader.cancel()
+        kind, value = await slot
+        self._done = True
+        if kind == _READ_ERROR:
+            raise value
+        self.last = value
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        """Stop reading and close the stream (after its reader has let go of it)."""
+        self._done = True
+        self._cut_waiter.cancel()
+        if not self._reader.done():
+            self._reader.cancel()
+        await asyncio.gather(self._reader, self._cut_waiter, return_exceptions=True)
+
+
+def _cut_answer(message: Any) -> Message | None:
+    """The visible text of an answer a 'now' message cut off, as an assistant message marked interrupted."""
+    if not isinstance(message, Message):
+        return None
+    texts = [TextContent(text=c.text) for c in message.content if isinstance(c, TextContent) and c.text.strip()]
+    if not texts:
+        return None
+    return Message(role="assistant", content=texts, stop_reason="interrupted", metadata={"interrupted": "steer_now"})
+
+
+_NO_NAMES: frozenset[str] = frozenset()
+
+
+def _has_deferred(tools: list[Any]) -> bool:
+    for tool in tools:
+        if getattr(tool, "defer_loading", False):
+            return True
+    return False
+
+
+def _empty_at_limit(message: Any) -> bool:
+    """A final answer the output limit cut off before any visible text."""
+    return isinstance(message, Message) and message.stop_reason in _TRUNCATED_STOPS and not message_text(message).strip()
+
+
+def _native_tool_search(model: Any) -> bool:
+    if not isinstance(model, str) or not _NATIVE_TOOL_SEARCH_MODEL.match(model):
+        return False
+    if model.startswith("openai/"):
+        from .llm.registry import TIMBAL_OPENAI_API
+
+        return TIMBAL_OPENAI_API == "responses"
+    return True
+
+
+def _native_search_finds(message: Message) -> list[str]:
+    """Tool names a provider-side tool search returned in one assistant message."""
+    names = []
+    for content in message.content:
+        value = content.value if isinstance(content, CustomContent) else None
+        if not isinstance(value, dict):
+            continue
+        if value.get("type") == "tool_search_tool_result":  # Anthropic
+            references = (value.get("content") or {}).get("tool_references") or []
+            names.extend(ref.get("tool_name") for ref in references if ref.get("tool_name"))
+        elif value.get("type") == "tool_search_output":  # OpenAI: functions, or namespaces of them
+            for tool in value.get("tools") or []:
+                inner = tool.get("tools") if tool.get("type") == "namespace" else [tool]
+                names.extend(t.get("name") for t in inner or [] if t.get("name"))
+    return names
+
+
+def rank_tools(tools: list[Any], query: str) -> list[Any]:
+    """Tools matching ``query``, best first: keyword hits weighted name > parameters > description."""
+    return [tool for _, tool in _score_tools(tools, query)]
+
+
+def _score_tools(tools: list[Any], query: str) -> list[tuple[int, Any]]:
+    words = set(_SEARCH_WORD.findall(query.lower()))
+    if not words:
+        return []
+    query_name = query.strip().lower()
+    indexed = []
+    for tool in tools:
+        name = tool.name.lower()
+        schema = getattr(tool, "input_schema", None) or getattr(tool, "params_model_schema", None) or {}
+        params = " ".join(schema.get("properties", {}))
+        indexed.append((
+            name,
+            (
+                (3, set(_SEARCH_WORD.findall(name))),
+                (2, set(_SEARCH_WORD.findall(params.lower()))),
+                (1, set(_SEARCH_WORD.findall((tool.description or "").lower()))),
+            ),
+        ))
+    if len(indexed) > 1:
+        # A word every tool has (an MCP server prefix like "timbal__") can't tell them apart.
+        everywhere = set.intersection(*(set().union(*(f for _, f in fields)) for _, fields in indexed))
+        words = (words - everywhere) or words
+    scored = []
+    for index, (tool, (name, fields)) in enumerate(zip(tools, indexed, strict=True)):
+        score = sum(weight * len(words & field) for weight, field in fields)
+        if name == query_name:
+            score += 10
+        if score:
+            scored.append((-score, index, tool))
+    return [(-neg_score, tool) for neg_score, _, tool in sorted(scored)]
+
+
 class AgentParams(BaseModel):
     """Input parameters for Agent execution. Use either 'prompt' or 'messages', not both."""
 
@@ -282,6 +562,9 @@ class AgentParams(BaseModel):
 
 class Agent(Runnable):
     """Orchestrates LLM interactions with autonomous tool calling."""
+
+    _dumps_memory: ClassVar[bool] = True
+    """Its spans always serialize a ``memory`` key, ``null`` until it assembled one (see Span.model_dump)."""
 
     model: SkipValidation[Model | str]
     """LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5') or a TestModel for offline testing."""
@@ -334,6 +617,32 @@ class Agent(Runnable):
     """When True, register ``read_background_transcript`` for the LLM once this
     session has background tasks. Default off — summaries via
     ``get_background_task`` are enough for most agents."""
+    steering: bool | None = None
+    """Let what is posted to the session while a turn runs join that turn after its current
+    tool batch, instead of waiting for the next one: session events on ``lane="next"`` and user
+    messages sent with ``mode="steer"`` (``ChatSession.send``). A user message joins as a user
+    message (input guardrails screen it, and it restores the ``max_iter`` budget); an event as a
+    runtime notice. The turn does not end while one is waiting: it calls the model once more.
+    ``None`` (default): on for runs a ``ChatSession`` starts, off otherwise. Never for a turn its
+    channel keeps closed (a ``ChatSession`` wake), even when ``True``. Root agents only."""
+    stream_idle_timeout: float | None = 300.0
+    """Seconds a model stream may send nothing before the call is given up
+    (:class:`timbal.errors.ModelStreamStalled`). Before the first chunk the attempt is
+    retried like a timeout (``max_retries``); after it, the call fails, since another
+    attempt would repeat what was already sent. ``None`` waits forever. Raise it for
+    models that think for minutes without streaming anything."""
+    tool_search: Literal["auto", "client", "off"] = "auto"
+    """How the model finds tools marked ``defer_loading`` (``Tool.defer_loading``,
+    ``MCPServer(defer_loading=True)``) without carrying all their schemas on every call.
+    ``"auto"``: Claude 4.5 and later use Anthropic's tool search (it runs server-side within the
+    same response, and found tools load without changing the cached prompt prefix); other models
+    get a ``search_tools`` tool whose finds stay loaded for the session, after the other tools.
+    ``"client"``: always ``search_tools``. ``"off"``: nothing is deferred."""
+    max_consecutive_denials: int | None = 3
+    """Tool calls in a row that may be denied (approval) or blocked (``tool_args``
+    guardrail) before the agent stops trying: it is told not to route around the
+    refusals, and its next model call gets no tools, so it answers the user. A tool call
+    that succeeds resets the count. ``None`` turns the breaker off."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
     memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
@@ -451,6 +760,7 @@ class Agent(Runnable):
                 ("temperature", self.temperature),
                 ("base_url", self.base_url),
                 ("api_key", self.api_key),
+                ("stream_idle_timeout", self.stream_idle_timeout),
             ]
             if v is not None
         }
@@ -832,12 +1142,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if has_followup_after_server_tool_use:
                     continue
                 if model_provider == "anthropic":
+                    kind = "tool_search_tool_result" if content.name.startswith("tool_search_tool") else (
+                        "web_search_tool_result"
+                    )
                     memory[-1].content.append(
                         CustomContent(
                             value={
-                                "type": "web_search_tool_result",
+                                "type": kind,
                                 "tool_use_id": content.id,
-                                "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
+                                "content": {"type": f"{kind}_error", "error_code": "unavailable"},
                             },
                         )
                     )
@@ -862,6 +1175,31 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         }
                     )
                 )
+        # A batch cut when only some of its calls had a result (a "now" cut answers the calls still running
+        # and waits for the ones finishing; results of a resumed batch are recorded one by one): the tool_use
+        # message is not the last one, and the rest of its calls have nothing. Left so, this turn would take
+        # them for calls waiting to be run (_find_pending_tool_uses) and run them, a second time for one that
+        # had finished when the cut came. They are answered here, next to the results that were recorded.
+        unanswered = self._find_pending_tool_uses(memory)
+        if unanswered:
+            asked = max(
+                i
+                for i, message in enumerate(memory)
+                if message.role == "assistant" and any(c is unanswered[0] for c in message.content)
+            )
+            after = asked + 1
+            while after < len(memory) and memory[after].role == "tool":
+                after += 1
+            # One message per call, as results are recorded: Chat Completions sends one result per tool message.
+            memory[after:after] = [
+                Message.validate(
+                    {
+                        "role": "tool",
+                        "content": [{"type": "tool_result", "id": call.id, "content": INTERRUPTED_TOOL_RESULT}],
+                    }
+                )
+                for call in unanswered
+            ]
 
     async def resolve_memory(self) -> None:
         """Resolve conversation memory from previous agent trace."""
@@ -1069,10 +1407,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     def _inject_background_completions(self, current_span: Any) -> None:
         """Drain finished-task notices and posted session events into memory at turn start.
 
-        Delivered between turns only — never mid-loop — so the parent is not
-        interrupted while talking. Skipped for subagents and approval/suspend
-        resumes (must not insert a user message between tool_use and tool_result).
-        Peek APIs are unchanged; notices are one-shot after drain.
+        Delivered between turns only so the parent is not interrupted while
+        talking; a turn that steers also takes ``lane="next"`` events after a
+        tool batch (:meth:`_take_steering`). User messages stay pending: they
+        start turns of their own (``take_followup``) or steer one. Skipped for
+        subagents and approval/suspend resumes (must not insert a user message
+        between tool_use and tool_result). Peek APIs are unchanged; notices are
+        one-shot after drain.
         """
         if current_span.parent_call_id is not None:
             return
@@ -1082,7 +1423,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if store is None:
             return
         notifications = store.drain_completions()
-        events = store.drain_events(settle=False)
+        events = store.drain_events(settle=False, where=lambda event: event.source != "user")
         if not notifications and not events:
             return
         notice = format_session_notice(notifications, events)
@@ -1096,6 +1437,38 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             memory.insert(-1, notice)
         else:
             memory.append(notice)
+
+    def _steers(self, run_context: Any, current_span: Any) -> bool:
+        """Whether this turn takes ``lane="next"`` events between steps (see ``steering``)."""
+        if current_span.parent_call_id is not None:
+            return False
+        if self.steering is None:
+            return run_context._steering is True
+        # A channel's False (a wake: its tool policy and silence are not a user's) beats the agent's True.
+        return self.steering and run_context._steering is not False
+
+    def _take_steering(self, run_context: Any, current_span: Any) -> list[Any]:
+        """The messages posted for the running turn (``lane="next"``), settled as delivered to it.
+
+        A runtime notice for events, then one user message per message the user
+        sent (screened one by one, so blocking one keeps the others).
+        """
+        if run_context._cut is not None:
+            run_context._cut.clear()  # what is drained now answers the cut; a later 'now' cuts again
+        store = current_background_store()
+        if store is None:
+            return []
+        events = store.drain_events(settle=False, where=lambda event: event.lane == "next")
+        if not events:
+            return []
+        current_span.metadata.setdefault("steered_events", []).extend(event.id for event in events)
+        record_delivery(run_context, current_span, events)
+        messages = []
+        others = [event for event in events if event.source != "user"]
+        if others:
+            messages.append(format_session_notice([], others))
+        messages.extend(format_user_message([event], steered=True) for event in events if event.source == "user")
+        return messages
 
     def _apply_background_limits(self, run_context: Any) -> None:
         """Push Agent concurrent/depth caps onto the session BG store."""
@@ -1282,7 +1655,35 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             "passes": passes,
         }
 
-    async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
+    async def _resumed_denials(self, run_context: Any) -> int:
+        """The denial streak of the paused run this turn resumes; 0 when it resumes another run, or none."""
+        session = await run_context.get_session()
+        streak = session.get(_DENIAL_STREAK_KEY, {}).get(self._path)
+        if streak and streak.get("run_id") == run_context.parent_id:
+            return streak["count"]
+        return 0
+
+    async def _save_denials(self, run_context: Any, denials: int) -> None:
+        """At a pause: the streak the run that resumes this one continues (a denied approval counts on top)."""
+        if not denials:
+            return  # a resume of this run reads 0: the entry it finds names another run
+        session = await run_context.get_session()
+        session.setdefault(_DENIAL_STREAK_KEY, {})[self._path] = {"run_id": run_context.id, "count": denials}
+
+    async def _stop_after_denials(self, current_span: Any, denials: int, append_memory: Any) -> None:
+        """After a tool batch past the denial limit: tell the model to stop routing around refusals (the caller
+        takes its tools away for the next call)."""
+        logger.warning("Agent reached max_consecutive_denials.", path=self._path, denials=denials)
+        current_span.metadata.setdefault("denial_limit", []).append({"denials": denials})
+        await append_memory(
+            Message(
+                role="user",
+                content=[TextContent(text=DEFAULT_DENIAL_NOTICE.format(count=denials))],
+                metadata={"source": "runtime", "kind": "denial_limit"},
+            )
+        )
+
+    async def _resolve_tools(self, i: int, tool_policy: Any = _UNSET_POLICY) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
         if i >= self.max_iter:
             return [], {}
@@ -1335,7 +1736,151 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 bg_tool.nest(self._path)
                 _register(bg_tool)
 
+        if tool_policy is not None:
+            if tool_policy is _UNSET_POLICY:
+                run_context = get_run_context()
+                tool_policy = run_context._tool_policy if run_context is not None else None
+            if tool_policy is not None:
+                tools = [tool for tool in tools if self._tool_allowed(tool, tool_policy)]
+                commands = {key: tool for key, tool in commands.items() if tool in tools}
+                self._record_allowed_tools(tools, tool_policy)
         return tools, commands
+
+    async def _plan_tool_search(
+        self, tools: list[Tool], model: Any
+    ) -> tuple[list[Tool], list[Tool], list[str] | None, set[str]]:
+        """Split a step's tools for tool search (``tool_search``).
+
+        Returns the tools offered to the model, the tools it may call (the same,
+        plus every deferred one), the names Anthropic defers natively (or None),
+        and the deferred names not loaded yet.
+        """
+        deferred = [
+            tool for tool in tools if getattr(tool, "defer_loading", False) and tool.name not in _READ_ONLY_BUILTINS
+        ]
+        if self.tool_search == "off" or not deferred:
+            return tools, tools, None, set()
+        if self.tool_search == "auto" and _native_tool_search(model):
+            return tools, tools, [tool.name for tool in deferred], set()
+        session = await get_run_context().get_session()
+        loaded_names = session.get(_LOADED_TOOLS_KEY, {}).get(self._path, [])
+        by_name = {tool.name: tool for tool in deferred}
+        loaded = [by_name[name] for name in loaded_names if name in by_name]
+        hidden = [tool for tool in deferred if tool.name not in set(loaded_names)]
+        deferred_ids = {id(tool) for tool in deferred}
+        offered = [tool for tool in tools if id(tool) not in deferred_ids] + loaded
+        dispatch = list(tools)
+        if hidden:
+            taken = {tool.name for tool in tools}
+            name = next(n for n in (SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS) if n not in taken)
+            search = self._search_tools(hidden, name, restricted=get_run_context()._tool_policy is not None)
+            offered.append(search)
+            dispatch.append(search)
+        return offered, dispatch, None, {tool.name for tool in hidden}
+
+    async def _load_tools(self, names: list[str], span: Any, query: str | None = None) -> None:
+        """Keep tools search_tools found offered for the rest of the session."""
+        session = await get_run_context().get_session()
+        loaded = session.setdefault(_LOADED_TOOLS_KEY, {}).setdefault(self._path, [])
+        loaded.extend(name for name in names if name not in loaded)
+        _record_tool_search(span, "client", names, query)
+
+    def _search_tools(self, hidden: list[Tool], name: str = SEARCH_TOOLS_NAME, *, restricted: bool = False) -> Tool:
+        """The ``search_tools`` tool over the deferred tools not loaded yet.
+
+        ``restricted``: a tool policy narrowed this turn's tools, so the ones it
+        hid can't be found either — said up front so the model stops looking.
+        """
+        names = [tool.name for tool in hidden]
+        listing = ", ".join(names[:80]) + (f", and {len(names) - 80} more" if len(names) > 80 else "")
+        scope = (
+            " This turn may only use some of your tools (for example only ones that read); "
+            "the others can't be found, so don't keep searching for them."
+            if restricted
+            else ""
+        )
+
+        async def search_tools(query: str, limit: int = 5) -> str:
+            """Find tools by what they do; the ones found become callable from your next step."""
+            scored = _score_tools(hidden, query)
+            # Found tools stay loaded for the session: skip weak matches (one shared word like "create").
+            matches = [tool for score, tool in scored if score * 2 >= scored[0][0]][: max(1, min(limit, 20))]
+            agent_span = get_run_context().parent_span()
+            if not matches:
+                record = agent_span.metadata.setdefault("tool_search", {"mode": "client", "loaded": [], "searches": []})
+                record["searches"].append({"query": query, "loaded": []})
+                misses = sum(1 for search in record["searches"] if not search["loaded"])
+                if misses >= _FRUITLESS_SEARCHES:
+                    return (
+                        f"No tool matched {query!r}, and {misses} searches this turn found nothing: what you are "
+                        f"looking for is not available{' in this turn' if restricted else ''}. Stop searching and "
+                        "answer with the tools you have."
+                    )
+                return f"No tool matched {query!r}. Try other words. Tools not loaded yet: {listing}.{scope}"
+            await self._load_tools([tool.name for tool in matches], agent_span, query)
+            found = [{"name": tool.name, "description": tool.description or ""} for tool in matches]
+            return json.dumps({"loaded": found, "note": "Call these from your next step."})
+
+        tool = Tool(
+            name=name,
+            description=(
+                f"Load tools that are not loaded yet. {len(names)} more are available: {listing}. "
+                "Search with a few words for what you need (or a tool's name); the matches become callable "
+                f"from your next step.{scope}"
+            ),
+            handler=search_tools,
+            read_only=True,
+        )
+        tool.nest(self._path)
+        return tool
+
+    @staticmethod
+    def _record_allowed_tools(tools: list[Any], policy: Any) -> None:
+        """Note on this agent's span the run's tool policy and what it let through at its latest tool resolution
+        (``metadata.tool_policy`` / ``tool_policy_allowed``): proof after the fact that it was enforced, and how a
+        session continuing a parked run restores a callable policy, which is not stored with the run."""
+        run_context = get_run_context()
+        if run_context is None:
+            return
+        try:
+            span = run_context.current_span()
+        except Exception:
+            return
+        span.metadata["tool_policy"] = describe_tool_policy(policy)
+        # The latest decision only: a callable may take a permission back between steps.
+        # Ordered by when it was made, not by when its span started: concurrent spans of one agent decide out
+        # of start order, and the restore must not bring back a permission a later decision took away.
+        allowed = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
+        decided_at = time.time_ns()
+        span.metadata["tool_policy_allowed"] = allowed
+        span.metadata["tool_policy_decided_at"] = decided_at
+        # A run started inside a call of the run the policy came from keeps its spans in a trace of its own: note
+        # the decision on that call's span too, where a session continuing the parked run restores it from.
+        origin = run_context.__dict__.get("_tool_policy_origin")
+        if origin is not None:
+            origin_context, origin_call_id = origin
+            origin_span = origin_context._trace.get(origin_call_id)
+            if origin_span is not None:
+                nested = origin_span.metadata.setdefault("nested_tool_policy_allowed", {})
+                seen = nested.get(span.path)
+                if seen is None or decided_at >= seen["at"]:
+                    nested[span.path] = {"allowed": allowed, "at": decided_at}
+
+    @staticmethod
+    def _tool_allowed(tool: Any, policy: Any) -> bool:
+        """Whether a run's tool policy (``RunContext._tool_policy``) lets the model see ``tool``.
+
+        ``"read_only"``: tools declared ``read_only`` (MCP: ``readOnlyHint``) and the agent's
+        own readers. A collection of names: those tools. A callable: ``policy(tool)``.
+        ``ReadOnlyWithin``: read-only, and only what the policy it narrows allowed.
+        """
+        if policy == READ_ONLY_POLICY:
+            return bool(getattr(tool, "read_only", False)) or tool.name in _READ_ONLY_BUILTINS
+        if isinstance(policy, ReadOnlyWithin):
+            return Agent._tool_allowed(tool, READ_ONLY_POLICY) and policy.allows(tool)
+        if callable(policy):
+            return bool(policy(tool))
+        return tool.name in policy
 
     def _synthetic_event(
         self,
@@ -1512,12 +2057,35 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             event.parent_call_id = tool_span_parent_call_id
         return event, tool_span_call_id, tool_span_parent_call_id
 
-    async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
-        """Execute multiple tool calls concurrently and multiplex their events."""
+    @staticmethod
+    def _interruptible(tool: Any) -> bool:
+        """Whether a 'now' message may cancel ``tool`` mid-run (``Tool.interruptible``, else ``read_only``)."""
+        interruptible = getattr(tool, "interruptible", None)
+        return bool(getattr(tool, "read_only", False) if interruptible is None else interruptible)
+
+    def _steered_event(self, tool_call: ToolUseContent, span_ids: tuple[str, str | None] | None) -> OutputEvent:
+        """The result of a tool a 'now' message cut, on the tool's own span so clients close its card."""
+        event = self._synthetic_event(
+            tool_call.name,
+            RunStatus(code="cancelled", reason="steered", message=DEFAULT_STEERED_TOOL_RESULT),
+            input=tool_call.input,
+        )
+        if span_ids is not None:
+            event.call_id, event.parent_call_id = span_ids
+        return event
+
+    async def _multiplex_tools(
+        self, tools: list[Tool], tool_calls: list[ToolUseContent], cut: asyncio.Event | None = None
+    ) -> AsyncGenerator[Any, None]:
+        """Execute multiple tool calls concurrently and multiplex their events.
+
+        ``cut``: set by a 'now' message. The interruptible calls still running are
+        cancelled (each gets a ``steered`` result); the others run to the end.
+        """
         # Fast path: a single tool call needs no queue/task fan-in — iterate the
         # tool directly, exactly like Workflow consumes its steps. This is the
-        # common case for most agent iterations.
-        if len(tool_calls) == 1:
+        # common case for most agent iterations. A cuttable batch needs the tasks.
+        if len(tool_calls) == 1 and cut is None:
             tool_call = tool_calls[0]
             tool = self._resolve_tool_for_call(tools, tool_call)
             if tool is None:
@@ -1601,12 +2169,74 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 tasks.append(task)
 
             remaining = len(tool_calls)
+            if cut is None:
+                while remaining > 0:
+                    tool_call, event = await queue.get()
+                    if event is None:
+                        remaining -= 1
+                    else:
+                        yield tool_call, event
+                return
+            spans: dict[str, tuple[str, str | None]] = {}  # tool_call id -> its span (call_id, parent)
+            finished: set[str] = set()
+            dropped: set[str] = set()
+            # Cut before their START was taken off the queue: the steered result waits for it, so it goes
+            # out on the tool's real span (after its START), not on a made-up one beside it.
+            awaiting: set[str] = set()
             while remaining > 0:
-                tool_call, event = await queue.get()
-                if event is None:
-                    remaining -= 1
+                if cut is not None and not cut.is_set():
+                    getter = asyncio.ensure_future(queue.get())
+                    waiter = asyncio.ensure_future(cut.wait())
+                    try:
+                        await asyncio.wait({getter, waiter}, return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        # Also when this batch is cancelled while it waits (the turn interrupted, the session
+                        # closed): neither helper may outlive it, waiting on an event nobody will set.
+                        waiter.cancel()
+                        if not getter.done():
+                            getter.cancel()
+                        await asyncio.gather(getter, waiter, return_exceptions=True)
+                    item = None if getter.cancelled() else getter.result()
                 else:
-                    yield tool_call, event
+                    item = await queue.get()
+                if item is not None:
+                    tool_call, event = item
+                    if event is None:
+                        remaining -= 1
+                        if tool_call.id in awaiting:
+                            # Its task is over. On its span if it had got as far as a START, else on none.
+                            awaiting.discard(tool_call.id)
+                            dropped.add(tool_call.id)
+                            yield tool_call, self._steered_event(tool_call, spans.get(tool_call.id))
+                    elif tool_call.id in awaiting:
+                        if event.type == "START" and tool_call.id not in spans:
+                            spans[tool_call.id] = (event.call_id, event.parent_call_id)
+                            yield tool_call, event  # its card opens; the steered result closes it
+                        elif isinstance(event, OutputEvent) and spans.get(tool_call.id, (None,))[0] == event.call_id:
+                            # It had finished before the cancel landed (a cancelled tool queues no result):
+                            # its own result stands.
+                            awaiting.discard(tool_call.id)
+                            finished.add(tool_call.id)
+                            yield tool_call, event
+                        # Anything else it queued before the cancel landed is not shown.
+                    elif tool_call.id not in dropped:  # else queued before the cancel landed
+                        if event.type == "START" and tool_call.id not in spans:
+                            spans[tool_call.id] = (event.call_id, event.parent_call_id)
+                        elif isinstance(event, OutputEvent) and spans.get(tool_call.id, (None,))[0] == event.call_id:
+                            finished.add(tool_call.id)
+                        yield tool_call, event
+                if cut is not None and cut.is_set():
+                    for task, tc in zip(tasks, tool_calls, strict=True):
+                        if task.done() or tc.id in finished:
+                            continue
+                        if self._interruptible(self._resolve_tool_for_call(tools, tc)):
+                            task.cancel()
+                            if tc.id in spans:
+                                dropped.add(tc.id)
+                                yield tc, self._steered_event(tc, spans[tc.id])
+                            else:
+                                awaiting.add(tc.id)
+                    cut = None  # one cut per batch; the rest runs to the end
         except (asyncio.CancelledError, GeneratorExit, InterruptError):
             raise
         finally:
@@ -1616,14 +2246,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _salvage_interrupted_llm_output(self, run_context: Any, current_span: Any) -> None:
+    async def _salvage_interrupted_llm_output(self, run_context: Any, current_span: Any) -> None:
         """Append any partial LLM output to memory when the agent loop is interrupted.
 
         Called from the handler's finally block when _append_memory never ran
         (GeneratorExit / CancelledError killed the generator before the LLM
         OutputEvent was processed).  The inner LLM span may still have captured
         a partial result via the collector snapshot in Runnable.__call__, so we
-        look it up in the trace and synchronously append it to memory.
+        look it up in the trace and append it to memory.
+
+        To the memory's dump as well: that is what a serializing provider stores
+        (not ``span.memory``), so the next turn and the stored trace would
+        otherwise miss what the user was shown. A message's dump does not suspend
+        (it is plain data), which matters here: this runs while the generator is
+        being closed or cancelled.
         """
         llm_path = f"{self._path}.llm"
         for span in reversed(run_context._trace.as_records()):
@@ -1632,6 +2268,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     cleaned = span.output.without_empty_text_blocks()
                     if cleaned is not None:
                         current_span.memory.append(cleaned)
+                        stored = getattr(current_span, "_memory_dump", None)
+                        if isinstance(stored, list):
+                            stored.append(await dump(cleaned))
                 break
 
     def _trailing_user_messages(self, memory: list[Message]) -> list[Message]:
@@ -1742,13 +2381,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         kwargs.pop("prompt", None)
         kwargs.pop("messages", None)
 
-        async def _append_memory(message: Message) -> None:
-            """Append a message to both memory and its serialized dump in lockstep."""
+        async def _append_memory(message: Message) -> bool:
+            """Append a message to both memory and its serialized dump in lockstep (False: empty, not kept)."""
             message = message.without_empty_text_blocks()
             if message is None:
-                return
+                return False
             current_span.memory.append(message)
             current_span._memory_dump.append(await dump(message))
+            return True
 
         # Input guardrails run blocking, before the first LLM call — a blocked input
         # spends zero tokens and executes zero tools.
@@ -1766,9 +2406,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # GuardrailEvents produced inside _process_tool_event (not a generator) — drained
         # and yielded by the loop right after each call.
         pending_guardrail_events: list[BaseEvent] = []
+        # Denied / blocked tool results in a row (max_consecutive_denials); any other result resets it. A
+        # resumed turn continues the streak its paused run left (an approval denial ends a run each time).
+        consecutive_denials = 0
+        denials_resumed = False
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
+            nonlocal consecutive_denials
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
                 return
             # Native-event handlers (coding harness) forward their own OutputEvent
@@ -1777,36 +2422,51 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # we double-append and break the next LLM call.
             if event.run_id != run_context.id:
                 return
-            if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
-                # Gated (approval) or suspended (input_required) tool: leave the
-                # tool_use unresolved so it re-fires on resume. Do not synthesize
-                # a tool_result.
-                return
-            if event.status.code == "cancelled" and event.status.reason == "early_exit":
-                bail(event.status.message)
-            if event.status.code == "cancelled" and event.status.reason == "cancelled":
-                # A human cancelled via Cancel() on the resume channel. Terminal:
-                # leave the tool_use unresolved (no tool_result) and let the caller
-                # yield the event before raising RunCancelled to stop the run.
-                return
+            status = event.status
+            status_code, reason = status.code, status.reason
+            if status_code == "cancelled":
+                if reason in _PAUSE_REASONS:
+                    # Gated (approval) or suspended (input_required) tool: leave the
+                    # tool_use unresolved so it re-fires on resume. Do not synthesize
+                    # a tool_result.
+                    return
+                if reason == "early_exit":
+                    bail(status.message)
+                if reason == "cancelled":
+                    # A human cancelled via Cancel() on the resume channel. Terminal:
+                    # leave the tool_use unresolved (no tool_result) and let the caller
+                    # yield the event before raising RunCancelled to stop the run.
+                    return
             content = None
-            if event.status.code == "cancelled" and event.status.reason == "approval_denied":
-                msg = event.status.message or "The tool call was denied."
+            denied = False
+            if status_code == "cancelled" and reason == "approval_denied":
+                msg = status.message or "The tool call was denied."
                 content = f"[Approval denied] {msg}"
-            elif event.status.code == "cancelled" and event.status.reason == "early_exit_local":
-                msg = event.status.message or "The tool exited early."
+                denied = True
+            elif status_code == "cancelled" and reason == "steered":
+                content = status.message or DEFAULT_STEERED_TOOL_RESULT
+                current_span.metadata.setdefault("steer_now", []).append(
+                    {"cut": "tool", "tool": event.path.rsplit(".", 1)[-1]}
+                )
+            elif status_code == "cancelled" and reason == "early_exit_local":
+                msg = status.message or "The tool exited early."
                 content = f"[Cancelled] {msg}"
-            elif event.status.code == "blocked":
+            elif status_code == "blocked":
                 # A tool_args guardrail blocked the call. Feed the block back so the LLM
                 # can self-correct (bounded by max_iter), mirroring tool_not_found.
-                msg = event.status.message or "The tool call was blocked by a guardrail."
+                msg = status.message or "The tool call was blocked by a guardrail."
                 content = f"[Blocked by guardrail] {msg}"
+                denied = True
             elif event.error is not None:
                 content = event.error
             elif isinstance(event.output, Message):
                 content = [c for c in event.output.content if isinstance(c, TextContent | FileContent)]
             else:
                 content = event.output
+            if denied:
+                consecutive_denials += 1
+            elif consecutive_denials:
+                consecutive_denials = 0
             # Pin the result when the originating tool opted in (e.g. read_skill), so memory
             # compaction never strips this durable context. The tool name is the final path
             # segment of its OutputEvent.
@@ -1832,7 +2492,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if (
                 guardrail_runner is not None
                 and guardrail_runner.has_stage(GuardrailStage.TOOL_RESULT)
-                and event.status.code == "success"
+                and status_code == "success"
             ):
                 for c in tool_result.content:
                     if not isinstance(c, ToolResultContent):
@@ -1864,7 +2524,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # the reduction persists into traces. Errors are never reduced — the model needs
             # the full error to recover.
             result_limit = tool_result_limits.get(tool_name)
-            if result_limit is not None and not pinned and event.status.code == "success":
+            if result_limit is not None and not pinned and status_code == "success":
                 for c in tool_result.content:
                     if isinstance(c, ToolResultContent):
                         offload_record = await apply_tool_result_limit(
@@ -1881,6 +2541,68 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 current_span.memory.append(tool_result)
             tool_result_dump = await dump(tool_result)
             current_span._memory_dump.append(tool_result_dump)
+
+        steering = self._steers(run_context, current_span)
+        # Only a tool set (MCP) or a tool the agent was given can be deferred; the tools added at run time never are.
+        may_defer = self.tool_search != "off" and any(
+            isinstance(t, ToolSet) or getattr(t, "defer_loading", False) for t in self.tools
+        )
+        # Fixed for the turn; checked after every tool batch.
+        denial_limit = self.max_consecutive_denials
+        if denial_limit is None:
+            denial_limit = math.inf
+        tool_policy = run_context._tool_policy
+        # Set by ChatSession when a 'now' message arrives: cut the model's answer or the
+        # interruptible tools in flight, then steer the message in (see _multiplex_tools).
+        cut: asyncio.Event | None = run_context._cut if steering else None
+
+        if steering:
+            # Set by _steer: whether it added messages, and whether the user wrote one of them.
+            steered = steered_user = False
+
+            async def _steer() -> AsyncGenerator[BaseEvent, None]:
+                """Bring in what was posted for the running turn, screening user text like a prompt.
+
+                A blocked message is dropped for a notice; the turn and its work go on.
+                """
+                nonlocal steered, steered_user
+                messages = self._take_steering(run_context, current_span)
+                steered = bool(messages)
+                steered_user = False
+                runner = self._guardrail_runner
+                screen = runner is not None and runner.has_stage(GuardrailStage.INPUT)
+                for message in messages:
+                    if not message.is_runtime() and screen:
+                        text = message_text(message)
+                        ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._path, payload=message)
+                        outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
+                        record_guardrails_metadata(current_span, outcome.triggered, run_context=run_context)
+                        for guardrail_event in build_guardrail_events(
+                            outcome.triggered, run_context=run_context, span=current_span
+                        ):
+                            yield guardrail_event
+                        if outcome.verdict is not None:
+                            await _append_memory(
+                                Message(
+                                    role="user",
+                                    content=[
+                                        TextContent(text=DEFAULT_STEER_BLOCKED_NOTICE.format(rail=outcome.rail.name))
+                                    ],
+                                    metadata={"source": "runtime", "kind": "steer_blocked"},
+                                )
+                            )
+                            continue
+                        if outcome.replaced and outcome.text != text:
+                            replace_message_text(message, outcome.text)
+                    await _append_memory(message)
+                    steered_user = steered_user or not message.is_runtime()
+
+        # Set once max_consecutive_denials is reached: the next model call gets no tools.
+        withhold_tools = False
+        # Set once a final answer came back empty at the output limit: the larger budget for the retry.
+        max_tokens_retry: int | None = None
+        last_output: Any = None
+        last_output_stored = False
 
         i = 0
         need_retry = False
@@ -1901,7 +2623,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 need_retry = False
                 _llm_memory_saved = False
                 # ? We could resolve the system prompt at each iteration
-                tools, commands = await self._resolve_tools(i)
+                tools, commands = await self._resolve_tools(i, tool_policy)
+                # A retry of this same call (guardrail, validation, empty answer) keeps it tool-less.
+                withheld = withhold_tools
+                if withhold_tools:
+                    tools, commands, withhold_tools = [], {}, False
+                # `tools` stays what the model may call: a deferred tool called by name runs (and loads).
+                if not may_defer or not _has_deferred(tools):
+                    llm_tools, deferred_tools, unloaded_tools = tools, None, _NO_NAMES
+                else:
+                    llm_tools, tools, deferred_tools, unloaded_tools = await self._plan_tool_search(tools, model)
                 if i >= self.max_iter and not max_iter_handled:
                     # Budget spent: _resolve_tools withheld tools for this call. Apply on_max_iter.
                     max_iter_handled = True
@@ -1971,6 +2702,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         ],
                                     }
                                 )
+                                if run_context._before_tool_dispatch is not None:
+                                    await run_context._before_tool_dispatch(
+                                        self._path, [(tool_use_id, tool.name, tool_input)]
+                                    )
                                 # Run the tool (raw stream — see _multiplex_tools;
                                 # same pending-cancel detection as the fast path)
                                 _cmd_task = asyncio.current_task()
@@ -2010,9 +2745,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 pending_tool_uses = self._find_pending_tool_uses(current_span.memory)
                 if pending_tool_uses:
                     _llm_memory_saved = True  # nothing to salvage; we never called the LLM
+                    if not denials_resumed:
+                        denials_resumed = True
+                        consecutive_denials = await self._resumed_denials(run_context)
                     tool_calls = pending_tool_uses
                     first_pending: OutputEvent | None = None
-                    active_events = self._multiplex_tools(tools, tool_calls)
+                    if run_context._before_tool_dispatch is not None:
+                        await run_context._before_tool_dispatch(
+                            self._path, [(call.id, call.name, call.input) for call in tool_calls]
+                        )
+                    active_events = self._multiplex_tools(tools, tool_calls, cut=cut)
                     async for tool_call, event in active_events:
                         await _process_tool_event(event, tool_call.id, append_to_messages=True)
                         for pending_event in pending_guardrail_events:
@@ -2034,8 +2776,19 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             first_pending = event
                     active_events = None
                     if first_pending is not None:
+                        await self._save_denials(run_context, consecutive_denials)
                         raise PauseRequired(first_pending)
                     i += 1
+                    if consecutive_denials >= denial_limit:
+                        await self._stop_after_denials(current_span, consecutive_denials, _append_memory)
+                        consecutive_denials, withhold_tools = 0, True
+                    if steering:
+                        if cut is not None and cut.is_set():
+                            await asyncio.sleep(NOW_COALESCE_SECS)
+                        async for steer_event in _steer():
+                            yield steer_event
+                        if steered_user:
+                            i, max_iter_handled, withhold_tools = 0, False, False
                     continue
 
                 # Mid-loop compaction: a single turn that makes many (or large) tool calls
@@ -2093,11 +2846,23 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     model=model,
                     messages=llm_messages,
                     system_prompt=system_prompt,
-                    tools=tools,
+                    tools=llm_tools,
                     output_model=self.output_model,
-                    **kwargs,
+                    **({"deferred_tools": deferred_tools} if deferred_tools else {}),
+                    **({**kwargs, "max_tokens": max_tokens_retry} if max_tokens_retry else kwargs),
                 )
+                if cut is not None:
+                    # A 'now' message ends the wait for the model's next event too (a stalled provider
+                    # sends none). Runs that cannot be cut read the stream directly, as before.
+                    active_events = _CuttableModelEvents(active_events, cut)
+                llm_call_id: str | None = None
+                answer_cut = False
                 async for event in active_events:
+                    if llm_call_id is None and event.type == "START":
+                        llm_call_id = event.call_id
+                    if cut is not None and cut.is_set() and not isinstance(event, OutputEvent):
+                        answer_cut = True  # a 'now' message: stop this answer where it is
+                        break
                     if isinstance(event, OutputEvent):
                         # If the LLM call fails, we want to propagate the error upwards
                         if event.error is not None:
@@ -2151,11 +2916,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             await _append_memory(
                                 Message(
                                     role="user",
-                                    content=[TextContent(text=(
-                                        "Your previous response ended before the tool call was issued "
-                                        "(the call was emitted as text, without arguments, and nothing ran). "
-                                        "Issue the tool call now as a proper function call."
-                                    ))],
+                                    content=[
+                                        TextContent(
+                                            text=(
+                                                "Your previous response ended before the tool call was issued "
+                                                "(the call was emitted as text, without arguments, and nothing ran). "
+                                                "Issue the tool call now as a proper function call."
+                                            )
+                                        )
+                                    ],
                                     metadata={"source": "runtime", "kind": "leaked_tool_call_retry"},
                                 )
                             )
@@ -2261,12 +3030,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             invalidate_message_dump_caches(event.output)
 
                         # Add LLM response to conversation for next iteration
-                        await _append_memory(event.output)
+                        last_output, last_output_stored = event.output, await _append_memory(event.output)
                         _llm_memory_saved = True
                         last_llm_usage = event.usage
                         self._record_context_measurement(current_span, event.usage, sent + 1)
 
-                        if self.output_model is not None:
+                        # An answer the output limit cut off before any text is retried with a larger
+                        # budget below; validating it would spend a correction round on nothing.
+                        if self.output_model is not None and not (
+                            _empty_at_limit(event.output)
+                            and not any(
+                                isinstance(c, ToolUseContent) and not c.is_server_tool_use
+                                for c in event.output.content
+                            )
+                        ):
                             validation_error_msg = None
                             validation_context = self.output_model_context
                             for content in event.output.content:
@@ -2337,29 +3114,121 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             setattr(event.item, attr, stable)
                     yield event
 
+                if cut is not None and active_events.cut_while_waiting:
+                    # Cut while the model was silent: the same as a cut at its next event, without one.
+                    answer_cut = True
+                    if llm_call_id is None and active_events.last is not None:
+                        llm_call_id = active_events.last.call_id
                 # Output validation/guardrails can break the loop early too.
                 await active_events.aclose()
                 active_events = None
+                if answer_cut:
+                    # Keep what was already said (unless output rails were holding it back),
+                    # then let the message in and answer again with everything in context.
+                    _llm_memory_saved = True
+                    llm_span = run_context._trace.get(llm_call_id) if llm_call_id else None
+                    partial = _cut_answer(llm_span.output if llm_span is not None else None)
+                    kept = partial is not None and not buffer_stream
+                    if kept:
+                        if stream_scrub:
+                            replace_message_text(partial, _runner.scrub_text(message_text(partial), *_out_stages))
+                        # False when nothing is left of it (the rails redacted all it had said): not in
+                        # memory, so there is nothing of it to take back below either.
+                        kept = await _append_memory(partial)
+                    current_span.metadata.setdefault("steer_now", []).append(
+                        {"cut": "answer", "kept_chars": len(message_text(partial)) if kept else 0}
+                    )
+                    await asyncio.sleep(NOW_COALESCE_SECS)
+                    async for steer_event in _steer():
+                        yield steer_event
+                    if kept and not steered:
+                        # Nothing came in after all: an assistant-final history would be a prefill.
+                        current_span.memory.pop()
+                        current_span._memory_dump.pop()
+                    if steered_user:
+                        i, max_iter_handled = 0, False
+                    else:
+                        # The same step again (nothing of the user's joined: a dropped message, an event):
+                        # still without the tools the denial breaker took away for it.
+                        withhold_tools = withheld
+                    continue
                 if guardrail_retry:
+                    withhold_tools = withheld
                     continue  # re-generate with the guardrail critique appended
 
                 if need_retry:
+                    withhold_tools = withheld
                     continue  # output_model validation failed — retry with error feedback
-
-                if self.output_model is not None:
-                    break
 
                 tool_calls = [
                     content
                     for content in current_span.memory[-1].content
                     if isinstance(content, ToolUseContent) and not content.is_server_tool_use
                 ]
+                if deferred_tools:
+                    found = _native_search_finds(current_span.memory[-1])
+                    if found:
+                        _record_tool_search(current_span, "native", found)
 
-                if not tool_calls:
+                if (
+                    not tool_calls
+                    and getattr(last_output, "stop_reason", None) in _TRUNCATED_STOPS
+                    and _empty_at_limit(last_output)
+                ):
+                    # A reasoning model can spend the whole budget thinking and write nothing.
+                    if last_output_stored:
+                        current_span.memory.pop()
+                        current_span._memory_dump.pop()
+                    budget = kwargs.get("max_tokens") or self.max_tokens
+                    retry_budget = min(budget * _MAX_TOKENS_RETRY_FACTOR, _MAX_TOKENS_RETRY_CAP) if budget else None
+                    if max_tokens_retry is None and retry_budget and retry_budget > budget:
+                        max_tokens_retry = retry_budget
+                        current_span.metadata["max_tokens_retry"] = {"from": budget, "to": retry_budget}
+                        logger.warning(
+                            "Final answer hit max_tokens with no text; retrying with a larger budget.",
+                            path=self._path,
+                            max_tokens=budget,
+                            retry_max_tokens=retry_budget,
+                        )
+                        withhold_tools = withheld
+                        continue
+                    raise ModelOutputTruncated(max_tokens_retry or budget)
+
+                if self.output_model is not None:
                     break
 
+                if not tool_calls:
+                    if steering:
+                        async for steer_event in _steer():
+                            yield steer_event
+                        if steered:
+                            # Something arrived for this turn before it ended: answer it too.
+                            i, max_iter_handled = (0, False) if steered_user else (i + 1, max_iter_handled)
+                            # A user message is a new request and gets the tools back. An event of the
+                            # application's does not undo the denial breaker: the answer to it is as
+                            # tool-less as the one it followed.
+                            withhold_tools = False if steered_user else withheld
+                            continue
+                    token = run_context._silence_token
+                    if (
+                        token is not None
+                        and current_span.parent_call_id is None
+                        and message_text(current_span.memory[-1]).strip() == token
+                    ):
+                        current_span.metadata["silent"] = True
+                    break
+
+                called_unloaded = (
+                    [call.name for call in tool_calls if call.name in unloaded_tools] if unloaded_tools else []
+                )
+                if called_unloaded:
+                    await self._load_tools(called_unloaded, current_span)
                 first_pending: OutputEvent | None = None
-                active_events = self._multiplex_tools(tools, tool_calls)
+                if run_context._before_tool_dispatch is not None:
+                    await run_context._before_tool_dispatch(
+                        self._path, [(call.id, call.name, call.input) for call in tool_calls]
+                    )
+                active_events = self._multiplex_tools(tools, tool_calls, cut=cut)
                 async for tool_call, event in active_events:
                     await _process_tool_event(event, tool_call.id, append_to_messages=True)
                     for pending_event in pending_guardrail_events:
@@ -2381,12 +3250,25 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         first_pending = event
                 active_events = None
                 if first_pending is not None:
+                    await self._save_denials(run_context, consecutive_denials)
                     raise PauseRequired(first_pending)
                 i += 1
+                if consecutive_denials >= denial_limit:
+                    await self._stop_after_denials(current_span, consecutive_denials, _append_memory)
+                    consecutive_denials, withhold_tools = 0, True
+                if steering:
+                    if cut is not None and cut.is_set():
+                        await asyncio.sleep(NOW_COALESCE_SECS)
+                    async for steer_event in _steer():
+                        yield steer_event
+                    if steered_user:
+                        # A user message is a new request: it gets the full tool budget, and its tools back
+                        # even when the denial breaker took them away for this step.
+                        i, max_iter_handled, withhold_tools = 0, False, False
         finally:
             try:
                 if active_events is not None:
                     await active_events.aclose()
             finally:
                 if not _llm_memory_saved:
-                    self._salvage_interrupted_llm_output(run_context, current_span)
+                    await self._salvage_interrupted_llm_output(run_context, current_span)

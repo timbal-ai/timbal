@@ -31,6 +31,8 @@ class InMemoryTracingProvider(TracingProvider):
 
     # Class-level storage: run_id -> Trace
     _storage: dict[str, Trace] = {}
+
+    durable = False  # process-local: a restart leaves nothing to read
     
     @classmethod
     @override

@@ -1,13 +1,18 @@
 import base64
+import hashlib
 import io
 import mimetypes
 import tempfile
-from collections.abc import Callable, Iterator
+import threading
+import time
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import urlopen
 
+import structlog
 from pydantic import (
     GetCoreSchemaHandler,
     GetJsonSchemaHandler,
@@ -20,7 +25,9 @@ from uuid_extensions import uuid7
 
 from .. import __version__
 from ..platform.types import UploadFileResponse
-from ..state import get_or_create_run_context
+from ..state import get_or_create_run_context, get_run_context
+
+logger = structlog.get_logger("timbal.types.file")
 
 
 def _is_local_path(source: str) -> bool:
@@ -42,6 +49,375 @@ def _is_local_path(source: str) -> bool:
 # content.timbal.ai is kept here so URLs minted before the timbalusercontent.com
 # move (or configs still pinning the old host) are still recognized.
 _PLATFORM_CDN_HOSTS = ("timbalusercontent.com", "content.timbal.ai")
+
+
+def _is_platform_cdn_host(host: str | None, platform_config: Any) -> bool:
+    """True when ``host`` (a parsed ``.hostname``) serves platform-persisted content."""
+    if not host:
+        return False
+    # .hostname (unlike .netloc) drops port/userinfo and lowercases, so e.g.
+    # "content.timbal.ai:443" still matches. The configured cdn may carry a
+    # port too — strip it the same way.
+    cdn_host = urlparse(f"//{platform_config.cdn}").hostname
+    return host == cdn_host or host in _PLATFORM_CDN_HOSTS
+
+
+# ---------------------------------------------------------------------------
+# Re-signing platform content URLs on read
+# ---------------------------------------------------------------------------
+# Private platform content is served from the CDN with a CloudFront canned-policy
+# signature on the query string (Expires, Signature, Key-Pair-Id). Such a URL
+# dies at its Expires (1h by default, 24h at most) or when its signing key is
+# revoked, yet persist() keeps it verbatim as a durable reference, so memories
+# and traces hold URLs that stop working. Reads heal them through
+# POST /orgs/{org_id}/content/sign, which resolves the URL's path back to the
+# object, re-checks the caller's access and mints a fresh URL. It ignores the old
+# signature, so expired URLs and ones signed with a revoked key both re-sign.
+# Only reads change: the stored reference stays the URL that was stored.
+#
+# Two rules keep a read from ever doing worse than it did before re-signing:
+# - A stored URL that may still serve (not past its Expires by more than
+#   _CLOCK_SKEW_GRACE_SECS) is the read's first request, exactly as before.
+#   Replacement URLs and the sign endpoint come into play only after the CDN
+#   refused it (403) or once it is clearly expired.
+# - No read fails without having fetched the stored URL: this machine's clock
+#   decides what is tried first, never whether the stored URL is tried at all.
+
+_CLOCK_SKEW_GRACE_SECS = 60
+"""How long past its Expires, by this machine's clock, a URL is still treated as one that may serve.
+
+This clock may run ahead of the CDN's, so a URL that looks just expired here can
+still be accepted there. Skipping it would put a sign call ahead of a URL that
+works, and the URL could expire for real while that call runs. Inside the grace
+the cost is one GET the CDN answers with 403; past it (or with a clock further
+ahead than this) the stored URL is still fetched, as the last resort."""
+
+_SIGN_BUDGET_SECS = 10.0
+"""Deadline for one sign call, retries included (``total_timeout``).
+
+Short on purpose: the sync read path blocks its thread (possibly an event
+loop's) for the whole call."""
+
+_MINT_CACHE_MAX = 1_000
+"""Cap on memoized mints; the least recently stored entry is evicted past it."""
+
+# (caller, org_id, object URL without query) -> (minted URL, its Expires or None).
+_mint_cache: "OrderedDict[tuple[str, str, str], tuple[str, float | None]]" = OrderedDict()
+_mint_cache_lock = threading.Lock()  # the sync read path can run on worker threads
+
+
+def _clear_mint_cache() -> None:
+    """Drop every memoized mint (tests; next read of a stale URL re-signs)."""
+    with _mint_cache_lock:
+        _mint_cache.clear()
+
+
+def _signed_url_expires(url: str) -> float | None:
+    """The ``Expires`` epoch seconds on a signed URL, or None when absent/unparseable."""
+    values = parse_qs(urlparse(url).query).get("Expires")
+    if not values:
+        return None
+    try:
+        return float(values[0])
+    except ValueError:
+        return None
+
+
+def _may_serve(expires: float | None) -> bool:
+    """Not past ``expires`` by more than the clock-skew grace (or no Expires to go by)."""
+    return expires is None or expires + _CLOCK_SKEW_GRACE_SECS > time.time()
+
+
+def _failure_label(failure: Any) -> Any:
+    """How a failed fetch is logged: its status code, else the exception's type (never a signed URL)."""
+    if isinstance(failure, int):
+        return failure
+    response = getattr(failure, "response", None)
+    return getattr(response, "status_code", None) or type(failure).__name__
+
+
+class _SignedContentUrl:
+    """A platform-signed CDN URL being read inside a run that can re-sign it.
+
+    :meth:`resolve` returns None — leave the read alone — unless the URL is on a
+    platform CDN host, carries CloudFront signing params, and the current run
+    has a platform config with an org subject. Unsigned content (public assets,
+    tmp files, legacy content.timbal.ai links) never re-signs.
+    """
+
+    __slots__ = ("url", "org_id", "expires", "_cache_key")
+
+    def __init__(self, url: str, org_id: str, cache_key: tuple[str, str, str]) -> None:
+        self.url = url
+        self.org_id = org_id
+        self.expires = _signed_url_expires(url)
+        self._cache_key = cache_key
+
+    @classmethod
+    def resolve(cls, url: str) -> "_SignedContentUrl | None":
+        run_context = get_run_context()
+        platform_config = run_context.platform_config if run_context is not None else None
+        subject = platform_config.subject if platform_config is not None else None
+        if subject is None or not subject.org_id:
+            return None
+        parsed = urlparse(url)
+        if not _is_platform_cdn_host(parsed.hostname, platform_config):
+            return None
+        query = parse_qs(parsed.query)
+        if "Signature" not in query and "Key-Pair-Id" not in query:
+            return None
+        # The endpoint re-checks the caller's access, so one caller's mint must
+        # never serve another caller's read: key the cache by platform + auth.
+        caller = hashlib.sha256(
+            f"{platform_config.host}\0{platform_config.auth.header_key}\0{platform_config.auth.header_value}".encode()
+        ).hexdigest()
+        object_url = parsed._replace(query="", fragment="").geturl()
+        return cls(url, subject.org_id, (caller, subject.org_id, object_url))
+
+    @property
+    def sign_path(self) -> str:
+        return f"orgs/{quote(self.org_id, safe='')}/content/sign"
+
+    @property
+    def object_url(self) -> str:
+        """The URL without its query string — safe to log (no signature)."""
+        return self._cache_key[2]
+
+    def may_serve(self) -> bool:
+        """The stored URL is not clearly expired (see ``_CLOCK_SKEW_GRACE_SECS``), or carries no Expires."""
+        return _may_serve(self.expires)
+
+    def cached(self) -> str | None:
+        """A memoized mint for this object that is not clearly expired, if any."""
+        with _mint_cache_lock:
+            entry = _mint_cache.get(self._cache_key)
+        if entry is None or not _may_serve(entry[1]):
+            return None
+        return entry[0]
+
+    @staticmethod
+    def minted_url(sign_response: Any) -> str:
+        """The usable URL in a sign response (``signed_url``, else the legacy ``url``)."""
+        minted = None
+        if isinstance(sign_response, dict):
+            minted = sign_response.get("signed_url") or sign_response.get("url")
+        if not isinstance(minted, str) or not minted:
+            raise ValueError("The content sign endpoint returned no URL.")
+        return minted
+
+    def remember(self, minted: str) -> None:
+        """Memoize a mint that just served a download, until its own Expires (if it has one)."""
+        with _mint_cache_lock:
+            _mint_cache.pop(self._cache_key, None)
+            if len(_mint_cache) >= _MINT_CACHE_MAX:
+                _mint_cache.popitem(last=False)
+            _mint_cache[self._cache_key] = (minted, _signed_url_expires(minted))
+
+    def forget(self, url: str, failure: Any) -> None:
+        """Drop the memoized mint if it is ``url``, which just failed to serve.
+
+        ``failure`` is the error status it answered or the exception its fetch raised.
+        """
+        logger.warning(
+            "Dropping a memoized platform content URL that failed to download",
+            url=self.object_url,
+            failure=_failure_label(failure),
+        )
+        with _mint_cache_lock:
+            entry = _mint_cache.get(self._cache_key)
+            if entry is not None and entry[0] == url:
+                del _mint_cache[self._cache_key]
+
+    def mint_failed(self, exc: Exception) -> Exception:
+        """The freshly minted URL did not download (error status, or the fetch raised)."""
+        logger.warning(
+            "Re-signed platform content URL failed to download",
+            url=self.object_url,
+            failure=_failure_label(exc),
+        )
+        return exc
+
+    def sign_failed(self, exc: Exception) -> Exception:
+        logger.warning(
+            "Could not re-sign platform content URL",
+            url=self.object_url,
+            status_code=getattr(exc, "status_code", None),
+            error=str(exc),
+        )
+        return exc
+
+
+def _raise_for_status(res: Any, sign_error: Exception) -> None:
+    """raise_for_status(), chaining the sign failure that left the URL unrefreshed."""
+    import httpx
+
+    try:
+        res.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise exc from sign_error
+
+
+# The two drivers below are the same flow, one awaiting and one blocking:
+# 1. A stored URL that may still serve (not past its Expires by more than the
+#    clock-skew grace) is fetched first, exactly as a read that never re-signs
+#    would. Its answer is final (the download, or the error raised) unless it
+#    is a 403: expired by the CDN's clock, or a revoked key.
+# 2. Otherwise a memoized mint for the object, under the same test of its own
+#    Expires, is fetched and serves the read if it downloads. If it fails in any
+#    way (an error status, or the fetch raises: connection refused, timeout, ...)
+#    it is dropped.
+# 3. Otherwise sign once and fetch the minted URL. A mint is memoized only once
+#    it has served a download, so a URL that fails is never reused by later reads.
+# 4. If none of that served the read and step 1 skipped the stored URL (clearly
+#    expired here, but this machine's clock may be further ahead of the CDN's
+#    than the grace allows), the stored URL is fetched: the CDN has the last word.
+# 5. If nothing served: a failed sign call raises the stored URL's error chained
+#    to the sign failure; a minted URL that failed to download raises its own
+#    error.
+# At most one sign call per read, so a sign endpoint that refuses (403) can't
+# loop.
+
+
+async def _get_signed_content(target: _SignedContentUrl, get: Callable[[str], Awaitable[Any]]) -> Any:
+    import httpx
+
+    from ..platform.utils import _request
+
+    async def mint() -> str:
+        res = await _request(
+            "POST",
+            target.sign_path,
+            json={"url": target.url},
+            timeout=httpx.Timeout(_SIGN_BUDGET_SECS),
+            total_timeout=_SIGN_BUDGET_SECS,
+        )
+        return target.minted_url(res.json())
+
+    # 1. The stored URL, while it may still serve.
+    stored = None  # its error response, once the CDN has answered it
+    if target.may_serve():
+        res = await get(target.url)
+        if res.status_code != 403:
+            res.raise_for_status()
+            return res
+        stored = res
+
+    # 2. A memoized mint.
+    cached = target.cached()
+    if cached is not None:
+        try:
+            res = await get(cached)
+        except Exception as exc:
+            target.forget(cached, exc)
+        else:
+            if res.is_success:
+                return res
+            target.forget(cached, res.status_code)
+
+    # 3. A fresh mint.
+    sign_error = mint_error = None
+    try:
+        minted = await mint()
+    except Exception as exc:
+        sign_error = target.sign_failed(exc)
+    else:
+        try:
+            res = await get(minted)
+            res.raise_for_status()
+        except Exception as exc:
+            mint_error = target.mint_failed(exc)
+        else:
+            if minted != target.url:
+                target.remember(minted)
+            return res
+
+    # 4. The stored URL as the last resort, if step 1 skipped it.
+    if stored is None:
+        try:
+            res = await get(target.url)
+        except Exception as exc:
+            if mint_error is None:
+                raise exc from sign_error
+        else:
+            if res.is_success:
+                return res
+            stored = res
+
+    # 5. Nothing served.
+    if mint_error is not None:
+        raise mint_error
+    _raise_for_status(stored, sign_error)
+
+
+def _get_signed_content_sync(target: _SignedContentUrl, get: Callable[[str], Any]) -> Any:
+    import httpx
+
+    from ..platform.utils import _request_sync
+
+    def mint() -> str:
+        res = _request_sync(
+            "POST",
+            target.sign_path,
+            json={"url": target.url},
+            timeout=httpx.Timeout(_SIGN_BUDGET_SECS),
+            total_timeout=_SIGN_BUDGET_SECS,
+        )
+        return target.minted_url(res.json())
+
+    # 1. The stored URL, while it may still serve.
+    stored = None  # its error response, once the CDN has answered it
+    if target.may_serve():
+        res = get(target.url)
+        if res.status_code != 403:
+            res.raise_for_status()
+            return res
+        stored = res
+
+    # 2. A memoized mint.
+    cached = target.cached()
+    if cached is not None:
+        try:
+            res = get(cached)
+        except Exception as exc:
+            target.forget(cached, exc)
+        else:
+            if res.is_success:
+                return res
+            target.forget(cached, res.status_code)
+
+    # 3. A fresh mint.
+    sign_error = mint_error = None
+    try:
+        minted = mint()
+    except Exception as exc:
+        sign_error = target.sign_failed(exc)
+    else:
+        try:
+            res = get(minted)
+            res.raise_for_status()
+        except Exception as exc:
+            mint_error = target.mint_failed(exc)
+        else:
+            if minted != target.url:
+                target.remember(minted)
+            return res
+
+    # 4. The stored URL as the last resort, if step 1 skipped it.
+    if stored is None:
+        try:
+            res = get(target.url)
+        except Exception as exc:
+            if mint_error is None:
+                raise exc from sign_error
+        else:
+            if res.is_success:
+                return res
+            stored = res
+
+    # 5. Nothing served.
+    if mint_error is not None:
+        raise mint_error
+    _raise_for_status(stored, sign_error)
 
 
 def _extract_filename(headers: dict, url: str) -> str:
@@ -389,14 +765,23 @@ class File(io.IOBase):
             _ = self.__wrapped__
             return
         import httpx
+
         url = str(self)
         headers = {"User-Agent": f"Timbal/{__version__}"}
         own_client = client is None
         if own_client:
             client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+
+        async def get(fetch_url: str) -> httpx.Response:
+            return await client.get(fetch_url, headers=headers, follow_redirects=True)
+
         try:
-            res = await client.get(url, headers=headers, follow_redirects=True)
-            res.raise_for_status()
+            signed = _SignedContentUrl.resolve(url)
+            if signed is None:
+                res = await get(url)
+                res.raise_for_status()
+            else:
+                res = await _get_signed_content(signed, get)
         finally:
             if own_client:
                 await client.aclose()
@@ -455,12 +840,9 @@ class File(io.IOBase):
             url = str(self)
             if not run_context.platform_config:
                 return url
-            # .hostname (unlike .netloc) drops port/userinfo and lowercases,
-            # so e.g. "content.timbal.ai:443" still matches. The configured cdn
-            # may carry a port too — strip it the same way.
-            host = urlparse(url).hostname
-            cdn_host = urlparse(f"//{run_context.platform_config.cdn}").hostname
-            if host and (host == cdn_host or host in _PLATFORM_CDN_HOSTS):
+            # Kept verbatim, signature included: reads re-sign it once it
+            # expires (see _SignedContentUrl), so stored references heal.
+            if _is_platform_cdn_host(urlparse(url).hostname, run_context.platform_config):
                 object.__setattr__(self, "__persisted__", url)
                 return url
 
@@ -493,6 +875,7 @@ class File(io.IOBase):
         params = {"org_id": org_id} if org_id.isdigit() else None
 
         from ..platform.utils import _request
+
         res = await _request("POST", path, params=params, files=files)
         upload_response = UploadFileResponse.model_validate(res.json())
         # The platform returns a fully percent-encoded URL — use it verbatim.
@@ -544,9 +927,18 @@ class File(io.IOBase):
     def _fetch_http_file(cls, url: str) -> io.IOBase:
         """Fetch a file from a HTTP/HTTPS URL (sync fallback)."""
         import httpx
+
         headers = {"User-Agent": f"Timbal/{__version__}"}
-        res = httpx.get(url, headers=headers, follow_redirects=True, timeout=30.0)
-        res.raise_for_status()
+
+        def get(fetch_url: str) -> httpx.Response:
+            return httpx.get(fetch_url, headers=headers, follow_redirects=True, timeout=30.0)
+
+        signed = _SignedContentUrl.resolve(url)
+        if signed is None:
+            res = get(url)
+            res.raise_for_status()
+        else:
+            res = _get_signed_content_sync(signed, get)
         fileobj = io.BytesIO(res.content)
         fileobj.name = _extract_filename(res.headers, url)
         # Set content type from server response

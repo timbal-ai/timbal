@@ -24,6 +24,7 @@ from ..state.background import (
     adopt_background_store,
     forget_idle_background_store,
     format_session_notice,
+    format_user_message,
 )
 
 if TYPE_CHECKING:
@@ -77,10 +78,11 @@ class Followup:
     @property
     def trigger(self) -> dict[str, Any]:
         """Root-span ``metadata.trigger`` for the receiving run."""
-        trigger: dict[str, Any] = {
-            "kind": "session_event" if self.events else "background_completion",
-            "task_ids": self.task_ids,
-        }
+        if any(event.source == "user" for event in self.events):
+            kind = "user_message"
+        else:
+            kind = "session_event" if self.events else "background_completion"
+        trigger: dict[str, Any] = {"kind": kind, "task_ids": self.task_ids}
         if self.events:
             trigger["event_ids"] = [event.id for event in self.events]
         if self.urgent:
@@ -116,13 +118,41 @@ def record_delivery(run_context: Any, span: Any, events: list[SessionEvent]) -> 
         record_guardrails_metadata(span, records, run_context=run_context)
 
 
+def user_batch(events: list[SessionEvent]) -> list[SessionEvent]:
+    """The user messages one turn starts with, out of ``events`` (oldest first).
+
+    Messages that interrupted (``announce="interrupt"``) go first, together.
+    Otherwise a ``followup`` message gets its turn alone, and the leading run
+    of ``steer`` / ``collect`` messages shares one.
+    """
+    users = [event for event in events if event.source == "user"]
+    urgent = [event for event in users if event.announce == "interrupt"]
+    if urgent:
+        return urgent
+    if not users or users[0].mode == "followup":
+        return users[:1]
+    batch: list[SessionEvent] = []
+    for event in users:
+        if event.mode == "followup":
+            break
+        batch.append(event)
+    return batch
+
+
 def take_followup(store: BackgroundTaskStore, *, urgent: bool = False) -> Followup | None:
     """Take every pending notice and event for a turn the session starts itself, or None.
 
-    Taking is the commitment: start the turn before anything else can take a
-    turn in the session, then call :meth:`Followup.started`, or
-    :meth:`Followup.release` if it never runs.
+    User messages come first: the turn starts with :func:`user_batch` as its
+    prompt, and leaves the rest pending for that turn's start to pick up (or
+    for the turns after it). Taking is the commitment: start the turn before
+    anything else can take a turn in the session, then call
+    :meth:`Followup.started`, or :meth:`Followup.release` if it never runs.
     """
+    batch = user_batch(store.pending_events())
+    if batch:
+        taken = {id(event) for event in batch}
+        events = store.drain_events(settle=False, where=lambda event: id(event) in taken)
+        return Followup(prompt=format_user_message(events), store=store, completions=[], events=events, urgent=urgent)
     completions = store.drain_completions()
     events = store.drain_events(settle=False)
     if not completions and not events:
