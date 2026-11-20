@@ -181,15 +181,6 @@ def charge_and_transfer(provider, review):
     return go, charges, transfers
 
 
-# A run is known to be started by a call's code when its root is minted while that call's id is ambient: the
-# call still running (an agent called in a tool or step body, whatever run context the handler set; a
-# background child), or ended with a task it left running. A message posted to a chat session, where it is
-# posted. One case reads otherwise: the id of a call whose stream was left mid-way stays behind in its
-# consumer's task, where it is nobody's code, so a task started by a tool whose own stream was then cut is
-# taken for that consumer. The reviewer then reads a model's text as the user's. Kept as a failing test.
-known_gap = pytest.mark.xfail(strict=True, reason="approval evidence: a run started by a call's code, unseen")
-
-
 class TestVerdicts:
     async def test_approve_runs_the_call_without_asking_anyone(self):
         charges, seen = Charges(), []
@@ -843,10 +834,10 @@ class TestDelegation:
         assert request.user_messages == ["hello"] and request.delegation == "charge 500 euros"
         assert not request.attended and charges.made == []
 
-    @known_gap
     async def test_a_task_started_by_a_tool_whose_stream_was_cut_is_delegated(self):
         """A streaming tool starts a task; its consumer leaves the stream mid-way (a client going away); the task
-        then calls the worker. The tool's id reads as one an abandoned stream left behind."""
+        then calls the worker. The tool's id is one an abandoned stream left behind, but only in the consumer's
+        task: in the task the tool started it is still that tool's code."""
         seen, charges = [], Charges()
         worker = billing_worker(seen, charges)
         cut, jobs = asyncio.Event(), []
@@ -873,7 +864,25 @@ class TestDelegation:
         cut.set()
         await asyncio.gather(*jobs)
         (request,) = seen
-        assert "charge 500 euros" not in request.user_messages
+        assert request.user_messages == ["what is my balance?"]
+        assert request.delegation == "charge 500 euros" and charges.made == []
+
+    async def test_a_message_posted_after_an_abandoned_stream_is_still_the_persons(self):
+        """The id a stream left mid-way leaves in its consumer's task is nobody's code there: a message that
+        task then sends to a session is the person's."""
+        seen, charges = [], Charges()
+        agent = make_agent(lambda request: seen.append(request) or "escalate", charges)
+        async for _event in Agent(name="other", model=TestModel(responses=["hi"]))(prompt="hello"):
+            break
+        await asyncio.sleep(0.05)  # the abandoned stream is closed by the loop
+        async with ChatSession(agent) as session:
+            event = session.send("please charge me 5 euros")
+            async for item in session.events():
+                if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                    break
+        (request,) = seen
+        assert event.sent_by is None
+        assert request.user_messages == ["please charge me 5 euros"] and request.delegation is None
 
     async def test_an_agent_in_a_task_a_tool_left_running_is_delegated(self):
         """The tool has returned and its turn has ended when the task it started calls the worker: still that
@@ -1353,6 +1362,52 @@ class TestReviewerGaps:
         assert next(s for s in lost._trace.as_records() if s.path == "agent.transfer").status.reason == (
             "approval_already_claimed"
         )
+
+    async def test_a_grant_that_approves_a_waiting_gate_claims_it(self, tmp_path):
+        """Two charges wait. A resume approves one "for the session"; the other is asked again and waits in
+        that resume, whose session now holds the grant. Resuming it twice finds the grant twice: the charge
+        still runs once, because a gate that was left waiting is claimed whatever approves it."""
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        charges = Charges()
+
+        def model(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            return Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id="c1", name="charge", input={"amount": 5}),
+                    ToolUseContent(id="c2", name="charge", input={"amount": 7}),
+                ],
+                stop_reason="tool_use",
+            )
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=model),
+            tools=[Tool(name="charge", handler=charges.charge, requires_approval=True)],
+            tracing_provider=provider,
+        )
+
+        async def go(**kwargs):
+            context = RunContext(tracing_provider=provider, parent_id=kwargs.pop("parent_id", None))
+            set_run_context(context)
+            events = [event async for event in agent(prompt="pay", **kwargs)]
+            set_run_context(None)
+            return context, events
+
+        first, events = await go()
+        five, seven = sorted((e for e in events if isinstance(e, ApprovalEvent)), key=lambda e: e.input["amount"])
+        partial, events = await go(
+            parent_id=first.id, resume={five.approval_id: {"approved": True, "scope": "session"}}
+        )
+        assert charges.made == [5]
+        assert [e.approval_id for e in events if isinstance(e, ApprovalEvent)] == [seven.approval_id]
+        for _ in range(2):  # the same resume, delivered twice: the grant approves the waiting charge in both
+            await go(parent_id=partial.id, resume={})
+        assert charges.made == [5, 7]
 
     async def test_a_lost_gate_does_not_cut_a_call_this_run_claimed(self, tmp_path):
         """A paused pair, and another continuation already took the transfer. This run claims the charge and is

@@ -46,11 +46,11 @@ from ..state import (
     set_run_context,
 )
 from ..state.context import (
-    _ABANDONED_CALLS,
     _DETACHED_CALLS,
     _LIVE_CALLS,
     RunContext,
     _EmitSink,
+    _left_behind,
     _note_abandoned_call,
     _running_call,
 )
@@ -227,6 +227,9 @@ on any sync handler; raise it (or set very high) to silence."""
 ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, Any]]
 ApprovalPrompt = str | Callable[..., str | None] | None
 ApprovalUi = dict[str, Any] | BaseModel | Callable[..., dict[str, Any] | BaseModel | None] | None
+
+
+_current_task = asyncio.current_task
 
 
 def _inherit_tool_policy(run_context: RunContext, entry_run_context: RunContext, entry_call_id: str) -> None:
@@ -1526,8 +1529,9 @@ class Runnable(ABC, BaseModel):
                 run_context.update_usage("approvals:granted", 1)
 
         # A decision OR a cancel claims the gate; the first claimer wins and
-        # any later duplicate (resolve or cancel) stops here. A grant is not a
-        # resume of a pending gate, so there is nothing to race for.
+        # any later duplicate (resolve or cancel) stops here. A grant claims
+        # only a gate that was left waiting: a fresh call it approves has
+        # nothing to race for.
         async def _claim() -> bool:
             """Claim the gate for this run; False (and the span closed as already claimed) when another run did."""
             if run_context._tracing_provider is None:
@@ -1558,9 +1562,12 @@ class Runnable(ABC, BaseModel):
                 span._output_dump = await dump(span.output)
             return claimed
 
-        if (approval_resolution is not None or approval_cancel is not None) and granted_by is None:
-            if not await _claim():
-                return False, None, validated_input
+        if approval_resolution is not None or approval_cancel is not None:
+            # A grant claims too when it resolves a gate the run this one continues left waiting: that call
+            # is being run again here, and another run continuing the same one would find the same grant.
+            if granted_by is None or approval_id in await run_context._left_waiting():
+                if not await _claim():
+                    return False, None, validated_input
 
         if approval_cancel is not None:
             run_context.update_usage("approvals:cancelled", 1)
@@ -1753,9 +1760,10 @@ class Runnable(ABC, BaseModel):
         while True:
             above = top_context.parent_of(top_span)
             if above is None:
-                if top_context._invoker is None:
+                invoker = top_context.__dict__.get("_invoker")
+                if invoker is None:
                     break
-                invoking_context, invoking_call_id = top_context._invoker
+                invoking_context, invoking_call_id = invoker
                 above = invoking_context._trace.get(invoking_call_id) if invoking_context is not None else None
                 if above is None:
                     outermost = None  # the call that started this run cannot be found: nobody to cite
@@ -2202,9 +2210,9 @@ class Runnable(ABC, BaseModel):
         # must be restored on exit or the swap leaks into the caller's run.
         _entry_run_context = run_context
         _entry_call_id = _call_id
-        _entry_parent_call_id = _parent_call_id
         if run_context is None:
             run_context = RunContext(parent_id=explicit_parent_id, tracing_provider=self.tracing_provider)
+            _entry_parent_call_id = _parent_call_id  # put back at exit when a call's code started this run
             _parent_call_id = None
             _call_id = None
         elif "." not in self._path:
@@ -2260,6 +2268,7 @@ class Runnable(ABC, BaseModel):
             # A top-level invoke always mints the first span of its context,
             # and that span must be a root: carrying the stale ids over would
             # produce an orphan parent_call_id that trace validation rejects.
+            _entry_parent_call_id = _parent_call_id  # put back at exit when a call's code started this run
             _parent_call_id = None
             _call_id = None
         set_run_context(run_context)
@@ -2292,16 +2301,16 @@ class Runnable(ABC, BaseModel):
         assert _new_call_id not in run_context._trace, f"Call ID {_new_call_id} already exists in trace."
         metadata = {**self.metadata}  # Shallow copy
         if _new_parent_call_id is None:
-            if _entry_call_id is not None and run_context._invoker is None:
+            if _entry_call_id is not None and run_context.__dict__.get("_invoker") is None:
                 # A run of its own that the forks above did not link, minted while a call is ambient: on a
                 # context the handler built and set, or with none set. If that call is still running (or
                 # detached, its code still running), its code started this run all the same.
                 invoking = _running_call(_entry_call_id)
-                if invoking is None and _entry_call_id not in _ABANDONED_CALLS:
-                    # The call has ended, and not by its stream being left mid-way (that leaves its id in
-                    # the consumer's task, where it is nobody's code): its id is ambient here because
-                    # something its code started is still going, a task it left running. Its run is the
-                    # context that task carries, when that holds the call.
+                if invoking is None and not _left_behind(_entry_call_id):
+                    # The call has ended: its id is ambient here because something its code started is still
+                    # going, a task it left running (also when its stream was cut meanwhile). Not so in the
+                    # task that was consuming a stream it left mid-way: there the id is only left behind,
+                    # nobody's code. Its run is the context that task carries, when that holds the call.
                     held = _entry_run_context is not None and _entry_call_id in _entry_run_context._trace
                     run_context.__dict__["_invoker"] = (_entry_run_context if held else None, _entry_call_id)
                     invoking = _entry_run_context if held else None
@@ -2329,7 +2338,8 @@ class Runnable(ABC, BaseModel):
         # it. The per-call sink itself is allocated lazily on first emit() —
         # benches never emit, so this is a pointer compare, not an object.
         if run_context._loop is None:
-            run_context.__dict__["_loop"] = asyncio.get_running_loop()
+            # And the task consuming this run: where its ids stay behind if it leaves the stream mid-way.
+            run_context.__dict__.update(_loop=asyncio.get_running_loop(), _driver=_current_task())
 
         def _restore_context():
             """Restore this invocation's context vars.
@@ -2640,7 +2650,7 @@ class Runnable(ABC, BaseModel):
 
         except GeneratorExit:
             _generator_closed = True
-            _note_abandoned_call(_new_call_id)
+            _note_abandoned_call(_new_call_id, run_context)
             # Only overwrite status if no earlier branch (e.g. approval gate)
             # already set it. This keeps approval_required, early_exit etc.
             # intact when a consumer breaks the stream right after their event.
@@ -2941,7 +2951,7 @@ class Runnable(ABC, BaseModel):
                 # (entry call id None) deliberately leave their context set so
                 # sequential same-task runs chain sessions implicitly.
                 set_run_context(_entry_run_context)
-                if _call_id is None and run_context._invoker is not None:
+                if _call_id is None and run_context.__dict__.get("_invoker") is not None:
                     # This was a run of its own, started by a call's code, and that code goes on: it is
                     # still inside its call. Without its ids back, the next run it starts would look like
                     # one nobody's code started (no link, no tool policy inherited, and an approval

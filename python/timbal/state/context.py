@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import weakref
 from collections import deque
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -46,18 +47,34 @@ _LIVE_CALLS: "dict[str, RunContext]" = {}
 _DETACHED_CALLS: "dict[str, RunContext]" = {}
 
 
-# Ids of calls whose stream its consumer closed before its end (``GeneratorExit``: an ``async for`` left mid-way
-# is closed by the loop, from another task). Such an id stays behind in the consumer's task, where it means
-# nobody's code. Any other ambient id of a call that has ended can only be a copy in something that call's code
-# started. Bounded: an id matters until the consumer's next run in that task, which clears it.
-_ABANDONED_CALLS: "dict[str, None]" = {}
+# Calls whose stream its consumer closed before its end (``GeneratorExit``: an ``async for`` left mid-way is
+# closed by the loop, from another task), each with the task that was consuming its run. Such an id stays behind
+# in that task, where it means nobody's code; the same id in any other task is a copy in something the call's
+# code started. Bounded: an id matters until the consumer's next run in that task, which clears it.
+_ABANDONED_CALLS: "dict[str, weakref.ref | None]" = {}
 _ABANDONED_CALLS_MAX = 4096
 
 
-def _note_abandoned_call(call_id: str) -> None:
-    _ABANDONED_CALLS[call_id] = None
+def _note_abandoned_call(call_id: str, run_context: "RunContext") -> None:
+    driver = run_context.__dict__.get("_driver")
+    _ABANDONED_CALLS[call_id] = weakref.ref(driver) if driver is not None else None
     if len(_ABANDONED_CALLS) > _ABANDONED_CALLS_MAX:
         del _ABANDONED_CALLS[next(iter(_ABANDONED_CALLS))]
+
+
+def _left_behind(call_id: str) -> bool:
+    """Whether ``call_id``, ambient here, is only what a stream left mid-way left in the task that was consuming
+    it: nobody's code is running under it. False for a call that ended any other way, and for the same id seen
+    from another task (one the call's code started, which goes on after the stream is cut)."""
+    if call_id not in _ABANDONED_CALLS:
+        return False
+    driver = _ABANDONED_CALLS[call_id]
+    if driver is None:
+        return False  # who was consuming it is not known: not shown to be a leftover
+    try:
+        return driver() is asyncio.current_task()
+    except RuntimeError:  # no running loop here (a thread): not the consumer's task
+        return False
 
 
 def _running_call(call_id: str | None) -> "RunContext | None":
@@ -306,8 +323,10 @@ class RunContext(BaseModel):
     #       this one: set when the run's root span is minted while a call is ambient that is
     #       still running (``_LIVE_CALLS`` / ``_DETACHED_CALLS``: an Agent called inside a tool
     #       or step body, forked or on a context the handler built and set; a background
-    #       child), or that has ended other than by its stream being left mid-way (a task it
-    #       left running; ``_ABANDONED_CALLS``). The run is None when it cannot be told. The
+    #       child), or that has ended (a task it left running), unless the id is only what a
+    #       stream left mid-way left in its consumer's task (``_left_behind``, by ``_driver``:
+    #       the task consuming this run, noted when its root starts). The run is None when it
+    #       cannot be told. The
     #       way up the call chain across runs: an approval reviewer follows it to the agent the
     #       person talks to, since this run's own root agent got its prompt from that call's
     #       code. ``_invoked_by`` is the fork's link as ids, for the trace
@@ -315,6 +334,8 @@ class RunContext(BaseModel):
     #       the run this one continues left waiting, read once when a gate asks (``_left_waiting``)
     #   _live_background: int — background work (spawned tasks, handed-off
     #       continuations) running on this context; it can outlive the root run.
+    # ``_invoker``, ``_parent_pending`` and ``_driver`` are only set when they apply (read them with
+    # ``__dict__.get``): a default for each would be paid by every run.
     # Do not add class-level annotations for them — pydantic would turn any
     # annotated underscore name back into a (slow) private attribute.
 
@@ -410,8 +431,6 @@ class RunContext(BaseModel):
             _resume_values=_NO_RESUME_VALUES,
             _used_resume_ids=set(),
             _invoked_by=None,
-            _invoker=None,
-            _parent_pending=None,
             _live_background=0,
             _trace=Trace(),
             _continuation_owner=None,
@@ -662,7 +681,7 @@ class RunContext(BaseModel):
             return _NOTHING_WAITING
         if provider.claim_approval.__func__ is TracingProvider.claim_approval.__func__:
             return _NOTHING_WAITING
-        known = self._parent_pending
+        known = self.__dict__.get("_parent_pending")
         if known is None or known[0] != parent_id:
             for pause in (*_PARENT_READ_RETRIES_S, None):
                 try:

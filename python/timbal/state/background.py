@@ -1535,14 +1535,13 @@ class BackgroundTaskStore:
         if source == "user":
             # Posted by a call's code (a tool, with text a model may have written), or by something that code
             # started: a call id is ambient there, also in a task the call left running after it ended. Taken
-            # here, in the poster's own context, since the turn that receives it runs elsewhere. (The id a
-            # stream abandoned mid-way leaves in its consumer's task reads the same: a message posted from
-            # that task is then taken for a call's too, which only costs it its standing as evidence.)
+            # here, in the poster's own context, since the turn that receives it runs elsewhere. Not the id a
+            # stream left mid-way leaves in the task that was consuming it: nobody's code is running there.
             from . import get_call_id, get_run_context
-            from .context import _running_call
+            from .context import _left_behind, _running_call
 
             call_id = get_call_id()
-            if call_id is not None:
+            if call_id is not None and not _left_behind(call_id):
                 sender = _running_call(call_id)
                 if sender is None:
                     ambient = get_run_context()
