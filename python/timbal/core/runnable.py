@@ -1537,7 +1537,7 @@ class Runnable(ABC, BaseModel):
             # must be after the same claim.
             waiting = await run_context._left_waiting()
             claimed = await run_context._tracing_provider.claim_approval(
-                (waiting or {}).get(approval_id) or (str(run_context.parent_id) if run_context.parent_id else None),
+                waiting.get(approval_id) or (str(run_context.parent_id) if run_context.parent_id else None),
                 approval_id,
                 str(run_context.id),
             )
@@ -1585,8 +1585,7 @@ class Runnable(ABC, BaseModel):
                     # like a person's answer, so the call runs at most once. The run that loses a claim
                     # stops there (see ``RunCancelled``), so what would follow is not done twice either.
                     # A call that waited nowhere has nothing to race for.
-                    waiting = await run_context._left_waiting()
-                    if (waiting is None or approval_id in waiting) and not await _claim():
+                    if approval_id in await run_context._left_waiting() and not await _claim():
                         return False, None, validated_input
                     approved = review.verdict == "approve"
                     approval_resolution = ApprovalResolution(
@@ -1600,7 +1599,7 @@ class Runnable(ABC, BaseModel):
         if approval_resolution is None:
             # Waiting again in a run that continues one it already waited in: it keeps the run it first
             # waited in (see ``_claim``), for whoever continues this run to claim it under.
-            carried = (await run_context._left_waiting() or {}).get(approval_id)
+            carried = (await run_context._left_waiting()).get(approval_id)
             if carried is not None:
                 span.metadata["approval"]["pending_since"] = carried
             # Status/output MUST be set BEFORE the caller yields the event.

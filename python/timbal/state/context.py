@@ -33,6 +33,8 @@ def _get_logger():
 # installs a new mapping (``Runnable._stream``), nothing ever writes into one in place.
 _NO_RESUME_VALUES: MappingProxyType[str, Any] = MappingProxyType({})
 _NOTHING_WAITING: Mapping[str, str] = MappingProxyType({})
+# Waits before reading the parent's trace again when the read failed (a locked database, a busy file).
+_PARENT_READ_RETRIES_S = (0.05, 0.2)
 
 # call id -> the run context of every call whose stream has not ended (``Runnable._stream`` keeps it). An ambient
 # call id found here is a call still running, whatever run context is set by now: a run minted under it, or a
@@ -639,10 +641,10 @@ class RunContext(BaseModel):
                     self._session_data.update(root_span.session)
         return self._session_data
 
-    async def _left_waiting(self) -> "Mapping[str, str] | None":
+    async def _left_waiting(self) -> "Mapping[str, str]":
         """The approvals the run this one continues left waiting: this run is running those calls again, and so
         may any other run continuing the same one, with resume values or without. Empty when it left none (or
-        this run continues nothing); None when that cannot be told.
+        this run continues nothing).
 
         Each with the run it first waited in, which is what a claim on it is made under: a gate a partial resume
         carried forward (answered one, asked again for the other) still waits in the run before as well, and
@@ -650,7 +652,9 @@ class RunContext(BaseModel):
 
         Read from the parent's trace, once per run, when a gate first asks (never with a provider that keeps no
         claims: there is nothing to decide). Read with ``get_strict``: the built-in providers' ``get`` answers a
-        failed read with None, which would read as a parent that left nothing waiting.
+        failed read with None, which would read as a parent that left nothing waiting. A read that fails is
+        tried again shortly; one that keeps failing raises :class:`~timbal.errors.ApprovalStateUnreadable`, and
+        the gate that asked fails without running or asking again (see there).
         """
         parent_id = self.parent_id
         provider = self._tracing_provider
@@ -660,16 +664,25 @@ class RunContext(BaseModel):
             return _NOTHING_WAITING
         known = self._parent_pending
         if known is None or known[0] != parent_id:
-            try:
-                trace = await provider.get_strict(self)
-            except Exception as e:
-                _get_logger().error(
-                    "Parent trace fetch failed. Its approvals may be waiting: reviewer decisions are claimed.",
-                    parent_id=parent_id,
-                    run_id=self.id,
-                    error=str(e),
-                )
-                return None
+            for pause in (*_PARENT_READ_RETRIES_S, None):
+                try:
+                    trace = await provider.get_strict(self)
+                    break
+                except Exception as e:
+                    if pause is None:
+                        from ..errors import ApprovalStateUnreadable
+
+                        _get_logger().error(
+                            "Parent trace fetch failed. Its approvals cannot be resolved in this run.",
+                            parent_id=parent_id,
+                            run_id=self.id,
+                            error=str(e),
+                        )
+                        raise ApprovalStateUnreadable(
+                            f"The run being continued ({parent_id}) could not be read, so its approvals cannot "
+                            f"be resolved: {e}"
+                        ) from e
+                    await asyncio.sleep(pause)
             waiting = {
                 approval["id"]: str(approval.get("pending_since") or parent_id)
                 for span in (trace.values() if trace is not None else ())

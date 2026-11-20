@@ -183,6 +183,16 @@ class Suspend(TimbalError):
         self.response_schema = response_schema
 
 
+class ApprovalStateUnreadable(TimbalError):
+    """The run being continued could not be read, so it is not known which approvals it left waiting, nor
+    which run each first waited in (what a claim on it is made under).
+
+    A gate in the continuing run is then neither resolved, claimed nor asked again: its call fails with this
+    error and nothing runs. Deciding it blind could run a call another run is also running, or ask again for
+    a gate under an identity later runs would not share.
+    """
+
+
 class RunCancelled(TimbalError):
     """Control-flow signal: the run stops while resolving a pause, and nothing is fed back to the model.
 

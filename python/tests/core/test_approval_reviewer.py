@@ -1139,9 +1139,10 @@ class TestReviewerGaps:
 
         return Flaky
 
-    async def test_a_parent_the_gate_cannot_read_counts_as_waiting(self, tmp_path):
-        """The gate's own read of the parent fails, after the agent read it and is running its waiting calls
-        again. Whether this one waited is unknown: claimed all the same, as a call run twice is the worse error."""
+    async def test_a_gate_reads_its_parent_again_before_giving_up(self, tmp_path, monkeypatch):
+        """The gate's own read of the parent fails once (a locked database): read again, and the gate is claimed
+        as it should be. Two runs continuing the paused one still run the call once."""
+        monkeypatch.setattr("timbal.state.context._PARENT_READ_RETRIES_S", (0.0, 0.0), raising=False)
         failing = {"reads": 0}
         resumed = False
 
@@ -1157,6 +1158,48 @@ class TestReviewerGaps:
         await go(parent_id=first.id)
         await go(parent_id=first.id)
         assert transfers == [7] and failing["reads"] == 0
+
+    async def test_a_parent_that_stays_unreadable_fails_the_gates_closed(self, tmp_path, monkeypatch):
+        """A partial resume whose gates cannot read the run they continue: the answered charge is not run (its
+        claim could be made under the wrong run), and the transfer is not asked again (it would wait under an
+        identity later runs do not share). Both calls fail; once the parent reads again, each runs once."""
+        import sqlite3
+
+        from timbal.state.tracing.providers import SqliteTracingProvider
+
+        monkeypatch.setattr("timbal.state.context._PARENT_READ_RETRIES_S", (0.0, 0.0), raising=False)
+        gate_reads_fail, reads = False, {}
+
+        class Flaky(SqliteTracingProvider.configured(_path=tmp_path / "t.db")):
+            @classmethod
+            async def get_strict(cls, run_context):
+                # A run reads its parent twice as it starts (session data, the agent's memory); its gates after.
+                reads[run_context.id] = reads.get(run_context.id, 0) + 1
+                if gate_reads_fail and reads[run_context.id] > 2:
+                    raise sqlite3.OperationalError("database is locked")
+                return await super().get_strict(run_context)
+
+        approving = False
+        go, charges, transfers = charge_and_transfer(
+            Flaky, lambda r: "approve" if approving and r.tool == "transfer" else "escalate"
+        )
+        first, events = await go()
+        cards = {e.path.rsplit(".", 1)[-1]: e for e in events if isinstance(e, ApprovalEvent)}
+
+        gate_reads_fail = True
+        blind, events = await go(parent_id=first.id, resume={cards["charge"].approval_id: True})
+        assert charges.made == [] and transfers == []
+        assert not any(isinstance(e, ApprovalEvent) for e in events) and blind.pending_approvals() == []
+        for path in ("agent.charge", "agent.transfer"):
+            span = next(s for s in blind._trace.as_records() if s.path == path)
+            assert span.status.code == "error" and span.error["type"] == "ApprovalStateUnreadable"
+
+        gate_reads_fail = False
+        partial, _ = await go(parent_id=first.id, resume={cards["charge"].approval_id: True})
+        approving = True
+        await go(parent_id=first.id)
+        await go(parent_id=partial.id)
+        assert charges.made == [5] and transfers == [7]
 
     async def test_a_session_read_that_fails_does_not_skip_the_claim(self, tmp_path):
         """The run's first read of its parent (its session data) fails and is taken for an empty session; the
