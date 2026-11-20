@@ -1,0 +1,76 @@
+---
+title: "Connect your IDE"
+description: "Browse a connector's schemas and folders, and run bounded SQL, from Cursor or any MCP client"
+---
+
+Every connector has its own [MCP](/mcp-integration/index) endpoint. Point an IDE or an agent at it and you can browse that server's databases, run bounded SQL and explore its shares, without writing `curl`.
+
+```text
+https://api.timbal.ai/orgs/{org_id}/connectors/{connector_id}/mcp
+```
+
+The connector is identified by the URL on every request, so a session can never drift to another server. Add one entry per connector.
+
+## Set it up in Cursor
+
+Add this to `~/.cursor/mcp.json`, or to `.cursor/mcp.json` in a project:
+
+```json
+{
+  "mcpServers": {
+    "timbal-connector-erp": {
+      "url": "https://api.timbal.ai/orgs/<org_id>/connectors/<connector_id>/mcp",
+      "headers": { "Authorization": "Bearer <api_key>" }
+    }
+  }
+}
+```
+
+To find `<connector_id>`:
+
+```bash
+curl "https://api.timbal.ai/orgs/$ORG_ID/connectors" -H "Authorization: Bearer $API_KEY"
+```
+
+<Warning>
+The API key in `mcp.json` is an **organization-wide** key. Protect the file like a credential and never commit it to version control.
+</Warning>
+
+## Tools
+
+| Tool | What it does | Role needed |
+| ---- | ------------ | ----------- |
+| `connector_status` | Online or not, version, capabilities | Membership |
+| `list_connections` | The connection names configured on the server | Membership |
+| `list_tables` | Tables of one connection | Membership |
+| `list_columns` | Columns of one table | Membership |
+| `describe_table` | Indexes, foreign keys, constraints, size | Membership |
+| `list_filesystems` | The share names configured on the server | Membership |
+| `fs_ls` | List one folder of a share | Membership |
+| `fs_du` | Summarize a folder tree: counts, bytes, largest files, extensions | Membership |
+| `query` | Run bounded SQL | ConnectorsManage |
+| `fs_search` | Search file contents | ConnectorsManage |
+
+Suggested order for a database: `connector_status`, `list_connections`, `list_tables`, `list_columns` or `describe_table`, then `query`.
+
+Suggested order for files: `connector_status`, `list_filesystems`, `fs_du` on a candidate folder, `fs_ls`, then `fs_search` if you need to look inside.
+
+Try a prompt such as: *"Using the timbal-connector-erp tools, list the tables in `erp` and describe the ones about customers."*
+
+## Behaviour
+
+- The tools do exactly what the equivalent [HTTP requests](/connect/sync-data) do: same limits, same capability checks, same audit entry for `query` (marked `via=mcp`).
+- The connection's [`query` setting](/connect/connections#the-query-setting) on the server still decides what `query` may do.
+- A connector that is offline, or lacks a capability, returns a tool error with the same message as the API. Nothing here can reach a server the connection can't.
+- It does **not** start jobs or syncs, copy files into a knowledge base, or push configuration. For those, use the [API](/connect/sync-data).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Sync your data" icon="rotate" href="/connect/sync-data">
+    Start a job or schedule a sync.
+  </Card>
+  <Card title="MCP integration" icon="plug" href="/mcp-integration/index">
+    Connect Timbal's own tools to your IDE.
+  </Card>
+</CardGroup>

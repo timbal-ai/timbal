@@ -1,0 +1,52 @@
+---
+title: "Guided setup"
+description: "Pick your operating system and database, and get the exact commands and configuration to run, in order"
+---
+
+import { ConnectGuidedSetup } from "/snippets/ConnectGuidedSetup.jsx";
+
+Choose where the connector runs and what it should reach. Below the options you get the whole procedure for that combination, from creating the token to checking the result: every command to run, every file to write, and which machine to run it on.
+
+Nothing you type here leaves your browser, and the page never asks for a password: the output uses `CHANGE_ME`, and a step tells you where to replace it.
+
+<ConnectGuidedSetup />
+
+## Before you start
+
+- **Network.** The server needs outbound TCP 443 to `api.timbal.ai`. Check it first with [Network requirements](/connect/network-requirements).
+- **Permissions in Timbal.** Creating tokens and running queries needs the **ConnectorsManage** role. Browsing schemas and folders only needs organization membership.
+- **`$ORG_ID` and `$API_KEY`.** Your organization id and an API key. Set them as environment variables on the machine where you run the `curl` commands. The key is organization-wide: treat it like a password.
+
+## What the steps do
+
+<AccordionGroup>
+  <Accordion title="Why a read-only login?">
+    The connector reads tables, so it needs `SELECT` and nothing else. The `query` setting in the connection file limits what Timbal can ask for, and the server always has the last word, but a login that can only read is the stronger limit. It also keeps working if someone changes the setting by mistake.
+  </Accordion>
+  <Accordion title="Why check the port before writing the configuration?">
+    `doctor` reports a failed connection with the driver's message, which can be hard to read. A blocked port is the most common cause, and `Test-NetConnection` or `nc` shows it in a second.
+  </Accordion>
+  <Accordion title="connections.json or config.json?">
+    Both work. `connections.json` has been there from the start and keeps credentials apart from the control-plane settings. Putting `connections` inside `config.json` (from connector 0.1.27) keeps everything in one file. File shares always go in `config.json`. If both are set, the inline connections win and `connections.json` is ignored: see [Where the connector looks](/connect/connections#where-the-connector-looks).
+  </Accordion>
+  <Accordion title="What stays on the server?">
+    Connection strings, passwords and real folder paths. Timbal only receives the names you chose (`connection_ref` and `filesystem_ref`), table and column metadata, and the rows or files you ask it to extract.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configure connections" icon="database" href="/connect/connections">
+    Every field and every option, with reference examples.
+  </Card>
+  <Card title="Operate the connector" icon="gauge" href="/connect/operate">
+    doctor, query, upgrades, remote configuration and revoking.
+  </Card>
+  <Card title="Sync your data" icon="rotate" href="/connect/sync-data">
+    One-off jobs, scheduled syncs and cursors.
+  </Card>
+  <Card title="Connect your IDE" icon="plug" href="/connect/mcp">
+    Browse schemas and run bounded SQL from Cursor.
+  </Card>
+</CardGroup>

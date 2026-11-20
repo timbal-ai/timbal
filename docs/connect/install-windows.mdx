@@ -7,7 +7,7 @@ description: "Install Timbal Connect as a Windows service with the setup file, a
 
 - Windows Server 2016 or newer (or Windows 10/11), x64 or ARM64
 - An account with local **Administrator** rights
-- The [network requirements](/connect/network-requirements) in place: direct outbound TCP 443 to `api.timbal.ai`, no TLS inspection
+- The [network requirements](/connect/network-requirements) in place: outbound TCP 443 to `api.timbal.ai`, direct or through an HTTP proxy
 - An [enrollment token](/api-reference/connectors/enrollment-tokens/create), unused and less than 24 hours old (unless created with a longer `ttl_secs`)
 
 ## Install with the setup file
@@ -32,7 +32,7 @@ description: "Install Timbal Connect as a Windows service with the setup file, a
 
     - **Control plane:** leave **Production** selected unless Timbal gave you a different URL
     - **Enrollment token:** paste your token
-    - **Download proxy:** leave empty unless downloads must go through a proxy. This only affects the download; the service itself always connects directly
+    - **Proxy:** leave empty unless the server reaches the internet through an HTTP proxy. From connector 0.1.33 it is used for the downloads, the network check and the service itself. See [Proxies](/connect/network-requirements#proxies)
 
     Click **Install**, then **Yes** on the administrator prompt.
   </Step>
@@ -40,7 +40,7 @@ description: "Install Timbal Connect as a Windows service with the setup file, a
     The installer checks the network, downloads and verifies the connector, and registers and starts the `timbal-connect` service. You get a success or failure message either way. On failure, the message names the cause; look it up in [Troubleshooting](/connect/troubleshooting).
   </Step>
   <Step title="Add your connections">
-    Edit `C:\ProgramData\TimbalConnect\connections.json` for databases and, for file shares, add `filesystems` to `config.json`. Then restart the service. See [Configure connections](/connect/connections).
+    Edit `C:\ProgramData\TimbalConnect\connections.json` for databases (or add `connections` to `config.json`) and, for file shares, add `filesystems` to `config.json`. Then restart the service. See [Configure connections](/connect/connections), or let the [Guided setup](/connect/guided-setup) write the commands for you.
   </Step>
 </Steps>
 
@@ -53,7 +53,7 @@ Before downloading anything, the setup checks the path the service will use and 
 | PowerShell | It is locked down by AppLocker, WDAC or Group Policy (see [Locked-down servers](#locked-down-servers)) |
 | DNS | The server can't resolve `api.timbal.ai` |
 | TCP 443 | A firewall blocks or drops the connection |
-| TLS certificate | A firewall inspects TLS traffic and re-signs it |
+| TLS certificate | A firewall inspects TLS traffic and re-signs it with a root this server doesn't trust. A root installed on the server is accepted from connector 0.1.32 |
 | WebSocket | A proxy or IPS strips the WebSocket upgrade |
 
 If the firewall rule is approved but not live yet, you can install anyway with `-SkipNetworkCheck` (see below). The service keeps retrying and connects once the rule lands, as long as the enrollment token hasn't expired by then. Create the token with a longer `ttl_secs` if the change may take days.
@@ -71,7 +71,7 @@ TimbalConnectSetup.cmd -Token <TOKEN>
 | `-Token <token>` | Enrollment token. Required on first install. Omit it to upgrade; pass a new one to [re-enroll](#re-enroll) |
 | `-Url <wss://...>` | Control plane, if Timbal gave you a non-default one |
 | `-Version <vX.Y.Z>` | Pin a connector version (default `latest`) |
-| `-Proxy <http://host:port>` | Proxy for the downloads only |
+| `-Proxy <http://host:port>` | HTTP proxy for the downloads, the network check and the service (0.1.33 or newer; older versions use it for the downloads only) |
 | `-SkipNetworkCheck` | Install even if the network check fails |
 
 Exit code `0` means installed and started; anything else is a failure, with the cause printed and logged.
