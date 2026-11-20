@@ -45,7 +45,9 @@ class MaxIterExceeded(TimbalError):
     """Raised when an agent with ``on_max_iter="error"`` exhausts ``max_iter`` without a final answer."""
 
     def __init__(self, max_iter: int) -> None:
-        super().__init__(f"Agent exhausted its iteration budget (max_iter={max_iter}) without producing a final answer.")
+        super().__init__(
+            f"Agent exhausted its iteration budget (max_iter={max_iter}) without producing a final answer."
+        )
         self.max_iter = max_iter
 
 
@@ -182,17 +184,22 @@ class Suspend(TimbalError):
 
 
 class RunCancelled(TimbalError):
-    """Control-flow signal: a human cancelled the run while resolving a pause.
+    """Control-flow signal: the run stops while resolving a pause, and nothing is fed back to the model.
 
     Raised when a ``Cancel`` value is supplied on the ``resume=`` channel for a
-    pending approval gate or ``suspend()`` call. Unwinds the handler and marks
-    the run ``cancelled`` / reason ``cancelled``. Unlike a denial, nothing is
-    fed back to the model — the whole run stops.
+    pending approval gate or ``suspend()`` call: the run ends ``cancelled`` /
+    reason ``cancelled``. Unlike a denial, the whole run stops.
+
+    Also when a gate the run this one continues left waiting was already claimed
+    by another run continuing it (``reason="approval_already_claimed"``): that
+    other run is the one going on with the turn, and this one must not make the
+    calls that would follow a second time.
     """
 
-    def __init__(self, message: str = "") -> None:
+    def __init__(self, message: str = "", *, reason: str = "cancelled") -> None:
         super().__init__(message or "Run cancelled.")
         self.message = message or "Run cancelled."
+        self.reason = reason
 
 
 class GuardrailBlocked(TimbalError):

@@ -647,6 +647,10 @@ def format_user_message(events: Sequence[SessionEvent], *, steered: bool = False
     metadata: dict[str, Any] = {"kind": USER_MESSAGE_KIND, "event_ids": [event.id for event in events]}
     if steered:
         metadata["steered"] = True
+    senders = [event.sent_by for event in events if event.sent_by is not None]
+    if senders:
+        # A running call's code posted (some of) it: not a person's words, for the whole message.
+        metadata["sent_by"] = senders
     return Message(
         role="user",
         content=[TextContent(text="\n\n".join(event.text for event in events))],
@@ -686,7 +690,11 @@ class SessionEvent:
     (:func:`report_progress`). ``guardrails`` holds the screening rails that
     fired on client text; the receiving run records them. ``lane`` is when a
     turn takes it (:data:`SessionEventLane`); ``mode`` is set on user messages
-    only (:data:`UserMessageMode`).
+    only (:data:`UserMessageMode`). ``sent_by`` is set on a user message that a
+    running call's code posted (``{"run_id", "call_id"}``, taken where it is
+    posted): text a tool or a model wrote, not a person, whatever the channel
+    calls it. The message it becomes carries it (``metadata["sent_by"]``), and
+    an approval reviewer does not read it as the user's words.
     """
 
     __slots__ = (
@@ -698,6 +706,7 @@ class SessionEvent:
         "task_id",
         "lane",
         "mode",
+        "sent_by",
         "guardrails",
         "posted_at",
         "state",
@@ -725,6 +734,7 @@ class SessionEvent:
         self.task_id = task_id
         self.lane: SessionEventLane = lane
         self.mode: UserMessageMode | None = mode
+        self.sent_by: dict[str, str] | None = None
         self.guardrails: list[Any] = []
         self.posted_at = time.time()
         self.state: SessionEventState = "pending"
@@ -758,7 +768,7 @@ class SessionEvent:
 
     def to_dict(self) -> dict[str, Any]:
         """What restores it (:meth:`BackgroundTaskStore.restore_event`): a durable session's pending events."""
-        return {
+        data = {
             "id": self.id,
             "text": self.text,
             "key": self.key,
@@ -769,6 +779,9 @@ class SessionEvent:
             "mode": self.mode,
             "posted_at": self.posted_at,
         }
+        if self.sent_by is not None:
+            data["sent_by"] = self.sent_by  # kept across a restart: it must not come back as a person's
+        return data
 
     def receipt(self) -> dict[str, Any]:
         receipt = {"event_id": self.id, "key": self.key, "state": self.state, "run_id": self.run_id}
@@ -1518,6 +1531,16 @@ class BackgroundTaskStore:
             raise ValueError(f"A session event is limited to {MAX_SESSION_EVENT_CHARS} characters.")
         key = (key or "").strip() or None
         event = SessionEvent(text, key=key, source=source, announce=announce, task_id=task_id, lane=lane, mode=mode)
+        if source == "user":
+            # Posted from inside a running call (a tool's code, with text a model may have written): taken
+            # here, in the poster's own context, since the turn that receives it runs elsewhere.
+            from . import get_call_id
+            from .context import _running_call
+
+            call_id = get_call_id()
+            sender = _running_call(call_id)
+            if sender is not None:
+                event.sent_by = {"run_id": str(sender.id), "call_id": call_id}
         loop = self._loop
         if loop is not None and not loop.is_closed() and _running_loop() is not loop:
             loop.call_soon_threadsafe(self._queue_event, event)
@@ -1571,6 +1594,7 @@ class BackgroundTaskStore:
         )
         event.id = data["id"]
         event.posted_at = data.get("posted_at", event.posted_at)
+        event.sent_by = data.get("sent_by")
         self._queue_event(event)
         return event
 

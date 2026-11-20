@@ -196,6 +196,9 @@ OnMaxIter = Literal["final_answer", "stop", "error"] | OnMaxIterHook
 # Status reasons that mean a child paused and must bubble up to pause the run —
 # an approval gate (approval_required) or a suspend() call (input_required).
 _PAUSE_REASONS = frozenset({"approval_required", "input_required"})
+# Why a tool call ended that stops the whole run, with nothing fed back to the model: a person cancelled it, or a
+# gate it left waiting was already claimed by another run continuing the same paused turn (that one goes on).
+_STOP_REASONS = frozenset({"cancelled", "approval_already_claimed"})
 
 # Consecutive turns that stored no memory (see Agent._previous_memory) a turn reaches back through.
 _MAX_TURNS_WITHOUT_MEMORY = 8
@@ -2935,8 +2938,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     return
                 if reason == "early_exit":
                     bail(status.message)
-                if reason == "cancelled":
-                    # A human cancelled via Cancel() on the resume channel. Terminal:
+                if reason in _STOP_REASONS:
+                    # A human cancelled via Cancel() on the resume channel, or another run
+                    # continuing the same paused turn already claimed this gate. Terminal:
                     # leave the tool_use unresolved (no tool_result) and let the caller
                     # yield the event before raising RunCancelled to stop the run.
                     return
@@ -3280,9 +3284,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
                                             yield event
                                             raise PauseRequired(event)
-                                        if event.status.code == "cancelled" and event.status.reason == "cancelled":
+                                        if event.status.code == "cancelled" and event.status.reason in _STOP_REASONS:
                                             yield event
-                                            raise RunCancelled(event.status.message or "Run cancelled by user.")
+                                            raise RunCancelled(
+                                                event.status.message or "Run cancelled by user.",
+                                                reason=event.status.reason,
+                                            )
                                         current_span.memory.append(
                                             Message.validate(
                                                 {
@@ -3323,9 +3330,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         if (
                             isinstance(event, OutputEvent)
                             and event.status.code == "cancelled"
-                            and event.status.reason == "cancelled"
+                            and event.status.reason in _STOP_REASONS
                         ):
-                            raise RunCancelled(event.status.message or "Run cancelled by user.")
+                            raise RunCancelled(
+                                event.status.message or "Run cancelled by user.", reason=event.status.reason
+                            )
                         if (
                             isinstance(event, OutputEvent)
                             and event.status.code == "cancelled"
@@ -3799,9 +3808,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if (
                         isinstance(event, OutputEvent)
                         and event.status.code == "cancelled"
-                        and event.status.reason == "cancelled"
+                        and event.status.reason in _STOP_REASONS
                     ):
-                        raise RunCancelled(event.status.message or "Run cancelled by user.")
+                        raise RunCancelled(event.status.message or "Run cancelled by user.", reason=event.status.reason)
                     if (
                         isinstance(event, OutputEvent)
                         and event.status.code == "cancelled"

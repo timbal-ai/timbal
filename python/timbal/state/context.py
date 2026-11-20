@@ -34,6 +34,22 @@ def _get_logger():
 _NO_RESUME_VALUES: MappingProxyType[str, Any] = MappingProxyType({})
 _NOTHING_WAITING: frozenset[str] = frozenset()
 
+# call id -> the run context of every call whose stream has not ended (``Runnable._stream`` keeps it). An ambient
+# call id found here is a call still running, whatever run context is set by now: a run minted under it, or a
+# message posted to a session under it, comes from that call's code. An id a stream abandoned mid-way left behind
+# in its consumer's task is gone from here once the loop has closed it.
+_LIVE_CALLS: "dict[str, RunContext]" = {}
+# The same for a detached call (a background child), from the task that runs its code being made until it ends:
+# its stream is over, its handler is not.
+_DETACHED_CALLS: "dict[str, RunContext]" = {}
+
+
+def _running_call(call_id: str | None) -> "RunContext | None":
+    """The run context of the call ``call_id`` while its code is still running, else None."""
+    if call_id is None:
+        return None
+    return _LIVE_CALLS.get(call_id) or _DETACHED_CALLS.get(call_id)
+
 
 def _waiting_approval(span: Any) -> dict[str, Any] | None:
     """The approval ``span`` still waits for (its ``metadata.approval``), or None. Tolerates ``RunStatus``

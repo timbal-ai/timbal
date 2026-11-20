@@ -45,7 +45,7 @@ from ..state import (
     set_parent_call_id,
     set_run_context,
 )
-from ..state.context import RunContext, _EmitSink
+from ..state.context import _DETACHED_CALLS, _LIVE_CALLS, RunContext, _EmitSink, _running_call
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
 from ..state.tracing.providers import TRACING_UNSET
 from ..state.tracing.span import Span
@@ -219,15 +219,6 @@ on any sync handler; raise it (or set very high) to silence."""
 ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, Any]]
 ApprovalPrompt = str | Callable[..., str | None] | None
 ApprovalUi = dict[str, Any] | BaseModel | Callable[..., dict[str, Any] | BaseModel | None] | None
-
-
-# call id -> the run context of every call whose stream has not ended. An ambient call id found here is a call
-# still running, whatever run context is set by now: a run minted under it was started by that call's code. An id
-# a stream abandoned mid-way left behind in its consumer's task is gone from here once the loop has closed it.
-_LIVE_CALLS: dict[str, RunContext] = {}
-# The same for a detached call (a background child), from the task that runs its code being made until it ends:
-# its stream is over, its handler is not.
-_DETACHED_CALLS: dict[str, RunContext] = {}
 
 
 def _inherit_tool_policy(run_context: RunContext, entry_run_context: RunContext, entry_call_id: str) -> None:
@@ -1579,17 +1570,11 @@ class Runnable(ABC, BaseModel):
                 if review.verdict != "escalate":
                     # A gate the run this one continues left waiting is being run again here, resume values
                     # given or not, and another run continuing the same one may be deciding it too: claimed
-                    # like a person's answer, so the call runs at most once. So is every other gate of a run
-                    # that answers one of them: the same resume delivered twice goes past the answered gate
-                    # in both runs (the one that lost it is told so, as a tool result), and what the model
-                    # calls next must run once too. A run that resumes nothing has nothing to race for,
-                    # whatever resume values it was given.
+                    # like a person's answer, so the call runs at most once. The run that loses a claim
+                    # stops there (see ``RunCancelled``), so what would follow is not done twice either.
+                    # A call that waited nowhere has nothing to race for.
                     waiting = await run_context._left_waiting()
-                    if (
-                        waiting is None
-                        or approval_id in waiting
-                        or any(answered in waiting for answered in run_context._resume_values)
-                    ) and not await _claim():
+                    if (waiting is None or approval_id in waiting) and not await _claim():
                         return False, None, validated_input
                     approved = review.verdict == "approve"
                     approval_resolution = ApprovalResolution(
@@ -1773,6 +1758,20 @@ class Runnable(ABC, BaseModel):
                 and (text := message.collect_text().strip())
             ]
 
+        # The request the person-facing agent is acting on may itself be one a running call posted to its
+        # session (``ChatSession.send`` from a tool): its latest message that is not the runtime's.
+        posted_by_code = None
+        if outermost is not None:
+            for message in reversed(outermost.memory if isinstance(outermost.memory, list) else []):
+                if (
+                    isinstance(message, Message)
+                    and message.role == "user"
+                    and (message.metadata or {}).get("source") is None
+                ):
+                    if (message.metadata or {}).get("sent_by"):
+                        posted_by_code = message.collect_text().strip() or None
+                    break
+
         if outermost is not None and outermost is top_span:
             # ``top_span`` is the root of the run nothing else started: an agent there talks to the person.
             user_messages = said(outermost)
@@ -1781,16 +1780,19 @@ class Runnable(ABC, BaseModel):
             # Under a workflow step, a tool, or a chain that cannot be followed: a request, not the user's words.
             user_messages = []
             delegated_by = caller
-        # Who started the turn is on the root of that same run; a chain that cannot be followed shows nobody.
+        # Who started the turn is on the root of that same run; a chain that cannot be followed shows nobody,
+        # and neither does a turn opened by a message a call's code posted.
         trigger = (top_span.metadata or {}).get("trigger") if outermost is not None else None
-        attended = outermost is not None and (
-            not isinstance(trigger, dict) or trigger.get("kind") in ("user_message", "resume")
+        attended = (
+            outermost is not None
+            and posted_by_code is None
+            and (not isinstance(trigger, dict) or trigger.get("kind") in ("user_message", "resume"))
         )
         user_messages = user_messages[-reviewer.context_messages :] if reviewer.context_messages else []
-        delegation = None
+        delegation = posted_by_code
         if delegated_by is not None:
             asked = said(delegated_by)
-            delegation = asked[-1] if asked else None
+            delegation = asked[-1] if asked else delegation
         request = ApprovalRequest(
             tool=self.name,
             arguments=redacted_input,
@@ -2277,7 +2279,7 @@ class Runnable(ABC, BaseModel):
                 # A run of its own that the forks above did not link, minted while a call is ambient: on a
                 # context the handler built and set, or with none set. If that call is still running (or
                 # detached, its code still running), its code started this run all the same.
-                invoking = _LIVE_CALLS.get(_entry_call_id) or _DETACHED_CALLS.get(_entry_call_id)
+                invoking = _running_call(_entry_call_id)
                 if invoking is not None:
                     run_context.__dict__["_invoker"] = (invoking, _entry_call_id)
                     if run_context._tool_policy is None:
@@ -2639,8 +2641,10 @@ class Runnable(ABC, BaseModel):
             # A human supplied a Cancel on the resume channel (approval or
             # suspend). Terminal: the whole run ends cancelled and nothing is
             # fed back to the model. Distinct from a denial (approval_denied).
-            span.status = RunStatus(code="cancelled", reason="cancelled", message=cancelled.message)
-            span.output = {"status": "cancelled", "reason": cancelled.message}
+            # Or a gate below was already claimed by another run continuing the same paused one
+            # (``reason="approval_already_claimed"``): that run goes on with the turn, this one stops.
+            span.status = RunStatus(code="cancelled", reason=cancelled.reason, message=cancelled.message)
+            span.output = {"status": cancelled.reason, "reason": cancelled.message}
             span._output_dump = await dump(span.output)
 
         except EarlyExit as early_exit:
