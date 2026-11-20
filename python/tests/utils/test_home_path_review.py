@@ -15,8 +15,9 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setattr(sys, "path", list(sys.path))
-    monkeypatch.setattr(sys, "modules", dict(sys.modules))
-    return home
+    yield home
+    for name in ("review_home_entry", "review_control", "~review_literal", "review_eval_agent"):
+        sys.modules.pop(name, None)
 
 
 def test_tilde_workspace_base(isolated_home):
