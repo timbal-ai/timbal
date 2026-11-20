@@ -36,7 +36,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     os: "windows",
     source: "sqlserver",
     withFiles: false,
-    layout: "file", // "file" = connections.json, "inline" = inside config.json
+    layout: "inline", // "inline" = inside config.json (0.1.27+, recommended), "file" = connections.json (legacy)
     reach: "default", // SQL Server: default | named_port | named_browser
     auth: "integrated", // SQL Server on Windows: sql | integrated | windows
     encrypt: "trust", // SQL Server: trust | verify | none
@@ -808,7 +808,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
               "How to reach it",
               choice(
                 [
-                  { id: "default", label: "Default instance, port 1433" },
+                  { id: "default", label: "Default instance, port 1433 (recommended)" },
                   { id: "named_port", label: "Named instance, known port" },
                   { id: "named_browser", label: "Named instance, SQL Browser" },
                 ],
@@ -822,7 +822,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
                 {choice(
                   [
                     { id: "sql", label: "SQL login" },
-                    { id: "integrated", label: "Windows, as the service", hint: "Windows only" },
+                    { id: "integrated", label: "Windows, as the service (recommended)", hint: "Windows only. No password on disk" },
                     { id: "windows", label: "Windows, explicit account", hint: "Windows only" },
                   ],
                   c.auth,
@@ -886,8 +886,8 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
               "Where to keep the connections",
               choice(
                 [
-                  { id: "file", label: "connections.json" },
-                  { id: "inline", label: "Inside config.json (0.1.27+)" },
+                  { id: "inline", label: "Inside config.json (recommended, 0.1.27+)" },
+                  { id: "file", label: "connections.json (legacy)" },
                 ],
                 s.layout,
                 (layout) => set({ layout })
