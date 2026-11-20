@@ -292,6 +292,7 @@ class OutputEvent(BaseEvent):
 
 Provider-prefixed strings. Examples:
 ```
+anthropic/claude-fable-5-2
 anthropic/claude-fable-5
 anthropic/claude-opus-5
 anthropic/claude-sonnet-5
@@ -300,6 +301,8 @@ anthropic/claude-opus-4-7
 anthropic/claude-opus-4-6
 anthropic/claude-sonnet-4-6
 anthropic/claude-haiku-4-5
+openai/gpt-6.2-astra
+openai/gpt-6.2-sol
 openai/gpt-6-astra
 openai/gpt-5.5
 openai/gpt-5.5-2026-04-23

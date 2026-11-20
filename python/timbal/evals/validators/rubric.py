@@ -33,7 +33,7 @@ class RubricValidator(BaseValidator):
                       name: recommendations
                       weight: 2
                 pass_threshold: 0.75
-                model: openai/gpt-5-mini
+                model: anthropic/claude-haiku-5-5
                 context: "The agent produced a price-comparison report."
 
         # Markdown rubric (bullet lines become criteria):
@@ -47,7 +47,7 @@ class RubricValidator(BaseValidator):
     """
 
     name: Literal["rubric!"] = "rubric!"  # type: ignore
-    model: SkipValidation[Any] = "openai/gpt-5-mini"
+    model: SkipValidation[Any] = "anthropic/claude-haiku-5-5"
     """Judge model. Use a small, cheap model."""
     pass_threshold: float = 1.0
     """Weighted fraction of criteria that must pass (1.0 = all)."""

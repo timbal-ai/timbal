@@ -15,7 +15,7 @@ from timbal import Agent
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-5"
+    model="openai/gpt-6.1-sol"
 )  # That's it! You've created your first agent!
 ```
 
@@ -129,7 +129,7 @@ agent = Agent(
 # OpenAI
 agent = Agent(
     name="reasoning_agent",
-    model="openai/gpt-5",
+    model="openai/gpt-6.1-sol",
     model_params={"reasoning": {"effort": "high", "summary": "auto"}},
 )
 ```
@@ -183,7 +183,7 @@ def out_of_budget(ctx):
         return {"role": "assistant", "content": f"[Stopped after {ctx.max_iter} steps.]"}
     return {"role": "user", "content": "Budget spent. Report what is done and what is not; claim nothing else."}
 
-agent = Agent(name="assistant", model="openai/gpt-5", tools=[search, write_report], max_iter=16, on_max_iter=out_of_budget)
+agent = Agent(name="assistant", model="openai/gpt-6.1-sol", tools=[search, write_report], max_iter=16, on_max_iter=out_of_budget)
 ```
 
 Every mode records `metadata["max_iter_reached"] = {"max_iter", "behavior"}` on the agent span. Injected messages are persisted in memory tagged `metadata={"source": "runtime", "kind": "max_iter_notice" | "max_iter_stop"}`, so `Message.is_runtime()` lets you hide them when rendering a human transcript.
@@ -201,7 +201,7 @@ def write_report(text: str) -> str:
     """Write a report."""
     return text
 
-agent = Agent(name="assistant", model="openai/gpt-5", tools=[search, write_report], timeout=120)
+agent = Agent(name="assistant", model="openai/gpt-6.1-sol", tools=[search, write_report], timeout=120)
 
 result = await agent(prompt="Research and write the report").collect()
 if result.status.code == "timeout":
@@ -243,7 +243,7 @@ refund = Tool(
     approval_prompt=lambda amount: f"Approve refunding ${amount}?",
 )
 
-agent = Agent(name="support_agent", model="openai/gpt-5", tools=[refund])
+agent = Agent(name="support_agent", model="openai/gpt-6.1-sol", tools=[refund])
 
 approval_id = None
 async for event in agent(prompt="Refund $250"):
@@ -312,7 +312,7 @@ def get_user_info():
 
 agent = Agent(
     name="user_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-6-luna",
     tools=[Tool(handler=get_user_info)]
 )
 
@@ -338,11 +338,11 @@ What if you want to change the model, `max_tokens`, or thinking config for each 
 # Agent with default values
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",  # Default model
+    model="openai/gpt-6-luna",  # Default model
     max_tokens=1024  # Default max_tokens
 )
 
-# Override model: was "openai/gpt-4o-mini", now "anthropic/claude-sonnet-4-6"
+# Override model: was "openai/gpt-6-luna", now "anthropic/claude-sonnet-4-6"
 response = await agent(
     prompt="What is the capital of Germany?",
     model="anthropic/claude-sonnet-4-6"

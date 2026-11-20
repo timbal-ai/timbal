@@ -37,7 +37,7 @@ async def search_articles(question: str) -> dict:
 
 agent = Agent(
     name="research_assistant",
-    model="openai/gpt-4.1-mini",
+    model="openai/gpt-6-luna",
     system_prompt=(
         "Use search_articles to answer questions about our documentation. "
         "Base your answer on retrieved records and say when the records are insufficient."

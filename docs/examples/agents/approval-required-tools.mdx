@@ -27,7 +27,7 @@ refund = Tool(
 
 agent = Agent(
     name="support_agent",
-    model="openai/gpt-5",
+    model="openai/gpt-6.1-sol",
     tools=[refund],
 )
 
@@ -79,7 +79,7 @@ provider = JsonlTracingProvider.configured(path=Path("traces.jsonl"))
 
 agent = Agent(
     name="support_agent",
-    model="openai/gpt-5",
+    model="openai/gpt-6.1-sol",
     tools=[refund],
     tracing_provider=provider,
 )

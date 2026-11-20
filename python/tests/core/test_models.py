@@ -56,8 +56,11 @@ class TestGetLongContextThreshold:
         "model_id,expected",
         [
             ("anthropic/claude-haiku-5-5", 100_000),
+            ("openai/gpt-6.2-astra", 272_000),
+            ("openai/gpt-6.2-sol", 272_000),
             ("openai/gpt-6-astra", 272_000),
             ("openai/gpt-6.1-sol", 272_000),
+            ("openai/gpt-6.1-terra", 272_000),
             ("openai/gpt-6-sol", 272_000),
             ("openai/gpt-6-luna", 272_000),
             ("openai/gpt-5.6-sol", 272_000),
@@ -97,7 +100,7 @@ class TestGetLongContextThreshold:
 class TestCacheWritePricing:
     @pytest.mark.parametrize(
         "model_id",
-        ["openai/gpt-6-astra", "openai/gpt-6.1-sol", "openai/gpt-6-sol", "openai/gpt-6-luna", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna"],
+        ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol", "openai/gpt-6-astra", "openai/gpt-6.1-sol", "openai/gpt-6.1-terra", "openai/gpt-6-sol", "openai/gpt-6-luna", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna"],
     )
     def test_models_with_published_cache_write_rate(self, model_id: str):
         assert has_cache_write_pricing(model_id) is True
@@ -121,11 +124,20 @@ class TestBaseUsageMetric:
 
 
 class TestServiceTierUsageSuffix:
-    @pytest.mark.parametrize("model", ["openai/gpt-6-astra", "openai/gpt-6.1-sol", "openai/gpt-6-sol", "openai/gpt-6-luna"])
+    @pytest.mark.parametrize("model", ["openai/gpt-6-astra", "openai/gpt-6.1-sol", "openai/gpt-6.1-terra", "openai/gpt-6-sol", "openai/gpt-6-luna"])
     def test_gpt6_tiers(self, model):
         assert service_tier_usage_suffix(model, "fast") == FAST_USAGE_SUFFIX
         assert service_tier_usage_suffix(model, "priority") == FAST_USAGE_SUFFIX
         assert service_tier_usage_suffix(model, "flex") == FLEX_USAGE_SUFFIX
+
+    @pytest.mark.parametrize("model", ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol"])
+    def test_gpt62_tiers_have_no_flex(self, model):
+        assert service_tier_usage_suffix(model, "fast") == FAST_USAGE_SUFFIX
+        assert service_tier_usage_suffix(model, "priority") == FAST_USAGE_SUFFIX
+        assert service_tier_usage_suffix(model, "flex") == ""
+
+    def test_terra_has_no_ultrafast(self):
+        assert service_tier_usage_suffix("openai/gpt-6.1-terra", "ultrafast") == ""
 
     def test_unpriced_tier_is_ignored(self):
         assert service_tier_usage_suffix("openai/gpt-4o", "fast") == ""

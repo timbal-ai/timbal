@@ -106,7 +106,7 @@ from timbal.state import get_run_context
 
 classifier = Agent(
     name="classifier",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     system_prompt="Classify the message as 'technical' or 'billing'. Respond with one word only.",
     max_tokens=64,
 )
@@ -120,7 +120,7 @@ technical_agent = Agent(
 
 billing_agent = Agent(
     name="billing_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     system_prompt="You are a billing support specialist.",
     max_tokens=1024,
 )

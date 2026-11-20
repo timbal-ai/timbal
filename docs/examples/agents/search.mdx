@@ -5,7 +5,7 @@ description: "Use provider-native web search or an executable search service wit
 
 Agents can search the web using the built-in `WebSearch` tool. Native `WebSearch()` runs on the model provider with Anthropic and OpenAI/xAI Responses, and through the Timbal platform on every other tool-capable model (`timbal/auto` included). Select an executable search provider to use your own search credentials instead.
 
-Domain-filtered searches also use the platform fallback when the model can't apply the filters natively (`openai/gpt-4.1-mini`, `openai/gpt-4o-mini`, or xAI with both lists or more than 5 domains). This requires a platform subject; unfiltered searches stay native.
+Domain-filtered searches also use the platform fallback when the model can't apply the filters natively (`openai/gpt-6-luna`, `openai/gpt-6-luna`, or xAI with both lists or more than 5 domains). This requires a platform subject; unfiltered searches stay native.
 
 <Note>
 See the [Model Reference](/models/overview) to check which specific models support web search.
@@ -18,7 +18,7 @@ from timbal.tools import WebSearch
 # Works with OpenAI or Anthropic models
 agent = Agent(
     name="SearchAgent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     tools=[WebSearch()],
     system_prompt="Search the web for current information."
 )
