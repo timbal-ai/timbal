@@ -153,10 +153,20 @@ class TestForkedRunLink:
         assert first.root_span().metadata["invoked_by"] == second.root_span().metadata["invoked_by"] == link
         assert caller_ctx._trace[call_id].metadata["invoked_runs"] == [first.id, second.id]
 
-    @pytest.mark.parametrize("on", ["the run's context", "a context the tool built", "no context"])
-    async def test_every_run_a_read_only_tool_starts_is_read_only(self, on):
-        """The tool policy is inherited by each run a call's code starts: not only the first, and also when the
-        tool gives the run a context of its own or clears the one that was set."""
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "the run's context",
+            "one context the tool built",
+            "a new context per run",
+            "a new context per run, the run's put back after each",
+            "a context the tool built, then the run's",
+            "no context",
+        ],
+    )
+    async def test_every_run_a_read_only_tool_starts_is_read_only(self, shape):
+        """The tool policy is inherited by each run a call's code starts: not only the first, and whatever run
+        context the tool set before it (one it built, a new one each time, none)."""
         from timbal.state import set_run_context
         from timbal.state.context import RunContext
 
@@ -178,23 +188,31 @@ class TestForkedRunLink:
             tracing_provider=InMemoryTracingProvider,
         )
 
-        async def look_twice() -> str:
+        async def look() -> str:
             outer = get_run_context()
-            if on == "a context the tool built":
-                set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
-            elif on == "no context":
-                set_run_context(None)
             try:
-                for prompt in ("one", "two"):
+                for index, prompt in enumerate(("one", "two", "three")):
+                    built = RunContext(tracing_provider=InMemoryTracingProvider)
+                    if shape == "one context the tool built":
+                        if index == 0:
+                            set_run_context(built)
+                    elif shape.startswith("a new context per run"):
+                        set_run_context(built)
+                    elif shape == "a context the tool built, then the run's":
+                        set_run_context(built if index == 0 else outer)
+                    elif shape == "no context":
+                        set_run_context(None)
                     await inner(prompt=prompt).collect()
+                    if shape.endswith("put back after each"):
+                        set_run_context(outer)
             finally:
                 set_run_context(outer)
             return "looked"
 
         outer = Agent(
             name="outer",
-            model=_calls("look_twice", {}),
-            tools=[Tool(name="look_twice", handler=look_twice, read_only=True)],
+            model=_calls("look", {}),
+            tools=[Tool(name="look", handler=look, read_only=True)],
             tracing_provider=InMemoryTracingProvider,
         )
         context = RunContext(tracing_provider=InMemoryTracingProvider)

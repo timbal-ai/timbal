@@ -2915,7 +2915,9 @@ class Runnable(ABC, BaseModel):
                     # This was a run of its own, started by a call's code, and that code goes on: it is
                     # still inside its call. Without its ids back, the next run it starts would look like
                     # one nobody's code started (no link, no tool policy inherited, and an approval
-                    # reviewer reading its prompt as a person's).
+                    # reviewer reading its prompt as a person's). The context set may be one the handler
+                    # swapped in, which these ids are not from: as it was before this run started
+                    # (``RunContext.update_usage`` records on that context's root then).
                     set_parent_call_id(_entry_parent_call_id)
                     set_call_id(_entry_call_id)
             # Flush any still-buffered RunContext.emit() events (post_hook,

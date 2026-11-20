@@ -541,6 +541,45 @@ class TestNextTurn:
         for handoff in list(agent_module._PREPARING.values()):
             await handoff.stored
 
+    @pytest.mark.parametrize(
+        "prompt, own",
+        [("go", False), (Message(role="user", content=[TextContent(text=""), TextContent(text="go")]), True)],
+        ids=["it still covers the history", "loading cleaned a message it covers"],
+    )
+    async def test_a_turn_holding_the_one_before_after_that_run_is_stored(self, prompt, own):
+        """Turn two did not wait. During it, turn one's compaction finishes and its run is stored, so it is gone
+        from ``_PREPARING``; turn two still holds it and starts none of its own meanwhile. At its end it takes
+        that one on for turn three, or, when it no longer matches turn two's history as stored (a prompt with an
+        empty text block, cleaned on load), prepares its own: turn three gets a prepared compaction either way."""
+        summarizer = Summarizer(released=False)
+        before: list = []
+
+        async def step_and_settle() -> str:
+            if before:  # turn two's step: the run before finishes its compaction and is stored meanwhile
+                summarizer.release.set()
+                await settled(before[0])
+                assert (before[0].id, "agent") not in agent_module._PREPARING
+            return "ok"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=stepping({"go": 2, "more": 1})),
+            tools=[Tool(name="step", handler=step_and_settle)],
+            tracing_provider=InMemoryTracingProvider,
+            memory_compaction=summarizer.compactor(),
+            memory_compaction_prepare_ratio=0.3,
+            max_iter=30,
+        )
+        first, _ = await run(agent, prompt=prompt)  # 6 messages, its compaction held at the summarizer
+        before.append(first)
+        second, _ = await run(agent, prompt="more", parent_id=first.id)  # 7, then 9, 10 with the answer
+        await settled(second)
+        assert summarizer.calls == ([6, 10] if own else [6])
+        third, _ = await run(agent, prompt="again", parent_id=second.id)
+        assert root(third).memory[0].collect_text() == SUMMARY
+        assert root(third).metadata["compaction"]["prepared_by"] == second.id
+        assert len(summarizer.calls) == (2 if own else 1)
+
     async def test_a_summary_that_is_there_is_taken_before_its_run_is_stored(self, monkeypatch):
         """The turn at the hard ratio waits for the summary, not for the trace of the run that made it."""
         real_store = RunContext._end_background_work

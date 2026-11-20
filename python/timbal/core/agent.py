@@ -266,13 +266,23 @@ def _isolated(message: Message) -> Message:
 
 
 def _predecessors_handoff(run_context: Any, path: str) -> "_Handoff | None":
-    """The compaction the turn this one continues prepared for it, while this process still holds it (running,
-    or there and not stored yet) and this turn has not taken it. One background compaction per session: nothing
-    starts another next to it, and a turn that ends first takes it on for the next."""
+    """The compaction the turn this one continues prepared for it, while this turn can still use it: on its way
+    in this process (running, or there and not stored yet), or held by this turn since it started without
+    waiting for it (its run may be stored and gone from ``_PREPARING`` by now). None once this turn took it, or
+    once it came to nothing. One background compaction per session: nothing starts another next to it, and a
+    turn that ends first takes it on for the next."""
     parent_id = getattr(run_context, "parent_id", None)
     if not parent_id or path in run_context.__dict__.get("_taken_handoffs", ()):
         return None
-    return _PREPARING.get((parent_id, path))
+    handoff = _PREPARING.get((parent_id, path))
+    if handoff is None:
+        unwaited = run_context.__dict__.get("_unwaited_handoffs", {}).get(path)
+        handoff = unwaited[0] if unwaited is not None else None
+    if handoff is not None and handoff.record.done():
+        record = handoff.record
+        if record.cancelled() or record.exception() is not None or not isinstance(record.result(), dict):
+            return None  # it produced nothing to take
+    return handoff
 
 
 def _retrieve_result(task: "asyncio.Task") -> None:
@@ -2022,6 +2032,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # this turn ends at the hard ratio: the next one then waits for that result rather than compacting
             # inline next to it.
             predecessor = _predecessors_handoff(run_context, self._path)
+            if predecessor is not None and predecessor.record.done():
+                # Already there: taken on only if it still covers this history as stored (loading may have
+                # cleaned a message of it). If not, this turn prepares its own, as with none.
+                record = predecessor.record.result()
+                covered = record.get("covered", 0)
+                if len(whole_dump) < covered or _fingerprint(whole_dump[:covered]) != record.get("fingerprint"):
+                    predecessor = None
             if predecessor is None:
                 if utilization >= self.memory_compaction_ratio:
                     return  # the next turn compacts at its start, as before

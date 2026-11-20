@@ -809,10 +809,17 @@ class RunContext(BaseModel):
         """
         from . import get_call_id
 
-        call_id = get_call_id() or self._trace._root_call_id
+        ambient = call_id = get_call_id() or self._trace._root_call_id
         # Update usage for all parents in the call stack
         while call_id:
-            assert call_id in self._trace, f"RunContext.update_usage: Call ID {call_id} not found in trace."
+            if call_id not in self._trace:
+                # Only the ambient id may be another context's (a handler that swapped this context in is still
+                # inside its own call): the usage is this run's all the same, recorded from its root. Any other
+                # miss is a broken trace.
+                assert call_id is ambient, f"RunContext.update_usage: Call ID {call_id} not found in trace."
+                ambient = None
+                call_id = self._trace._root_call_id
+                continue
             span = self._trace[call_id]
             span.usage[key] = span.usage.get(key, 0) + value
             call_id = span.parent_call_id

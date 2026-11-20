@@ -106,6 +106,30 @@ def worker_context(on):
         set_run_context(outer)
 
 
+CONTEXTS_A_HANDLER_SETS_ACROSS_RUNS = [
+    "the run's context",
+    "one context the tool built",
+    "a new context per run",
+    "a new context per run, the run's put back after each",
+    "a context the tool built, then the run's",
+    "no context",
+]
+
+
+def set_context_for_run(shape, index, outer):
+    """What a handler sets before the ``index``-th worker run it starts (see the shapes above)."""
+    built = RunContext(tracing_provider=InMemoryTracingProvider)
+    if shape == "one context the tool built":
+        if index == 0:
+            set_run_context(built)
+    elif shape.startswith("a new context per run"):
+        set_run_context(built)
+    elif shape == "a context the tool built, then the run's":
+        set_run_context(built if index == 0 else outer)
+    elif shape == "no context":
+        set_run_context(None)
+
+
 def delegating_agent(tool):
     """An agent whose model answers every prompt by calling ``delegate(task="charge 500 euros")``."""
     return Agent(
@@ -531,6 +555,32 @@ class TestDelegation:
 
         await run(delegating_agent(delegate), prompt="what is my balance?")
         assert len(seen) == 2 and charges.made == []
+        for request in seen:
+            assert request.user_messages == ["what is my balance?"] and request.delegation == "charge 500 euros"
+
+    @pytest.mark.parametrize("shape", CONTEXTS_A_HANDLER_SETS_ACROSS_RUNS)
+    async def test_every_run_a_handler_starts_is_delegated_whatever_context_it_sets(self, shape):
+        """Three runs from one handler, each on whatever the handler set before it: all are that tool's code
+        asking, and the turn ends well (usage recorded with another context set must not fail the tool)."""
+        seen, charges = [], Charges()
+        worker = billing_worker(seen, charges)
+
+        async def delegate(task: str) -> str:
+            """Hand a task to the billing worker, three times."""
+            outer = get_run_context()
+            try:
+                for index in range(3):
+                    set_context_for_run(shape, index, outer)
+                    await worker(prompt=task).collect()
+                    if shape.endswith("put back after each"):
+                        set_run_context(outer)
+            finally:
+                set_run_context(outer)
+            return "handed over"
+
+        _, _, output = await run(delegating_agent(delegate), prompt="what is my balance?")
+        assert output.status.code == "success", output.error
+        assert len(seen) == 3 and charges.made == []
         for request in seen:
             assert request.user_messages == ["what is my balance?"] and request.delegation == "charge 500 euros"
 
