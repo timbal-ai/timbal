@@ -19,6 +19,7 @@ from timbal.tools.notion import (
     NotionCreatePage,
     NotionGetDataSource,
     NotionGetPage,
+    NotionPartialWriteError,
     NotionQueryDataSource,
     NotionSearch,
     NotionTokenError,
@@ -119,7 +120,7 @@ async def test_api_key_from_integration() -> None:
 @pytest.mark.asyncio
 async def test_oauth_token_from_integration() -> None:
     auth = await _resolve_auth(_tool(integration=_integration({"access_token": "oauth-user"})))
-    assert auth == NotionAuth("oauth-user", "oauth", False)
+    assert auth == NotionAuth("oauth-user", "oauth", True)  # replaced by resolving the integration again
 
 
 @pytest.mark.asyncio
@@ -163,6 +164,83 @@ async def test_missing_token_file_says_to_sign_in(tmp_path: Any) -> None:
     tool = _tool(auth_method="oauth", token_file=str(tmp_path / "nope.json"), client_id="c", client_secret="s")
     with pytest.raises(CredentialNotAvailable, match="sign in first"):
         await _resolve_auth(tool)
+
+
+def _no_http(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected request to {request.url}")
+
+    return _mock_http(monkeypatch, refuse)
+
+
+def _deployer_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """The deployer's own Notion sign-in, as examples/notion/.env.example sets it up."""
+    token_file = tmp_path / "deployer.json"
+    _oauth_store.write_token_file(
+        token_file, {"provider": "notion", "client_id": "cid", "refresh_token": "deployer-rt", "access_token": "dep"}
+    )
+    monkeypatch.setenv("NOTION_ACCESS_TOKEN", "deployer-oauth")
+    monkeypatch.setenv("NOTION_REFRESH_TOKEN", "deployer-rt")
+    monkeypatch.setenv("NOTION_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("NOTION_CLIENT_ID", "cid")
+    monkeypatch.setenv("NOTION_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("NOTION_API_KEY", "ntn_deployer")
+
+
+@pytest.mark.asyncio
+async def test_integration_api_key_beats_the_deployer_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    _deployer_env(monkeypatch, tmp_path)
+    auth = await _resolve_auth(_tool(integration=_integration({"api_key": "ntn_user"})))
+    assert auth == NotionAuth("ntn_user", "api_key", False)
+
+
+@pytest.mark.asyncio
+async def test_integration_without_credentials_ignores_the_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    seen = _no_http(monkeypatch)
+    _deployer_env(monkeypatch, tmp_path)
+    with pytest.raises(CredentialNotAvailable) as exc_info:
+        await _resolve_auth(_tool(integration=_integration({})))
+    assert exc_info.value.env_vars == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_integration_refresh_token_is_never_exchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The platform stores this refresh token; Notion rotates it, so spending it here kills that copy.
+    seen = _no_http(monkeypatch)
+    creds = {"refresh_token": "platform-rt", "client_id": "cid", "client_secret": "secret"}
+    with pytest.raises(CredentialNotAvailable, match="must refresh it and return `token`"):
+        await _resolve_auth(_tool(integration=_integration(creds)))
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_rejected_integration_token_is_resolved_again(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path != "/v1/oauth/token", "an integration's token must not be refreshed here"
+        if request.headers["Authorization"] == "Bearer old":
+            return httpx.Response(401, json={"code": "unauthorized", "message": "API token is invalid."})
+        return httpx.Response(200, json={"results": [], "has_more": False})
+
+    seen = _mock_http(monkeypatch, handler)
+    _deployer_env(monkeypatch, tmp_path)
+    platform = {"refresh_token": "platform-rt", "client_id": "cid", "client_secret": "secret"}
+    integration = _integration({})
+    integration.resolve = AsyncMock(side_effect=[{**platform, "access_token": "old"}, {**platform, "token": "new"}])
+    out = await NotionSearch(integration=integration)().collect()
+    assert out.status.code == "success", out.error
+    assert [r.headers["Authorization"] for r in seen] == ["Bearer old", "Bearer new"]
+
+
+@pytest.mark.asyncio
+async def test_rejected_integration_token_reports_the_401(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    seen = _mock_http(monkeypatch, lambda _: httpx.Response(401, json={"code": "unauthorized"}))
+    _deployer_env(monkeypatch, tmp_path)
+    creds = {"access_token": "old", "refresh_token": "platform-rt", "client_id": "cid", "client_secret": "secret"}
+    with pytest.raises(NotionAPIError, match="revoked or expired") as exc_info:
+        await notion._notion_request(_tool(integration=_integration(creds)), "GET", "/users/me")
+    assert exc_info.value.status == 401
+    assert [r.url.path for r in seen] == ["/v1/users/me"]
 
 
 @pytest.mark.asyncio
@@ -324,6 +402,11 @@ async def test_bad_api_key_explained(monkeypatch: pytest.MonkeyPatch) -> None:
         PAGE.replace("-", ""),
         f"https://www.notion.so/acme/Roadmap-{PAGE.replace('-', '')}?pvs=4",
         f"https://www.notion.so/{PAGE.replace('-', '')}#heading",
+        # The title's last word is hex or digits too: it must not merge into the ID.
+        f"https://www.notion.so/acme/Roadmap-2025-{PAGE.replace('-', '')}",
+        f"https://www.notion.so/acme/My-Cafe-{PAGE.replace('-', '')}",
+        f"https://www.notion.so/acme/Sprint-12-{PAGE.replace('-', '')}?pvs=4",
+        f"https://www.notion.so/acme/Deadbeef-{PAGE.replace('-', '')}#top",
     ],
 )
 def test_normalize_id(ref: str) -> None:
@@ -624,6 +707,55 @@ async def test_create_page_appends_past_100_blocks(monkeypatch: pytest.MonkeyPat
     assert len(_body(seen[0])["children"]) == 100
     assert [len(_body(r)["children"]) for r in seen[1:]] == [100, 50]
     assert _body(seen[0])["parent"] == {"type": "page_id", "page_id": PAGE}
+
+
+def _fail_patch(n: int) -> Any:
+    """A handler where page creation works and the n-th PATCH (1-based) is refused."""
+    patches = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal patches
+        if request.method == "POST":
+            return httpx.Response(200, json={"object": "page", "id": PAGE, "properties": {}})
+        patches += 1
+        if patches == n:
+            return httpx.Response(400, json={"code": "validation_error", "message": "Body failed validation."})
+        return httpx.Response(200, json={"results": []})
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_create_page_failing_partway_says_the_page_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _mock_http(monkeypatch, _fail_patch(2))
+    content = "\n".join(f"- item {i}" for i in range(350))
+    out = await NotionCreatePage(api_key=SecretStr("k"))(parent=PAGE, title="Big", content=content).collect()
+    assert out.status.code == "error"
+    assert [r.method for r in seen] == ["POST", "PATCH", "PATCH"]
+    message = out.error["message"]
+    assert f"created page {PAGE}" in message
+    assert "200 of 350" in message
+    assert "do not create it again" in message
+    assert 'begins "item 200"' in message
+    assert "may still have been applied" not in message  # a 400 was refused, not maybe applied
+
+
+@pytest.mark.asyncio
+async def test_append_failing_partway_says_what_landed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_http(monkeypatch, _fail_patch(2))
+    blocks = markdown_to_blocks("\n".join(f"- item {i}" for i in range(250)))
+    with pytest.raises(NotionPartialWriteError, match="Appended 100 of 250") as exc_info:
+        await notion._append_blocks(_tool(api_key=SecretStr("k")), PAGE, blocks)
+    assert (exc_info.value.page_id, exc_info.value.blocks_written, exc_info.value.blocks_total) == (PAGE, 100, 250)
+    assert exc_info.value.status == 400
+
+
+@pytest.mark.asyncio
+async def test_append_failing_first_keeps_the_plain_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_http(monkeypatch, _fail_patch(1))
+    with pytest.raises(NotionAPIError) as exc_info:
+        await notion._append_blocks(_tool(api_key=SecretStr("k")), PAGE, markdown_to_blocks("- one\n- two"))
+    assert not isinstance(exc_info.value, NotionPartialWriteError)
 
 
 @pytest.mark.asyncio

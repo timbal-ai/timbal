@@ -53,7 +53,9 @@ The person signs in on Notion's consent page and picks the pages to share. Notio
 access token and a refresh token. Notion issues a **new refresh token on every refresh**, so the
 tools keep the newest one in a token file and read it from there on the next run. Without the
 file, a restart would reuse a token that was already spent. On the Timbal platform, a Notion
-OAuth integration supplies the token instead.
+OAuth integration supplies the access token instead. The platform refreshes it, so the tools
+never exchange an integration's refresh token; a token Notion rejects is fetched from the
+integration again.
 
 ### Method 2: API key (internal integration)
 
@@ -164,7 +166,7 @@ Every tool takes the same optional fields, which win over the environment:
 | `client_id`, `client_secret` | `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET` | OAuth refresh |
 | `auth_method` | `NOTION_AUTH_METHOD` | pins `oauth` or `api_key` |
 | `notion_version` | `NOTION_VERSION` | the `Notion-Version` header (default `2026-03-11`) |
-| `integration` | | a Timbal platform integration supplying any of the above |
+| `integration` | | a Timbal platform integration: an OAuth `token` (the platform refreshes it) or an `api_key`. The env vars above, and the token file they name, are not read when it is set |
 
 When `auth_method` is not set, OAuth credentials are tried before the API key. With OAuth, a token
 Notion rejects is refreshed once and the call retried. Rate limits (`429`, `529`) are retried

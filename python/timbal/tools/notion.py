@@ -4,8 +4,8 @@ Two ways to connect, both sending ``Authorization: Bearer <token>``:
 
 - **oauth** (public integration): the person who signs in picks the pages the integration may
   see. Token from ``Integration("notion")`` (``token`` / ``access_token``), tool field ``token``,
-  or env ``NOTION_ACCESS_TOKEN``; or a ``refresh_token`` (integration, tool field, env
-  ``NOTION_REFRESH_TOKEN``) exchanged with the integration's ``client_id`` + ``client_secret``.
+  or env ``NOTION_ACCESS_TOKEN``; or a ``refresh_token`` (tool field or env ``NOTION_REFRESH_TOKEN``,
+  never an integration's) exchanged with the integration's ``client_id`` + ``client_secret``.
   Notion issues a new refresh token on every refresh, so point ``token_file`` / env
   ``NOTION_TOKEN_FILE`` at a file to keep the newest one across restarts
   (``examples/notion/setup_credentials.py`` writes it). A rejected access token is refreshed
@@ -22,11 +22,16 @@ sources*, and rows are queried per data source. The tools accept a database or a
 (or a Notion URL) wherever one is expected and resolve the other.
 
 Integration credentials (type: oauth or credentials):
-- token / access_token: an OAuth access token
-- refresh_token: an OAuth refresh token (needs client_id + client_secret)
-- client_id / client_secret: the public integration's OAuth client
+- token / access_token: an OAuth access token. The platform refreshes it and keeps Notion's
+  rotated refresh token; a ``refresh_token`` alone is refused, never exchanged here, since that
+  would spend the token the platform stores. A token Notion rejects is replaced by resolving
+  the integration again.
 - api_key: an internal integration secret
-- auth_method: "oauth" or "api_key"
+- auth_method: "oauth" or "api_key". Unset, an integration carrying a user token is OAuth.
+
+With an integration, credentials come from it and the tool's own fields only: ``NOTION_*``
+environment variables (and the token file they name) are not read, so a deployer's sign-in
+never stands in for a user.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from collections.abc import Callable
 from typing import Annotated, Any, Literal, NamedTuple
 
 from pydantic import Field, SecretStr
@@ -69,7 +75,8 @@ AuthMethod = Literal["oauth", "api_key"]
 class NotionAuth(NamedTuple):
     token: str
     method: AuthMethod
-    #: Whether a rejected OAuth token can be replaced through the refresh grant.
+    #: Whether a rejected OAuth token can be replaced: through the refresh grant, or by resolving
+    #: the platform integration again (the platform refreshes its tokens itself).
     can_refresh: bool = False
 
 
@@ -80,6 +87,26 @@ class NotionAPIError(ValueError):
         super().__init__(message)
         self.status = status
         self.code = code
+
+
+class NotionPartialWriteError(NotionAPIError):
+    """A write spread over several requests failed partway: ``page_id`` already holds the first
+    ``blocks_written`` of ``blocks_total`` blocks, so repeating the whole write would duplicate them."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int,
+        code: str | None = None,
+        page_id: str,
+        blocks_written: int,
+        blocks_total: int,
+    ) -> None:
+        super().__init__(message, status=status, code=code)
+        self.page_id = page_id
+        self.blocks_written = blocks_written
+        self.blocks_total = blocks_total
 
 
 class NotionTokenError(ValueError):
@@ -112,8 +139,15 @@ def _first(*values: Any) -> str | None:
     return None
 
 
-def _auth_method(tool: Any, creds: dict[str, Any]) -> AuthMethod | None:
-    raw = _first(getattr(tool, "auth_method", None), creds.get("auth_method"), os.getenv("NOTION_AUTH_METHOD"))
+EnvLookup = Callable[[str], str | None]
+
+
+def _no_env(_name: str) -> None:
+    return None
+
+
+def _auth_method(tool: Any, creds: dict[str, Any], env: EnvLookup = os.getenv) -> AuthMethod | None:
+    raw = _first(getattr(tool, "auth_method", None), creds.get("auth_method"), env("NOTION_AUTH_METHOD"))
     if raw is None:
         return None
     method = raw.lower().replace("-", "_")
@@ -122,10 +156,10 @@ def _auth_method(tool: Any, creds: dict[str, Any]) -> AuthMethod | None:
     return method  # type: ignore[return-value]
 
 
-def _client_parts(tool: Any, creds: dict[str, Any]) -> tuple[str, str] | None:
-    client_id = _first(getattr(tool, "client_id", None), creds.get("client_id"), os.getenv("NOTION_CLIENT_ID"))
+def _client_parts(tool: Any, creds: dict[str, Any], env: EnvLookup = os.getenv) -> tuple[str, str] | None:
+    client_id = _first(getattr(tool, "client_id", None), creds.get("client_id"), env("NOTION_CLIENT_ID"))
     client_secret = _first(
-        getattr(tool, "client_secret", None), creds.get("client_secret"), os.getenv("NOTION_CLIENT_SECRET")
+        getattr(tool, "client_secret", None), creds.get("client_secret"), env("NOTION_CLIENT_SECRET")
     )
     if client_id and client_secret:
         return client_id, client_secret
@@ -207,12 +241,25 @@ async def _resolve_auth(tool: Any, *, rejected: str | None = None) -> NotionAuth
     """Bearer token for this tool (see the module docstring for the order).
 
     ``rejected`` is an OAuth access token Notion just refused: it is skipped and, when a
-    refresh token is available, replaced through the refresh grant.
+    refresh token is available, replaced through the refresh grant. With a platform
+    integration it is replaced only by what the integration resolves to now.
     """
-    creds: dict[str, Any] = {}
-    if isinstance(getattr(tool, "integration", None), Integration):
-        creds = await tool.integration.resolve() or {}
-    method = _auth_method(tool, creds)
+    integration = getattr(tool, "integration", None)
+    from_integration = isinstance(integration, Integration)
+    creds: dict[str, Any] = (await integration.resolve() or {}) if from_integration else {}
+    # With a platform integration, credentials come from it and the tool's own fields only. The
+    # process environment (and a token file it names) holds the deployer's Notion sign-in, which
+    # must never answer for a user whose integration lacks a credential or was rejected.
+    env: EnvLookup = _no_env if from_integration else os.getenv
+    method = _auth_method(tool, creds, env)
+    if method is None and any(_first(creds.get(k)) for k in ("token", "access_token", "refresh_token")):
+        method = "oauth"  # an OAuth integration stays OAuth instead of falling back to an API key
+    # The platform refreshes an OAuth integration's token itself and stores the newest refresh
+    # token. Notion rotates refresh tokens on every use, so exchanging it here would leave the
+    # platform holding a dead one: an integration has to supply the access token.
+    integration_refresh_only = bool(_first(creds.get("refresh_token"))) and not _first(
+        creds.get("token"), creds.get("access_token")
+    )
     token_file_missing: str | None = None
 
     if method != "api_key":
@@ -220,25 +267,30 @@ async def _resolve_auth(tool: Any, *, rejected: str | None = None) -> NotionAuth
             getattr(tool, "token", None),
             creds.get("token"),
             creds.get("access_token"),
-            os.getenv("NOTION_ACCESS_TOKEN"),
+            env("NOTION_ACCESS_TOKEN"),
         )
-        refresh = _first(
-            getattr(tool, "refresh_token", None), creds.get("refresh_token"), os.getenv("NOTION_REFRESH_TOKEN")
-        )
-        token_file = _first(getattr(tool, "token_file", None), os.getenv("NOTION_TOKEN_FILE"))
+        refresh = _first(getattr(tool, "refresh_token", None), env("NOTION_REFRESH_TOKEN"))
+        token_file = _first(getattr(tool, "token_file", None), env("NOTION_TOKEN_FILE"))
         if token_file and not refresh and _oauth_store.read_token_file(token_file) is None:
             token_file_missing, token_file = token_file, None
-        client = _client_parts(tool, creds)
+        client = _client_parts(tool, creds, env)
         can_refresh = bool((refresh or token_file) and client)
         if token and token != rejected:
-            return NotionAuth(token, "oauth", can_refresh)
+            return NotionAuth(token, "oauth", can_refresh or from_integration)
+        if integration_refresh_only:
+            raise CredentialNotAvailable(
+                "Notion",
+                missing=["token"],
+                message="The Notion integration supplied a refresh token but no access token. The platform "
+                "must refresh it and return `token`: exchanging it here would spend the refresh token it stores.",
+            )
         if can_refresh:
             assert client is not None
             access = await get_token_from_refresh_token(*client, refresh, token_file=token_file, rejected=rejected)
             return NotionAuth(access, "oauth", True)
 
     if method != "oauth":
-        api_key = _first(getattr(tool, "api_key", None), creds.get("api_key"), os.getenv("NOTION_API_KEY"))
+        api_key = _first(getattr(tool, "api_key", None), creds.get("api_key"), env("NOTION_API_KEY"))
         if api_key:
             return NotionAuth(api_key, "api_key")
 
@@ -246,17 +298,19 @@ async def _resolve_auth(tool: Any, *, rejected: str | None = None) -> NotionAuth
         raise CredentialNotAvailable(
             "Notion",
             missing=["refresh_token"],
-            env_vars=["NOTION_TOKEN_FILE"],
+            env_vars=[] if from_integration else ["NOTION_TOKEN_FILE"],
             message=f"Notion token file {token_file_missing!r} is missing or holds no refresh token: "
             "sign in first (examples/notion/setup_credentials.py writes it).",
         )
-    if method == "oauth":
+    if from_integration:
+        missing = ["api_key"] if method == "api_key" else ["token"] if method == "oauth" else ["token", "api_key"]
+    elif method == "oauth":
         missing = ["token", "refresh_token + client_id + client_secret"]
     elif method == "api_key":
         missing = ["api_key"]
     else:
         missing = ["api_key", "token", "refresh_token + client_id + client_secret"]
-    raise CredentialNotAvailable("Notion", missing=missing, env_vars=_ENV_VARS)
+    raise CredentialNotAvailable("Notion", missing=missing, env_vars=[] if from_integration else _ENV_VARS)
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +375,11 @@ async def _notion_request(
                 },
             )
             if response.status_code == 401 and auth.method == "oauth" and auth.can_refresh and not refreshed:
-                auth = await _resolve_auth(tool, rejected=auth.token)
                 refreshed = True
+                try:
+                    auth = await _resolve_auth(tool, rejected=auth.token)
+                except CredentialNotAvailable:
+                    break  # nothing to replace it with (an integration still on the same token): report the 401
                 continue
             if response.status_code in (429, 529) and attempt < _MAX_RETRIES:
                 try:
@@ -348,7 +405,9 @@ async def _notion_request(
 # IDs, rich text and properties
 # ---------------------------------------------------------------------------
 
-_HEX32 = re.compile(r"([0-9a-f]{32})", re.I)
+# A whole 32-hex word: in a slug URL (`Title-Words-<id>`) the title's last word can be hex too
+# (`Roadmap-2025-<id>`, `Cafe-<id>`), so a match never runs across the dash before the ID.
+_HEX32 = re.compile(r"(?<![0-9a-f])([0-9a-f]{32})(?![0-9a-f])", re.I)
 _UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", re.I)
 
 
@@ -359,7 +418,7 @@ def normalize_id(value: str) -> str:
     found = _UUID.findall(path) or _UUID.findall(text)
     if found:
         return found[-1].lower()
-    compact = _HEX32.findall(path.replace("-", "")) or _HEX32.findall(text.replace("-", ""))
+    compact = _HEX32.findall(path) or _HEX32.findall(text)
     if not compact:
         raise ValueError(f"Not a Notion ID or URL: {value!r}")
     h = compact[-1].lower()
@@ -670,12 +729,56 @@ async def _blocks_markdown(
         cursor = page.get("next_cursor")
 
 
-async def _append_blocks(tool: Any, block_id: str, blocks: list[dict[str, Any]]) -> int:
+async def _append_blocks(
+    tool: Any, block_id: str, blocks: list[dict[str, Any]], *, written: int = 0, created: bool = False
+) -> int:
+    """Append ``blocks`` in batches of 100; ``written`` blocks are already there (sent with the create).
+
+    A batch that fails after others landed raises ``NotionPartialWriteError`` saying how much is on
+    the page, so the model does not repeat the whole write and duplicate it.
+    """
+    total = written + len(blocks)
     for start in range(0, len(blocks), _MAX_CHILDREN):
-        await _notion_request(
-            tool, "PATCH", f"/blocks/{block_id}/children", json_body={"children": blocks[start : start + _MAX_CHILDREN]}
-        )
-    return len(blocks)
+        try:
+            await _notion_request(
+                tool,
+                "PATCH",
+                f"/blocks/{block_id}/children",
+                json_body={"children": blocks[start : start + _MAX_CHILDREN]},
+            )
+        except Exception as exc:
+            done = written + start
+            if done == 0:
+                raise  # nothing landed: the error stands as it is
+            first = blocks[start]
+            resume = plain_text((first.get(first.get("type", "")) or {}).get("rich_text"))[:80]
+            resume_hint = f' (the first one not written begins "{resume}")' if resume else ""
+            if created:
+                message = (
+                    f"Notion created page {block_id} but wrote only {done} of {total} content blocks before an "
+                    f"error: {exc}. The page exists: do not create it again; append the remaining content"
+                    f"{resume_hint} with notion_append_content."
+                )
+            else:
+                message = (
+                    f"Appended {done} of {total} blocks to {block_id} before an error: {exc}. The first {done} "
+                    f"are on the page: append only the content after them{resume_hint}, or it would be added twice."
+                )
+            status = getattr(exc, "status", 0)
+            if not status or status >= 500:
+                message += (
+                    " The failed request may still have been applied: read the page with notion_get_page "
+                    "before appending again."
+                )
+            raise NotionPartialWriteError(
+                message,
+                status=getattr(exc, "status", 0),
+                code=getattr(exc, "code", None),
+                page_id=block_id,
+                blocks_written=done,
+                blocks_total=total,
+            ) from exc
+    return total
 
 
 async def _resolve_data_source(tool: Any, ref: str) -> dict[str, Any]:
@@ -944,7 +1047,7 @@ class NotionCreatePage(_NotionTool):
                 body["children"] = blocks[:_MAX_CHILDREN]
             page = await _notion_request(self, "POST", "/pages", json_body=body)
             if len(blocks) > _MAX_CHILDREN:
-                await _append_blocks(self, page["id"], blocks[_MAX_CHILDREN:])
+                await _append_blocks(self, page["id"], blocks[_MAX_CHILDREN:], written=_MAX_CHILDREN, created=True)
             return {**page_summary(page, with_properties=False), "blocks_written": len(blocks)}
 
         super().__init__(handler=_create_page, **kwargs)

@@ -163,23 +163,49 @@ async def refreshed_access_token(
     """
     if token_file is None and not refresh_token:
         raise ValueError("A refresh token or a token file is required.")
+    cached = _TOKEN_CACHE.get(key)
+    if cached and cached[0] != rejected and is_fresh(cached[1]):
+        return cached[0]  # the common case: no task, no lock
     path = os.path.abspath(os.fspath(token_file)) if token_file is not None else None
-    async with async_lock(key):
-        if path is None:
-            return await _refresh_locked(key, owner, refresh_token, None, exchange, is_refused, rejected)
-        lock = file_lock(path)
-        # Waiting for another process blocks, so wait in a thread. If this call is cancelled
-        # meanwhile, the thread still gets the lock later: release it as soon as it does.
-        entering = asyncio.ensure_future(asyncio.to_thread(lock.__enter__))
-        try:
-            await asyncio.shield(entering)
-        except asyncio.CancelledError:
-            entering.add_done_callback(lambda f: None if f.exception() else lock.__exit__(None, None, None))
-            raise
-        try:
-            return await _refresh_locked(key, owner, refresh_token, path, exchange, is_refused, rejected)
-        finally:
-            lock.__exit__(None, None, None)
+
+    async def locked() -> str:
+        async with async_lock(key):
+            if path is None:
+                return await _refresh_locked(key, owner, refresh_token, None, exchange, is_refused, rejected)
+            lock = file_lock(path)
+            # Another process may hold it, so wait in a thread. If this task is cancelled meanwhile
+            # (loop shutdown), the thread still gets the lock later: release it as soon as it does.
+            entering = asyncio.ensure_future(asyncio.to_thread(lock.__enter__))
+            try:
+                await asyncio.shield(entering)
+            except asyncio.CancelledError:
+                entering.add_done_callback(lambda f: None if f.exception() else lock.__exit__(None, None, None))
+                raise
+            try:
+                return await _refresh_locked(key, owner, refresh_token, path, exchange, is_refused, rejected)
+            finally:
+                lock.__exit__(None, None, None)
+
+    # The provider spends the old refresh token the moment it applies the grant. If this caller
+    # were cancelled after that (a run timeout, an interrupt) and before the new token reached the
+    # cache and the file, every later call would fail until someone signed in again. So the work
+    # runs as a task of its own, holding its locks until it ends, and the caller only waits for it.
+    task = asyncio.ensure_future(locked())
+    _IN_FLIGHT.add(task)
+    task.add_done_callback(_settled)
+    return await asyncio.shield(task)
+
+
+# Refreshes still running after their caller was cancelled (a strong reference keeps them alive).
+_IN_FLIGHT: set[asyncio.Task[str]] = set()
+
+
+def _settled(task: asyncio.Task[str]) -> None:
+    _IN_FLIGHT.discard(task)
+    if not task.cancelled():
+        # Marks a failure retrieved: the caller sees it through the shield, and one whose caller
+        # was cancelled has no one to report to (the next call starts its own refresh).
+        task.exception()
 
 
 async def _refresh_locked(

@@ -216,3 +216,32 @@ def test_windows_file_lock_raises_other_errors(monkeypatch: pytest.MonkeyPatch, 
         with store.file_lock(str(tmp_path / "token.json")):
             pass
     assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_caller_still_keeps_the_rotated_token(tmp_path: Any) -> None:
+    # The provider has applied the grant (rt1 is spent) when the caller is cancelled: the new
+    # refresh token must still reach the cache and the file, or the next call has nothing valid.
+    applied = asyncio.Event()
+    release = asyncio.Event()
+    spent: list[str] = []
+
+    async def exchange(token: str) -> dict[str, Any]:
+        spent.append(token)
+        applied.set()
+        await release.wait()  # the response is still on its way
+        return {"access_token": "at-1", "refresh_token": "rt2"}
+
+    token_file = tmp_path / "t.json"
+    caller = asyncio.ensure_future(_get(exchange, token_file=token_file))
+    await applied.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    release.set()
+    await asyncio.gather(*store._IN_FLIGHT)  # the refresh itself carries on to the end
+
+    assert store.read_token_file(token_file)["refresh_token"] == "rt2"
+    assert await _get(exchange, token_file=token_file) == "at-1"
+    assert spent == ["rt1"]
+    assert not store._IN_FLIGHT
