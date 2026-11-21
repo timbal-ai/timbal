@@ -2001,7 +2001,9 @@ class ChatSession:
                 except Exception as e:
                     error = str(e) or type(e).__name__
                 else:
+                    # An earlier failure is no longer why the lease may run out (a stalled loop would be).
                     self._lease_from, due = now, now + ttl / 3
+                    error = "no renewal was tried"
                     continue
             logger.warning("chat_session_lease_renewal_failed", session_id=self.id, error=error)
             # Sooner than the next renewal would be: what is left of the lease is all the time there is.
