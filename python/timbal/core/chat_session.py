@@ -25,6 +25,7 @@ from ..state.background import (
     SessionEvent,
     adopt_background_store,
     forget_idle_background_store,
+    session_continues_from,
     store_for_run,
 )
 from ..state.chat_store import (
@@ -402,6 +403,18 @@ def _ended_parked(turn: asyncio.Task) -> bool:
     return _ended_by_itself(turn) and is_parked(turn.result().status)
 
 
+def _left_parked(turn: asyncio.Task | None) -> bool | None:
+    """Whether the run a finished turn left ended waiting on an approval or a question.
+
+    None for a turn that left no run (never started, failed before it did): the head is as it was, and so
+    is whether it waits for an answer.
+    """
+    if turn is None or not turn.done() or turn.cancelled() or turn.exception() is not None:
+        return None
+    output = turn.result()
+    return is_parked(output.status) if output is not None else None
+
+
 def _brief(value: Any, limit: int = 160) -> str:
     text = value if isinstance(value, str) else repr(value)
     text = " ".join(text.split())
@@ -423,8 +436,12 @@ def _tool_calls(context: RunContext, dispatched: list[dict[str, Any]] | tuple = 
     The model's requests come from its stored calls' outputs as well as the agent's memory: a save can land
     between a model call ending and its tool spans (or the memory) being stored. ``dispatched``: the calls the
     session recorded before the agent ran them (``in_flight.dispatched``). One the trace does not show at all
-    (saved before that step, or not since) is unconfirmed too: it may have run.
+    (saved before that step, or not since) is unconfirmed too: it may have run. A ``call_tool`` request
+    (``tool_search="dispatch"``) ran as the tool it names, under that tool's span: the two are one call.
     """
+    from .agent import _CALL_TOOL_FALLBACKS, CALL_TOOL_NAME
+
+    dispatchers = (CALL_TOOL_NAME, *_CALL_TOOL_FALLBACKS)
     root = context.root_span()
     llm_path = f"{root.path}.llm"
     children = [span for span in context._trace.as_records() if span.parent_call_id == root.call_id]
@@ -438,14 +455,31 @@ def _tool_calls(context: RunContext, dispatched: list[dict[str, Any]] | tuple = 
         if call.get("id"):
             requests.setdefault(call["id"], (call.get("name") or "?", call.get("input")))
     results = {block.get("id"): block for message in memory for block in _blocks(message, "tool_result")}
+    # A span records the tool call it ran for (``metadata.tool_call_id``, set as the tool starts): that is
+    # its request, whatever its name. Pairing by name alone gave an earlier dispatched call the span of a
+    # later one that failed as ``call_tool`` (an unknown target), and listed its real span a second time.
+    # By name only for a span without the id (a trace from before spans recorded it, a tool cut as it started).
+    by_request: dict[str, Any] = {}
     spans: dict[str, list[Any]] = {}
     for span in children:
-        if span.path != llm_path:
+        if span.path == llm_path:
+            continue
+        request_id = span.metadata.get("tool_call_id") if isinstance(span.metadata, dict) else None
+        if isinstance(request_id, str) and request_id in requests and request_id not in by_request:
+            by_request[request_id] = span
+        else:
             spans.setdefault(span.path.rsplit(".", 1)[-1], []).append(span)
     completed, unconfirmed = [], []
     for request_id, (name, args) in requests.items():
         call = f"{name}({_brief(args, 80)})"
-        span = spans[name].pop(0) if spans.get(name) else None
+        span = by_request.get(request_id)
+        if span is None:
+            ran = name
+            if name in dispatchers and not spans.get(name) and isinstance(args, dict):
+                target = args.get("name")
+                if isinstance(target, str) and spans.get(target):
+                    ran = target
+            span = spans[ran].pop(0) if spans.get(ran) else None
         if request_id in results:
             text = " ".join(b.get("text", "") for b in _blocks(results[request_id], "text")) or "done"
             completed.append(f"{call} → {_brief(text)}")
@@ -604,10 +638,14 @@ class ChatSession:
         self._providers: dict[tuple[type, str], type] = {}
         store = store_for_run(parent_id) if parent_id is not None else None
         self._store = store if store is not None else BackgroundTaskStore()
+        if store is None and parent_id is not None:
+            # The session continues from a run that had no store: a turn another channel chains onto that
+            # run (a call joining, a plain client) is the session's, and asks this channel first.
+            session_continues_from(self._store, parent_id)
         self._scheduler = SessionScheduler(
-            channel=self, on_busy="enqueue", can_interrupt=True, on_work=self._work_arrived
+            channel=self, on_busy="enqueue", can_interrupt=True, on_work=self._work_arrived, lends=True
         )
-        self._scheduler.bind(self._store)
+        self._scheduler.join(self._store)
         self._scheduler.head = parent_id
         self._work = asyncio.Event()
         self._resume: dict[str, Any] | None = None
@@ -660,6 +698,16 @@ class ChatSession:
         self._kept_events: dict[str, SessionEvent] = {}
         # Turns in a row the store would not record the start of: they did not run (see _write_ahead).
         self._store_failures = 0
+        # Reads in a row that failed for the question a call left the session with (see _take_question).
+        self._question_failures = 0
+        # The head a call left parked whose stored trace held no question when read (_dropped_question_holds).
+        self._dropped_question: str | None = None
+        if self._scheduler.lent and any(self._scheduler.takes(event) for event in self._store.pending_events()):
+            # Opened on a live call that holds something its user wrote: this chat's to answer from now on
+            # (the call leaves it to the chat), and nothing else would start the worker.
+            self._work.set()
+            with contextlib.suppress(RuntimeError):  # no loop running yet: the first send() starts it
+                self._ensure_worker()
         # The restorable events last seen queued: one arriving through the task store is stored at once.
         self._queued_events: tuple[str, ...] = ()
         # App and client events still queued that the session follows until a turn takes them (_work_arrived).
@@ -772,6 +820,20 @@ class ChatSession:
         self._ensure_worker()
         return wake.id
 
+    def message_task(self, task_id: str, text: str) -> SessionEvent:
+        """Send one of the session's running background agents a message from the user.
+
+        It reads it after its current step (:meth:`BackgroundTaskStore.message_task`
+        raises for an unknown, finished or non-agent task). Background tasks are
+        in-process: a durable session does not keep the message across a restart.
+        """
+        if self.closed:
+            raise RuntimeError("The chat session is closed.")
+        event = self._store.message_task(task_id, text, source="user")
+        self.last_activity = time.monotonic()
+        self._record("task_message", task_id=task_id, event_id=event.id, text=event.text)
+        return event
+
     def interrupt(self) -> bool:
         """Cut what the session is doing; queued messages then start the next turn.
 
@@ -793,6 +855,8 @@ class ChatSession:
 
         For a caller that could not get it stored (:meth:`flush` raised): withdrawn, a retry cannot run it twice.
         """
+        if any(event.id == work_id and not self._mine(event) for event in self._store.pending_events()):
+            return False  # another session's, kept for its restore
         withdrawn = self._store.withdraw_event(work_id)
         if not withdrawn:
             wake = next((wake for wake in self._wakes if wake.id == work_id), None)
@@ -917,7 +981,8 @@ class ChatSession:
         False again once another client's run of the session answers it or goes past it (the head moved).
         """
         context = self._last_context
-        return self._parked and context is not None and self._scheduler.head == context.id
+        # The session's head: while a call has the session, the call's, not the one this channel last saw.
+        return self._parked and context is not None and self._scheduler.session_head == context.id
 
     def resume(self, values: dict[str, Any]) -> None:
         """Answer the parked turn: ``{approval_id: ...}`` / ``{interaction_id: value}``, as for ``resume=``.
@@ -959,10 +1024,17 @@ class ChatSession:
         """
         return self.log.subscribe(after, numbered=numbered)
 
+    def _mine(self, event: SessionEvent) -> bool:
+        """Not a message another session keeps for its own restore (``SessionEvent.kept_for``): that one is
+        in the other session's snapshot, and is neither listed, stored, marked, withdrawn nor taken back here."""
+        return event.kept_for is None or event.kept_for == self.id
+
     def pending_messages(self) -> list[dict[str, Any]]:
         """Receipts of the user messages no turn has taken yet, oldest first."""
         return [
-            {**event.receipt(), "text": event.text} for event in self._store.pending_events() if event.source == "user"
+            {**event.receipt(), "text": event.text}
+            for event in self._store.pending_events()
+            if event.source == "user" and self._mine(event)
         ]
 
     def state(self) -> dict[str, Any]:
@@ -1046,6 +1118,13 @@ class ChatSession:
                 self._in_flight = {**cut, "cut": "shutdown"}
             if self._last_context is not None:
                 self._scheduler.unmark(self._last_context)
+            if keep and self._session_store is not None:
+                # Kept in its store: restored later with what was typed and not answered. Another channel
+                # on the session (a call it shares with, a chat opened meanwhile) must not answer that
+                # too: marked as this session's until it takes them back (from_store).
+                for event in self._store.pending_events():
+                    if event.source == "user" and event.kept_for is None:
+                        event.kept_for = self.id
             self._scheduler.release(self._store)
             forget_idle_background_store(self._store)
             self._record("closed", kept=keep)
@@ -1125,6 +1204,11 @@ class ChatSession:
             # Queuing the stored events would start the worker: not before the dead turn is settled (its recovery
             # goes first, and a turn finishing meanwhile would store a snapshot without it).
             session._hold_worker = True
+            worker, session._worker = session._worker, None
+            if worker is not None:
+                # Started by the constructor for a message the task store holds (a call has the session):
+                # it has not run a step yet, and does not until the stored state is settled.
+                worker.cancel()
             # Restored in the process that closed it, the run's task store may still be there (a background
             # task going, an event no turn took), holding the session's events: in the order they were left,
             # followed by the closed session. They are taken out and queued again below from the snapshot,
@@ -1133,7 +1217,9 @@ class ChatSession:
             # followed by this session. The events themselves are kept, so their senders' receipts settle.
             session._kept_events = {
                 event.id: event
-                for event in session._store.drain_events(settle=False, where=lambda event: event.task_id is None)
+                for event in session._store.drain_events(
+                    settle=False, where=lambda event: event.task_id is None and session._mine(event)
+                )
             }
             session._version, session._leased, session._lease_from = snapshot.version, True, leased_at
             session.turns, session.last_status, session._parked = snapshot.turns, snapshot.last_status, snapshot.parked
@@ -1189,12 +1275,16 @@ class ChatSession:
                 left = leased_at + session_store.lease_ttl_s - time.monotonic()
                 await _answered_within(session_store.release_lease(session_id, process_owner()), left)
             raise
+        if session.parked:
+            # Restored on a question: the session is not lent to a call while it waits (see SessionScheduler).
+            session._scheduler.note_parked(session._last_context.id)
         session._record("restored", head=session.head, recovered=recovered, pending=len(snapshot.pending))
         session._persist()
         session._lease_task = asyncio.get_running_loop().create_task(session._renew_lease())
         session._hold_worker = False
         if session.parked and any(
-            event.source == "user" and event.announce == "interrupt" for event in session._store.pending_events()
+            event.source == "user" and event.announce == "interrupt" and session._mine(event)
+            for event in session._store.pending_events()
         ):
             # An 'interrupt' message is stored before it cuts anything: if the process died in between, the
             # question it was to abandon still waits. Abandon it now (nothing to do if that was stored too).
@@ -1230,29 +1320,143 @@ class ChatSession:
         run_id, self._restore_from = self._restore_from, None
         if run_id is None or self._last_context is not None:
             return
-        # The context resolves the agent's setting (TRACING_UNSET: auto-detected) into the provider runs use.
-        lookup = RunContext(parent_id=run_id, tracing_provider=self._agent.tracing_provider)
-        provider = lookup._tracing_provider
-        if provider is None:
-            return
         try:
             # Not get() / _get_parent_trace: they read a failed lookup as "no parent", and an unparked session
             # would resume the parked run with the next message's turn and drop that message.
-            trace = await provider.get_strict(lookup)
+            found = await self._parked_run(run_id)
         except Exception as error:
             self._restore_from = run_id
             self._record("restore_failed", run_id=run_id, error=str(error))
             raise
-        root = next((span for span in trace.values() if span.parent_call_id is None), None) if trace else None
-        if root is None or not is_parked(root.status) or self._last_context is not None:
+        if found is None or self._last_context is not None:
             return
+        self._park_on(*found)
+
+    async def _parked_run(self, run_id: str) -> tuple[RunContext, Any] | None:
+        """The stored run ``run_id`` if it ended on an approval or a question: a context holding its trace,
+        and its root span. Raises when the run cannot be read."""
+        # The context resolves the agent's setting (TRACING_UNSET: auto-detected) into the provider runs use.
+        lookup = RunContext(parent_id=run_id, tracing_provider=self._agent.tracing_provider)
+        provider = lookup._tracing_provider
+        if provider is None:
+            return None
+        trace = await provider.get_strict(lookup)
+        root = next((span for span in trace.values() if span.parent_call_id is None), None) if trace else None
+        if root is None or not is_parked(root.status):
+            return None
         context = RunContext(id=run_id, tracing_provider=self._agent.tracing_provider)
         context.__dict__["_trace"] = trace
+        return context, root
+
+    def _park_on(self, context: RunContext, root: Any, *, handed_over: bool = False) -> None:
+        """The question ``context``'s run ended on is this session's to answer: :meth:`resume`, :meth:`interrupt`."""
         prompt = (root.input or {}).get("prompt") or ""
         self._last_context, self._parked, self._last_prompt = context, True, prompt
+        # Its question is this session's to answer: not lent to a call while it waits (see SessionScheduler).
+        self._scheduler.note_parked(context.id)
         meta = prompt.get("metadata") if isinstance(prompt, dict) else getattr(prompt, "metadata", None)
         if meta and meta.get("kind") in (WAKE_KIND, RECOVERY_KIND):
-            self._last_options = self._wake_options(meta, trace)
+            self._last_options = self._wake_options(meta, context._trace)
+        elif handed_over:
+            # Another channel's turn: resumed as that ran, not under what this session's last turn was given.
+            self._last_options = _TurnOptions()
+
+    async def _take_question(self, run_id: str) -> bool:
+        """Take over the question the session came back with: a call hung up on one of its own.
+
+        Like the question of a run a session is opened on: ``state()`` lists it, :meth:`resume` answers
+        it, :meth:`interrupt` abandons it. Left to the call's client alone, the chat would hold everything
+        typed behind a question nobody here could answer.
+
+        A run whose stored trace holds no question (not parked, or nothing stored of it where this
+        session reads) is not waited for: nothing here could answer it, and no turn of this session
+        can be taken for its answer (the turn reads the same trace). The session goes on from it,
+        and reads the run once more before each turn it starts on it (:meth:`_dropped_question_holds`):
+        the end of a run can be stored late (a save that failed and was sent again).
+
+        False only when the run could not be read: that is not "no question" (a turn started now
+        might resume it and lose its prompt), so the caller asks again later. True otherwise: taken,
+        found not to wait, or no longer this session's to settle (the head moved, the session closed).
+        """
+        try:
+            found = await self._parked_run(run_id)
+        except Exception as error:
+            logger.warning("chat_session_question_unreadable", session_id=self.id, run_id=run_id, error=str(error))
+            return False
+        scheduler = self._scheduler
+        if self.closed or self._parked or scheduler.lent or scheduler.head != run_id:
+            return True
+        if found is None:
+            logger.warning("chat_session_question_missing", session_id=self.id, run_id=run_id)
+            scheduler.not_waiting(run_id)
+            self._dropped_question = run_id
+            return True
+        self._dropped_question = None
+        if self._last_context is not None:
+            scheduler.unmark(self._last_context)
+        self._park_on(*found, handed_over=True)
+        self.last_activity = time.monotonic()
+        self._record("parked", run_id=run_id)
+        self._persist()
+        if any(
+            event.source == "user" and event.announce == "interrupt" and self._mine(event)
+            for event in self._store.pending_events()
+        ):
+            # Sent while the question was still the call's: its user has already moved on from it.
+            self._interrupt_now()
+        return True
+
+    async def _dropped_question_holds(self) -> bool:
+        """Whether the turn about to start must wait for the run whose question was dropped.
+
+        That run held no question when it was read (nothing stored of it), but its end can be stored
+        late, and the turn reads the same trace: found parked by then, the turn would be taken for
+        the answer and lose its prompt. So it is read once more right before a turn starts on it,
+        also while a call has the session on that same head (the turn would chain onto it there).
+
+        - Still no question: False, the turn starts.
+        - Parked now: it is this session's question after all. True, and the run is handed back to
+          the worker to take (with the session, if a call has it).
+        - Unreadable: not known, which is neither of the above. True after a wait, so the turn does
+          not start and the worker asks again; nothing else changes (the call keeps the session,
+          nothing is marked as waiting for an answer).
+
+        Forgotten once the head has moved on: nothing chains onto that run any more.
+        """
+        run_id, scheduler = self._dropped_question, self._scheduler
+        if run_id is None:
+            return False
+        if scheduler.session_head != run_id:
+            self._dropped_question = None
+            return False
+        try:
+            found = await self._parked_run(run_id)
+        except Exception as error:
+            logger.warning("chat_session_question_unreadable", session_id=self.id, run_id=run_id, error=str(error))
+            await self._wait_to_read_again()
+            return True
+        self._question_failures = 0
+        if found is None:
+            return False
+        self._dropped_question = None
+        if self.closed or scheduler.session_head != run_id:
+            return False
+        scheduler.note_parked(run_id)
+        return True
+
+    async def _wait_to_read_again(self) -> None:
+        """After a read of a question's run failed: a while (0.5 s doubling, up to 30 s), or until something
+        arrives or the session changes. Nothing else would bring the worker back to it.
+
+        Only a wait that ran its whole time makes the next one longer. One cut short (a message, a wake)
+        is followed by a read at once and is not counted: messages typed during an outage must not push
+        the next try out to the longest wait, since nothing tells the worker when the store is back.
+        """
+        delay = _TURN_RETRY_DELAY_S * 2 ** min(self._question_failures, 8)
+        try:
+            await asyncio.wait_for(self._until_scheduler_or_work(), min(delay, _RESTORE_RETRY_MAX_S))
+        except TimeoutError:
+            self._question_failures += 1
 
     def _wake_options(self, meta: dict[str, Any], trace: Any) -> _TurnOptions:
         """The options of a parked wake, from its prompt; a wake never resumes with more than it had.
@@ -1281,7 +1485,7 @@ class ChatSession:
             return
         # An app or client event is queued by the task store (post_event), not by a method of the session.
         # Task progress is not restored, so it is left alone.
-        restorable = [event for event in self._store.pending_events() if event.task_id is None]
+        restorable = [event for event in self._store.pending_events() if event.task_id is None and self._mine(event)]
         for event in restorable:
             if event.source != "user" and event.id not in self._followed_events:
                 # Followed until a turn takes it: steered into a running one, it stays with that turn.
@@ -1353,25 +1557,55 @@ class ChatSession:
                     # Another client's run answered the parked turn or went past it: go on from that run.
                     self._parked = False
                     parked_run = self._last_context.id if self._last_context is not None else None
-                    self._record("unparked", run_id=parked_run, head=scheduler.head)
+                    self._record("unparked", run_id=parked_run, head=scheduler.session_head)
                     continue
                 await self._until_scheduler_or_work()
                 continue
-            if scheduler.head_parked:
+            if scheduler.asking and not scheduler.lent:
+                # The call hung up on a question of its own and the session came back with it.
+                if await self._take_question(scheduler.head):
+                    continue
+                # The run that asked could not be read (the trace store is away). No turn starts on a run
+                # that may be waiting for an answer. Asked again after a while, as restore() does, and
+                # sooner when something arrives.
+                await self._wait_to_read_again()
+                continue
+            if self._dropped_question is None:
+                # No question left to read (taken, answered by another client, the head moved): the next
+                # one that cannot be read starts its waits from the shortest again.
+                self._question_failures = 0
+            if scheduler.session_parked:
                 # Another client's run of this session waits for its caller (an approval, a question): a
                 # turn now would chain onto it, and that run's resume would drop the turn's prompt. Its
                 # resume, or any newer head, lets the session go on; messages stay pending until then.
+                # (The session's head: a call that has the session moves it, and may be the one asking.)
                 await self._until_scheduler_or_work()
                 continue
             # A recovery turn goes before anything queued: it is about the turn the user saw cut, and the turns
-            # after it must find it settled. Other wakes wait for the user.
+            # after it must find it settled (also while a call has the session: it is this session's own cut
+            # turn, and what is typed must not go ahead of it). Other wakes wait for the user, and for the
+            # session: while a call has it the chat answers only what is typed, and an application's wake
+            # runs once it is the chat's again (the call hands it back with its head).
+            if self._wakes and await self._dropped_question_holds():
+                continue
             recovering = bool(self._wakes) and self._wakes[0].kind == RECOVERY_KIND
-            if self._wakes and (recovering or scheduler.pending_turn() is None) and not scheduler.other_turn_first():
+            if recovering and scheduler.other_turn_first():
+                # Another turn is ahead (the call's, another client's): the recovery turn goes right after
+                # it, not after whatever was typed meanwhile.
+                await self._until_scheduler_or_work()
+                continue
+            if (
+                self._wakes
+                and (recovering or (not scheduler.lent and scheduler.pending_turn() is None))
+                and not scheduler.other_turn_first()
+            ):
                 wake = self._wakes.pop(0)
                 scheduler.turn_started()
                 await self._run_turn(wake=wake)
                 continue
             if not await self._turn_due():
+                continue
+            if await self._dropped_question_holds():
                 continue
             # Take and busy in one step: a foreign root turn either goes before it or meets a busy owner.
             followup = scheduler.take()
@@ -1423,7 +1657,7 @@ class ChatSession:
         """Hold a turn for collected messages until none has arrived for ``collect_window`` seconds, and while
         another client's run of the session waits for its caller (a turn would chain onto it, see _serve_turns)."""
         while True:
-            if self._scheduler.head_parked:
+            if self._scheduler.session_parked:
                 await self._scheduler._wait_change()
                 continue
             collected = [
@@ -1497,7 +1731,7 @@ class ChatSession:
         try:
             kwargs, trigger, options = self._turn_inputs(followup, resume, wake)
             context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
-            context._tracing_provider = self._turn_provider(context._tracing_provider, context.platform_config)
+            context._tracing_provider = self._turn_provider(context._tracing_provider)
             context._steering = options.steer
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
@@ -1563,7 +1797,9 @@ class ChatSession:
                     raise
         finally:
             self._turn = None
-            scheduler.turn_finished()
+            # With how its run ended: a session left on a question is not lent to a call (only the chat
+            # can answer it), and the call's turns wait for the answer.
+            scheduler.turn_finished(_left_parked(turn))
             if followup is not None:
                 # Handed back unless a run started with it (then this does nothing). Here as well as in the
                 # turn's own task: one cancelled before its first step never runs any of its code.
@@ -1779,14 +2015,16 @@ class ChatSession:
 
     # -- Log ----------------------------------------------------------------------
 
-    def _turn_provider(self, provider: Any, platform_config: Any = None) -> Any:
-        """The provider a turn saves with: ``durability`` when given; else platform saves are buffered
-        unless the host takes span deltas.
+    def _turn_provider(self, provider: Any) -> Any:
+        """The provider a turn saves with: ``durability`` when given; else platform saves are buffered.
 
         A whole-trace save uploads the run's history again, so a turn that saved on every finished span
-        would upload it dozens of times; buffered, it saves at most once per flush interval and waits only
-        at the turn's end. With deltas a save is one or two spans, and ``sync`` keeps every finished span
-        for crash recovery. A provider or ``TIMBAL_TRACE_DURABILITY`` that already chose a mode keeps it.
+        would upload it dozens of times. With deltas a save is small, but each still costs a round trip the
+        turn would wait for (about two per tool step). Buffered, mid-run saves go out at most once per
+        flush interval without the turn waiting; with ``store_before_acting`` (set on the buffered
+        providers configured here) the agent still stores a tool batch that is not read-only before
+        running it, so recovery never misses a call whose effects may have happened.
+        A provider or ``TIMBAL_TRACE_DURABILITY`` that already chose a mode keeps it.
         """
         from ..state.tracing import uploads
         from ..state.tracing.providers import PlatformTracingProvider
@@ -1798,12 +2036,19 @@ class ChatSession:
             chosen = provider.durability is not None or os.environ.get(uploads.DURABILITY_ENV)
             if not issubclass(provider, PlatformTracingProvider) or chosen:
                 return provider
-            want = "sync" if provider.takes_deltas(platform_config) else "buffered"
-        if uploads.durability(provider) == want:
+            want = "buffered"
+        settings: dict[str, Any] = {}
+        if uploads.durability(provider) != want:
+            settings["durability"] = want
+        if want == "buffered" and not getattr(provider, "store_before_acting", False):
+            # Not with ``durability=`` when the provider is buffered already (the platform default): an
+            # explicit mode also turns on the ``tracing:*`` usage counters, which a default must not add.
+            settings["store_before_acting"] = True
+        if not settings:
             return provider
         configured = self._providers.get((provider, want))
         if configured is None:
-            configured = self._providers[(provider, want)] = provider.configured(durability=want)
+            configured = self._providers[(provider, want)] = provider.configured(**settings)
         return configured
 
     def _record(self, kind: str, **fields: Any) -> None:
@@ -1865,7 +2110,11 @@ class ChatSession:
             # that serializes after its first await would write a later state than the one it was handed.
             in_flight=copy.deepcopy(self._in_flight),
             # Progress of a background task dies with the task (process-local): not worth restoring.
-            pending=[event.to_dict() for event in self._store.pending_events() if event.task_id is None],
+            pending=[
+                event.to_dict()
+                for event in self._store.pending_events()
+                if event.task_id is None and self._mine(event)
+            ],
             wakes=[wake.to_dict() for wake in self._wakes],
             resume=_dump_resume(self._resume),
             log_cursor=self.log.cursor_end,

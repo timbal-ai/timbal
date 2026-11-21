@@ -64,8 +64,10 @@ from ..state.background import (
     DEFAULT_BG_TASK_RETENTION_SECS,
     GET_BACKGROUND_TASK_DESCRIPTION,
     LIST_BACKGROUND_TASKS_DESCRIPTION,
+    MESSAGE_BACKGROUND_TASK_DESCRIPTION,
     READ_BACKGROUND_TRANSCRIPT_DESCRIPTION,
     current_background_store,
+    current_background_task_id,
     format_session_notice,
     format_user_message,
 )
@@ -155,6 +157,8 @@ NOW_COALESCE_SECS = 0.25
 SEARCH_TOOLS_NAME = "search_tools"
 # Used when an agent tool already has the name (e.g. an unprefixed MCP server's own search_tools).
 _SEARCH_TOOLS_FALLBACKS = ("find_tools", "load_tools", "search_deferred_tools")
+CALL_TOOL_NAME = "call_tool"
+_CALL_TOOL_FALLBACKS = ("call_found_tool", "call_deferred_tool")
 # Session key: tools search_tools loaded, per agent path, in load order.
 _LOADED_TOOLS_KEY = "__loaded_tools"
 # Models with provider-side tool search: Claude 4.5 and later; OpenAI gpt-5.4 and later (Responses API).
@@ -473,6 +477,47 @@ def _record_tool_search(span: Any, mode: str, loaded: list[str], query: str | No
 
 
 _READ_EVENT, _READ_END, _READ_ERROR = 0, 1, 2
+
+
+def _stores_before_acting(run_context: Any) -> bool:
+    """Whether the run's provider buffers mid-run saves and asks for the run stored before acting tools run."""
+    provider = run_context._tracing_provider
+    if provider is None or not getattr(provider, "store_before_acting", False):
+        return False
+    from ..state.tracing import uploads
+
+    return uploads.durability(provider) == "buffered"
+
+
+class _CallTool(Tool):
+    """``call_tool`` (``tool_search="dispatch"``): runs a deferred tool by name.
+
+    The agent rewrites a call to it into the call itself before dispatch
+    (:meth:`Agent._dispatched`), so its own handler only answers a call it
+    could not rewrite.
+    """
+
+    @classmethod
+    def build(cls, tool_name: str, search_name: str, path: str) -> "_CallTool":
+        def call_tool(name: str, arguments: dict[str, Any] | None = None) -> str:  # noqa: ARG001
+            """Run a tool found with the search tool.
+
+            Args:
+                name: The tool's name, as the search returned it.
+                arguments: The tool's input, matching the input schema the search returned.
+            """
+            raise ValueError(f"No tool named {name!r} can be run here. Find one with {search_name} first.")
+
+        tool = cls(
+            name=tool_name,
+            description=(
+                f"Run a tool you found with {search_name}: pass its name and its arguments as the input "
+                "schema the search returned describes."
+            ),
+            handler=call_tool,
+        )
+        tool.nest(path)
+        return tool
 
 
 class _CuttableModelEvents:
@@ -797,20 +842,25 @@ class Agent(Runnable):
     message (input guardrails screen it, and it restores the ``max_iter`` budget); an event as a
     runtime notice. The turn does not end while one is waiting: it calls the model once more.
     ``None`` (default): on for runs a ``ChatSession`` starts, off otherwise. Never for a turn its
-    channel keeps closed (a ``ChatSession`` wake), even when ``True``. Root agents only."""
+    channel keeps closed (a ``ChatSession`` wake), even when ``True``. Root agents only — except
+    that an agent running as a background task reads the messages sent to that task
+    (``message_background_task``) between its steps unless this is ``False``."""
     stream_idle_timeout: float | None = 300.0
     """Seconds a model stream may send nothing before the call is given up
     (:class:`timbal.errors.ModelStreamStalled`). Before the first chunk the attempt is
     retried like a timeout (``max_retries``); after it, the call fails, since another
     attempt would repeat what was already sent. ``None`` waits forever. Raise it for
     models that think for minutes without streaming anything."""
-    tool_search: Literal["auto", "client", "off"] = "auto"
+    tool_search: Literal["auto", "client", "dispatch", "off"] = "auto"
     """How the model finds tools marked ``defer_loading`` (``Tool.defer_loading``,
     ``MCPServer(defer_loading=True)``) without carrying all their schemas on every call.
     ``"auto"``: Claude 4.5 and later use Anthropic's tool search (it runs server-side within the
     same response, and found tools load without changing the cached prompt prefix); other models
     get a ``search_tools`` tool whose finds stay loaded for the session, after the other tools.
-    ``"client"``: always ``search_tools``. ``"off"``: nothing is deferred."""
+    ``"client"``: always ``search_tools``. ``"dispatch"``: the tools offered never change, so the
+    cached prefix survives every search: ``search_tools`` returns the schemas it finds and the
+    model runs one with ``call_tool(name, arguments)``, which runs as a direct call would
+    (approval, guardrails, spans under the tool's own name). ``"off"``: nothing is deferred."""
     max_consecutive_denials: int | None = 3
     """Tool calls in a row that may be denied (approval) or blocked (``tool_args``
     guardrail) before the agent stops trying: it is told not to route around the
@@ -1662,6 +1712,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         store = current_background_store()
         if store is None:
             return
+        run_context = get_run_context()
+        marker = run_context._continuation_owner
+        channel = marker() if marker is not None else None
+        if channel is not None and channel.lent:
+            # A turn of a chat while a call has the session: it answers what was typed. Finished tasks
+            # and events are the call's to speak (SessionScheduler.takes), so they stay pending for it.
+            return
         notifications = store.drain_completions()
         events = store.drain_events(settle=False, where=lambda event: event.source != "user")
         if not notifications and not events:
@@ -1669,7 +1726,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         notice = format_session_notice(notifications, events)
         if events:
             current_span.metadata["session_events"] = [event.id for event in events]
-            record_delivery(get_run_context(), current_span, events)
+            record_delivery(run_context, current_span, events)
         memory = current_span.memory
         # Sit immediately before the current user prompt so history stays
         # [...prior turns..., completion notice, user prompt].
@@ -1681,24 +1738,65 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     def _steers(self, run_context: Any, current_span: Any) -> bool:
         """Whether this turn takes ``lane="next"`` events between steps (see ``steering``)."""
         if current_span.parent_call_id is not None:
-            return False
+            return self._task_record(current_span) is not None
         if self.steering is None:
             return run_context._steering is True
         # A channel's False (a wake: its tool policy and silence are not a user's) beats the agent's True.
         return self.steering and run_context._steering is not False
 
+    @property
+    def _takes_task_messages(self) -> bool:
+        return self.steering is not False
+
+    def _task_record(self, current_span: Any) -> Any | None:
+        """The background task this call is the detached root of, when it reads messages sent to it."""
+        task_id = current_background_task_id()
+        if task_id is None:
+            return None
+        store = current_background_store()
+        record = store.get(task_id) if store is not None else None
+        if record is None or not record.steerable or record.call_id != current_span.call_id:
+            return None
+        return record
+
     def _take_steering(self, run_context: Any, current_span: Any) -> list[Any]:
         """The messages posted for the running turn (``lane="next"``), settled as delivered to it.
 
         A runtime notice for events, then one user message per message the user
-        sent (screened one by one, so blocking one keeps the others).
+        sent (screened one by one, so blocking one keeps the others). A
+        background task takes the messages sent to it instead, as one user
+        message: whoever sent them is who it works for.
         """
+        if current_span.parent_call_id is not None:
+            record = self._task_record(current_span)
+            sent = record.take_messages() if record is not None else []
+            if not sent:
+                return []
+            for message in sent:
+                message._settle("delivered", run_context.id)
+            current_span.metadata.setdefault("task_messages", []).extend(message.id for message in sent)
+            run_context.update_usage("background:messages_delivered", len(sent))
+            steered = format_user_message(sent, steered=True)
+            steered.metadata["sources"] = sorted({message.source for message in sent})
+            return [steered]
         if run_context._cut is not None:
             run_context._cut.clear()  # what is drained now answers the cut; a later 'now' cuts again
         store = current_background_store()
         if store is None:
             return []
-        events = store.drain_events(settle=False, where=lambda event: event.lane == "next")
+        marker = run_context._continuation_owner
+        channel = marker() if marker is not None else None
+        if channel is not None:
+            # A channel's turn takes what is that channel's to answer (SessionScheduler.takes). In a
+            # session a chat and a call share: a chat turn only what the user wrote (an application's
+            # event waits for the call), a call's turn everything but that (it waits for the chat).
+            events = store.drain_events(
+                settle=False, where=lambda event: event.lane == "next" and channel.takes(event, store)
+            )
+        else:
+            events = store.drain_events(
+                settle=False, where=lambda event: event.lane == "next" and event.kept_for is None
+            )
         if not events:
             return []
         current_span.metadata.setdefault("steered_events", []).extend(event.id for event in events)
@@ -2306,6 +2404,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 ("list_background_tasks", LIST_BACKGROUND_TASKS_DESCRIPTION, self.list_background_tasks),
                 ("cancel_background_task", CANCEL_BACKGROUND_TASK_DESCRIPTION, self.cancel_background_task),
             ]
+            if store.has_steerable:
+                bg_tools.append(
+                    ("message_background_task", MESSAGE_BACKGROUND_TASK_DESCRIPTION, self.message_background_task)
+                )
             if self.background_transcript_tool:
                 bg_tools.append(
                     (
@@ -2345,18 +2447,28 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return tools, tools, None, set()
         if self.tool_search == "auto" and _native_tool_search(model):
             return tools, tools, [tool.name for tool in deferred], set()
+        restricted = get_run_context()._tool_policy is not None
+        deferred_ids = {id(tool) for tool in deferred}
+        if self.tool_search == "dispatch":
+            taken = {tool.name for tool in tools}
+            search_name = next(n for n in (SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS) if n not in taken)
+            call_name = next(n for n in (CALL_TOOL_NAME, *_CALL_TOOL_FALLBACKS) if n not in taken)
+            added = [
+                self._search_tools(deferred, search_name, restricted=restricted, dispatch=call_name),
+                _CallTool.build(call_name, search_name, self._path),
+            ]
+            return [tool for tool in tools if id(tool) not in deferred_ids] + added, [*tools, *added], None, set()
         session = await get_run_context().get_session()
         loaded_names = session.get(_LOADED_TOOLS_KEY, {}).get(self._path, [])
         by_name = {tool.name: tool for tool in deferred}
         loaded = [by_name[name] for name in loaded_names if name in by_name]
         hidden = [tool for tool in deferred if tool.name not in set(loaded_names)]
-        deferred_ids = {id(tool) for tool in deferred}
         offered = [tool for tool in tools if id(tool) not in deferred_ids] + loaded
         dispatch = list(tools)
         if hidden:
             taken = {tool.name for tool in tools}
             name = next(n for n in (SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS) if n not in taken)
-            search = self._search_tools(hidden, name, restricted=get_run_context()._tool_policy is not None)
+            search = self._search_tools(hidden, name, restricted=restricted)
             offered.append(search)
             dispatch.append(search)
         return offered, dispatch, None, {tool.name for tool in hidden}
@@ -2368,11 +2480,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         loaded.extend(name for name in names if name not in loaded)
         _record_tool_search(span, "client", names, query)
 
-    def _search_tools(self, hidden: list[Tool], name: str = SEARCH_TOOLS_NAME, *, restricted: bool = False) -> Tool:
+    def _search_tools(
+        self,
+        hidden: list[Tool],
+        name: str = SEARCH_TOOLS_NAME,
+        *,
+        restricted: bool = False,
+        dispatch: str | None = None,
+    ) -> Tool:
         """The ``search_tools`` tool over the deferred tools not loaded yet.
 
         ``restricted``: a tool policy narrowed this turn's tools, so the ones it
         hid can't be found either — said up front so the model stops looking.
+        ``dispatch``: the name of the ``call_tool`` dispatcher (``tool_search="dispatch"``):
+        finds return their schemas instead of loading, and the description never
+        changes, so neither does the cached prefix.
         """
         names = [tool.name for tool in hidden]
         listing = ", ".join(names[:80]) + (f", and {len(names) - 80} more" if len(names) > 80 else "")
@@ -2389,8 +2511,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # Found tools stay loaded for the session: skip weak matches (one shared word like "create").
             matches = [tool for score, tool in scored if score * 2 >= scored[0][0]][: max(1, min(limit, 20))]
             agent_span = get_run_context().parent_span()
+            mode = "client" if dispatch is None else "dispatch"
             if not matches:
-                record = agent_span.metadata.setdefault("tool_search", {"mode": "client", "loaded": [], "searches": []})
+                record = agent_span.metadata.setdefault("tool_search", {"mode": mode, "loaded": [], "searches": []})
                 record["searches"].append({"query": query, "loaded": []})
                 misses = sum(1 for search in record["searches"] if not search["loaded"])
                 if misses >= _FRUITLESS_SEARCHES:
@@ -2400,20 +2523,29 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         "answer with the tools you have."
                     )
                 return f"No tool matched {query!r}. Try other words. Tools not loaded yet: {listing}.{scope}"
+            if dispatch is not None:
+                _record_tool_search(agent_span, mode, [tool.name for tool in matches], query)
+                found = [tool.anthropic_schema for tool in matches]
+                return json.dumps(
+                    {"found": found, "note": f'Run one with {dispatch}(name="<tool name>", arguments={{...}}).'}
+                )
             await self._load_tools([tool.name for tool in matches], agent_span, query)
             found = [{"name": tool.name, "description": tool.description or ""} for tool in matches]
             return json.dumps({"loaded": found, "note": "Call these from your next step."})
 
-        tool = Tool(
-            name=name,
-            description=(
+        if dispatch is None:
+            description = (
                 f"Load tools that are not loaded yet. {len(names)} more are available: {listing}. "
                 "Search with a few words for what you need (or a tool's name); the matches become callable "
                 f"from your next step.{scope}"
-            ),
-            handler=search_tools,
-            read_only=True,
-        )
+            )
+        else:
+            description = (
+                f"Find more tools: {len(names)} are available through {dispatch}: {listing}. Search with a few "
+                "words for what you need (or a tool's name); you get each match's input schema, then run it "
+                f"with {dispatch}.{scope}"
+            )
+        tool = Tool(name=name, description=description, handler=search_tools, read_only=True)
         tool.nest(self._path)
         return tool
 
@@ -2586,6 +2718,38 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             },
         )
 
+    @staticmethod
+    def _acts(tools: list[Tool], tool_calls: list[ToolUseContent]) -> bool:
+        """Whether a batch calls any tool that is not declared read-only (unknown names count as acting).
+
+        ``tool_calls`` as they will run: a ``call_tool`` dispatch already resolved to its target
+        (:meth:`_dispatched`). One that resolves to nothing stays the dispatcher, which is not
+        read-only, so it counts as acting.
+        """
+        by_name = {tool.name: tool for tool in tools}
+        return any(not getattr(by_name.get(call.name), "read_only", False) for call in tool_calls)
+
+    @staticmethod
+    def _dispatched(tools: list[Tool], tool_call: ToolUseContent) -> ToolUseContent:
+        """A ``call_tool`` call as the call it stands for (same id, so its result answers it); else unchanged."""
+        if tool_call.name != CALL_TOOL_NAME and tool_call.name not in _CALL_TOOL_FALLBACKS:
+            return tool_call
+        dispatcher = next((t for t in tools if isinstance(t, _CallTool) and t.name == tool_call.name), None)
+        if dispatcher is None or not isinstance(tool_call.input, dict):
+            return tool_call
+        name, arguments = tool_call.input.get("name"), tool_call.input.get("arguments")
+        if isinstance(arguments, str):
+            with contextlib.suppress(ValueError):
+                arguments = json.loads(arguments)
+        if arguments is None:
+            arguments = {}  # left out or null (also as the JSON string "null"): a tool that needs no input
+        target = next((t for t in tools if t.name == name and not isinstance(t, _CallTool)), None)
+        if target is None or not isinstance(arguments, dict):
+            # Anything else that is not an object (a list, a number, an empty string) is a malformed
+            # call, not one with no arguments: left to the dispatcher, whose own validation refuses it.
+            return tool_call
+        return ToolUseContent(id=tool_call.id, name=target.name, input=arguments)
+
     def _resolve_tool_for_call(self, tools: list[Tool], tool_call: ToolUseContent) -> Tool | None:
         """Find the tool for a call, logging when the LLM asked for an unknown one."""
         tool = next((t for t in tools if t.name == tool_call.name), None)
@@ -2667,6 +2831,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         ``cut``: set by a 'now' message. The interruptible calls still running are
         cancelled (each gets a ``steered`` result); the others run to the end.
         """
+        if self.tool_search == "dispatch":
+            tool_calls = [self._dispatched(tools, tool_call) for tool_call in tool_calls]
         # Fast path: a single tool call needs no queue/task fan-in — iterate the
         # tool directly, exactly like Workflow consumes its steps. This is the
         # common case for most agent iterations. A cuttable batch needs the tasks.
@@ -3173,10 +3339,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         denial_limit = self.max_consecutive_denials
         if denial_limit is None:
             denial_limit = math.inf
+        stores_first = _stores_before_acting(run_context)
         tool_policy = run_context._tool_policy
         # Set by ChatSession when a 'now' message arrives: cut the model's answer or the
         # interruptible tools in flight, then steer the message in (see _multiplex_tools).
-        cut: asyncio.Event | None = run_context._cut if steering else None
+        cut: asyncio.Event | None = run_context._cut if steering and current_span.parent_call_id is None else None
 
         if steering:
             # Set by _steer: whether it added messages, and whether the user wrote one of them.
@@ -3901,6 +4068,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 )
                 if called_unloaded:
                     await self._load_tools(called_unloaded, current_span)
+                if stores_first and self._acts(
+                    tools,
+                    # As they will run: a dispatch is judged by the tool it runs, not by the dispatcher.
+                    [self._dispatched(tools, call) for call in tool_calls]
+                    if self.tool_search == "dispatch"
+                    else tool_calls,
+                ):
+                    # Buffered saves lag the run: store the calls before what they do, so a crash between the
+                    # two can never leave a tool's effects with no record of the call (recovery reads it).
+                    await run_context._save_trace(barrier=True)
                 first_pending: OutputEvent | None = None
                 lost_claim: OutputEvent | None = None
                 if run_context._before_tool_dispatch is not None:

@@ -9,6 +9,7 @@ Public API:
     - emit(): Fire-and-forget custom DELTA event on the current call's stream.
     - get_background_task / list_background_tasks / cancel_background_task /
       read_background_transcript / wait_for_background: session-scoped background children.
+    - message_background_task: a message a running background agent reads after its current step.
     - post_session_event / SessionEvent: events posted to a session from outside its runs.
     - report_progress: progress from inside a background task, as an event keyed on the task.
 
@@ -37,6 +38,9 @@ from .background import (
 )
 from .background import (
     list_background_tasks as list_background_tasks,
+)
+from .background import (
+    message_background_task as message_background_task,
 )
 from .background import (
     post_session_event as post_session_event,
