@@ -413,6 +413,12 @@ def test_normalize_id(ref: str) -> None:
     assert normalize_id(ref) == PAGE
 
 
+def test_peek_link_resolves_to_the_row_not_the_database() -> None:
+    db, view, row = DB.replace("-", ""), "9" * 32, PAGE.replace("-", "")
+    assert normalize_id(f"https://www.notion.so/acme/{db}?v={view}&p={row}&pm=s") == PAGE
+    assert normalize_id(f"https://www.notion.so/acme/Tasks-{db}?v={view}") == DB  # a view is not the row
+
+
 def test_normalize_id_rejects_garbage() -> None:
     with pytest.raises(ValueError):
         normalize_id("not a notion id")
@@ -504,6 +510,14 @@ def test_to_do_keeps_checked_only_on_its_first_block() -> None:
     blocks = markdown_to_blocks("- [x] " + "w" * 210_000)
     assert [b["type"] for b in blocks] == ["to_do", "paragraph"]
     assert blocks[0]["to_do"]["checked"] is True
+
+
+def test_only_web_links_are_linked() -> None:
+    parts = rich_text("[below](#notes), [spec](./spec.md) and [site](https://example.com/a)")
+    links = {p["text"]["content"]: (p["text"].get("link") or {}).get("url") for p in parts}
+    assert links["below"] is None
+    assert links["spec"] is None
+    assert links["site"] == "https://example.com/a"
 
 
 def test_links_and_italic() -> None:
@@ -871,3 +885,147 @@ def test_no_tool_parameter_uses_a_reserved_runnable_kwarg() -> None:
         if isinstance(cls, type) and issubclass(cls, module._NotionTool) and cls is not module._NotionTool:
             fields = set(cls().params_model.model_fields)
             assert not fields & reserved, (name, fields & reserved)
+
+
+def _request_sizes(seen: list[httpx.Request]) -> list[int]:
+    return [len(r.content) for r in seen if r.method in ("POST", "PATCH")]
+
+
+@pytest.mark.asyncio
+async def test_append_batches_stay_under_the_request_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _mock_http(monkeypatch, lambda _: httpx.Response(200, json={"results": []}))
+    paragraphs = [chr(ord("a") + i) * 150_000 for i in range(5)]
+    out = await NotionAppendContent(api_key=SecretStr("k"))(page_id=PAGE, content="\n\n".join(paragraphs)).collect()
+    assert out.status.code == "success", out.error
+    assert out.output["blocks_written"] == 5
+    assert len(seen) > 1 and max(_request_sizes(seen)) < 500_000
+    sent = [
+        "".join(p["text"]["content"] for p in b["paragraph"]["rich_text"]) for r in seen for b in _body(r)["children"]
+    ]
+    assert sent == paragraphs  # every block, in order
+
+
+@pytest.mark.asyncio
+async def test_create_with_huge_non_ascii_text_stays_under_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={"object": "page", "id": PAGE, "properties": {}})
+        return httpx.Response(200, json={"results": []})
+
+    seen = _mock_http(monkeypatch, handler)
+    text = "日本語" * 60_000  # 180,000 characters, about 1 MB as escaped JSON
+    out = await NotionCreatePage(api_key=SecretStr("k"))(parent=PAGE, title="Big", content=text).collect()
+    assert out.status.code == "success", out.error
+    assert max(_request_sizes(seen)) < 500_000
+    blocks = [b for r in seen for b in (_body(r).get("children") or [])]
+    assert "".join(p["text"]["content"] for b in blocks for p in b["paragraph"]["rich_text"]) == text
+
+
+def _nested_page_handler(tokens: list[str] | None = None) -> Any:
+    children = {
+        PAGE: [{"id": "b1", "type": "toggle", "toggle": {"rich_text": [{"plain_text": "t"}]}, "has_children": True}],
+        "b1": [{"id": "b2", "type": "toggle", "toggle": {"rich_text": [{"plain_text": "u"}]}, "has_children": True}],
+        "b2": [{"type": "paragraph", "paragraph": {"rich_text": [{"plain_text": "deep"}]}, "has_children": False}],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if tokens is not None:
+            tokens.append(request.headers["Authorization"])
+            if request.headers["Authorization"] == "Bearer old":
+                return httpx.Response(401, json={"code": "unauthorized"})
+        if request.url.path == f"/v1/pages/{PAGE}":
+            return httpx.Response(200, json={"object": "page", "id": PAGE, "properties": {}})
+        return httpx.Response(200, json={"results": children[request.url.path.split("/")[3]], "has_more": False})
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_credentials_are_resolved_once_per_tool_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _mock_http(monkeypatch, _nested_page_handler())
+    integration = _integration({"token": "user"})
+    tool = NotionGetPage(integration=integration)
+    out = await tool(page_id=PAGE).collect()
+    assert out.status.code == "success", out.error
+    assert out.output["content"].endswith("deep")
+    assert len(seen) == 4  # the page and three levels of children
+    assert integration.resolve.await_count == 1
+    await tool(page_id=PAGE).collect()
+    assert integration.resolve.await_count == 2  # a new call resolves again
+
+
+@pytest.mark.asyncio
+async def test_a_token_replaced_mid_call_is_used_for_the_rest_of_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    tokens: list[str] = []
+    _mock_http(monkeypatch, _nested_page_handler(tokens))
+    integration = _integration({})
+    integration.resolve = AsyncMock(side_effect=[{"token": "old"}, {"token": "new"}])
+    out = await NotionGetPage(integration=integration)(page_id=PAGE).collect()
+    assert out.status.code == "success", out.error
+    assert tokens == ["Bearer old"] + ["Bearer new"] * 4
+    assert integration.resolve.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_peek_link_as_a_database_keeps_the_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/v1/databases/{DB}":
+            return httpx.Response(200, json={"object": "database", "data_sources": [{"id": DS, "name": "Tasks"}]})
+        if request.url.path == f"/v1/data_sources/{DS}":
+            return httpx.Response(200, json={"object": "data_source", "id": DS, "properties": {}})
+        return httpx.Response(404, json={"code": "object_not_found"})
+
+    seen = _mock_http(monkeypatch, handler)
+    peek = f"https://www.notion.so/acme/Tasks-{DB.replace('-', '')}?v={'9' * 32}&p={PAGE.replace('-', '')}&pm=s"
+    out = await NotionGetDataSource(api_key=SecretStr("k"))(database_id=peek).collect()
+    assert out.status.code == "success", out.error
+    assert seen[0].url.path == f"/v1/databases/{DB}"
+
+
+def test_web_url_rules() -> None:
+    assert notion._is_web_url("http://x")
+    assert notion._is_web_url("HTTPS://example.com/a?b=c")
+    assert not notion._is_web_url("https://")
+    assert not notion._is_web_url("javascript:alert(1)")
+    assert not notion._is_web_url("mailto:a@example.com")
+    assert not notion._is_web_url("https://example.com/" + "a" * 2000)  # over Notion's 2000-character limit
+
+
+@pytest.mark.asyncio
+async def test_create_with_large_properties_appends_all_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={"object": "page", "id": PAGE, "properties": {}})
+        return httpx.Response(200, json={"results": []})
+
+    seen = _mock_http(monkeypatch, handler)
+    title = "t" * 199_000  # the properties alone take about half a request
+    content = "p" * 199_000
+    out = await NotionCreatePage(api_key=SecretStr("k"))(parent=PAGE, title=title, content=content).collect()
+    assert out.status.code == "success", out.error
+    assert "children" not in _body(seen[0])
+    assert max(_request_sizes(seen)) < 500_000
+    appended = [b for r in seen[1:] for b in _body(r)["children"]]
+    assert "".join(p["text"]["content"] for b in appended for p in b["paragraph"]["rich_text"]) == content
+
+
+@pytest.mark.asyncio
+async def test_partial_write_counts_with_size_based_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _mock_http(monkeypatch, _fail_patch(2))
+    paragraphs = [chr(ord("a") + i) * 150_000 for i in range(7)]
+    out = await NotionCreatePage(api_key=SecretStr("k"))(parent=PAGE, content="\n\n".join(paragraphs)).collect()
+    assert out.status.code == "error"
+    sent = [len(_body(r).get("children") or []) for r in seen]
+    assert sent == [2, 2, 2]  # create, one append that landed, one that failed
+    assert "wrote only 4 of 7" in out.error["message"]
+    assert f'begins "{"e" * 80}"' in out.error["message"]
+
+
+@pytest.mark.asyncio
+async def test_whoami_resolves_credentials_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_http(monkeypatch, lambda _: httpx.Response(200, json={"id": "bot", "bot": {}}))
+    integration = _integration({"token": "user"})
+    out = await NotionWhoAmI(integration=integration)().collect()
+    assert out.status.code == "success", out.error
+    assert out.output["auth_method"] == "oauth"
+    assert integration.resolve.await_count == 1

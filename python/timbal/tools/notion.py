@@ -37,16 +37,20 @@ never stands in for a user.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Annotated, Any, Literal, NamedTuple
+from urllib.parse import parse_qs, urlparse
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..errors import CredentialNotAvailable
 from ..platform.integrations import Integration
+from ..state import get_call_id
 from . import _oauth_store
 
 API_URL = "https://api.notion.com/v1"
@@ -58,6 +62,8 @@ TOKEN_URL = f"{API_URL}/oauth/token"
 _MAX_TEXT = 2000  # characters per rich_text segment
 _MAX_RICH_TEXT = 100  # segments per rich_text array
 _MAX_CHILDREN = 100  # blocks per create/append request
+#: Notion refuses a request body over 500 KB; batches stay under this, leaving room for the rest.
+_MAX_REQUEST_BYTES = 400_000
 _MAX_RETRIES = 3
 
 _ENV_VARS = [
@@ -346,6 +352,23 @@ def _retry_after(response: Any, attempt: int) -> float:
     return min(max(delay, 0.5), 30.0)
 
 
+# (call id, tool) -> the credentials that tool call's requests share. Keyed by the call, so a later
+# call (or another tool) never reuses them; concurrent calls run in their own task contexts.
+_CALL_AUTH: ContextVar[tuple[tuple[str | None, int], NotionAuth] | None] = ContextVar("notion_call_auth", default=None)
+
+
+async def _call_auth(tool: Any) -> NotionAuth:
+    """This tool call's credentials: resolved on its first use, then shared by its requests."""
+    scope = (get_call_id(), id(tool))
+    held = _CALL_AUTH.get()
+    if scope[0] and held and held[0] == scope:
+        return held[1]
+    auth = await _resolve_auth(tool)
+    if scope[0]:
+        _CALL_AUTH.set((scope, auth))
+    return auth
+
+
 async def _notion_request(
     tool: Any,
     method: str,
@@ -357,7 +380,11 @@ async def _notion_request(
     """One Notion API call: auth, version header, 429/529 back-off, and one refresh on a rejected OAuth token."""
     import httpx
 
-    auth = await _resolve_auth(tool)
+    # One tool call may make many requests (a page's nested blocks, append batches). Resolving
+    # credentials is a platform round trip with an integration, so it is done once per call and
+    # shared by its requests; a rejected token is still replaced below, for the rest of the call.
+    scope = (get_call_id(), id(tool))
+    auth = await _call_auth(tool)
     version = _first(getattr(tool, "notion_version", None), os.getenv("NOTION_VERSION")) or NOTION_VERSION
     refreshed = False
     attempt = 0
@@ -380,6 +407,8 @@ async def _notion_request(
                     auth = await _resolve_auth(tool, rejected=auth.token)
                 except CredentialNotAvailable:
                     break  # nothing to replace it with (an integration still on the same token): report the 401
+                if scope[0]:
+                    _CALL_AUTH.set((scope, auth))
                 continue
             if response.status_code in (429, 529) and attempt < _MAX_RETRIES:
                 try:
@@ -391,6 +420,8 @@ async def _notion_request(
                     attempt += 1
                     continue
             break
+    if scope[0]:
+        _CALL_AUTH.set((scope, auth))
     if response.status_code >= 400:
         try:
             body = response.json()
@@ -411,9 +442,20 @@ _HEX32 = re.compile(r"(?<![0-9a-f])([0-9a-f]{32})(?![0-9a-f])", re.I)
 _UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", re.I)
 
 
-def normalize_id(value: str) -> str:
-    """A Notion ID from an ID (dashed or not) or a notion.so URL, in dashed UUID form."""
+def normalize_id(value: str, *, peek: bool = True) -> str:
+    """A Notion ID from an ID (dashed or not) or a notion.so URL, in dashed UUID form.
+
+    A "peek" link (``<database>?v=<view>&p=<page>&pm=s``) names the row it opens in ``p``: that
+    one wins over the database in the path, unless ``peek=False`` (a database is meant). ``v``
+    (a view) is never the object meant.
+    """
     text = value.strip()
+    row = (parse_qs(urlparse(text).query).get("p") or [""])[0] if peek and "?" in text else ""
+    if row:
+        try:
+            return normalize_id(row)
+        except ValueError:
+            pass  # not an ID: fall back to the path
     path = text.split("?")[0].split("#")[0]
     found = _UUID.findall(path) or _UUID.findall(text)
     if found:
@@ -547,6 +589,37 @@ def _text_segments(text: str, annotations: dict[str, bool] | None = None, href: 
     return segments
 
 
+_MAX_URL = 2000  # characters Notion accepts in a link
+
+
+def _is_web_url(href: str) -> bool:
+    """An absolute http(s) URL Notion will accept as a link."""
+    parsed = urlparse(href)
+    return parsed.scheme.lower() in ("http", "https") and bool(parsed.netloc) and len(href) <= _MAX_URL
+
+
+def _json_size(value: Any) -> int:
+    """Bytes ``value`` takes as JSON, non-ASCII escaped: an upper bound on what the request sends."""
+    return len(json.dumps(value))
+
+
+def _chunks(items: list[Any], *, count: int, budget: int = _MAX_REQUEST_BYTES) -> list[list[Any]]:
+    """``items`` in order, in groups of at most ``count`` and about ``budget`` bytes of JSON."""
+    groups: list[list[Any]] = []
+    current: list[Any] = []
+    size = 0
+    for item in items:
+        n = _json_size(item)
+        if current and (len(current) >= count or size + n > budget):
+            groups.append(current)
+            current, size = [], 0
+        current.append(item)
+        size += n
+    if current:
+        groups.append(current)
+    return groups
+
+
 def _inline_segments(text: str) -> list[dict[str, Any]]:
     """Every rich_text segment for a line of Markdown, with no cap on how many."""
     parts: list[dict[str, Any]] = []
@@ -559,7 +632,10 @@ def _inline_segments(text: str) -> list[dict[str, Any]]:
         elif match.group("code") is not None:
             parts += _text_segments(match.group("code"), {"code": True})
         elif match.group("label") is not None:
-            parts += _text_segments(match.group("label"), href=match.group("href"))
+            # Notion links only absolute http(s) URLs and rejects the whole request for anything
+            # else (`#notes`, `./spec.md`), so those keep their label as plain text.
+            href = match.group("href")
+            parts += _text_segments(match.group("label"), href=href if _is_web_url(href) else None)
         else:
             parts += _text_segments(match.group("italic"), {"italic": True})
         position = match.end()
@@ -597,7 +673,7 @@ def _blocks(kind: str, text: str = "", **extra: Any) -> list[dict[str, Any]]:
     if kind == "divider":
         return [{"object": "block", "type": kind, kind: dict(extra)}]
     parts = _inline_segments(text)
-    chunks = [parts[i : i + _MAX_RICH_TEXT] for i in range(0, len(parts), _MAX_RICH_TEXT)] or [[]]
+    chunks = _chunks(parts, count=_MAX_RICH_TEXT) or [[]]
     follow = kind if kind in ("paragraph", "quote") else "paragraph"
     blocks = [{"object": "block", "type": kind, kind: {"rich_text": chunks[0], **extra}}]
     blocks += [{"object": "block", "type": follow, follow: {"rich_text": chunk}} for chunk in chunks[1:]]
@@ -629,14 +705,14 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
                 code.append(lines[i])
                 i += 1
             segments = _text_segments("\n".join(code)) or _text_segments(" ")
-            # A fence past 100 segments of 2000 characters continues in further code blocks.
-            for start in range(0, len(segments), _MAX_RICH_TEXT):
+            # A fence past 100 segments (or one request's size) continues in further code blocks.
+            for chunk in _chunks(segments, count=_MAX_RICH_TEXT):
                 blocks.append(
                     {
                         "object": "block",
                         "type": "code",
                         "code": {
-                            "rich_text": segments[start : start + _MAX_RICH_TEXT],
+                            "rich_text": chunk,
                             "language": language if language in _CODE_LANGUAGES else "plain text",
                         },
                     }
@@ -761,25 +837,21 @@ async def _blocks_markdown(
 async def _append_blocks(
     tool: Any, block_id: str, blocks: list[dict[str, Any]], *, written: int = 0, created: bool = False
 ) -> int:
-    """Append ``blocks`` in batches of 100; ``written`` blocks are already there (sent with the create).
+    """Append ``blocks`` in batches of at most 100 blocks and ~400 KB; ``written`` blocks are already
+    there (sent with the create).
 
     A batch that fails after others landed raises ``NotionPartialWriteError`` saying how much is on
     the page, so the model does not repeat the whole write and duplicate it.
     """
     total = written + len(blocks)
-    for start in range(0, len(blocks), _MAX_CHILDREN):
+    done = written
+    for batch in _chunks(blocks, count=_MAX_CHILDREN):
         try:
-            await _notion_request(
-                tool,
-                "PATCH",
-                f"/blocks/{block_id}/children",
-                json_body={"children": blocks[start : start + _MAX_CHILDREN]},
-            )
+            await _notion_request(tool, "PATCH", f"/blocks/{block_id}/children", json_body={"children": batch})
         except Exception as exc:
-            done = written + start
             if done == 0:
                 raise  # nothing landed: the error stands as it is
-            first = blocks[start]
+            first = batch[0]
             resume = plain_text((first.get(first.get("type", "")) or {}).get("rich_text"))[:80]
             resume_hint = f' (the first one not written begins "{resume}")' if resume else ""
             if created:
@@ -807,12 +879,13 @@ async def _append_blocks(
                 blocks_written=done,
                 blocks_total=total,
             ) from exc
+        done += len(batch)
     return total
 
 
 async def _resolve_data_source(tool: Any, ref: str) -> dict[str, Any]:
     """The data source for a database or data source ID/URL (a database with several must be disambiguated)."""
-    object_id = normalize_id(ref)
+    object_id = normalize_id(ref, peek=False)  # a peek link's `p` is a row; the database is its path
     try:
         database = await _notion_request(tool, "GET", f"/databases/{object_id}")
     except NotionAPIError as exc:
@@ -882,7 +955,7 @@ class NotionWhoAmI(_NotionTool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _whoami() -> Any:
-            auth = await _resolve_auth(self)
+            auth = await _call_auth(self)
             me = await _notion_request(self, "GET", "/users/me")
             bot = me.get("bot") or {}
             owner = bot.get("owner") or {}
@@ -1072,11 +1145,18 @@ class NotionCreatePage(_NotionTool):
             blocks = markdown_to_blocks(content) if content else []
             # `parent`, not `parent_id`: Runnable reserves `parent_id` for chaining runs.
             body: dict[str, Any] = {"parent": parent_ref, "properties": props}
-            if blocks:
-                body["children"] = blocks[:_MAX_CHILDREN]
+            # The first batch goes with the create, within what the properties leave of the request;
+            # when they leave too little, the create carries no content and everything is appended.
+            batches = _chunks(blocks, count=_MAX_CHILDREN)
+            first = batches[0] if batches else []
+            if first and _json_size(props) + _json_size(first) > _MAX_REQUEST_BYTES:
+                first = []
+            if first:
+                body["children"] = first
             page = await _notion_request(self, "POST", "/pages", json_body=body)
-            if len(blocks) > _MAX_CHILDREN:
-                await _append_blocks(self, page["id"], blocks[_MAX_CHILDREN:], written=_MAX_CHILDREN, created=True)
+            rest = blocks[len(first) :]
+            if rest:
+                await _append_blocks(self, page["id"], rest, written=len(first), created=True)
             return {**page_summary(page, with_properties=False), "blocks_written": len(blocks)}
 
         super().__init__(handler=_create_page, **kwargs)
