@@ -449,6 +449,63 @@ def test_rich_text_respects_notion_limits() -> None:
     assert len(many) <= 100
 
 
+def _text(parts: list[dict[str, Any]]) -> str:
+    return "".join(p["text"]["content"] for p in parts)
+
+
+def _within_limits(blocks: list[dict[str, Any]]) -> None:
+    for block in blocks:
+        parts = block[block["type"]].get("rich_text", [])
+        assert len(parts) <= 100
+        assert all(len(p["text"]["content"]) <= 2000 for p in parts)
+
+
+def test_rich_text_keeps_all_the_text_past_100_segments() -> None:
+    line = " ".join(f"**b{i}**" for i in range(150))
+    parts = rich_text(line)
+    assert len(parts) <= 100
+    assert _text(parts) == line.replace("**", "")  # formatting gives way, the text does not
+    assert parts[0]["annotations"] == {"bold": True}
+
+
+def test_rich_text_too_long_for_one_value_raises() -> None:
+    with pytest.raises(ValueError, match="too long for one Notion value"):
+        rich_text("x" * 200_001)
+
+
+def test_long_paragraph_continues_in_further_blocks() -> None:
+    text = "y" * 250_000
+    blocks = markdown_to_blocks(text)
+    _within_limits(blocks)
+    assert [b["type"] for b in blocks] == ["paragraph", "paragraph"]
+    assert "".join(_text(b["paragraph"]["rich_text"]) for b in blocks) == text
+
+
+def test_heavily_formatted_line_keeps_its_formatting_across_blocks() -> None:
+    line = " ".join(f"**b{i}**" for i in range(150))
+    blocks = markdown_to_blocks(f"- {line}")
+    _within_limits(blocks)
+    # 150 bold runs and the 149 spaces between them: 299 segments, three blocks.
+    assert [b["type"] for b in blocks] == ["bulleted_list_item", "paragraph", "paragraph"]
+    parts = [p for b in blocks for p in b[b["type"]]["rich_text"]]
+    assert _text(parts) == line.replace("**", "")
+    assert sum(1 for p in parts if p.get("annotations") == {"bold": True}) == 150
+
+
+def test_long_code_fence_continues_in_further_code_blocks() -> None:
+    code = "z" * 250_000
+    blocks = markdown_to_blocks(f"```python\n{code}\n```")
+    _within_limits(blocks)
+    assert [(b["type"], b["code"]["language"]) for b in blocks] == [("code", "python"), ("code", "python")]
+    assert "".join(_text(b["code"]["rich_text"]) for b in blocks) == code
+
+
+def test_to_do_keeps_checked_only_on_its_first_block() -> None:
+    blocks = markdown_to_blocks("- [x] " + "w" * 210_000)
+    assert [b["type"] for b in blocks] == ["to_do", "paragraph"]
+    assert blocks[0]["to_do"]["checked"] is True
+
+
 def test_links_and_italic() -> None:
     parts = rich_text("see [docs](https://example.com) and *this*")
     assert parts[1]["text"]["link"] == {"url": "https://example.com"}

@@ -547,8 +547,8 @@ def _text_segments(text: str, annotations: dict[str, bool] | None = None, href: 
     return segments
 
 
-def rich_text(text: str) -> list[dict[str, Any]]:
-    """Notion rich_text for a line of Markdown: **bold**, *italic*, `code` and [links](url)."""
+def _inline_segments(text: str) -> list[dict[str, Any]]:
+    """Every rich_text segment for a line of Markdown, with no cap on how many."""
     parts: list[dict[str, Any]] = []
     position = 0
     for match in _INLINE.finditer(text):
@@ -565,16 +565,43 @@ def rich_text(text: str) -> list[dict[str, Any]]:
         position = match.end()
     if position < len(text):
         parts += _text_segments(text[position:])
-    if len(parts) > _MAX_RICH_TEXT:  # keep the text, drop the formatting past the limit
-        tail = "".join(p["text"]["content"] for p in parts[_MAX_RICH_TEXT - 1 :])
-        parts = parts[: _MAX_RICH_TEXT - 1] + _text_segments(tail)[:1]
     return parts
 
 
-def _block(kind: str, text: str = "", **extra: Any) -> dict[str, Any]:
-    body: dict[str, Any] = {"rich_text": rich_text(text)} if kind != "divider" else {}
-    body.update(extra)
-    return {"object": "block", "type": kind, kind: body}
+def rich_text(text: str) -> list[dict[str, Any]]:
+    """Notion rich_text for one value that cannot be split (a title, a comment): **bold**, *italic*,
+    `code` and [links](url), within Notion's 100 segments of 2000 characters.
+
+    Past 100 segments the formatting goes before the text does: the trailing segments are merged
+    into plain text. Text that would not fit even then raises instead of being cut.
+    """
+    parts = _inline_segments(text)
+    if len(parts) <= _MAX_RICH_TEXT:
+        return parts
+    for keep in range(_MAX_RICH_TEXT - 1, -1, -1):
+        tail = _text_segments("".join(p["text"]["content"] for p in parts[keep:]))
+        if keep + len(tail) <= _MAX_RICH_TEXT:
+            return parts[:keep] + tail
+    raise ValueError(
+        f"Text of {len(text):,} characters is too long for one Notion value "
+        f"(at most {_MAX_RICH_TEXT * _MAX_TEXT:,}): shorten it."
+    )
+
+
+def _blocks(kind: str, text: str = "", **extra: Any) -> list[dict[str, Any]]:
+    """One block, or several when its text needs more than Notion's 100 rich_text segments.
+
+    Nothing is dropped: the overflow goes into continuation blocks, of the same kind for
+    paragraphs and quotes, plain paragraphs after a heading or a list item.
+    """
+    if kind == "divider":
+        return [{"object": "block", "type": kind, kind: dict(extra)}]
+    parts = _inline_segments(text)
+    chunks = [parts[i : i + _MAX_RICH_TEXT] for i in range(0, len(parts), _MAX_RICH_TEXT)] or [[]]
+    follow = kind if kind in ("paragraph", "quote") else "paragraph"
+    blocks = [{"object": "block", "type": kind, kind: {"rich_text": chunks[0], **extra}}]
+    blocks += [{"object": "block", "type": follow, follow: {"rich_text": chunk}} for chunk in chunks[1:]]
+    return blocks
 
 
 def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
@@ -585,7 +612,7 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
 
     def flush() -> None:
         if paragraph:
-            blocks.append(_block("paragraph", "\n".join(paragraph)))
+            blocks.extend(_blocks("paragraph", "\n".join(paragraph)))
             paragraph.clear()
 
     i = 0
@@ -601,17 +628,19 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
             while i < len(lines) and not lines[i].strip().startswith("```"):
                 code.append(lines[i])
                 i += 1
-            content = "\n".join(code)
-            blocks.append(
-                {
-                    "object": "block",
-                    "type": "code",
-                    "code": {
-                        "rich_text": _text_segments(content) or _text_segments(" "),
-                        "language": language if language in _CODE_LANGUAGES else "plain text",
-                    },
-                }
-            )
+            segments = _text_segments("\n".join(code)) or _text_segments(" ")
+            # A fence past 100 segments of 2000 characters continues in further code blocks.
+            for start in range(0, len(segments), _MAX_RICH_TEXT):
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": "code",
+                        "code": {
+                            "rich_text": segments[start : start + _MAX_RICH_TEXT],
+                            "language": language if language in _CODE_LANGUAGES else "plain text",
+                        },
+                    }
+                )
             i += 1
             continue
         heading = re.match(r"^(#{1,3})\s+(.*)$", stripped)
@@ -622,22 +651,22 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
             flush()
         elif heading:
             flush()
-            blocks.append(_block(f"heading_{len(heading.group(1))}", heading.group(2)))
+            blocks.extend(_blocks(f"heading_{len(heading.group(1))}", heading.group(2)))
         elif re.fullmatch(r"(-{3,}|\*{3,}|_{3,})", stripped):
             flush()
-            blocks.append(_block("divider"))
+            blocks.extend(_blocks("divider"))
         elif todo:
             flush()
-            blocks.append(_block("to_do", todo.group(2), checked=todo.group(1).lower() == "x"))
+            blocks.extend(_blocks("to_do", todo.group(2), checked=todo.group(1).lower() == "x"))
         elif bullet:
             flush()
-            blocks.append(_block("bulleted_list_item", bullet.group(1)))
+            blocks.extend(_blocks("bulleted_list_item", bullet.group(1)))
         elif numbered:
             flush()
-            blocks.append(_block("numbered_list_item", numbered.group(1)))
+            blocks.extend(_blocks("numbered_list_item", numbered.group(1)))
         elif stripped.startswith(">"):
             flush()
-            blocks.append(_block("quote", stripped.lstrip(">").strip()))
+            blocks.extend(_blocks("quote", stripped.lstrip(">").strip()))
         else:
             paragraph.append(stripped)
         i += 1
