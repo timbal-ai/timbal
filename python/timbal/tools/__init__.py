@@ -749,6 +749,12 @@ if TYPE_CHECKING:
         PowerBIListWorkspaces,
         PowerBIQueryDataset,
     )
+    from .qlik import (
+        QlikGetAppFields,
+        QlikListApps,
+        QlikQuery,
+        QlikWhoAmI,
+    )
     from .quiver_ai import (
         QuiverAIGenerateSVG,
         QuiverAIGetModel,
@@ -2542,6 +2548,10 @@ __all__ = [
     "PowerBIQueryDataset",
     "PowerBIListReports",
     "PowerBIGetReport",
+    "QlikGetAppFields",
+    "QlikListApps",
+    "QlikQuery",
+    "QlikWhoAmI",
     "KreaCancelJob",
     "KreaGenerateImage",
     "KreaGenerateVideo",
@@ -3837,6 +3847,10 @@ _LAZY_IMPORTS = {
     "PowerBIQueryDataset": ".powerbi",
     "PowerBIListReports": ".powerbi",
     "PowerBIGetReport": ".powerbi",
+    "QlikGetAppFields": ".qlik",
+    "QlikListApps": ".qlik",
+    "QlikQuery": ".qlik",
+    "QlikWhoAmI": ".qlik",
     "KreaCancelJob": ".krea",
     "KreaGenerateImage": ".krea",
     "KreaGenerateVideo": ".krea",
