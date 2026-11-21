@@ -10,7 +10,7 @@ from timbal import Agent
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     guardrails="default",  # PII redaction + secret redaction + prompt-injection blocking
 )
 ```
@@ -28,7 +28,7 @@ The edges:
 ### One string
 
 ```python
-agent = Agent(name="a", model="openai/gpt-5-mini", guardrails="default")
+agent = Agent(name="a", model="openai/gpt-6.1-terra", guardrails="default")
 ```
 
 `"default"` is deterministic and free — no classifier calls: `DetectPII(action="redact")` + `RedactSecrets()` + `PromptInjection(action="block")`.
@@ -40,7 +40,7 @@ from timbal import Agent
 
 agent = Agent(
     name="a",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     guardrails=["pii:redact", "injection:block", "secrets", "moderation:warn"],
 )
 ```
@@ -55,7 +55,7 @@ from timbal.guardrails import DetectPII, Moderate, PromptInjection, TopicGuard
 
 agent = Agent(
     name="scoped",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     guardrails=[
         DetectPII(on_input="redact", on_output="block", types=["email", "credit_card", "ssn"]),
         PromptInjection(action="block"),
@@ -81,7 +81,7 @@ def no_competitors(text: str):
 
 agent = Agent(
     name="competitor_guard",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     guardrails=[guardrail(no_competitors, stages=["model_output"])],
 )
 ```
@@ -93,7 +93,7 @@ Return-value coercion: `True`/`None` allow, `False` blocks, a `str` replaces the
 ```python
 from timbal.guardrails import LLMJudge
 
-LLMJudge("Response must not give medical advice", model="openai/gpt-5-mini", action="retry")
+LLMJudge("Response must not give medical advice", model="openai/gpt-6.1-terra", action="retry")
 ```
 
 With `action="retry"` the judge's critique is fed back to the model and the response is re-generated — bounded by `Agent(max_guardrail_retries=2)`. Exhaustion blocks with the last reason.
@@ -160,7 +160,7 @@ def gate_prod(text):
 
 agent = Agent(
     name="deploy_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     tools=[deploy],
     guardrails=[guardrail(gate_prod, stages=["tool_args"])],
 )
@@ -192,7 +192,7 @@ from timbal import Agent
 
 agent = Agent(
     name="shadow_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     guardrails=["pii:redact", "injection:block"],
     guardrail_mode="shadow",
 )
@@ -210,7 +210,7 @@ from timbal.guardrails import LLMJudge
 
 agent = Agent(
     name="sampled_monitor",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     guardrails=[
         LLMJudge(
             rubric=["Answers the question directly", "Cites a source"],
@@ -259,7 +259,7 @@ provider = JsonlTracingProvider.configured(
 )
 agent = Agent(
     name="redacted_traces",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     tracing_provider=provider,
     guardrails="default",
 )
@@ -312,7 +312,7 @@ It does not catch non-English attacks, base64 or character-separated obfuscation
 paraphrases that avoid the keywords entirely. Those need the classifier:
 
 ```python
-PromptInjection(model="openai/gpt-5-mini")  # patterns first; classifier only when they find nothing
+PromptInjection(model="openai/gpt-6.1-terra")  # patterns first; classifier only when they find nothing
 ```
 
 Treat either as defence in depth, not a boundary: the durable mitigations are least-privilege

@@ -86,7 +86,7 @@ from timbal.types.events import InteractionEvent, OutputEvent
 
 agent = Agent(
     name="onboarding_assistant",
-    model="openai/gpt-5",
+    model="openai/gpt-6.1-sol",
     tools=[ask_text, ask_choice, ask_user_multi, confirm, ask_form, ask_rating],
     system_prompt=(
         "You onboard new users. Gather what you need by calling the interaction "
@@ -205,7 +205,7 @@ from timbal.state.tracing.providers import JsonlTracingProvider
 
 agent = Agent(
     name="onboarding_assistant",
-    model="openai/gpt-5",
+    model="openai/gpt-6.1-sol",
     tools=[ask_text, ask_form, confirm],
     tracing_provider=JsonlTracingProvider.configured(path=Path("traces.jsonl")),
 )

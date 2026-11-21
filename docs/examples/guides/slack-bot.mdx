@@ -125,7 +125,7 @@ from timbal import Agent
 agent = Agent(
     name="SlackAgent",
     system_prompt="You are a tech support AI assistant. Help users with their technical questions clearly and concisely.",
-    model="openai/gpt-4.1-mini",
+    model="openai/gpt-6-luna",
     pre_hook=pre_hook,
     post_hook=post_hook,
 )
@@ -275,7 +275,7 @@ def post_hook():
 agent = Agent(
     name="SlackAgent",
     system_prompt="You are a tech support AI assistant. Help users with their technical questions clearly and concisely.",
-    model="openai/gpt-4.1-mini",
+    model="openai/gpt-6-luna",
     pre_hook=pre_hook,
     post_hook=post_hook,
 )
@@ -392,7 +392,7 @@ Your Slack bot is now ready! 🚀 Start a direct message with your bot or mentio
   
   <Accordion title="Agent Not Processing Messages">
     - Check that OpenAI API key is valid and has sufficient credits
-    - Verify agent model name is correct (e.g., `openai/gpt-4o-mini`)
+    - Verify agent model name is correct (e.g., `openai/gpt-6-luna`)
     - Ensure pre-hook is setting `span.input["prompt"]` correctly
     - Add logging to debug webhook payload structure
   </Accordion>

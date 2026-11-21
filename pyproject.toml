@@ -164,6 +164,9 @@ convention = "google"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# A test still running after 5 minutes is hung: print every thread's stack (the run goes on waiting; CI's job
+# timeout ends it). Without it a hang shows only the test's name.
+faulthandler_timeout = 300
 markers = [
   "integration: marks tests that need real services (LLM keys, Timbal platform/KB, network); default run uses '-m not integration'",
 ]

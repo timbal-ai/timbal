@@ -23,7 +23,7 @@ from timbal.voice import (
 async def converse(microphone_chunks, playback):
     agent = Agent(
         name="voice_assistant",
-        model="openai/gpt-5-mini",
+        model="openai/gpt-6.1-terra",
         system_prompt="Reply in short spoken sentences.",
     )
     session = VoiceSession(

@@ -397,7 +397,7 @@ async def _call_summarizer(model: Any, prompt: str, max_summary_tokens: int) -> 
         messages=[prompt_message],
         system_prompt="You are a conversation summarizer. Produce structured, factual summaries. Never invent facts.",
         max_tokens=max_summary_tokens,
-        temperature=0.0,
+        # No temperature: newer models reject it (Claude Haiku 5.5: "`temperature` is deprecated for this model").
     )
 
     # Get first chunk to determine collector type
@@ -715,7 +715,7 @@ def summarize(
         threshold: Trigger summarization when message count exceeds this.
         model: Model for summarization. Defaults to None, which uses the
             agent's own model. Override with a cheaper model like
-            'openai/gpt-5-mini' to reduce cost.
+            'anthropic/claude-haiku-5-5' to reduce cost.
         keep_last_n: Number of recent messages to keep unsummarized.
         max_summary_tokens: Maximum tokens for the summary response.
         preserve_user_messages: Carry the user's messages from the summarized region
@@ -855,6 +855,8 @@ def summarize(
                 "content": _build_summary_message_text(
                     summary_text, verbatim_entries, transcript_handles, rehydrated, max_verbatim_chars
                 ),
+                # Model-written: never a person's words (an approval reviewer must not read it as authorization).
+                "metadata": {"source": RUNTIME_SOURCE, "kind": "compaction_summary"},
             }
         )
 

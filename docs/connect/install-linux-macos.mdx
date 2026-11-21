@@ -8,7 +8,7 @@ description: "Install Timbal Connect as a systemd or launchd service"
 - Linux on x86_64 or aarch64 (any distribution; the binary is static) with systemd, or macOS on Intel or Apple silicon
 - `root` or `sudo`
 - `curl` and `sha256sum` (Linux) or `shasum` (macOS)
-- The [network requirements](/connect/network-requirements) in place: direct outbound TCP 443 to `api.timbal.ai`, no TLS inspection
+- The [network requirements](/connect/network-requirements) in place: outbound TCP 443 to `api.timbal.ai`, direct or through an HTTP proxy
 - An [enrollment token](/api-reference/connectors/enrollment-tokens/create), unused and not expired
 
 ## Install
@@ -24,8 +24,9 @@ The script detects the OS and architecture, downloads the connector, verifies it
 | `--token <token>` | Enrollment token. Required on first install. Omit it to upgrade; pass a new one to re-enroll |
 | `--url <wss://...>` | Control plane, if Timbal gave you a non-default one. On an existing install it defaults to the one the server is configured for |
 | `--version <vX.Y.Z>` | Pin a connector version (default `latest`) |
+| `--proxy <http://host:port>` | HTTP proxy for the downloads and the service (0.1.33 or newer) |
 
-Then add your databases and file shares: [Configure connections](/connect/connections).
+Then add your databases and file shares: [Configure connections](/connect/connections), or follow the [Guided setup](/connect/guided-setup).
 
 ### Without the install script
 
@@ -83,6 +84,21 @@ If the first attempt used an expired or already-used token, or the connector was
 ```bash
 sudo /opt/timbal-connect/current/timbal-connect service uninstall           # keeps configuration and credentials
 sudo /opt/timbal-connect/current/timbal-connect service uninstall --purge   # removes everything
+```
+
+If the binary is gone or `service uninstall` fails, remove everything by hand:
+
+```bash
+# Linux
+sudo systemctl disable --now timbal-connect
+sudo rm -f /etc/systemd/system/timbal-connect.service
+sudo systemctl daemon-reload
+sudo rm -rf /etc/timbal-connect /var/lib/timbal-connect /opt/timbal-connect
+
+# macOS
+sudo launchctl bootout system/ai.timbal.connect
+sudo rm -f /Library/LaunchDaemons/ai.timbal.connect.plist /Library/Logs/timbal-connect.log
+sudo rm -rf /etc/timbal-connect /var/lib/timbal-connect /opt/timbal-connect
 ```
 
 Uninstalling doesn't revoke the connector in Timbal; revoke it too if the server leaves your control: [Revoke connector](/api-reference/connectors/revoke). Reinstalling always needs a new enrollment token.

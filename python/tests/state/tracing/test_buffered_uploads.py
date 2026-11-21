@@ -114,14 +114,18 @@ async def test_buffered_coalesces_and_the_end_of_the_run_lands_last():
 
 
 async def test_a_slow_store_no_longer_holds_the_run():
-    sync = make_storage(delay=0.1)
-    _, sync_seconds = await run_agent(sync, rounds=3, per_round=2)
-    buffered = make_storage(delay=0.1).configured(durability="buffered", flush_interval_s=0.5)
+    # Counted, not timed: two runs timed against each other race whatever else the runner is doing.
+    sync = make_storage()
+    await run_agent(sync, rounds=3, per_round=2)
+    delay = 0.4
+    awaiting_every_save = len(sync.stored) * delay  # ~4.4 s: what a run holding on each store would take
+    buffered = make_storage(delay=delay).configured(durability="buffered", flush_interval_s=0.5)
     output, buffered_seconds = await run_agent(buffered, rounds=3, per_round=2)
-    assert buffered_seconds < sync_seconds / 2, (buffered_seconds, sync_seconds)
+    # The run waits for its end barrier and an upload in flight then: ~2 stores (~0.8 s), not one per span.
+    # The bound leaves the runner over a second of slack and still fails a run that waits per span.
+    assert buffered_seconds < awaiting_every_save / 2, (buffered_seconds, awaiting_every_save)
+    assert output.usage["tracing:wait_ms"] < awaiting_every_save * 1000 / 2
     assert buffered.stored[-1]["finished"]
-    # The run waited only for its end barrier (and an upload in flight then), not per span.
-    assert output.usage["tracing:wait_ms"] < sync_seconds * 1000 / 2
 
 
 async def test_a_barrier_save_is_stored_before_it_returns():

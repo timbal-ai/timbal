@@ -5,14 +5,14 @@ description: "Timbal's on-premises data gateway: use databases and file shares o
 
 Timbal Connect is Timbal's **on-premises data gateway**: a service you install on a server inside your network that acts as a bridge between your databases and file shares and Timbal. It opens one outbound, encrypted connection to Timbal and waits for instructions: browse a schema, run a read-only query, sync a table into a knowledge base, or copy files.
 
-You never open an inbound port, and **database credentials never leave the server**. Timbal only knows each connection by the name you give it; the connection string lives in a file on the server.
+You never open an inbound port, and **database credentials stay on the server** (unless you choose to [push configuration from Timbal](/connect/operate#change-the-configuration-from-timbal)). Timbal only knows each connection by the name you give it; the connection string lives in a file on the server.
 
 ## How it works
 
 1. You create an **enrollment token** in Timbal: a single-use key, valid for 24 hours by default, that lets one server register itself.
 2. You run the installer on the server. It checks the network path, downloads the connector, and registers it as a system service (a Windows service, a systemd unit or a launchd job).
 3. On first start the connector trades the token for its own credential and connects. The token is consumed and can't be reused.
-4. You list your databases in a local `connections.json` file, and any file shares in `config.json`. From then on, Timbal can use them by name.
+4. You list your databases in a local `connections.json` file (or inside `config.json`), and any file shares in `config.json`. From then on, Timbal can use them by name.
 
 The connector updates itself when Timbal pushes a new version, and rolls back automatically if the new version can't connect.
 
@@ -23,7 +23,7 @@ The connector updates itself when Timbal pushes a new version, and rolls back au
 | PostgreSQL | Any version with a standard wire protocol |
 | SQL Server | SQL logins, Windows-integrated authentication and NTLM, named instances |
 | MySQL / MariaDB | Standard user/password |
-| File shares | Local or mounted directories you list in [`config.json`](/connect/connections#file-shares) |
+| File shares | Local or mounted directories you list in [`config.json`](/connect/connections#file-shares). Read-only: Timbal can browse, search and copy files out |
 
 Supported platforms: Windows Server 2016 or newer (x64 and ARM64), Linux (x86_64 and aarch64, any distribution) and macOS (Intel and Apple silicon).
 
@@ -43,14 +43,14 @@ If you've set up Microsoft's on-premises data gateway for Power BI or Fabric, yo
 
 Two differences matter when you set it up:
 
-- **Connections live on the server, not in the cloud.** There is no "add data source" screen in Timbal where you type a server name and password. You list connections in a file on the gateway server, and Timbal refers to them by name. Your database passwords are never stored in Timbal.
-- **Some gateway features aren't available yet.** Timbal Connect can't go through an HTTP proxy: it needs direct outbound access to `api.timbal.ai` (see [Network requirements](/connect/network-requirements)). There are no gateway clusters either: each server is its own connector, and the queries and syncs you assign to a connector run only on that server.
+- **Connections live on the server, not in the cloud.** There is no "add data source" screen in Timbal where you type a server name and password. You list connections in a file on the gateway server, and Timbal refers to them by name. Your database passwords are not stored in Timbal.
+- **Some gateway features aren't available yet.** There are no gateway clusters: each server is its own connector, and the queries and syncs you assign to a connector run only on that server. HTTP proxies work (connector 0.1.33 or newer) as long as they don't require NTLM or Kerberos authentication (see [Network requirements](/connect/network-requirements#proxies)).
 
 ## Before you start
 
 <Steps>
   <Step title="Check the network">
-    The server needs direct outbound HTTPS (TCP 443) to `api.timbal.ai`, with WebSocket allowed and no TLS inspection on that host. This is the most common blocker, so check it first: [Network requirements](/connect/network-requirements).
+    The server needs outbound HTTPS (TCP 443) to `api.timbal.ai`, directly or through an HTTP proxy, with WebSocket allowed. TLS inspection on that host must be off, or its root certificate installed on the server. This is the most common blocker, so check it first: [Network requirements](/connect/network-requirements).
   </Step>
   <Step title="Get an enrollment token">
     Ask your Timbal contact for one, or create it with the API: [Create enrollment token](/api-reference/connectors/enrollment-tokens/create). The token is shown once and expires after 24 hours unless you set `ttl_secs` (up to 30 days).
@@ -61,9 +61,19 @@ Two differences matter when you set it up:
   <Step title="Add your connections">
     Tell the connector which databases and file shares it may use: [Configure connections](/connect/connections).
   </Step>
+  <Step title="Check and use it">
+    Run `doctor` on the server, then browse, query and sync from Timbal: [Operate the connector](/connect/operate) and [Sync your data](/connect/sync-data).
+  </Step>
 </Steps>
 
+<Tip>
+Rather follow one path than read the reference? [Guided setup](/connect/guided-setup) asks for your operating system and database, and gives you the exact commands and files for that combination.
+</Tip>
+
 <CardGroup cols={2}>
+  <Card title="Guided setup" icon="wand-magic-sparkles" href="/connect/guided-setup">
+    Pick your system and database, get the commands.
+  </Card>
   <Card title="Network requirements" icon="network-wired" href="/connect/network-requirements">
     What to ask your IT team for, and how to check it.
   </Card>

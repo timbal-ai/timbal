@@ -91,7 +91,13 @@ async def lifespan(
         if isinstance(runnable, Agent) and voice_warmup_intended(runnable)
         else None
     )
+    # Durable chat sessions with work waiting (a queued message, a turn the last process died in) go on now.
+    from .chat import restore_chat_sessions
+
     try:
+        # Inside the try: whatever fails here, what startup already began (the voice warmup, the LiveKit
+        # driver) is stopped below, not left running in a server that never came up.
+        await restore_chat_sessions(app)
         yield
     finally:
         from .chat import close_chat_sessions
@@ -419,9 +425,7 @@ def create_app() -> FastAPI:
             status_code=200,
             content={
                 "run_id": run_id,
-                "events": [
-                    {"seq": seq, "data": event.model_dump(mode="json")} for seq, event in events
-                ],
+                "events": [{"seq": seq, "data": event.model_dump(mode="json")} for seq, event in events],
                 "next_cursor": next_cursor,
                 "done": done,
                 "expired": False,

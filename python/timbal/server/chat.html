@@ -235,6 +235,7 @@
           <span class="label">While busy</span>
           <div class="seg" id="modes" role="radiogroup" aria-label="Busy mode">
             <button type="button" data-mode="steer" class="on" title="Join the running turn after its current tool batch">Steer</button>
+            <button type="button" data-mode="now" title="Join the running turn right away: cut its answer or its read-only tools">Now</button>
             <button type="button" data-mode="followup" title="Wait for a turn of its own">Follow-up</button>
             <button type="button" data-mode="collect" title="Merge with other collected messages into one later turn">Collect</button>
             <button type="button" data-mode="interrupt" title="Cancel the running turn and run this first">Interrupt</button>
@@ -271,6 +272,7 @@
   const api = (path) => new URL(`sessions${path}`, new URL("./", location.href)).toString();
   const MODE_HINTS = {
     steer: "joins the running turn after its current tool call",
+    now: "joins the running turn right away, cutting its answer or read-only tools",
     followup: "gets a turn of its own after the running one",
     collect: "waits for a quiet moment, then one turn for all collected",
     interrupt: "cuts the running turn and runs first",
@@ -368,6 +370,7 @@
     m.row.classList.remove("waiting");
     const turn = S.turns[record.run_id];
     if (record.state === "superseded") { m.badge.className = "badge superseded"; m.badge.textContent = "superseded"; return; }
+    if (record.state === "withdrawn") { m.badge.className = "badge superseded"; m.badge.textContent = "not sent"; return; }
     if (!turn) { m.badge.className = "badge"; m.badge.textContent = "delivered"; return; }
     if (turn.eventIds.includes(record.event_id)) {
       m.badge.className = "badge started"; m.badge.textContent = `started turn ${turn.n}`;
@@ -434,6 +437,18 @@
       (S.toolQueue[key] = S.toolQueue[key] || []).push(entry);
     }
     return entry;
+  }
+
+  // A model call starts only once the tools of the call before it have: a card still waiting for its START
+  // then was never run (its answer was cut by a 'now' message before its tools ran, or it named a tool the
+  // agent does not have). Left in the queue, it would take the START and the result of the next call to a
+  // tool of that name.
+  function expireQueuedTools(runId) {
+    Object.keys(S.toolQueue).forEach((key) => {
+      if (!key.startsWith(`${runId}:`)) return;
+      S.toolQueue[key].forEach((t) => { t.state.className = "state"; t.state.textContent = "not run"; });
+      delete S.toolQueue[key];
+    });
   }
 
   // A provider-side result block (tool_search_tool_result, web_search_tool_result) closes its server card.
@@ -524,6 +539,18 @@
       case "message_settled":
         settleMessage(d);
         break;
+      case "restored": {
+        // A new server process took the session over; the turn the old one ran never sent its end.
+        Object.values(S.toolByCall).forEach((t) => {
+          if (t.state.classList.contains("run")) { t.state.className = "state bad"; t.state.textContent = "cut by restart"; }
+        });
+        S.busy = false; S.runId = null;
+        const how = { continued: " · the cut turn is being recovered", requeued: " · the cut turn's messages run again",
+          finished: "", notified: " · the next turn is told about the cut one", dropped: "" }[d.recovered] || "";
+        note(`↻ server restarted: session restored${how}`, "warn");
+        refreshState();
+        break;
+      }
       case "turn_started": {
         S.turnNo += 1;
         const trigger = d.trigger || {};
@@ -577,6 +604,9 @@
       case "wake_superseded":
         note("⏰ an older wake with the same key was replaced", "wake");
         break;
+      case "wake_withdrawn":
+        note("⏰ a wake could not be stored and was taken back", "warn");
+        break;
       case "closed":
         note("session closed", "warn");
         break;
@@ -590,6 +620,8 @@
     if (d.type === "START" && d.parent_call_id === null) { turn.rootCallId = d.call_id; return; }
     const direct = turn.rootCallId && d.parent_call_id === turn.rootCallId;
     const isLlm = direct && d.path.endsWith(".llm");
+
+    if (d.type === "START" && isLlm) { expireQueuedTools(d.run_id); return; }
 
     if (d.type === "DELTA") {
       const item = d.item || {};
@@ -767,8 +799,21 @@
       $("head-id").textContent = short(state.head);
       $("head-id").title = state.head || "";
       S.parked = state.parked;
+      pendingCards(state);
       setStatus();
     } catch { /* the stream will say if the server went away */ }
+  }
+
+  // What a parked session waits for, from its state: the events that asked are not in the log of a session
+  // the server restored (or of one whose log dropped them), so without this there is no button to answer.
+  // askCard() skips an id it already shows, so the live events and this can both run, in either order.
+  function pendingCards(state) {
+    for (const a of state.pending_approvals || []) {
+      askCard("approval", { ...a, runnable_path: a.path, runnable_name: (a.path || "").split(".").pop() });
+    }
+    for (const i of state.pending_interactions || []) {
+      askCard("interaction", { ...i, runnable_path: i.path, runnable_name: (i.path || "").split(".").pop() });
+    }
   }
 
   function resetView() {
@@ -803,7 +848,7 @@
       if (d.type === "SESSION") onSession(d);
       else onRunEvent(d);
     };
-    es.addEventListener("gapped", () => note("the event log dropped older entries", "warn"));
+    es.addEventListener("gapped", () => note("some events are no longer in the log (dropped, or the server restarted)", "warn"));
     refreshState();
     setStatus();
   }
@@ -874,6 +919,7 @@
       $("agent-name").textContent = meta.agent || "?";
       $("agent-chip").title = meta.model ? `model: ${meta.model}` : "";
       if (!meta.is_agent) { note("the served runnable is not an Agent: chat sessions are unavailable", "warn"); return; }
+      if (meta.store_error) { note(`chat sessions are unavailable: ${meta.store_error}`, "warn"); return; }
     } catch { $("agent-name").textContent = "?"; }
     const match = location.hash.match(/s=([0-9a-f]+)/);
     if (match) {

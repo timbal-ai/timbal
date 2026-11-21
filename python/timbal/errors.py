@@ -45,7 +45,9 @@ class MaxIterExceeded(TimbalError):
     """Raised when an agent with ``on_max_iter="error"`` exhausts ``max_iter`` without a final answer."""
 
     def __init__(self, max_iter: int) -> None:
-        super().__init__(f"Agent exhausted its iteration budget (max_iter={max_iter}) without producing a final answer.")
+        super().__init__(
+            f"Agent exhausted its iteration budget (max_iter={max_iter}) without producing a final answer."
+        )
         self.max_iter = max_iter
 
 
@@ -181,18 +183,33 @@ class Suspend(TimbalError):
         self.response_schema = response_schema
 
 
-class RunCancelled(TimbalError):
-    """Control-flow signal: a human cancelled the run while resolving a pause.
+class ApprovalStateUnreadable(TimbalError):
+    """The run being continued could not be read, so it is not known which approvals it left waiting, nor
+    which run each first waited in (what a claim on it is made under).
 
-    Raised when a ``Cancel`` value is supplied on the ``resume=`` channel for a
-    pending approval gate or ``suspend()`` call. Unwinds the handler and marks
-    the run ``cancelled`` / reason ``cancelled``. Unlike a denial, nothing is
-    fed back to the model — the whole run stops.
+    A gate in the continuing run is then neither resolved, claimed nor asked again: its call fails with this
+    error and nothing runs. Deciding it blind could run a call another run is also running, or ask again for
+    a gate under an identity later runs would not share.
     """
 
-    def __init__(self, message: str = "") -> None:
+
+class RunCancelled(TimbalError):
+    """Control-flow signal: the run stops while resolving a pause, and nothing is fed back to the model.
+
+    Raised when a ``Cancel`` value is supplied on the ``resume=`` channel for a
+    pending approval gate or ``suspend()`` call: the run ends ``cancelled`` /
+    reason ``cancelled``. Unlike a denial, the whole run stops.
+
+    Also when a gate the run this one continues left waiting was already claimed
+    by another run continuing it (``reason="approval_already_claimed"``): that
+    other run is the one going on with the turn, and this one must not make the
+    calls that would follow a second time.
+    """
+
+    def __init__(self, message: str = "", *, reason: str = "cancelled") -> None:
         super().__init__(message or "Run cancelled.")
         self.message = message or "Run cancelled."
+        self.reason = reason
 
 
 class GuardrailBlocked(TimbalError):

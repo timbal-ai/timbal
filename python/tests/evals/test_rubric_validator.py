@@ -39,7 +39,7 @@ class TestParsing:
         assert isinstance(v, RubricValidator)
         assert v.value == ["a", "b"]
         assert v.pass_threshold == 1.0
-        assert v.model == "openai/gpt-5-mini"
+        assert v.model == "anthropic/claude-haiku-5-5"
 
     def test_dict_form_hoists_options(self):
         v = parse_validator(
@@ -49,7 +49,7 @@ class TestParsing:
                 "value": {
                     "criteria": ["a", {"criterion": "b", "weight": 2}],
                     "pass_threshold": 0.5,
-                    "model": "openai/gpt-5-mini",
+                    "model": "anthropic/claude-haiku-5-5",
                     "context": "a report",
                 },
             }

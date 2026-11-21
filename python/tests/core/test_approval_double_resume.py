@@ -232,6 +232,8 @@ class TestAgentToolDoubleResume:
         ).collect()
 
         assert first.status.code == "success"
-        assert second.status.code == "success"
+        # The run that lost the gate stops there, like a tool called directly: the other run is the one
+        # continuing the turn, and whatever this one's model would call next would be done twice.
+        assert (second.status.code, second.status.reason) == ("cancelled", "approval_already_claimed")
         assert calls == [300]
         assert _claim_count(backend) == 1

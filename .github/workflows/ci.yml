@@ -32,6 +32,8 @@ jobs:
   test:
     name: Test (${{ matrix.os }} / py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
+    # A normal run takes 15-30 minutes. A hung test would otherwise hold the job for GitHub's 6 hours.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

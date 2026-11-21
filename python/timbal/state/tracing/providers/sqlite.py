@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -33,13 +34,27 @@ class _Database:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute(f"PRAGMA synchronous={synchronous}")
         _ensure_schema(self.conn)
+        # Which file this is a connection to: the path can come to name another one (see alive()).
+        self._file = self._file_at_path()
         # Per run: which spans are finished and committed to this file (not rewritten until the root ends),
         # and the order spans were first seen. Kept per connection: a file recreated after being deleted
         # holds none of them. Bounded: a run whose process died never ends.
         self.runs: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
+    def _file_at_path(self) -> tuple[int, int] | None:
+        try:
+            found = os.stat(self.path)
+        except OSError:
+            return None
+        return (found.st_dev, found.st_ino)
+
     def alive(self) -> bool:
-        return self.path.exists()
+        """Whether the path still names the file this connection opened.
+
+        Not just whether a file is there: one deleted and written again (by another connection, by a
+        restore) is a different file, and this connection would go on writing to the one that is gone.
+        """
+        return self._file is not None and self._file_at_path() == self._file
 
     def run_state(self, run_id: str) -> dict[str, Any]:
         state = self.runs.get(run_id)
@@ -55,6 +70,28 @@ class _Database:
 _DATABASES: dict[tuple[str, str], _Database] = {}
 _DATABASES_LOCK = threading.Lock()
 _RUN_STATE_MAX = 2048
+# The parent's connections, in a forked child: kept referenced so that they are never closed there.
+_INHERITED_AFTER_FORK: list[_Database] = []
+
+
+def _forget_databases_after_fork() -> None:
+    """In a forked child (a server that opened a file and then forked its workers): open again.
+
+    A connection shared across a fork is two processes on one connection's file locks and WAL index, which
+    SQLite does not support (lock errors, a corrupted WAL). And a lock a parent thread held at the fork,
+    the registry's or a connection's, stays held in the child with nobody left to let go of it.
+
+    The inherited connections are not closed: closing one here would let go of the file locks the parent
+    holds through it. They are kept referenced instead, so that collecting them never closes them either.
+    """
+    global _DATABASES_LOCK
+    _INHERITED_AFTER_FORK.extend(_DATABASES.values())
+    _DATABASES.clear()
+    _DATABASES_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_databases_after_fork)
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -85,7 +122,59 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (parent_id, approval_id)
         )
     """)
+    # Durable chat sessions (timbal.state.chat_store.SqliteChatSessionStore): one mutable row per session.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            session_id  TEXT    PRIMARY KEY,
+            agent       TEXT    NOT NULL,
+            snapshot    TEXT    NOT NULL,
+            version     INTEGER NOT NULL,
+            lease_owner TEXT,
+            lease_until REAL,
+            updated_at  INTEGER NOT NULL,
+            has_work    INTEGER
+        )
+    """)
+    # has_work: 1 when the session would run something without a client asking (SessionSnapshot.has_work),
+    # 0 when not, written with every save. NULL only in a row from before the column, until it is written
+    # again. Startup asks for the sessions with work: idle ones stay in the table until deleted and soon
+    # outnumber them, so that question is answered from an index over the rows that are not 0.
+    if "has_work" not in {column[1] for column in conn.execute("PRAGMA table_info(chat_sessions)")}:
+        try:
+            conn.execute("ALTER TABLE chat_sessions ADD COLUMN has_work INTEGER")
+        except sqlite3.OperationalError:
+            # Another process opening the file added it first.
+            if "has_work" not in {column[1] for column in conn.execute("PRAGMA table_info(chat_sessions)")}:
+                raise
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_sessions_work ON chat_sessions (session_id) WHERE has_work IS NOT 0"
+    )
     conn.commit()
+
+
+def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
+    """The process's one connection to the SQLite file at ``path`` (created with the schema if absent)."""
+    mode = synchronous.upper()
+    if mode not in ("NORMAL", "FULL"):
+        raise ValueError(f"synchronous must be 'NORMAL' or 'FULL', got {synchronous!r}")
+    key = (str(Path(path).resolve()), mode)
+    with _DATABASES_LOCK:
+        db = _DATABASES.get(key)
+    if db is not None and db.alive():  # not alive: the file was deleted under us, don't write to the old inode
+        return db
+    # Opened outside the registry's lock, which every database of the process goes through: a file that
+    # cannot be opened now (a stalled mount) holds up its own callers, not those of every other file.
+    opened = _Database(Path(path), mode)
+    with _DATABASES_LOCK:
+        current = _DATABASES.get(key)
+        if current is not None and current is not db and current.alive():
+            # Another thread opened it meanwhile: one connection per file, theirs. Only while theirs is
+            # still to the file at the path: one that went stale since (the file deleted under it) is
+            # replaced by this one, as a stale one always is.
+            opened.conn.close()
+            return current
+        _DATABASES[key] = opened
+        return opened
 
 
 class SqliteTracingProvider(TracingProvider):
@@ -130,15 +219,7 @@ class SqliteTracingProvider(TracingProvider):
                 "SqliteTracingProvider._path is not set. "
                 "Use SqliteTracingProvider.configured(path=Path(...)) to create a configured provider."
             )
-        mode = cls.synchronous.upper()
-        if mode not in ("NORMAL", "FULL"):
-            raise ValueError(f"synchronous must be 'NORMAL' or 'FULL', got {cls.synchronous!r}")
-        key = (str(Path(cls._path).resolve()), mode)
-        with _DATABASES_LOCK:
-            db = _DATABASES.get(key)
-            if db is None or not db.alive():  # the file was deleted under us: don't write to the old inode
-                db = _DATABASES[key] = _Database(Path(cls._path), mode)
-            return db
+        return database(cls._path, cls.synchronous)
 
     @classmethod
     @override

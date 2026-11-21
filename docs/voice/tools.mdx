@@ -29,7 +29,7 @@ async def get_delivery_status(order_id: str) -> dict:
 
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     system_prompt=(
         "You help callers check deliveries. Ask for the order ID if it is missing. "
         "Use get_delivery_status before giving a delivery status; never invent it. "
@@ -99,7 +99,7 @@ async def build_report(topic: str) -> str:
 
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     system_prompt="You help callers with sales reports. Reply in one or two short spoken sentences.",
     tools=[Tool(handler=build_report, background_mode="always")],
     voice_config={"language": "en", "events": {"announce_background_results": True}},
