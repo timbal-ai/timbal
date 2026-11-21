@@ -144,6 +144,68 @@ class TestChatTurnDurability:
         assert order == ["look", "barrier", "act"]  # read-only tools run without waiting for a save
         assert stored_before[0].count("agent.llm") == 2  # the call to `act` was stored before `act` ran
 
+    @pytest.mark.parametrize(
+        ("batches", "expected"),
+        [
+            ([["look"], ["act"]], ["look", "barrier", "act"]),  # a read-only target does not wait for a save
+            ([["look", "act"]], ["barrier", "look", "act"]),  # a batch with a target that acts does
+            ([["nope"], ["look"]], ["barrier", "look"]),  # a name that resolves to nothing counts as acting
+        ],
+    )
+    async def test_a_dispatched_batch_is_judged_by_the_tools_it_runs(self, batches, expected):
+        """``tool_search="dispatch"``: the model calls ``call_tool(name=...)``, and what decides whether the
+        trace is stored first is the tool that call runs, not the dispatcher."""
+        order: list[str] = []
+        provider = FakePlatform.configured(platform_config=CONFIG)
+        save_trace = RunContext._save_trace
+
+        async def spy(self, *, barrier=False):
+            root = self.root_span()
+            if barrier and root is not None and root.t1 is None:
+                order.append("barrier")
+            return await save_trace(self, barrier=barrier)
+
+        def act() -> str:
+            order.append("act")
+            return "done"
+
+        def look() -> str:
+            order.append("look")
+            return "seen"
+
+        steps = iter(batches)
+
+        def handler(_messages):
+            names = next(steps, None)
+            if names is None:
+                return "finished"
+            return Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id=f"{name}-{at}", name="call_tool", input={"name": name, "arguments": {}})
+                    for at, name in enumerate(names)
+                ],
+                stop_reason="tool_use",
+            )
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[
+                Tool(name="look", handler=look, read_only=True, defer_loading=True),
+                Tool(name="act", handler=act, defer_loading=True),
+            ],
+            tool_search="dispatch",
+            tracing_provider=provider,
+        )
+        with patch.object(RunContext, "_save_trace", spy):
+            finished = await one_turn(agent)
+        assert finished["status"]["code"] == "success"
+        assert sorted(order) == sorted(expected)
+        assert order.index("barrier") == expected.index("barrier")
+        if "act" in expected:
+            assert order.index("barrier") < order.index("act")
+
     async def test_buffered_providers_outside_chat_sessions_do_not_wait_before_tools(self):
         order: list[str] = []
         save_trace = RunContext._save_trace

@@ -455,19 +455,31 @@ def _tool_calls(context: RunContext, dispatched: list[dict[str, Any]] | tuple = 
         if call.get("id"):
             requests.setdefault(call["id"], (call.get("name") or "?", call.get("input")))
     results = {block.get("id"): block for message in memory for block in _blocks(message, "tool_result")}
+    # A span records the tool call it ran for (``metadata.tool_call_id``, set as the tool starts): that is
+    # its request, whatever its name. Pairing by name alone gave an earlier dispatched call the span of a
+    # later one that failed as ``call_tool`` (an unknown target), and listed its real span a second time.
+    # By name only for a span without the id (a trace from before spans recorded it, a tool cut as it started).
+    by_request: dict[str, Any] = {}
     spans: dict[str, list[Any]] = {}
     for span in children:
-        if span.path != llm_path:
+        if span.path == llm_path:
+            continue
+        request_id = span.metadata.get("tool_call_id") if isinstance(span.metadata, dict) else None
+        if isinstance(request_id, str) and request_id in requests and request_id not in by_request:
+            by_request[request_id] = span
+        else:
             spans.setdefault(span.path.rsplit(".", 1)[-1], []).append(span)
     completed, unconfirmed = [], []
     for request_id, (name, args) in requests.items():
         call = f"{name}({_brief(args, 80)})"
-        ran = name
-        if name in dispatchers and not spans.get(name) and isinstance(args, dict):
-            target = args.get("name")
-            if isinstance(target, str) and spans.get(target):
-                ran = target
-        span = spans[ran].pop(0) if spans.get(ran) else None
+        span = by_request.get(request_id)
+        if span is None:
+            ran = name
+            if name in dispatchers and not spans.get(name) and isinstance(args, dict):
+                target = args.get("name")
+                if isinstance(target, str) and spans.get(target):
+                    ran = target
+            span = spans[ran].pop(0) if spans.get(ran) else None
         if request_id in results:
             text = " ".join(b.get("text", "") for b in _blocks(results[request_id], "text")) or "done"
             completed.append(f"{call} → {_brief(text)}")
@@ -690,6 +702,12 @@ class ChatSession:
         self._question_failures = 0
         # The head a call left parked whose stored trace held no question when read (_dropped_question_holds).
         self._dropped_question: str | None = None
+        if self._scheduler.lent and any(self._scheduler.takes(event) for event in self._store.pending_events()):
+            # Opened on a live call that holds something its user wrote: this chat's to answer from now on
+            # (the call leaves it to the chat), and nothing else would start the worker.
+            self._work.set()
+            with contextlib.suppress(RuntimeError):  # no loop running yet: the first send() starts it
+                self._ensure_worker()
         # The restorable events last seen queued: one arriving through the task store is stored at once.
         self._queued_events: tuple[str, ...] = ()
         # App and client events still queued that the session follows until a turn takes them (_work_arrived).
@@ -837,6 +855,8 @@ class ChatSession:
 
         For a caller that could not get it stored (:meth:`flush` raised): withdrawn, a retry cannot run it twice.
         """
+        if any(event.id == work_id and not self._mine(event) for event in self._store.pending_events()):
+            return False  # another session's, kept for its restore
         withdrawn = self._store.withdraw_event(work_id)
         if not withdrawn:
             wake = next((wake for wake in self._wakes if wake.id == work_id), None)
@@ -1004,10 +1024,17 @@ class ChatSession:
         """
         return self.log.subscribe(after, numbered=numbered)
 
+    def _mine(self, event: SessionEvent) -> bool:
+        """Not a message another session keeps for its own restore (``SessionEvent.kept_for``): that one is
+        in the other session's snapshot, and is neither listed, stored, marked, withdrawn nor taken back here."""
+        return event.kept_for is None or event.kept_for == self.id
+
     def pending_messages(self) -> list[dict[str, Any]]:
         """Receipts of the user messages no turn has taken yet, oldest first."""
         return [
-            {**event.receipt(), "text": event.text} for event in self._store.pending_events() if event.source == "user"
+            {**event.receipt(), "text": event.text}
+            for event in self._store.pending_events()
+            if event.source == "user" and self._mine(event)
         ]
 
     def state(self) -> dict[str, Any]:
@@ -1091,6 +1118,13 @@ class ChatSession:
                 self._in_flight = {**cut, "cut": "shutdown"}
             if self._last_context is not None:
                 self._scheduler.unmark(self._last_context)
+            if keep and self._session_store is not None:
+                # Kept in its store: restored later with what was typed and not answered. Another channel
+                # on the session (a call it shares with, a chat opened meanwhile) must not answer that
+                # too: marked as this session's until it takes them back (from_store).
+                for event in self._store.pending_events():
+                    if event.source == "user" and event.kept_for is None:
+                        event.kept_for = self.id
             self._scheduler.release(self._store)
             forget_idle_background_store(self._store)
             self._record("closed", kept=keep)
@@ -1170,6 +1204,11 @@ class ChatSession:
             # Queuing the stored events would start the worker: not before the dead turn is settled (its recovery
             # goes first, and a turn finishing meanwhile would store a snapshot without it).
             session._hold_worker = True
+            worker, session._worker = session._worker, None
+            if worker is not None:
+                # Started by the constructor for a message the task store holds (a call has the session):
+                # it has not run a step yet, and does not until the stored state is settled.
+                worker.cancel()
             # Restored in the process that closed it, the run's task store may still be there (a background
             # task going, an event no turn took), holding the session's events: in the order they were left,
             # followed by the closed session. They are taken out and queued again below from the snapshot,
@@ -1178,7 +1217,9 @@ class ChatSession:
             # followed by this session. The events themselves are kept, so their senders' receipts settle.
             session._kept_events = {
                 event.id: event
-                for event in session._store.drain_events(settle=False, where=lambda event: event.task_id is None)
+                for event in session._store.drain_events(
+                    settle=False, where=lambda event: event.task_id is None and session._mine(event)
+                )
             }
             session._version, session._leased, session._lease_from = snapshot.version, True, leased_at
             session.turns, session.last_status, session._parked = snapshot.turns, snapshot.last_status, snapshot.parked
@@ -1242,7 +1283,8 @@ class ChatSession:
         session._lease_task = asyncio.get_running_loop().create_task(session._renew_lease())
         session._hold_worker = False
         if session.parked and any(
-            event.source == "user" and event.announce == "interrupt" for event in session._store.pending_events()
+            event.source == "user" and event.announce == "interrupt" and session._mine(event)
+            for event in session._store.pending_events()
         ):
             # An 'interrupt' message is stored before it cuts anything: if the process died in between, the
             # question it was to abandon still waits. Abandon it now (nothing to do if that was stored too).
@@ -1356,7 +1398,10 @@ class ChatSession:
         self.last_activity = time.monotonic()
         self._record("parked", run_id=run_id)
         self._persist()
-        if any(event.source == "user" and event.announce == "interrupt" for event in self._store.pending_events()):
+        if any(
+            event.source == "user" and event.announce == "interrupt" and self._mine(event)
+            for event in self._store.pending_events()
+        ):
             # Sent while the question was still the call's: its user has already moved on from it.
             self._interrupt_now()
         return True
@@ -1440,7 +1485,7 @@ class ChatSession:
             return
         # An app or client event is queued by the task store (post_event), not by a method of the session.
         # Task progress is not restored, so it is left alone.
-        restorable = [event for event in self._store.pending_events() if event.task_id is None]
+        restorable = [event for event in self._store.pending_events() if event.task_id is None and self._mine(event)]
         for event in restorable:
             if event.source != "user" and event.id not in self._followed_events:
                 # Followed until a turn takes it: steered into a running one, it stays with that turn.
@@ -2065,7 +2110,11 @@ class ChatSession:
             # that serializes after its first await would write a later state than the one it was handed.
             in_flight=copy.deepcopy(self._in_flight),
             # Progress of a background task dies with the task (process-local): not worth restoring.
-            pending=[event.to_dict() for event in self._store.pending_events() if event.task_id is None],
+            pending=[
+                event.to_dict()
+                for event in self._store.pending_events()
+                if event.task_id is None and self._mine(event)
+            ],
             wakes=[wake.to_dict() for wake in self._wakes],
             resume=_dump_resume(self._resume),
             log_cursor=self.log.cursor_end,

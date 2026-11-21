@@ -1712,6 +1712,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         store = current_background_store()
         if store is None:
             return
+        run_context = get_run_context()
+        marker = run_context._continuation_owner
+        channel = marker() if marker is not None else None
+        if channel is not None and channel.lent:
+            # A turn of a chat while a call has the session: it answers what was typed. Finished tasks
+            # and events are the call's to speak (SessionScheduler.takes), so they stay pending for it.
+            return
         notifications = store.drain_completions()
         events = store.drain_events(settle=False, where=lambda event: event.source != "user")
         if not notifications and not events:
@@ -1719,7 +1726,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         notice = format_session_notice(notifications, events)
         if events:
             current_span.metadata["session_events"] = [event.id for event in events]
-            record_delivery(get_run_context(), current_span, events)
+            record_delivery(run_context, current_span, events)
         memory = current_span.memory
         # Sit immediately before the current user prompt so history stays
         # [...prior turns..., completion notice, user prompt].
@@ -1777,7 +1784,19 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         store = current_background_store()
         if store is None:
             return []
-        events = store.drain_events(settle=False, where=lambda event: event.lane == "next")
+        marker = run_context._continuation_owner
+        channel = marker() if marker is not None else None
+        if channel is not None:
+            # A channel's turn takes what is that channel's to answer (SessionScheduler.takes). In a
+            # session a chat and a call share: a chat turn only what the user wrote (an application's
+            # event waits for the call), a call's turn everything but that (it waits for the chat).
+            events = store.drain_events(
+                settle=False, where=lambda event: event.lane == "next" and channel.takes(event, store)
+            )
+        else:
+            events = store.drain_events(
+                settle=False, where=lambda event: event.lane == "next" and event.kept_for is None
+            )
         if not events:
             return []
         current_span.metadata.setdefault("steered_events", []).extend(event.id for event in events)
@@ -2701,7 +2720,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
     @staticmethod
     def _acts(tools: list[Tool], tool_calls: list[ToolUseContent]) -> bool:
-        """Whether a batch calls any tool that is not declared read-only (unknown names count as acting)."""
+        """Whether a batch calls any tool that is not declared read-only (unknown names count as acting).
+
+        ``tool_calls`` as they will run: a ``call_tool`` dispatch already resolved to its target
+        (:meth:`_dispatched`). One that resolves to nothing stays the dispatcher, which is not
+        read-only, so it counts as acting.
+        """
         by_name = {tool.name: tool for tool in tools}
         return any(not getattr(by_name.get(call.name), "read_only", False) for call in tool_calls)
 
@@ -2713,12 +2737,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         dispatcher = next((t for t in tools if isinstance(t, _CallTool) and t.name == tool_call.name), None)
         if dispatcher is None or not isinstance(tool_call.input, dict):
             return tool_call
-        name, arguments = tool_call.input.get("name"), tool_call.input.get("arguments") or {}
+        name, arguments = tool_call.input.get("name"), tool_call.input.get("arguments")
         if isinstance(arguments, str):
             with contextlib.suppress(ValueError):
                 arguments = json.loads(arguments)
+        if arguments is None:
+            arguments = {}  # left out or null (also as the JSON string "null"): a tool that needs no input
         target = next((t for t in tools if t.name == name and not isinstance(t, _CallTool)), None)
         if target is None or not isinstance(arguments, dict):
+            # Anything else that is not an object (a list, a number, an empty string) is a malformed
+            # call, not one with no arguments: left to the dispatcher, whose own validation refuses it.
             return tool_call
         return ToolUseContent(id=tool_call.id, name=target.name, input=arguments)
 
@@ -4040,7 +4068,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 )
                 if called_unloaded:
                     await self._load_tools(called_unloaded, current_span)
-                if stores_first and self._acts(tools, tool_calls):
+                if stores_first and self._acts(
+                    tools,
+                    # As they will run: a dispatch is judged by the tool it runs, not by the dispatcher.
+                    [self._dispatched(tools, call) for call in tool_calls]
+                    if self.tool_search == "dispatch"
+                    else tool_calls,
+                ):
                     # Buffered saves lag the run: store the calls before what they do, so a crash between the
                     # two can never leave a tool's effects with no record of the call (recovery reads it).
                     await run_context._save_trace(barrier=True)

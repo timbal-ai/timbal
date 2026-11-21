@@ -713,6 +713,7 @@ class SessionEvent:
         "lane",
         "mode",
         "sent_by",
+        "kept_for",
         "guardrails",
         "posted_at",
         "state",
@@ -741,6 +742,10 @@ class SessionEvent:
         self.lane: SessionEventLane = lane
         self.mode: UserMessageMode | None = mode
         self.sent_by: dict[str, str] | None = None
+        # The id of a session that closed to be restored while this message waited: it is in that session's
+        # snapshot and comes back with it, so no other channel takes it meanwhile (it would be answered
+        # twice). Process-local, cleared when the session takes it back (restore_event).
+        self.kept_for: str | None = None
         self.guardrails: list[Any] = []
         self.posted_at = time.time()
         self.state: SessionEventState = "pending"
@@ -1659,6 +1664,7 @@ class BackgroundTaskStore:
         it was closed, and took its events out with ``drain_events(settle=False)``): queued again as it is,
         so the receipt its sender holds is the one that settles."""
         if held is not None and held.state == "pending":
+            held.kept_for = None  # back with the session it was kept for
             self._queue_event(held)
             return held
         event = SessionEvent(

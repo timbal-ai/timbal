@@ -106,6 +106,51 @@ class TestDispatch:
         span = next(s for s in trace.values() if s.path == "agent.get_weather")
         assert span.status.code == "error"
 
+    @pytest.mark.parametrize("arguments", [[], [1], "[]", "not json", 0, "", False, 3])
+    async def test_arguments_that_are_not_an_object_are_an_error_not_an_empty_object(self, arguments):
+        # A tool whose every parameter has a default: an empty object runs it. A list, a number or a
+        # string that is not an object is a malformed call, and must not be run as one with no arguments.
+        ran = []
+
+        def search_orders(limit: int = 100) -> str:
+            ran.append(limit)
+            return f"{limit} orders"
+
+        tools = [Tool(name="search_orders", handler=search_orders, defer_loading=True)]
+        model = TestModel(responses=[dispatch("search_orders", arguments=arguments), "Oops."])
+        out = await agent(model, tools, tool_search="dispatch")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        assert ran == []
+        trace = await trace_of(out)
+        span = next(s for s in trace.values() if s.path == f"agent.{CALL_TOOL_NAME}")
+        assert span.status.code == "error"
+
+    @pytest.mark.parametrize(
+        "call_input",
+        [
+            {"name": "search_orders"},
+            {"name": "search_orders", "arguments": None},
+            {"name": "search_orders", "arguments": "null"},  # null, from a model that sends arguments as JSON text
+            {"name": "search_orders", "arguments": "{}"},
+        ],
+    )
+    async def test_missing_or_null_arguments_are_an_empty_object(self, call_input):
+        ran = []
+
+        def search_orders(limit: int = 100) -> str:
+            ran.append(limit)
+            return f"{limit} orders"
+
+        tools = [Tool(name="search_orders", handler=search_orders, defer_loading=True)]
+        asked = Message(
+            role="assistant",
+            content=[ToolUseContent(id="c1", name=CALL_TOOL_NAME, input=call_input)],
+            stop_reason="tool_use",
+        )
+        out = await agent(TestModel(responses=[asked, "ok"]), tools, tool_search="dispatch")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        assert ran == [100]
+
     async def test_a_found_tool_called_by_its_own_name_runs_too(self):
         calls = []
         model = TestModel(responses=[call("get_weather", city="Oslo"), "ok"])

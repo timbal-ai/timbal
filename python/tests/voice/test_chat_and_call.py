@@ -7,6 +7,7 @@ import pytest
 from timbal import Agent
 from timbal.core.chat_session import RECOVERY_KIND, ChatSession, _Wake
 from timbal.core.tool import Tool
+from timbal.state.chat_store import InMemoryChatSessionStore
 from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
 from timbal.types.events import ApprovalEvent, OutputEvent
 from timbal.voice import AgentApproval, TranscriptEvent, VoiceSession, VoiceSessionEvent
@@ -62,6 +63,339 @@ class TestCallJoinsAChat:
 
         assert _seen(model.calls[1])[-3:] == ["escrito 1", "Hola por chat.", "hablado 1"]
         assert _seen(model.calls[2])[-3:] == ["hablado 1", "Hola por voz.", "escrito 2"]
+
+
+class TestWhoAnswersAUserMessage:
+    """A message sent as the user's (``source="user"``): the chat's while one shares the session, else the call's."""
+
+    async def test_a_call_alone_answers_it(self) -> None:
+        model = _Model("Son las tres.")
+        call, stt = _call(model)
+        receipts = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            receipts.append(await call.notify("¿qué hora es?", source="user", announce="when_idle"))
+            await _said(call, events, "Son las tres.")
+
+        await _run(call, stt, drive)
+        assert receipts[0].state == "delivered"
+        assert _seen(model.calls[0])[-1] == "¿qué hora es?"
+
+    async def test_the_call_answers_it_again_once_the_chat_is_gone(self) -> None:
+        model = _Model("Hola por chat.", "Hola por voz.", "Son las tres.")
+        chat = ChatSession(_agent(model))
+        try:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            call, stt = _call(model, parent_run_id=chat.head)
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+                await _said(call, events, "Hola por voz.")
+                await _until(lambda: _owner(chat) is call._scheduler)
+                await chat.close()
+                # Nobody is left to answer what is typed: the call does, as a call alone.
+                await call.notify("¿qué hora es?", source="user", announce="when_idle")
+                await _said(call, events, "Son las tres.")
+
+            await _run(call, stt, drive)
+        finally:
+            await chat.close()
+        assert _seen(model.calls[2])[-1] == "¿qué hora es?"
+
+    async def test_a_chat_closed_to_be_restored_keeps_what_was_typed(self) -> None:
+        # Call 2 (the call's second turn) holds until opened: a message typed meanwhile waits for it.
+        model = _GatedModel(
+            "Hola por chat.", "Hola por voz.", "Larga por voz.", "Son las tres.", "Visto por chat.", gate_at=2
+        )
+        store = InMemoryChatSessionStore()
+        agent = _agent(model)
+        chat = ChatSession(agent, session_store=store)
+        restored: list[ChatSession] = []
+        try:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            call, stt = _call(model, parent_run_id=chat.head)
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+                await _said(call, events, "Hola por voz.")
+                await _until(lambda: _owner(chat) is call._scheduler)
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
+                await asyncio.wait_for(model.entered.wait(), 2)
+                typed = chat.send("escrito 2")
+                await chat.flush()
+                # Kept: the session lives on in its store, with this message. Not the call's to answer.
+                await chat.close(keep=True)
+                model.opened.set()
+                await _said(call, events, "Larga por voz.")
+                # Once the line is quiet the call speaks what is its own to answer. This is not.
+                await _until(lambda: call._event_turn_blocker() is None)
+                await asyncio.sleep(0.3)
+                assert typed.state == "pending" and len(model.calls) == 3
+                # What is sent to the call from now on is in no snapshot: the call's, as on a call alone.
+                later = await call.notify("¿qué hora es?", source="user", announce="when_idle")
+                await _said(call, events, "Son las tres.")
+                assert later.state == "delivered" and typed.state == "pending"
+                restored.append(await ChatSession.from_store(agent, store, chat.id))
+                await _turns(restored[0], 2)
+
+            await _run(call, stt, drive)
+        finally:
+            for session in (chat, *restored):
+                await session.close()
+        # Each answered once: the later one by the call, the kept one by the restored chat.
+        last = [_seen(seen)[-1] for seen in model.calls]
+        assert last.count("escrito 2") == 1 and last.count("¿qué hora es?") == 1 and len(model.calls) == 5
+
+    async def test_another_chat_on_the_call_leaves_a_kept_chat_s_message_alone(self) -> None:
+        # Call 2 (the call's second turn) holds until opened.
+        model = _GatedModel("Hola por chat.", "Hola por voz.", "Larga por voz.", "Visto por chat.", gate_at=2)
+        store = InMemoryChatSessionStore()
+        agent = _agent(model)
+        chat = ChatSession(agent, session_store=store)
+        opened: list[ChatSession] = []
+        try:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            call, stt = _call(model, parent_run_id=chat.head)
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+                await _said(call, events, "Hola por voz.")
+                await _until(lambda: _owner(chat) is call._scheduler)
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
+                await asyncio.wait_for(model.entered.wait(), 2)
+                typed = chat.send("escrito 2")
+                await chat.flush()
+                await chat.close(keep=True)
+                # A client that opens a new session on the conversation, not the one it had.
+                other = ChatSession(_agent(model), parent_id=call._last_run_context.id)
+                opened.append(other)
+                model.opened.set()
+                await _said(call, events, "Larga por voz.")
+                await _until(lambda: call._event_turn_blocker() is None)
+                await asyncio.sleep(0.3)
+                # The message is the kept session's (it is in its snapshot): not this chat's either.
+                assert typed.state == "pending" and other.turns == 0 and len(model.calls) == 3
+                await other.close()
+                opened.append(await ChatSession.from_store(agent, store, chat.id))
+                await _turns(opened[1], 2)
+
+            await _run(call, stt, drive)
+        finally:
+            for session in (chat, *opened):
+                await session.close()
+        assert [_seen(seen)[-1] for seen in model.calls].count("escrito 2") == 1 and len(model.calls) == 4
+
+    async def test_a_second_kept_chat_does_not_take_over_the_first_one_s_message(self) -> None:
+        # Two sessions on one conversation, both closed to be restored. The message is the first one's: the
+        # second neither marks it as its own nor stores it, so it is answered once, by the first.
+        # Call 2 (the call's second turn) holds until opened.
+        model = _GatedModel("Hola por chat.", "Hola por voz.", "Larga por voz.", "Visto por chat.", gate_at=2)
+        store = InMemoryChatSessionStore()
+        agent = _agent(model)
+        chat = ChatSession(agent, session_store=store)
+        opened: list[ChatSession] = []
+        try:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            call, stt = _call(model, parent_run_id=chat.head)
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+                await _said(call, events, "Hola por voz.")
+                await _until(lambda: _owner(chat) is call._scheduler)
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
+                await asyncio.wait_for(model.entered.wait(), 2)
+                typed = chat.send("escrito 2")
+                await chat.flush()
+                await chat.close(keep=True)
+                second = ChatSession(agent, parent_id=call._last_run_context.id, session_store=store)
+                opened.append(second)
+                assert second.pending_messages() == []
+                await second.flush()
+                await second.close(keep=True)
+                assert typed.kept_for == chat.id and (await store.load(second.id)).pending == []
+                model.opened.set()
+                await _said(call, events, "Larga por voz.")
+                opened.append(await ChatSession.from_store(agent, store, second.id))
+                await asyncio.sleep(0.3)
+                assert typed.state == "pending" and len(model.calls) == 3  # not the second session's to answer
+                await opened[1].close(keep=True)
+                opened.append(await ChatSession.from_store(agent, store, chat.id))
+                await _turns(opened[2], 2)
+
+            await _run(call, stt, drive)
+        finally:
+            for session in (chat, *opened):
+                await session.close()
+        assert [_seen(seen)[-1] for seen in model.calls].count("escrito 2") == 1 and len(model.calls) == 4
+
+    async def test_a_chat_opened_on_a_call_takes_the_message_the_call_was_holding(self) -> None:
+        # Call 1 (the call's second turn) holds until opened: a user message sent to the call waits for it.
+        model = _GatedModel("Hola por voz.", "Sigo por voz.", "Son las tres.", gate_at=1)
+        call, stt = _call(model)
+        chats: list[ChatSession] = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await call.notify("dato", announce="silent")  # the call owns a store
+            await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+            await _said(call, events, "Hola por voz.")
+            await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
+            await asyncio.wait_for(model.entered.wait(), 2)
+            receipt = await call.notify("¿qué hora es?", source="user", announce="when_idle")
+            chat = ChatSession(_agent(model), parent_id=call._last_run_context.id)
+            chats.append(chat)
+            model.opened.set()
+            await _said(call, events, "Sigo por voz.")
+            # The chat's from the moment it is there, though nothing was sent to it: answered as a chat turn.
+            await _turns(chat, 1)
+            assert receipt.state == "delivered" and "Son las tres." not in _texts(events)
+
+        await _run(call, stt, drive)
+        await chats[0].close()
+        assert _seen(model.calls[2])[-1] == "¿qué hora es?"
+
+
+class TestTheCallsEventsStayTheCalls:
+    """While the call has the session, a chat turn answers what was typed and takes nothing else."""
+
+    async def test_a_call_turn_that_steers_leaves_what_was_typed_to_the_chat(self) -> None:
+        # An agent that always steers (steering=True): the call's turn takes the events posted for the
+        # turn in flight before it ends. Not what the user typed: that is the chat's turn.
+        # Call 1 (the call's turn) holds until opened.
+        model = _GatedModel("Hola por chat.", "Hola por voz.", "Visto por chat.", gate_at=1)
+
+        def steering_agent() -> Agent:
+            return Agent(name="assistant", model=model.model, steering=True, tracing_provider=InMemoryTracingProvider)
+
+        async with ChatSession(steering_agent()) as chat:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            stt = DelayedMockSTT()
+            call = VoiceSession(
+                agent=steering_agent(), stt=stt, tts=MockTTS(), turn_detector="heuristic", parent_run_id=chat.head
+            )
+            typed = []
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+                await asyncio.wait_for(model.entered.wait(), 2)
+                typed.append(chat.send("escrito 2"))  # steer: for the turn in flight, if it were the chat's
+                await asyncio.sleep(0.2)
+                model.opened.set()
+                await _said(call, events, "Hola por voz.")
+                await _turns(chat, 2)
+
+            await _run(call, stt, drive)
+            assert typed[0].run_id != call._last_run_context.id
+
+        assert len(model.calls) == 3 and _seen(model.calls[2])[-1] == "escrito 2"
+
+    async def test_a_call_turn_the_chat_admitted_leaves_what_was_typed_to_the_chat(self) -> None:
+        # The chat has the session here (the call had no store and meets the chat's with its turn), and
+        # the agent always steers. What is typed during the call's turn is still the chat's turn.
+        # Call 1 (the call's second turn) holds until opened.
+        model = _GatedModel("Hola por voz.", "Sigo por voz.", "Visto por chat.", gate_at=1)
+
+        def steering_agent() -> Agent:
+            return Agent(name="assistant", model=model.model, steering=True, tracing_provider=InMemoryTracingProvider)
+
+        stt = DelayedMockSTT()
+        call = VoiceSession(agent=steering_agent(), stt=stt, tts=MockTTS(), turn_detector="heuristic")
+        typed = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+            await _said(call, events, "Hola por voz.")
+            async with ChatSession(steering_agent(), parent_id=call._last_run_context.id) as chat:
+                assert _owner(chat) is chat._scheduler
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
+                await asyncio.wait_for(model.entered.wait(), 2)
+                typed.append(chat.send("escrito 2"))
+                await asyncio.sleep(0.2)
+                model.opened.set()
+                await _said(call, events, "Sigo por voz.")
+                await _turns(chat, 1)
+                assert typed[0].run_id != call._last_run_context.id
+
+        await _run(call, stt, drive)
+        assert len(model.calls) == 3 and _seen(model.calls[2])[-1] == "escrito 2"
+
+    async def test_a_chat_turn_does_not_take_an_event_posted_as_it_starts(self) -> None:
+        model = _Model("Hola por chat.", "Hola por voz.", "Visto por chat.", "Aviso por voz.")
+        entered, gate, hold = asyncio.Event(), asyncio.Event(), [False]
+
+        async def prompt() -> str:
+            if hold[0]:
+                hold[0] = False
+                entered.set()
+                await gate.wait()
+            return "Eres útil."
+
+        chat_agent = Agent(
+            name="assistant", model=model.model, system_prompt=prompt, tracing_provider=InMemoryTracingProvider
+        )
+        async with ChatSession(chat_agent) as chat:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            call, stt = _call(model, parent_run_id=chat.head)
+            receipts = []
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+                await _said(call, events, "Hola por voz.")
+                await _until(lambda: _owner(chat) is call._scheduler)
+                hold[0] = True
+                chat.send("escrito 2")
+                await asyncio.wait_for(entered.wait(), 3)  # the chat's turn has started, its prompt not built yet
+                receipts.append(await call.notify("informe listo"))
+                gate.set()
+                await _turns(chat, 2)
+                # The call's to speak, not the chat's to fold into its answer.
+                await _said(call, events, "Aviso por voz.")
+
+            await _run(call, stt, drive)
+
+        assert not any("informe listo" in text for text in _seen(model.calls[2]))
+        assert "informe listo" in model.calls[3][-1].collect_text()
+        assert receipts[0].state == "delivered" and receipts[0].run_id == call._last_run_context.id
+
+    async def test_a_chat_turn_does_not_take_an_event_between_its_tool_batches(self) -> None:
+        release, started = asyncio.Event(), asyncio.Event()
+
+        async def slow() -> str:
+            """Slow."""
+            started.set()
+            await release.wait()
+            return "hecho"
+
+        tools = [Tool(name="slow", handler=slow)]
+        model = _Model("Hola por chat.", "Hola por voz.", _tool_call("slow"), "Visto por chat.", "Aviso por voz.")
+        async with ChatSession(_agent(model, tools)) as chat:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            call, stt = _call(model, tools, parent_run_id=chat.head)
+            receipts = []
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+                await _said(call, events, "Hola por voz.")
+                await _until(lambda: _owner(chat) is call._scheduler)
+                chat.send("escrito 2")
+                await asyncio.wait_for(started.wait(), 3)
+                # For the turn in flight (lane="next"), but not the user's words: the call's to speak.
+                receipts.append(chat.store.post_event("informe listo", lane="next"))
+                release.set()
+                await _turns(chat, 2)
+                await _said(call, events, "Aviso por voz.")
+
+            await _run(call, stt, drive)
+
+        assert not any("informe listo" in text for text in _seen(model.calls[3]))
+        assert "informe listo" in model.calls[4][-1].collect_text()
+        assert receipts[0].run_id == call._last_run_context.id
 
 
 def _owner(chat: ChatSession):

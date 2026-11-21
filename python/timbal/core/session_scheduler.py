@@ -168,7 +168,8 @@ def take_followup(
     channel's to take (a call leaves typed messages to the chat it borrowed
     the session from, which answers nothing else meanwhile).
     """
-    batch = user_batch(store.pending_events()) if users else []
+    # Not what a session closed to be restored keeps (SessionEvent.kept_for): it comes back for those.
+    batch = user_batch([event for event in store.pending_events() if event.kept_for is None]) if users else []
     if batch:
         taken = {id(event) for event in batch}
         events = store.drain_events(settle=False, where=lambda event: id(event) in taken)
@@ -176,7 +177,9 @@ def take_followup(
     if not others:
         return None
     completions = store.drain_completions()
-    events = store.drain_events(settle=False, where=None if users else lambda event: event.source != "user")
+    events = store.drain_events(
+        settle=False, where=lambda event: event.kept_for is None and (users or event.source != "user")
+    )
     if not completions and not events:
         return None
     return Followup(
@@ -454,6 +457,11 @@ class SessionScheduler:
                 successor = owner._successors.get(store)
                 if successor is not None and successor() is self:
                     del owner._successors[store]
+                    if self.lends:
+                        # The chat leaves a call that has the session: what was typed and not answered
+                        # is the call's to answer now, and nothing else would tell it. (Not the
+                        # messages a session closed to be restored keeps: SessionEvent.kept_for.)
+                        owner.work_arrived()
                 # Nor to be lent it by a chat still busy (or asking): it would lend it to a call that ended.
                 if owner._borrower is not None and owner._borrower() is self:
                     owner._borrower = None
@@ -772,11 +780,40 @@ class SessionScheduler:
         urgency = self.pending_turn()
         if urgency is None or self.other_turn_first(urgency):
             return None
-        return take_followup(self.store, urgent=urgency == "interrupt", users=self.user_messages, others=not self.lent)
+        return take_followup(
+            self.store, urgent=urgency == "interrupt", users=self.takes_user_messages, others=not self.lent
+        )
+
+    @property
+    def takes_user_messages(self) -> bool:
+        """Whether what the user wrote is this channel's to answer.
+
+        A call (``user_messages=False``) leaves it to the chat it shares the session with, which
+        answers it as a typed turn. With no chat there, nobody else would answer: the call does,
+        as a call on its own always did.
+        """
+        return self.user_messages or not any(
+            lender is not None and lender.lends for lender in (ref() for ref in self._successors.values())
+        )
+
+    def takes(self, event: SessionEvent, store: BackgroundTaskStore | None = None) -> bool:
+        """Whether a pending ``event`` is for this channel's turns: to start one for, and to take into one.
+
+        User messages go to the channel that answers them (:attr:`takes_user_messages`); everything
+        else to the channel that has the session (not to a chat while a call has it). ``store``: the
+        session the turn runs in, for a call whose turn was admitted by a chat that has the session
+        (the call does not: it is waiting to be lent it): what the user wrote is that chat's too.
+        """
+        if event.source == "user" and not self.user_messages and store is not None:
+            owner = store.continuation_owner()
+            if isinstance(owner, SessionScheduler) and owner is not self and owner.lends:
+                return False
+        return self._answers(event, self.lent)
 
     def _answers(self, event: SessionEvent, lent: bool) -> bool:
-        """Whether ``event`` is this channel's to answer: user messages unless it is a call, the rest unless lent."""
-        return self.user_messages if event.source == "user" else not lent
+        if event.kept_for is not None:
+            return False  # waits for the session it was kept for (see SessionEvent.kept_for)
+        return self.takes_user_messages if event.source == "user" else not lent
 
     # -- Internals ------------------------------------------------------------------
 

@@ -754,6 +754,53 @@ class TestRestore:
         assert "Started but not confirmed (each may or may not have run): work({})." in notice
         await restored.close()
 
+    async def test_the_notice_pairs_dispatched_calls_with_their_own_spans(self, db):
+        """A dispatch to a tool that does not exist leaves a ``call_tool`` span of its own (the error). It is
+        that call's span, not the span of an earlier dispatch that ran as its tool: each request is paired
+        by the tool call id its span recorded, so the earlier call is listed once, with its own outcome."""
+        provider, store = db
+        gate = Gate()
+        steps = ["lookup", "send_rocket", "work"]
+
+        def through_call_tool(messages):
+            if "cut off by a server restart" in last_user_text(messages):
+                return "recovered"
+            name = steps[len([m for m in messages if m.role == "tool"])]
+            return Message(
+                role="assistant",
+                content=[ToolUseContent(id=f"call-{name}", name="call_tool", input={"name": name, "arguments": {}})],
+                stop_reason="tool_use",
+            )
+
+        def agent():
+            return Agent(
+                name="agent",
+                model=TestModel(handler=through_call_tool),
+                tools=[
+                    Tool(name="lookup", handler=lambda: "2 unread", defer_loading=True),
+                    Tool(name="work", handler=gate.work, defer_loading=True),
+                ],
+                tool_search="dispatch",
+                tracing_provider=provider,
+            )
+
+        session = ChatSession(agent(), session_store=store)
+        session.send("go")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        await crash(session)
+        provider.crashed = False
+
+        restored = await ChatSession.from_store(agent(), store, session.id)
+        notice = restored._wakes[0].text
+        completed, unconfirmed = notice.split("Started but not confirmed")
+        asked = {name: f"call_tool({{'name': '{name}'" for name in steps}  # each request, as the notice labels it
+        # Each call once, with its own outcome (before: the lookup got the failed dispatch's span, and its own
+        # span was then listed again as a call nobody had asked for).
+        assert notice.count("lookup") == 1 and f"{asked['lookup']}, 'arguments': {{}}}}) → 2 unread" in completed
+        assert notice.count(asked["send_rocket"]) == 1 and "No tool named 'send_rocket'" in completed  # ran, failed
+        assert notice.count("work") == 1 and asked["work"] in unconfirmed
+        await restored.close()
+
     async def test_the_notice_names_a_dispatched_call_once(self, db):
         """``tool_search="dispatch"``: the model asks for ``call_tool(name=…)`` and the tool runs under its own
         span. The notice pairs the two, so one call is not listed twice (once completed, once unconfirmed)."""
