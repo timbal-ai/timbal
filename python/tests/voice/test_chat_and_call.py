@@ -188,6 +188,98 @@ class TestWhoAnswersAUserMessage:
                 await session.close()
         assert [_seen(seen)[-1] for seen in model.calls].count("escrito 2") == 1 and len(model.calls) == 4
 
+    @pytest.mark.parametrize("source", ["user", "app"])
+    async def test_what_arrives_after_the_chat_let_go_is_not_in_its_snapshot(self, source: str) -> None:
+        # The snapshot of a session closed to be restored is written after it has let go of the session
+        # (here: behind a save still out). What reaches the call meanwhile is the call's: a user message
+        # it answers, an application's event it speaks. Stored with the chat too, it would come back with
+        # the chat and be delivered a second time.
+        # Call 2 (the call's second turn) holds until opened.
+        model = _GatedModel(
+            "Hola por chat.", "Hola por voz.", "Larga por voz.", "Son las tres.", "Visto por chat.", gate_at=2
+        )
+        store = _GatedStore()
+        agent = _agent(model)
+        chat = ChatSession(agent, session_store=store)
+        restored: list[ChatSession] = []
+        try:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            await chat.flush()
+            call, stt = _call(model, parent_run_id=chat.head)
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+                await _said(call, events, "Hola por voz.")
+                await _until(lambda: _owner(chat) is call._scheduler)
+                await chat.flush()
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
+                await asyncio.wait_for(model.entered.wait(), 2)
+                store.hold = True
+                chat.send("escrito 2")
+                await asyncio.wait_for(store.entered.wait(), 2)  # its save is out, and held
+                closing = asyncio.create_task(chat.close(keep=True))
+                await _until(lambda: call._scheduler.successor(chat.store) is None)  # the chat has let go
+                if source == "user":
+                    later = await call.notify("¿qué hora es?", source="user", announce="when_idle")
+                else:
+                    later = await call.notify("¿qué hora es?")
+                store.gate.set()
+                await closing
+                stored = [event["text"] for event in (await store.load(chat.id)).pending]
+                assert stored == ["escrito 2"]
+                model.opened.set()
+                await _said(call, events, "Larga por voz.")
+                await _said(call, events, "Son las tres.")
+                assert later.state == "delivered"
+                restored.append(await ChatSession.from_store(agent, store, chat.id))
+                await _turns(restored[0], 2)
+
+            await _run(call, stt, drive)
+        finally:
+            for session in (chat, *restored):
+                await session.close()
+        last = [seen[-1].collect_text() for seen in model.calls]
+        assert sum("escrito 2" in text for text in last) == 1 and sum("¿qué hora es?" in text for text in last) == 1
+        assert len(model.calls) == 5
+
+    async def test_a_restore_that_fails_does_not_claim_what_was_sent_to_the_call_since(self) -> None:
+        # The kept session is restored while its trace store is away: the restore fails and lets go
+        # again. A message sent to the call in between was never the chat's, and is not marked as kept.
+        _Flaky.down = False
+        # Call 2 (the chat's second turn) holds until it is cut, before the model has answered it.
+        model = _GatedModel("Hola por chat.", "Hola por voz.", "Son las tres.", gate_at=2)
+        store = InMemoryChatSessionStore()
+        agent = _agent(model, provider=_Flaky)
+        chat = ChatSession(agent, session_store=store)
+        try:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            call, stt = _call(model, provider=_Flaky, parent_run_id=chat.head)
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+                await _said(call, events, "Hola por voz.")
+                await _until(lambda: _owner(chat) is call._scheduler)
+                chat.send("escrito 2")
+                await asyncio.wait_for(model.entered.wait(), 2)
+                await chat.flush()
+                await chat.close(keep=True)  # cuts the turn: the restore has to read its run
+                model.opened.set()  # the gate is for that turn only
+                later = await call.notify("¿qué hora es?", source="user", announce="when_idle")
+                _Flaky.down = True
+                with pytest.raises(ConnectionError):
+                    await ChatSession.from_store(agent, store, chat.id)
+                _Flaky.down = False
+                assert later.kept_for is None
+                await _said(call, events, "Son las tres.")
+                assert later.state == "delivered"
+
+            await _run(call, stt, drive)
+        finally:
+            _Flaky.down = False
+            await chat.close()
+
     async def test_a_second_kept_chat_does_not_take_over_the_first_one_s_message(self) -> None:
         # Two sessions on one conversation, both closed to be restored. The message is the first one's: the
         # second neither marks it as its own nor stores it, so it is answered once, by the first.
@@ -322,6 +414,87 @@ class TestTheCallsEventsStayTheCalls:
 
         await _run(call, stt, drive)
         assert len(model.calls) == 3 and _seen(model.calls[2])[-1] == "escrito 2"
+
+    async def test_an_event_the_call_spoke_is_not_spoken_again_when_a_kept_chat_comes_back(self) -> None:
+        # The chat's snapshot lists the event (it was pending when the chat closed to be restored), and
+        # the call then speaks it. Restored in the same process, the chat does not queue it a second time.
+        # Call 2 (the call's second turn) holds until opened.
+        model = _GatedModel("Hola por chat.", "Hola por voz.", "Larga por voz.", "Aviso uno.", "Aviso dos.", gate_at=2)
+        store = InMemoryChatSessionStore()
+        agent = _agent(model)
+        chat = ChatSession(agent, session_store=store)
+        restored: list[ChatSession] = []
+        try:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            call, stt = _call(model, parent_run_id=chat.head)
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+                await _said(call, events, "Hola por voz.")
+                await _until(lambda: _owner(chat) is call._scheduler)
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
+                await asyncio.wait_for(model.entered.wait(), 2)
+                receipt = await call.notify("informe listo")
+                await chat.flush()
+                await chat.close(keep=True)
+                assert [event["text"] for event in (await store.load(chat.id)).pending] == ["informe listo"]
+                model.opened.set()
+                await _said(call, events, "Larga por voz.")
+                await _said(call, events, "Aviso uno.")
+                assert receipt.state == "delivered"
+                restored.append(await ChatSession.from_store(agent, store, chat.id))
+                await _until(lambda: call._event_turn_blocker() is None)
+                await asyncio.sleep(0.4)
+                assert "Aviso dos." not in _texts(events) and len(model.calls) == 4
+
+            await _run(call, stt, drive)
+        finally:
+            for session in (chat, *restored):
+                await session.close()
+
+    async def test_a_restore_whose_snapshot_never_lands_does_not_forget_what_the_call_spoke(self) -> None:
+        # As above, and the session store is away while the chat is restored: that session closes again
+        # with nothing of its own stored, so the snapshot is still the one that lists the event.
+        # Call 2 (the call's second turn) holds until opened.
+        model = _GatedModel("Hola por chat.", "Hola por voz.", "Larga por voz.", "Aviso uno.", "Aviso dos.", gate_at=2)
+        store = _AwayStore()
+        agent = _agent(model)
+        chat = ChatSession(agent, session_store=store)
+        restored: list[ChatSession] = []
+        try:
+            chat.send("escrito 1")
+            await _turns(chat, 1)
+            call, stt = _call(model, parent_run_id=chat.head)
+
+            async def drive(events: list[VoiceSessionEvent]) -> None:
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
+                await _said(call, events, "Hola por voz.")
+                await _until(lambda: _owner(chat) is call._scheduler)
+                await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
+                await asyncio.wait_for(model.entered.wait(), 2)
+                receipt = await call.notify("informe listo")
+                await chat.flush()
+                await chat.close(keep=True)
+                model.opened.set()
+                await _said(call, events, "Larga por voz.")
+                await _said(call, events, "Aviso uno.")
+                assert receipt.state == "delivered"
+                store.away = True
+                restored.append(await ChatSession.from_store(agent, store, chat.id))
+                await restored[0].close(keep=True, store_timeout=0.3)
+                store.away = False
+                assert [event["text"] for event in (await store.load(chat.id)).pending] == ["informe listo"]
+                restored.append(await ChatSession.from_store(agent, store, chat.id))
+                await _until(lambda: call._event_turn_blocker() is None)
+                await asyncio.sleep(0.4)
+                assert "Aviso dos." not in _texts(events) and len(model.calls) == 4
+
+            await _run(call, stt, drive)
+        finally:
+            store.away = False
+            for session in (chat, *restored):
+                await session.close()
 
     async def test_a_chat_turn_does_not_take_an_event_posted_as_it_starts(self) -> None:
         model = _Model("Hola por chat.", "Hola por voz.", "Visto por chat.", "Aviso por voz.")
@@ -1079,6 +1252,36 @@ class TestAQuestionWaitsOnTheCall:
         await _run(call, stt, drive)
         await chats[0].close()
         assert tools[0].runs == ["wired"] and chats[0].last_status["code"] == "success"
+
+
+class _GatedStore(InMemoryChatSessionStore):
+    """A session store whose next save, once ``hold`` is set, waits for ``gate``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hold = False
+        self.entered = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    async def save(self, snapshot, *, expect_version, owner=None):
+        if self.hold:
+            self.hold = False
+            self.entered.set()
+            await self.gate.wait()
+        return await super().save(snapshot, expect_version=expect_version, owner=owner)
+
+
+class _AwayStore(InMemoryChatSessionStore):
+    """A session store whose saves fail while ``away`` (reads and leases still answer)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.away = False
+
+    async def save(self, snapshot, *, expect_version, owner=None):
+        if self.away:
+            raise ConnectionError("session store away")
+        return await super().save(snapshot, expect_version=expect_version, owner=owner)
 
 
 class _Elsewhere(InMemoryTracingProvider):

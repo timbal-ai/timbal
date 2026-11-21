@@ -67,6 +67,28 @@ DEFAULT_BG_TASK_RETENTION_SECS = 300.0
 # Process-local: run_id → store. Sequential turns find the bag via parent_id.
 # Concurrent siblings (no parent_id) each create a new store.
 _STORES_BY_RUN_ID: dict[str, BackgroundTaskStore] = {}
+# Per session id: the events that were pending when that session closed to be restored
+# (``SessionEvent.left_in``) and that a turn has taken since, in this process. They are still in the
+# session's snapshot, which stopped following when it closed: restored here, the session does not queue
+# them a second time (``taken_since_kept``). Only events carrying the mark are recorded, so nothing a
+# recovery queues again, and nothing from another process, is ever in it. The newest sessions, oldest out.
+_TAKEN_SINCE_KEPT: dict[str, set[str]] = {}
+_TAKEN_SINCE_KEPT_MAX = 1024
+
+
+def taken_since_kept(session_id: str) -> set[str]:
+    """Take the ids of the events ``session_id`` left pending when it closed to be restored and that a turn
+    took meanwhile, in this process (see ``SessionEvent.left_in``). Empties the record: the caller is that
+    session coming back, or puts them back with :func:`note_taken_since_kept` if it does not come back."""
+    return _TAKEN_SINCE_KEPT.pop(session_id, set())
+
+
+def note_taken_since_kept(session_id: str, event_ids: set[str]) -> None:
+    if not event_ids:
+        return
+    _TAKEN_SINCE_KEPT.setdefault(session_id, set()).update(event_ids)
+    if len(_TAKEN_SINCE_KEPT) > _TAKEN_SINCE_KEPT_MAX:
+        del _TAKEN_SINCE_KEPT[next(iter(_TAKEN_SINCE_KEPT))]
 # Stores a channel has owned (a text driver, a voice call): searched for the run
 # a session continued from before it had a store (see store_joined_from).
 _OWNED_STORES: weakref.WeakSet[BackgroundTaskStore] = weakref.WeakSet()
@@ -714,6 +736,7 @@ class SessionEvent:
         "mode",
         "sent_by",
         "kept_for",
+        "left_in",
         "guardrails",
         "posted_at",
         "state",
@@ -746,6 +769,11 @@ class SessionEvent:
         # snapshot and comes back with it, so no other channel takes it meanwhile (it would be answered
         # twice). Process-local, cleared when the session takes it back (restore_event).
         self.kept_for: str | None = None
+        # The id of a session that closed to be restored while this event was pending in its task store: the
+        # event is in that session's snapshot. Unlike kept_for it holds nobody back (a call sharing the
+        # session speaks an application's event); it is how a delivery after that close is told to the
+        # session when it comes back (taken_since_kept). Process-local, cleared by restore_event.
+        self.left_in: str | None = None
         self.guardrails: list[Any] = []
         self.posted_at = time.time()
         self.state: SessionEventState = "pending"
@@ -804,6 +832,8 @@ class SessionEvent:
         self.state = state
         if run_id is not None:
             self.run_id = run_id
+        if state == "delivered" and self.left_in is not None:
+            note_taken_since_kept(self.left_in, {self.id})
         if self._settled is not None:
             self._settled.set()
         callbacks, self._on_settle = self._on_settle, None
@@ -1664,7 +1694,7 @@ class BackgroundTaskStore:
         it was closed, and took its events out with ``drain_events(settle=False)``): queued again as it is,
         so the receipt its sender holds is the one that settles."""
         if held is not None and held.state == "pending":
-            held.kept_for = None  # back with the session it was kept for
+            held.kept_for = held.left_in = None  # back with the session it was kept for
             self._queue_event(held)
             return held
         event = SessionEvent(
@@ -2216,6 +2246,7 @@ def clear_background_stores() -> None:
     """Drop the process-local registry. Tests only."""
     _STORES_BY_RUN_ID.clear()
     _OWNED_STORES.clear()
+    _TAKEN_SINCE_KEPT.clear()
 
 
 GET_BACKGROUND_TASK_DESCRIPTION = (

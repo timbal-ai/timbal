@@ -25,8 +25,10 @@ from ..state.background import (
     SessionEvent,
     adopt_background_store,
     forget_idle_background_store,
+    note_taken_since_kept,
     session_continues_from,
     store_for_run,
+    taken_since_kept,
 )
 from ..state.chat_store import (
     ChatSessionStore,
@@ -702,6 +704,15 @@ class ChatSession:
         self._question_failures = 0
         # The head a call left parked whose stored trace held no question when read (_dropped_question_holds).
         self._dropped_question: str | None = None
+        # close(keep=True): the ids of the events pending in the task store when it let go of it (each
+        # marked SessionEvent.left_in, the user's messages kept_for too). From then on only those are this
+        # session's (see _mine).
+        self._left: frozenset[str] | None = None
+        # from_store(): the events it left at that close that a turn took since, in this process (still in
+        # its snapshot: not queued again), and, if the restore fails, the events that carried this
+        # session's marks when it took them back (the only ones its closing marks again).
+        self._taken_since_kept: set[str] = set()
+        self._only_keep: frozenset[str] | None = None
         if self._scheduler.lent and any(self._scheduler.takes(event) for event in self._store.pending_events()):
             # Opened on a live call that holds something its user wrote: this chat's to answer from now on
             # (the call leaves it to the chat), and nothing else would start the worker.
@@ -1025,8 +1036,17 @@ class ChatSession:
         return self.log.subscribe(after, numbered=numbered)
 
     def _mine(self, event: SessionEvent) -> bool:
-        """Not a message another session keeps for its own restore (``SessionEvent.kept_for``): that one is
-        in the other session's snapshot, and is neither listed, stored, marked, withdrawn nor taken back here."""
+        """Whether a pending ``event`` is this session's to list, store, mark, withdraw or take back.
+
+        Not a message another session keeps for its own restore (``SessionEvent.kept_for``): that one is in
+        the other session's snapshot. And once this session has closed to be restored, only what was
+        pending when it let go of the task store (``SessionEvent.left_in``): what arrives after that is
+        another channel's (a call it shared with answers or speaks it), and stored here it would be
+        delivered again when the session comes back. The snapshot of a closed session is written after
+        that point.
+        """
+        if self._left is not None:
+            return event.id in self._left
         return event.kept_for is None or event.kept_for == self.id
 
     def pending_messages(self) -> list[dict[str, Any]]:
@@ -1118,13 +1138,28 @@ class ChatSession:
                 self._in_flight = {**cut, "cut": "shutdown"}
             if self._last_context is not None:
                 self._scheduler.unmark(self._last_context)
+            if keep and self._taken_since_kept and self._stored_changes == 0:
+                # Restored, and closing again before any snapshot of its own was stored (the session store
+                # was away): the stored one is still the old one, which lists what a turn took meanwhile.
+                # The next restore has to know that too.
+                note_taken_since_kept(self.id, self._taken_since_kept)
             if keep and self._session_store is not None:
-                # Kept in its store: restored later with what was typed and not answered. Another channel
-                # on the session (a call it shares with, a chat opened meanwhile) must not answer that
-                # too: marked as this session's until it takes them back (from_store).
+                # Kept in its store: restored later with what is pending now, which its snapshot holds.
+                # What the user typed and it has not answered is marked as this session's (kept_for):
+                # another channel on the session (a call it shares with, a chat opened meanwhile) must not
+                # answer that too. Everything it leaves is tagged (left_in): a call may still speak an
+                # application's event, and the session is told so when it comes back (from_store).
+                left = []
                 for event in self._store.pending_events():
+                    if event.task_id is not None or not self._mine(event):
+                        continue
+                    if self._only_keep is not None and event.id not in self._only_keep:
+                        continue  # a restore that failed: only what it had taken back is its own
+                    event.left_in = self.id
                     if event.source == "user" and event.kept_for is None:
                         event.kept_for = self.id
+                    left.append(event.id)
+                self._left = frozenset(left)
             self._scheduler.release(self._store)
             forget_idle_background_store(self._store)
             self._record("closed", kept=keep)
@@ -1221,6 +1256,15 @@ class ChatSession:
                     settle=False, where=lambda event: event.task_id is None and session._mine(event)
                 )
             }
+            # If this restore fails: what its closing marks again (restore_event clears the marks as it
+            # queues them). Not something sent to another channel since, which was never this session's.
+            session._only_keep = frozenset(
+                event.id
+                for event in session._kept_events.values()
+                if session_id in (event.kept_for, event.left_in)
+            )
+            # What it left at its close and a turn took since (a call sharing the conversation spoke it).
+            session._taken_since_kept = taken_since_kept(session_id)
             session._version, session._leased, session._lease_from = snapshot.version, True, leased_at
             session.turns, session.last_status, session._parked = snapshot.turns, snapshot.last_status, snapshot.parked
             session._last_prompt = _load_prompt(snapshot.last_prompt)
@@ -1265,6 +1309,8 @@ class ChatSession:
                 # What was taken out of the task store and not queued again yet: back where it was.
                 session._store.requeue([], list(session._kept_events.values()))
                 session._kept_events = {}
+                # Still true for the next attempt: the stored snapshot is as it was.
+                note_taken_since_kept(session_id, session._taken_since_kept)
                 session._lost = True  # stores nothing while it lets go of the task store
                 with contextlib.suppress(BaseException):
                     await session.close(keep=True)
@@ -1278,6 +1324,7 @@ class ChatSession:
         if session.parked:
             # Restored on a question: the session is not lent to a call while it waits (see SessionScheduler).
             session._scheduler.note_parked(session._last_context.id)
+        session._only_keep = None  # restored: a later close keeps whatever is unanswered then
         session._record("restored", head=session.head, recovered=recovered, pending=len(snapshot.pending))
         session._persist()
         session._lease_task = asyncio.get_running_loop().create_task(session._renew_lease())
@@ -2333,7 +2380,13 @@ class ChatSession:
                 continue
             queued.add(data["id"])
             # The event itself when this process still has it (from_store() took it out of the task store).
-            event = self._store.restore_event(data, held=self._kept_events.pop(data["id"], None))
+            held = self._kept_events.pop(data["id"], None)
+            if held is None and data["id"] in self._taken_since_kept:
+                # Pending when this session closed to be restored, and taken by a turn since, in this
+                # process (a call sharing the conversation spoke it; the closed session's snapshot no
+                # longer followed). Queued again, it would be delivered twice.
+                continue
+            event = self._store.restore_event(data, held=held)
             if event.source == "user":
                 self._watch(event)
 
