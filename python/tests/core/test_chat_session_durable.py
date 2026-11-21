@@ -1686,10 +1686,14 @@ class TestLeaseRunsOut:
     find the old one still acting."""
 
     TTL = 0.9
+    # For the tests where the session must keep its lease: a stalled event loop (a busy CI runner) uses up
+    # the lease as surely as a store that does not answer, and the session then rightly gives it up. A
+    # 0.9 s lease leaves about 0.4 s between a failed renewal and the end of the lease; this one, 1.4 s.
+    KEPT_TTL = 3.0
 
-    async def _mid_tool(self, db):
+    async def _mid_tool(self, db, ttl=TTL):
         provider, store = db
-        store.lease_ttl_s = self.TTL
+        store.lease_ttl_s = ttl
         till = Till()
         session = ChatSession(make_agent(provider, till), session_store=store)
         session.send("start")
@@ -1730,35 +1734,47 @@ class TestLeaseRunsOut:
 
     async def test_a_store_that_answers_within_the_lease_keeps_the_session(self, db):
         """Slow is not gone: renewals that take a good part of a lease, and land, are renewals."""
-        session, store, till = await self._mid_tool(db)
+        ttl = self.KEPT_TTL
+        session, store, till = await self._mid_tool(db, ttl)
+        landed = []
 
         async def renew(real):
-            await asyncio.sleep(self.TTL / 5)
-            return await real()
+            await asyncio.sleep(ttl / 5)
+            result = await real()
+            landed.append(1)
+            return result
 
         renewals(store, renew)
-        with pytest.raises(TimeoutError):
-            await taken_over(store, session.id, timeout=self.TTL * 1.6)  # never free: it was renewed each time
+        # Four slow renewals, sent a third of a lease apart: the last lands more than a lease after the first
+        # was sent, when any lease confirmed before them has run out. A session that did not count them has
+        # given up by then, and its renewals stopped.
+        await until(lambda: len(landed) >= 4 or session.lost)
         assert not session.lost and session.busy
+        with pytest.raises(SessionLeased):
+            await store.acquire_lease(session.id, "elsewhere:1:x")  # still its own: renewed each time
         till.release.set()
         await records(session, "turn_finished", 1)
         assert till.charges == 1
         await session.close()
 
     async def test_one_failed_renewal_is_tried_again_before_the_lease_runs_out(self, db):
-        session, store, till = await self._mid_tool(db)
-        failed = []
+        session, store, till = await self._mid_tool(db, self.KEPT_TTL)
+        failed, retried = [], []
 
         async def renew(real):
             if not failed:
                 failed.append(1)
                 raise OSError("store unreachable")
-            return await real()
+            result = await real()
+            retried.append(1)
+            return result
 
         renewals(store, renew)
-        with pytest.raises(TimeoutError):
-            await taken_over(store, session.id, timeout=self.TTL * 1.6)
-        assert failed and not session.lost and session.busy
+        # The retry lands, or the session gave up first (and never tries it): wait for whichever comes.
+        await until(lambda: retried or session.lost)
+        assert failed and retried and not session.lost and session.busy
+        with pytest.raises(SessionLeased):
+            await store.acquire_lease(session.id, "elsewhere:1:x")  # the retry renewed it: still its own
         till.release.set()
         await records(session, "turn_finished", 1)
         await session.close()
