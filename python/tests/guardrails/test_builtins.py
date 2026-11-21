@@ -171,9 +171,9 @@ class TestPresets:
         import timbal.guardrails as g
 
         assert isinstance(g.TopicGuard(allow=["billing"]), Guardrail)
-        assert g.TopicGuard(allow=["billing"]).model == "openai/gpt-5-mini"
+        assert g.TopicGuard(allow=["billing"]).model == "anthropic/claude-haiku-5-5"
         assert isinstance(g.LLMJudge("no medical advice"), Guardrail)
-        assert g.LLMJudge("no medical advice").model == "openai/gpt-5-mini"
+        assert g.LLMJudge("no medical advice").model == "anthropic/claude-haiku-5-5"
         with pytest.raises(AttributeError):
             g.NotARail  # noqa: B018
 

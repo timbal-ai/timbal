@@ -153,7 +153,7 @@ agent_is_company = Agent(
     name="agent_is_company",
     system_prompt="""Determine if the input is a company name.
     Return only 'true' or 'false'.""",
-    model="openai/gpt-4.1-mini"
+    model="openai/gpt-6-luna"
 )
 
 # Nest the agent under the parent agent's path
@@ -170,7 +170,7 @@ async def pre_hook():
 
 agent = Agent(
     name="agent",
-    model="openai/gpt-4.1-mini",
+    model="openai/gpt-6-luna",
     pre_hook=pre_hook
 )
 ```

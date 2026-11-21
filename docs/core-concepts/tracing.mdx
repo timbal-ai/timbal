@@ -21,7 +21,7 @@ llm_span = Span(
     t0=1640995200000,  # Start time (Unix ms)
     t1=1640995201000,  # End time (Unix ms)
     input={
-        "model": "openai/gpt-4o-mini",
+        "model": "openai/gpt-6-luna",
         "messages": [{
             "role": "user",
             "content": [{"type": "text", "text": "Hello"}],
@@ -32,8 +32,8 @@ llm_span = Span(
         "content": [{"type": "text", "text": "Hello! How can I assist you today?"}],
     },
     usage={
-        "openai/gpt-4o-mini:input_text_tokens": 32,
-        "openai/gpt-4o-mini:output_text_tokens": 10,
+        "openai/gpt-6-luna:input_text_tokens": 32,
+        "openai/gpt-6-luna:output_text_tokens": 10,
     },
     metadata={
         "type": "LLM",

@@ -1,5 +1,6 @@
 """Anthropic Messages API request adapter (anthropic)."""
 
+import re
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -10,6 +11,16 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
     from ..runnable import Runnable
+
+
+# Claude models whose API rejects non-default sampling parameters with a 400 (Opus 4.7+, the Opus/Sonnet/Haiku 5
+# generations, Fable and Mythos). Anthropic's model docs say to omit `temperature`, `top_p` and `top_k` for them.
+_NO_SAMPLING_PARAMS = re.compile(r"^claude-(?:(?:fable|mythos)-|opus-(?:4-[78]|5)|sonnet-5|haiku-5)")
+
+
+def rejects_temperature(model_name: str) -> bool:
+    """Whether the Anthropic API rejects a ``temperature`` value for this model (dated ids included)."""
+    return _NO_SAMPLING_PARAMS.match(model_name) is not None
 
 
 def prepare_messages_request(
@@ -41,7 +52,9 @@ def prepare_messages_request(
         if anthropic_tools:
             anthropic_kwargs["tools"] = anthropic_tools
 
-    if temperature is not None:
+    # Deterministic callers (LLM judges pin temperature=0.0) would 400 on these models, so the value is dropped
+    # for them. Sending it anyway via ``model_params={"temperature": ...}`` still reaches the API unchanged.
+    if temperature is not None and not rejects_temperature(model_name):
         anthropic_kwargs["temperature"] = temperature
 
     # Server-side automatic prompt caching (anthropic SDK >= 0.83): the API

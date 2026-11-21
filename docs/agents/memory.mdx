@@ -59,7 +59,7 @@ Configure the tracing provider for your deployment and keep run IDs with the con
 ```python
 from timbal import Agent
 
-agent = Agent(name="example", model="openai/gpt-4o-mini")
+agent = Agent(name="example", model="openai/gpt-6-luna")
 
 first = await agent(prompt="My name is David").collect()
 second = await agent(parent_id=first.run_id, prompt="What's my name?").collect()
@@ -92,7 +92,7 @@ Each agent interaction creates a unique run with its own context. You can branch
 from timbal import Agent
 from timbal.state import RunContext, set_run_context
 
-agent = Agent(name="example", model="openai/gpt-4o-mini")
+agent = Agent(name="example", model="openai/gpt-6-luna")
 
 # Main conversation
 step1 = await agent(prompt="Hello").collect()

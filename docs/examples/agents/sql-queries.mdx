@@ -35,7 +35,7 @@ async def add_ticket(customer_id: str, priority: str) -> dict:
 
 agent = Agent(
     name="support_analyst",
-    model="openai/gpt-4.1-mini",
+    model="openai/gpt-6-luna",
     system_prompt="Use the ticket tools to record support requests and answer ticket-count questions.",
     tools=[
         count_high_priority_tickets,
