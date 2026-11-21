@@ -841,7 +841,9 @@ async def _append_blocks(
     there (sent with the create).
 
     A batch that fails after others landed raises ``NotionPartialWriteError`` saying how much is on
-    the page, so the model does not repeat the whole write and duplicate it.
+    the page, so the model does not repeat the whole write and duplicate it. With ``created`` (the
+    page was just made by this call) any failure does, even before the first block: the page exists,
+    and a plain error would invite creating it again.
     """
     total = written + len(blocks)
     done = written
@@ -849,14 +851,15 @@ async def _append_blocks(
         try:
             await _notion_request(tool, "PATCH", f"/blocks/{block_id}/children", json_body={"children": batch})
         except Exception as exc:
-            if done == 0:
-                raise  # nothing landed: the error stands as it is
+            if done == 0 and not created:
+                raise  # nothing landed on an existing page: the error stands as it is
             first = batch[0]
             resume = plain_text((first.get(first.get("type", "")) or {}).get("rich_text"))[:80]
             resume_hint = f' (the first one not written begins "{resume}")' if resume else ""
             if created:
+                wrote = f"only {done} of {total}" if done else f"none of its {total}"
                 message = (
-                    f"Notion created page {block_id} but wrote only {done} of {total} content blocks before an "
+                    f"Notion created page {block_id} but wrote {wrote} content blocks before an "
                     f"error: {exc}. The page exists: do not create it again; append the remaining content"
                     f"{resume_hint} with notion_append_content."
                 )

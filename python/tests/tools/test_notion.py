@@ -1010,6 +1010,23 @@ async def test_create_with_large_properties_appends_all_content(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
+async def test_create_whose_first_append_fails_still_says_the_page_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Properties that fill most of a request leave no room for content in the create, so every
+    # block is appended afterwards. If the first append fails, the page exists all the same.
+    seen = _mock_http(monkeypatch, _fail_patch(1))
+    out = await NotionCreatePage(api_key=SecretStr("k"))(
+        parent=PAGE, title="t" * 199_000, content="p" * 199_000
+    ).collect()
+    assert out.status.code == "error"
+    assert [r.method for r in seen] == ["POST", "PATCH"]
+    assert "children" not in _body(seen[0])
+    message = out.error["message"]
+    assert f"created page {PAGE}" in message
+    assert "wrote none of its" in message
+    assert "do not create it again" in message
+
+
+@pytest.mark.asyncio
 async def test_partial_write_counts_with_size_based_batches(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _mock_http(monkeypatch, _fail_patch(2))
     paragraphs = [chr(ord("a") + i) * 150_000 for i in range(7)]
