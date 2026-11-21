@@ -409,6 +409,8 @@ def _load_runnable(runnable_fqn: str, eval_file_path: Path) -> Runnable:
     # current working directory (so eval files in e.g. an "evals/" subdirectory can
     # reference project-root modules like "agent.py::agent").
     runnable_path_obj = Path(runnable_path)
+    if runnable_path_obj.parts and runnable_path_obj.parts[0] == "~":
+        runnable_path_obj = runnable_path_obj.expanduser()
     if not runnable_path_obj.is_absolute():
         candidate = (eval_file_path.parent / runnable_path_obj).resolve()
         if not candidate.exists():
