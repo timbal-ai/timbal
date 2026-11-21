@@ -109,15 +109,20 @@ def file_lock(path: str) -> Iterator[None]:
     os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+        if os.name == "nt":
             import msvcrt
+
+            from ..state.tracing.providers.jsonl import _is_windows_lock_contention_error
 
             while True:
                 try:
                     msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # retries for ~10 s, then raises
                     break
-                except OSError:
-                    continue
+                except OSError as exc:
+                    # Only "held by another process" is worth waiting out; anything else
+                    # (a filesystem without locks, a bad fd) would loop forever.
+                    if not _is_windows_lock_contention_error(exc):
+                        raise
             try:
                 yield
             finally:

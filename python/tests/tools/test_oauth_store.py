@@ -1,9 +1,11 @@
 """Tests for the shared rotating-refresh-token store (token file, locks, fallbacks)."""
 
 import asyncio
+import errno
 import os
 import sys
 import threading
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -184,3 +186,33 @@ async def test_needs_a_refresh_token_or_a_file() -> None:
     exchange, _ = _rotating()
     with pytest.raises(ValueError, match="refresh token or a token file"):
         await _get(exchange, refresh_token=None)
+
+
+def _fake_msvcrt(monkeypatch: pytest.MonkeyPatch, failures: list[OSError]) -> list[int]:
+    """Run ``file_lock``'s Windows branch on any OS: ``locking`` raises ``failures`` in turn, then succeeds."""
+    calls: list[int] = []
+
+    def locking(_fd: int, mode: int, _nbytes: int) -> None:
+        calls.append(mode)
+        if mode == 1 and failures:
+            raise failures.pop(0)
+
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=locking))
+    monkeypatch.setattr(store.os, "name", "nt")
+    return calls
+
+
+def test_windows_file_lock_waits_out_contention(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    held = OSError(errno.EACCES, "held by another process")
+    calls = _fake_msvcrt(monkeypatch, [held, held])
+    with store.file_lock(str(tmp_path / "token.json")):
+        pass
+    assert calls == [1, 1, 1, 0]
+
+
+def test_windows_file_lock_raises_other_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    calls = _fake_msvcrt(monkeypatch, [OSError(errno.EINVAL, "locking not supported")])
+    with pytest.raises(OSError, match="locking not supported"):
+        with store.file_lock(str(tmp_path / "token.json")):
+            pass
+    assert calls == [1]

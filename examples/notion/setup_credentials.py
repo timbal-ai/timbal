@@ -27,6 +27,9 @@ from dotenv import load_dotenv
 from timbal.tools._oauth_store import write_token_file
 from timbal.tools.notion import AUTHORIZE_URL, NotionWhoAmI, exchange_code
 
+# Before the settings below are read, so NOTION_CALLBACK_PORT and NOTION_TOKEN_FILE from .env apply.
+load_dotenv()
+
 PORT = int(os.getenv("NOTION_CALLBACK_PORT", "8766"))
 REDIRECT_URI = f"http://localhost:{PORT}/callback"
 TOKEN_FILE = os.getenv("NOTION_TOKEN_FILE") or ".notion_token.json"
@@ -66,7 +69,6 @@ def _wait_for_code(expected_state: str) -> str:
 
 
 async def main() -> None:
-    load_dotenv()
     client_id = os.environ["NOTION_CLIENT_ID"]
     client_secret = os.environ["NOTION_CLIENT_SECRET"]
 
