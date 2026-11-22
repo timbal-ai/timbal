@@ -661,8 +661,17 @@ async def stalled(fault, session) -> None:
         assert session.lost, f"a session stalled past its lease went on: {session.state()}"
     if not session.closed:
         # Its writes landed, or one of them found the row moved on (the session is lost then).
-        with contextlib.suppress(Exception):
+        try:
             await session.flush()
+        except asyncio.CancelledError:
+            # The planned fault can strike at this flush's own write: a dead store cancels it. Anything else
+            # (the test itself cancelled) goes on up.
+            if not fault.dead or asyncio.current_task().cancelling():
+                raise
+        except Exception:
+            pass
+        if fault.gone.is_set():
+            return  # it died or began shutting down during that flush: the caller restores it
     if session.lost:
         await asyncio.wait_for(session.wait_closed(), 10)
         fault.gone.set()
