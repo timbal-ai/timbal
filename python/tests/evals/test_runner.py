@@ -101,14 +101,16 @@ class TestParallelRun:
     async def test_parallel_is_actually_concurrent(self):
         import time
 
-        evals = [make_eval(f"e{i}", 0.2, "out") for i in range(4)]
+        delay = 0.5
+        evals = [make_eval(f"e{i}", delay, "out") for i in range(4)]
         t0 = time.perf_counter()
 
         await run_evals(evals, reporter=Reporter(), max_concurrency=4)
 
         elapsed = time.perf_counter() - t0
-        # Sequential would take >= 0.8s; parallel should be well under that.
-        assert elapsed < 0.6
+        # Sequential would take >= 2.0 s, parallel ~0.5 s: a bound at 3/4 of sequential leaves a busy runner
+        # a second of slack and still fails a sequential run.
+        assert elapsed < 4 * delay * 0.75, elapsed
 
 
 class TestAbnormalExit:

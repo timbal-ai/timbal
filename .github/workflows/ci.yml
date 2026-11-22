@@ -1,16 +1,18 @@
 name: CI
 
+# Two lanes, decided by the `plan` job (scripts/ci_plan.py):
+# - full: every OS x Python, tests in parallel. The merge queue, manual runs, and pull requests while
+#   the merge queue is not on. It is what has to pass before anything lands.
+# - fast: Ubuntu + the lowest supported Python, tests in parallel. Pull requests once the repo variable
+#   CI_MERGE_QUEUE=true (the merge queue then runs the full lane on what is about to land).
+# A pull request that touches nothing the tests read runs no tests.
+# Require only `CI result` in branch rules: it passes when every job that ran passed. (No path filter on
+# the trigger: a required check from a workflow that never started would block the pull request.)
+
 on:
   pull_request:
     branches: [main, "release/**"]  # release/** = backport PRs (RELEASING.md)
-    paths:
-      - "python/**"
-      - "docs/models/**"
-      - "pyproject.toml"
-      - "uv.lock"
-      - "scripts/audit_models.py"
-      - "scripts/generate_models.py"
-      - ".github/workflows/ci.yml"
+  merge_group:
   workflow_dispatch:
     inputs:
       os:
@@ -29,18 +31,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      lane: ${{ steps.plan.outputs.lane }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts/ci_plan.py
+          sparse-checkout-cone-mode: false
+
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          MERGE_QUEUE: ${{ vars.CI_MERGE_QUEUE }}
+          OS_INPUT: ${{ github.event.inputs.os }}
+        run: python3 scripts/ci_plan.py >> "$GITHUB_OUTPUT"
+
   test:
-    name: Test (${{ matrix.os }} / py${{ matrix.python-version }})
+    name: Test (${{ matrix.os }} / py${{ matrix.python }})
+    needs: plan
+    if: needs.plan.outputs.lane != 'none'
     runs-on: ${{ matrix.os }}
+    # A full run takes about 10 minutes. A hung test would otherwise hold the job for GitHub's 6 hours.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        # On manual (workflow_dispatch) runs the `os` input narrows the matrix
-        # to a single OS — useful for iterating on Windows-only failures without
-        # burning the other matrix cells. On PR events `github.event.inputs.os`
-        # is empty, so the full matrix runs.
-        os: ${{ (github.event.inputs.os == '' || github.event.inputs.os == 'all') && fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]') || fromJSON(format('["{0}"]', github.event.inputs.os)) }}
-        python-version: ["3.11", "3.12", "3.13"]
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -53,7 +76,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python }}
 
       # Install dev deps + the `all` optional-dependency group so the entire
       # import surface (server, codegen, documents, evals) is exercised on
@@ -68,5 +91,47 @@ jobs:
       - name: Audit models.yaml (offline)
         run: uv run python scripts/audit_models.py --offline
 
+      # Everything in parallel, then the tests marked `serial` (none today) one at a time. Both passes
+      # always run; either failing fails the step. One cell of the full lane measures coverage, over both.
+      # - Workers: one per core minus one. With every core busy, the event loop, SQLite threads and background
+      #   uploads starve, and that is when rare stalls showed up; a free core costs little.
+      # - A failed test is retried once (pytest-rerunfailures): a rare flake does not fail the job, a real
+      #   failure fails both times. Every test that passed only on retry is listed in the job summary and as a
+      #   warning, so flakes stay visible and get fixed.
       - name: Run tests
-        run: uv run pytest
+        shell: bash
+        env:
+          COVERAGE: ${{ matrix.coverage }}
+        run: |
+          workers=$(uv run python -c "import os; print(max(1, (os.cpu_count() or 2) - 1))")
+          cov=""
+          if [ "$COVERAGE" = "true" ]; then cov="--cov=timbal --cov-report=term-missing"; fi
+          retry="--reruns 1 --reruns-delay 1"
+          rc=0
+          uv run pytest -n "$workers" --dist worksteal -m "not integration and not serial" $retry $cov 2>&1 | tee pytest.log || rc=$?
+          # Exit 5: no test is marked `serial` (none needs it today); the step does not fail for that.
+          uv run pytest -m "serial and not integration" $retry $cov ${cov:+--cov-append} 2>&1 | tee -a pytest.log \
+            || { s=$?; [ "$s" -eq 5 ] || rc=$s; }
+          flaky=$(uv run python scripts/ci_flaky.py pytest.log)
+          if [ -n "$flaky" ]; then
+            echo "$flaky" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Flaky tests::$(echo "$flaky" | grep -c '^- ') test(s) passed only on retry; see the job summary"
+          fi
+          exit "$rc"
+
+  result:
+    name: CI result
+    needs: [plan, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job that ran passed
+        env:
+          LANE: ${{ needs.plan.outputs.lane }}
+          PLAN: ${{ needs.plan.result }}
+          TEST: ${{ needs.test.result }}
+        run: |
+          echo "lane=$LANE plan=$PLAN test=$TEST"
+          [ "$PLAN" = "success" ] || exit 1
+          if [ "$LANE" = "none" ]; then exit 0; fi
+          [ "$TEST" = "success" ]

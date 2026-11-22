@@ -79,15 +79,18 @@ class BufferedPlaybackTracker(PlaybackTracker):
     def __init__(
         self,
         bytes_per_second: int,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         if bytes_per_second <= 0:
             raise ValueError("bytes_per_second must be positive")
         self._bps = bytes_per_second
+        # perf_counter, not monotonic: before Python 3.13, Windows' monotonic ticks every 15.6 ms, longer than a
+        # short reply's audio. Read in one tick with its emission, that audio was still playing and none of it
+        # heard, so an utterance right after it cut the reply from memory as unheard.
         self._clock = clock
         # Bytes on the played axis that will play unless interrupted.
         self._scheduled_bytes = 0
-        # When the gapless queue drains (monotonic).
+        # When the gapless queue drains (on ``clock``).
         self._playing_until = 0.0
         # Last client ack: (bytes, at_time). None until the first ack.
         self._last_ack: tuple[int, float] | None = None

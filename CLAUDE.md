@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Development and Testing
 - **Install dependencies**: `uv sync --dev` (from repo root — `pyproject.toml` is at root)
-- **Run all tests**: `uv run pytest` (from repo root)
+- **Run all tests**: `uv run pytest -n auto` (from repo root; `-n auto` = one pytest-xdist worker per core, serial without it). Coverage is opt-in: add `--cov=timbal --cov-report=term-missing`
 - **Run single test**: `uv run pytest python/tests/core/test_agent.py::TestClass::test_method`
 - **Linting**: `uv run ruff check`
 - **Format**: `uv run ruff format`
@@ -729,6 +729,9 @@ async with OTelExporter(endpoint="http://localhost:4318") as exporter:
 - All async tests use `pytest-asyncio` (mode=AUTO — no `@pytest.mark.asyncio` needed if configured)
 - Use `TestModel` to avoid API calls in unit tests
 - `tmp_path` pytest fixture for file-based provider tests
+- Tests run in parallel (pytest-xdist) in CI and with `-n auto` locally: each worker is its own process and every worker must collect the same test ids, so a `parametrize` id must not depend on the process (`ids=repr` of an `object()` or of a value holding a timestamp breaks collection; `test_chat_session_durable.py` `_stable_id`), and a test must not share files, ports or global state with another test except through its own `tmp_path`
+- Clocks: before Python 3.13, Windows' `time.monotonic()` / `time.time()` and asyncio's timers tick every 15.6 ms, so two events can get the same timestamp. Never order events by comparing their timestamps strictly: stamp them so they cannot tie (`VoiceSession._event_stamp`) or use a counter. A test deadline is a hang guard with headroom (a scenario that takes 0.2 s here can take seconds on a busy Windows runner), never a timing check. To find this class of bug on any OS, run tests with the clock in coarse ticks (`test_end_call.py` `_session_clock` does it for the voice session)
+- CI (`.github/workflows/ci.yml`, planned by `scripts/ci_plan.py`) has two lanes. **Full**: every OS × Python 3.11–3.13, in the merge queue, on manual runs (`gh workflow run ci.yml --ref <branch> [-f os=windows-latest]`) and on pull requests until the merge queue is on. **Fast**: Ubuntu + Python 3.11 on pull requests once the repo variable `CI_MERGE_QUEUE=true`. A PR that changes nothing the tests read runs no tests. `CI result` is the one check to require. Each job runs the tests in parallel (one worker per core minus one), then the `serial` ones (`pytestmark = pytest.mark.serial`; none today) one at a time. A failed test is retried once (pytest-rerunfailures); one that passed only on retry is listed in the job summary and as a warning (`scripts/ci_flaky.py`): a flake to fix, never a reason to raise `--reruns`
 - Test classes group related tests: `TestProviderName`, `TestFeature`
 - `python/tests/guardrails/conftest.py` provides `StreamingTestModel`, which streams real
   `TextDelta`/`ThinkingDelta`/`ToolUse` items through the router — use it whenever a test

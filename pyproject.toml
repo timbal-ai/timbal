@@ -86,6 +86,8 @@ dev = [
   "pytest>=8.3.4",
   "pytest-asyncio>=0.25.2",
   "pytest-cov>=7.0.0",
+  "pytest-rerunfailures>=15.0",
+  "pytest-xdist>=3.8.0",
   "yappi>=1.7.6",
 ]
 
@@ -172,6 +174,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
   "integration: marks tests that need real services (LLM keys, Timbal platform/KB, network); default run uses '-m not integration'",
+  "serial: CI runs these one at a time, after the parallel pass (see the `Run tests` step of ci.yml)",
 ]
 addopts = [
   "-v",
@@ -179,8 +182,6 @@ addopts = [
   "--strict-markers",
   "--color=yes",
   "-W ignore::DeprecationWarning",
-  "--cov=timbal",
-  "--cov-report=term-missing",
   "-m",
   "not integration",
 ]

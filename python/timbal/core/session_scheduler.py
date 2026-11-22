@@ -493,8 +493,16 @@ class SessionScheduler:
         if changed is not None and not changed.done():
             changed.set_result(None)
 
-    async def _wait_change(self) -> None:
+    def changed(self) -> asyncio.Future[None]:
+        """Done at the next change of the session's turns (one ending, admitted, queued, a new head).
+
+        Taken right where the state that is waited on was read, with nothing awaited in between: a
+        change made after that read always completes it. Shared by every waiter, so never cancel it.
+        """
         if self._changed is None:
             self._changed = asyncio.get_running_loop().create_future()
+        return self._changed
+
+    async def _wait_change(self) -> None:
         # Shielded: one waiter being cancelled must not cancel the future the others share.
-        await asyncio.shield(self._changed)
+        await asyncio.shield(self.changed())

@@ -211,6 +211,8 @@ class TestDefaultParamsExecution:
             return f"{message}:{counter}"
 
         tool = Tool(name="callable_exec_tool", handler=handler, default_params={"counter": get_counter})
+        # get_counter's count is module state other tests also advance (in any order, under xdist): count from here.
+        start = getattr(get_counter, "count", 0)
 
         # Execute multiple times to verify callable is executed each time
         result1 = tool(message="first")
@@ -225,8 +227,8 @@ class TestDefaultParamsExecution:
         assert_no_errors(output2)
 
         # Counter should increment each time
-        assert "first:1" in str(output1.output)
-        assert "second:2" in str(output2.output)
+        assert output1.output == f"first:{start + 1}"
+        assert output2.output == f"second:{start + 2}"
 
     @pytest.mark.asyncio
     async def test_async_callable_default_params_execution(self):

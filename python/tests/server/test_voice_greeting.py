@@ -1255,7 +1255,11 @@ class TestGreetingPromptNoteAfterBargeIn:
         prompts = _spy_on_system_prompts(monkeypatch)
         tts = _PacedTTS(num_chunks=2, every_secs=0.0)
         session = _make_session(
-            greeting={"text": GREETING, "interruptible": True}, tts=tts
+            greeting={"text": GREETING, "interruptible": True},
+            tts=tts,
+            # Playback frozen at 0 bytes: "never heard" by construction. With the real clock, the few ms between
+            # the claim and the interrupt on a busy runner already counted as a heard "H".
+            playback_tracker=BufferedPlaybackTracker(bytes_per_second=32_000, clock=lambda: 0.0),
         )
         await session._claim_greeting(GREETING)
         await session.interrupt()
