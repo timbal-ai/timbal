@@ -155,11 +155,19 @@ async def loop_watchdog(request):
     it; the stacks say which, and the test fails), or the whole process stopped running (this thread was late
     by as much: nothing in the process ran, so nothing could have happened; noted on the report, the test's
     own result stands). Measured on ``time.perf_counter``, which no test moves (``Clock`` moves monotonic).
+
+    Async tests only: during a sync test's body nothing runs the loop, so a sync test that waits (on a thread,
+    a file) would read as a blocked loop. Applied module-wide, it lets the sync tests of the module pass as is.
     """
     import asyncio
+    import inspect
     import sys
     import threading
     import traceback
+
+    if not inspect.iscoroutinefunction(getattr(request.node, "obj", None)):
+        yield
+        return
 
     loop = asyncio.get_running_loop()
     loop_thread = threading.get_ident()
