@@ -1042,6 +1042,104 @@ def flaky_db(tmp_path):
     return provider, SqliteChatSessionStore(tmp_path / "timbal.db")
 
 
+class TestAStoppedTurnThatDied:
+    """The user stops a turn (a message sent as ``interrupt``) and the process dies before the stop took effect
+    in what was stored. The turn had run no tool call, so a restart would queue its message again: behind the
+    stop, where it reads as the user's latest words, and the gated tool it asked for is asked for again (and,
+    approved, runs). Live, the stop cut that turn and its request was never acted on again (CI, Windows: the
+    `approval_abandoned_as_it_parks` sweep under a trace outage, its `dispatched` write never landing)."""
+
+    async def _stopped_before_its_tool(self, db, charge):
+        """``pay``'s model asks for the charge; the turn is held before it records that call (the write that
+        would, never landed), and the stop is sent and stored (acknowledged), the cut not made yet."""
+        provider, store = db
+        session = ChatSession(gated_agent(provider, charge), session_store=store)
+        about_to_dispatch = asyncio.Event()
+
+        async def held(_in_flight, _agent_path, _calls):
+            about_to_dispatch.set()
+            await asyncio.Event().wait()
+
+        session._note_dispatch = held
+        session.send("pay")
+        await asyncio.wait_for(about_to_dispatch.wait(), 30)
+        stop = session.send("never mind", mode="interrupt", defer_cut=True)
+        await session.flush()
+        stored = await store.load(session.id)
+        assert stored.in_flight is not None and not stored.in_flight.get("dispatched")
+        assert [event["text"] for event in stored.pending] == ["never mind"]
+        return provider, store, session, stop
+
+    async def _restored(self, provider, store, session, charge):
+        await crash(session)
+        provider.crashed = False
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        await until(lambda: not restored.busy and not restored.pending_messages())
+        return restored
+
+    async def _the_stop_holds(self, restored, charge):
+        assert not restored.parked, "the stopped request asked for the charge again"
+        assert charge.gate.calls == 0
+        outputs = root_outputs(restored)
+        assert [output.output.collect_text() for output in outputs] == ["echo: never mind"]
+        # Not lost: the next turn read it, named as what the user stopped.
+        run = await restored._load_run(outputs[-1].run_id)
+        texts = [str(message.get("content")) for message in run.root_span().memory]
+        notice = next(text for text in texts if "stopped that turn" in text)
+        assert '"pay"' in notice and "cut off by a server restart" in notice
+
+    async def test_only_the_stop_message_was_stored(self, db):
+        charge = Charge(released=True)
+        provider, store, session, _ = await self._stopped_before_its_tool(db, charge)
+        assert not (await store.load(session.id)).in_flight.get("stopped")
+        restored = await self._restored(provider, store, session, charge)
+        await self._the_stop_holds(restored, charge)
+        await restored.close()
+
+    async def test_the_stop_was_stored_with_the_turn(self, db):
+        charge = Charge(released=True)
+        provider, store, session, stop = await self._stopped_before_its_tool(db, charge)
+        # The cut reached the turn (_interrupt_now marks it stopped and stores that), and the process died
+        # before the turn was cancelled and settled.
+        session._in_flight["stopped"] = True
+        session._persist()
+        await session.flush()
+        assert (await store.load(session.id)).in_flight["stopped"] is True
+        restored = await self._restored(provider, store, session, charge)
+        await self._the_stop_holds(restored, charge)
+        await restored.close()
+
+    async def test_a_resume_stopped_before_its_tool_is_not_answered_again(self, db):
+        """The user approves, then stops the turn acting on it before it records the charge; only the stop message
+        is stored. The answers go back with the question, which the stop abandons: approved or not, the charge
+        does not run."""
+        provider, store = db
+        charge = Charge(released=True)
+        session, approval = await parked(provider, store, charge)
+        about_to_dispatch = asyncio.Event()
+
+        async def held(_in_flight, _agent_path, _calls):
+            about_to_dispatch.set()
+            await asyncio.Event().wait()
+
+        session._note_dispatch = held
+        session.resume({approval.approval_id: True})
+        await asyncio.wait_for(about_to_dispatch.wait(), 30)
+        session.send("never mind", mode="interrupt", defer_cut=True)
+        await session.flush()
+        stored = await store.load(session.id)
+        assert stored.in_flight["resume"] and not stored.in_flight.get("stopped")
+        await crash(session)
+        provider.crashed = False
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        await records(restored, "turn_finished", 2, after=after_restore(restored))
+        await until(lambda: not restored.busy and not restored.pending_messages())
+        assert not restored.parked and charge.gate.calls == 0
+        assert root_outputs(restored)[-1].output.collect_text() == "echo: never mind"
+        await restored.close()
+
+
 class TestAParkedRunThatIsGone:
     """The snapshot says the session waits for an answer, and the run that asked is not in the trace store
     (traces kept apart from the sessions and rotated, a platform run that is a 404). Nothing can answer it:
