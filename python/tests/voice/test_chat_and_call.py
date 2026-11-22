@@ -38,10 +38,12 @@ async def _said(call: VoiceSession, events: list[VoiceSessionEvent], text: str, 
     Not the text alone: it is announced before the turn has ended (its run recorded as the call's last,
     the session free for the next utterance), and how long that takes differs by machine. A step that
     follows on the text may find the turn still going: an utterance injected then is not a new turn, and
-    ``_last_run_context`` is still the turn before.
+    ``_last_run_context`` is still the turn before. And heard: an utterance while its audio still plays is a
+    barge-in, which keeps in memory only the part of the reply that was played.
     """
     await _until(lambda: text in _texts(events), timeout)
     await _until(lambda: call._current_turn_task is None or call._current_turn_task.done(), timeout)
+    await _until(lambda: not call.playback.is_playing, timeout)
 
 
 class TestCallJoinsAChat:
