@@ -24,6 +24,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     mariadb: { label: "MariaDB", kind: "mysql", port: "3306", host: "127.0.0.1", db: "shopdb", user: "timbal_ro", name: "shop" },
     sqlserver: { label: "SQL Server", kind: "sql_server", port: "1433", host: "sql01.corp.local", db: "ERP", user: "timbal_ro", name: "erp" },
     none: { label: "Files only", kind: null, port: "", host: "", db: "", user: "", name: "main" },
+    service: { label: "Web service only", kind: null, port: "", host: "", db: "", user: "", name: "main" },
   };
 
   const FS_PATHS = {
@@ -36,6 +37,8 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     os: "windows",
     source: "sqlserver",
     withFiles: false,
+    withService: false,
+    svcAuth: "header", // web service: header | basic | none
     layout: "inline", // "inline" = inside config.json (0.1.27+, recommended), "file" = connections.json (legacy)
     reach: "default", // SQL Server: default | named_port | named_browser
     auth: "integrated", // SQL Server on Windows: sql | integrated | windows
@@ -54,14 +57,19 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     const pick = (key, fallback) => (o[key] !== undefined && String(o[key]).trim() !== "" ? String(o[key]).trim() : fallback);
     const isSqlServer = s.source === "sqlserver";
     const defaultPort = isSqlServer && s.reach === "named_port" ? "52001" : src.port;
+    const isDb = s.source !== "none" && s.source !== "service";
+    const svcName = pick("svcName", "crm");
+    const svcUrl = pick("svcUrl", "http://crm.internal:8080/mcp");
+    const svcAddr = svcUrl.match(/^(https?):\/\/(\[[^\]]+\]|[^/:?#]+)(?::(\d+))?/i);
     return {
       os: s.os,
       source: s.source,
       src,
-      isDb: s.source !== "none",
+      isDb,
       isSqlServer,
       withFiles: s.source === "none" ? true : s.withFiles,
-      layout: s.source === "none" ? "inline" : s.layout,
+      withService: s.source === "service" ? true : s.withService,
+      layout: isDb ? s.layout : "inline",
       reach: s.reach,
       // Integrated and Windows authentication only exist on Windows connectors.
       auth: isSqlServer && s.os === "windows" ? s.auth : "sql",
@@ -77,6 +85,14 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
       ntlmUser: pick("ntlmUser", "CORP\\svc_timbal"),
       fsName: pick("fsName", "exports"),
       fsPath: pick("fsPath", FS_PATHS[s.os]),
+      svcName,
+      svcUrl,
+      svcHost: svcAddr ? svcAddr[2] : "",
+      svcPort: svcAddr ? svcAddr[3] || (svcAddr[1].toLowerCase() === "https" ? "443" : "80") : "",
+      svcAuth: s.svcAuth,
+      svcHeader: pick("svcHeader", "Authorization"),
+      svcUser: pick("svcUser", "timbal"),
+      svcEnv: `${svcName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_${s.svcAuth === "basic" ? "PASSWORD" : "TOKEN"}`,
       proxy: pick("proxy", ""),
     };
   };
@@ -109,21 +125,35 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     return entry;
   };
 
+  // On Linux the secret goes in connector.env and the entry references it; elsewhere it is written
+  // in config.json, as CHANGE_ME until the reader replaces it.
+  const buildService = (c) => {
+    const entry = { kind: "mcp", url: c.svcUrl };
+    const secret = c.os === "linux" ? `\${${c.svcEnv}}` : PLACEHOLDER;
+    if (c.svcAuth === "header") {
+      const value = c.svcHeader.toLowerCase() === "authorization" ? `Bearer ${secret}` : secret;
+      entry.auth = { mode: "header", headers: { [c.svcHeader]: value } };
+    }
+    if (c.svcAuth === "basic") entry.auth = { mode: "basic", user: c.svcUser, password: secret };
+    return entry;
+  };
+
   const json = (value) => JSON.stringify(value, null, 2);
 
   const buildFiles = (c) => {
     // Returns the files to write: connections.json (a bare map) and/or the keys to put in config.json.
     const files = { connections: null, config: null };
     const fs = c.withFiles ? { [c.fsName]: { path: c.fsPath } } : null;
+    const services = c.withService ? { [c.svcName]: buildService(c) } : null;
+    const cfg = {};
     if (c.isDb && c.layout === "file") {
       files.connections = { [c.name]: buildEntry(c) };
-      if (fs) files.config = { filesystems: fs };
-    } else {
-      const cfg = {};
-      if (c.isDb) cfg.connections = { [c.name]: buildEntry(c) };
-      if (fs) cfg.filesystems = fs;
-      files.config = cfg;
+    } else if (c.isDb) {
+      cfg.connections = { [c.name]: buildEntry(c) };
     }
+    if (fs) cfg.filesystems = fs;
+    if (services) cfg.services = services;
+    if (Object.keys(cfg).length) files.config = cfg;
     return files;
   };
 
@@ -261,7 +291,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
           `curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/enrollment-tokens" \\`,
           `  -H "Authorization: Bearer $API_KEY" \\`,
           `  -H "Content-Type: application/json" \\`,
-          `  -d '{"name": "${c.isDb ? c.name : c.fsName} server", "ttl_secs": 86400}'`,
+          `  -d '{"name": "${c.isDb ? c.name : c.withFiles ? c.fsName : c.svcName} server", "ttl_secs": 86400}'`,
         ].join("\n"),
       },
     ];
@@ -273,7 +303,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
           '  -Uri "https://api.timbal.ai/orgs/$env:ORG_ID/connectors/enrollment-tokens" `',
           '  -Headers @{ Authorization = "Bearer $env:API_KEY" } `',
           '  -ContentType "application/json" `',
-          `  -Body '{"name": "${c.isDb ? c.name : c.fsName} server", "ttl_secs": 86400}'`,
+          `  -Body '{"name": "${c.isDb ? c.name : c.withFiles ? c.fsName : c.svcName} server", "ttl_secs": 86400}'`,
         ].join("\n"),
       });
     }
@@ -383,9 +413,24 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
       });
     }
 
+    // 3b. Check the web service is reachable -------------------------------------------------------------
+    if (c.withService) {
+      steps.push({
+        id: "service-reach",
+        title: "Check the server can reach the web service",
+        where: where.server,
+        text: c.svcHost
+          ? `The connector calls \`${c.svcUrl}\` from this server, directly and never through a proxy. Check that \`${c.svcHost}:${c.svcPort}\` answers before writing any configuration.`
+          : "The service URL must start with `http://` or `https://`.",
+        blocks: c.svcHost ? [{ label: c.os === "windows" ? "PowerShell" : "bash", code: reachCmd(c.os, c.svcHost, c.svcPort) }] : [],
+        note: "The URL is the service's MCP endpoint (streamable HTTP), often ending in `/mcp`. Web services need connector **0.1.35** or newer.",
+      });
+    }
+
     // 4. Write the configuration -----------------------------------------------------------------------
     const configBlocks = [];
     const secretFile = c.isDb && (c.auth === "sql" || c.auth === "windows") ? (files.connections ? "connections.json" : "config.json") : null;
+    const svcSecret = c.withService && c.svcAuth !== "none";
 
     if (files.connections) {
       configBlocks.push({
@@ -423,11 +468,17 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
         `File shares always go in \`config.json\` under \`filesystems\`. \`${c.fsName}\` is the name Timbal will see; \`${c.fsPath}\` stays on this server.`
       );
     }
+    if (c.withService) {
+      configText.push(
+        `Web services go in \`config.json\` under \`services\`. \`${c.svcName}\` is the name in the URL clients use; the service's address and credential stay on this server.`
+      );
+    }
     const configNotes = [];
     if (files.connections) configNotes.push("This replaces `connections.json`. If it already has connections, add the entry to the existing file instead.");
     if (c.os === "windows") configNotes.push("Save files as UTF-8 **without** BOM. The commands above do. A byte-order mark makes the file fail to parse.");
-    if (files.config) configNotes.push("Keep `connections_path` out of `config.json` when you use inline `connections`: setting both stops the connector from starting.");
+    if (files.config && c.isDb && !files.connections) configNotes.push("Keep `connections_path` out of `config.json` when you use inline `connections`: setting both stops the connector from starting.");
     if (files.connections) configNotes.push("An inline `connections` block already present in `config.json` takes precedence over `connections.json`.");
+    if (c.withService) configNotes.push("A connector older than 0.1.35 refuses to start with a `services` key: upgrade it first.");
     if (c.os === "linux" && files.config) {
       configNotes.push("If `config.json` already exists on this server, add the keys to it by hand instead of creating it.");
       configNotes.push("On Linux the connector settings live in `connector.env`. If `doctor` does not show your entries, add `TIMBAL_CONNECT_CONFIG=/etc/timbal-connect/config.json` to that file and restart.");
@@ -465,6 +516,42 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
       });
     }
 
+    // 5b. The web service's secret -------------------------------------------------------------------------
+    if (svcSecret && c.os === "linux") {
+      const envFile = `${unixDir}/connector.env`;
+      steps.push({
+        id: "service-secret",
+        title: `Put the service's ${c.svcAuth === "basic" ? "password" : "token"} in connector.env`,
+        where: where.server,
+        text: `The entry reads \`\${${c.svcEnv}}\` from the service's environment, so the secret stays out of \`config.json\`. Add the variable, then replace \`${PLACEHOLDER}\` with the real value.`,
+        blocks: [
+          {
+            label: "bash",
+            code: `echo '${c.svcEnv}=${PLACEHOLDER}' | sudo tee -a ${envFile} > /dev/null\nsudo nano ${envFile}`,
+          },
+        ],
+        note: "If the variable is not set, the connector refuses to start and the log names it.",
+      });
+    }
+    if (svcSecret && c.os !== "linux") {
+      const target = filePath(c.os, "config.json");
+      steps.push({
+        id: "service-secret",
+        title: `Replace ${PLACEHOLDER} with the service's ${c.svcAuth === "basic" ? "password" : "token"}`,
+        where: where.server,
+        text: `Open \`${target}\` and, in \`services.${c.svcName}.auth\`, replace \`${PLACEHOLDER}\` with the ${
+          c.svcAuth === "basic" ? `password of \`${c.svcUser}\`` : "token the service expects"
+        }. In JSON, write \`\\\\\` for a backslash and \`\\"\` for a quote.`,
+        blocks: [
+          {
+            label: c.os === "windows" ? "PowerShell (elevated)" : "bash",
+            code: c.os === "windows" ? `notepad "${target}"` : `sudo nano ${target}`,
+          },
+        ],
+        note: c.os === "windows" ? "Do not save as \"UTF-8 with BOM\": the file would fail to parse." : "This file now holds a credential. Make sure only root can read it.",
+      });
+    }
+
     // 6. Restart -------------------------------------------------------------------------------------------
     steps.push({
       id: "restart",
@@ -489,7 +576,11 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
       where: where.server,
       text: `\`doctor\` is read-only. \`[config]\` must parse and \`[egress]\` must reach Timbal on port 443${
         c.isDb ? `. \`[connection: ${c.name}]\` must connect and list tables` : ""
-      }${c.withFiles ? `. The \`${c.fsName}\` share must be readable` : ""}. In the log you want \`connector enrolled and connected\`.`,
+      }${c.withFiles ? `. The \`${c.fsName}\` share must be readable` : ""}${
+        c.withService ? `. \`[service: ${c.svcName}]\` must show \`MCP initialize ok\`` : ""
+      }. In the log you want \`connector enrolled and connected\`${
+        c.withService ? ` and \`gateway: serving on-prem services over the tunnel\`` : ""
+      }.`,
       blocks: verifyBlocks,
       note:
         c.os === "windows" && c.isSqlServer && c.auth === "integrated"
@@ -524,13 +615,49 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
         code: `curl "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/browse/filesystems/summary?filesystem_ref=${c.fsName}" \\\n  -H "Authorization: Bearer $API_KEY"`,
       });
     }
+    if (c.withService) {
+      const svcUrl = `https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/services/${c.svcName}/mcp`;
+      timbal.push({
+        label: "Check the connector reports gateway:v1",
+        code: `curl "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID" \\\n  -H "Authorization: Bearer $API_KEY"\n# -> "version": "0.1.35" or newer, "capabilities": [..., "gateway:v1"]`,
+      });
+      timbal.push({
+        label: "Call the web service through Timbal",
+        code: [
+          `curl -X POST "${svcUrl}" \\`,
+          `  -H "Authorization: Bearer $API_KEY" \\`,
+          `  -H "Content-Type: application/json" \\`,
+          `  -H "Accept: application/json, text/event-stream" \\`,
+          `  -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "curl", "version": "1"}}}'`,
+          `# -> the service's reply, with "serverInfo" and "capabilities"`,
+        ].join("\n"),
+      });
+      timbal.push({
+        label: "Add it to Cursor (~/.cursor/mcp.json)",
+        code: json({
+          mcpServers: {
+            [`${c.svcName}-on-prem`]: {
+              url: `https://api.timbal.ai/orgs/<org_id>/connectors/<connector_id>/services/${c.svcName}/mcp`,
+              headers: { Authorization: "Bearer <api_key>" },
+            },
+          },
+        }),
+      });
+    }
+    const next = [];
+    if (c.isDb) next.push("[sync the data](/connect/sync-data)");
+    if (c.withFiles) next.push("[copy the files](/connect/filesystems#copy-files-to-a-knowledge-base)");
+    if (c.isDb || c.withFiles) next.push("[connect your IDE](/connect/mcp)");
+    if (c.withService) next.push("[use the web service from an agent](/connect/web-services#connect-a-client)");
     steps.push({
       id: "timbal",
       title: "Confirm from Timbal",
       where: where.workstation,
-      text: "The connector must be online. Your names appear exactly as you wrote them, and nothing else about the server does.",
+      text: `The connector must be online. Your names appear exactly as you wrote them, and nothing else about the server does.${
+        c.withService ? " Calling the web service needs the **ConnectorsManage** role." : ""
+      }`,
       blocks: timbal,
-      note: "Next: [sync the data](/connect/sync-data)" + (c.withFiles ? " or [copy the files](/connect/filesystems#copy-files-to-a-knowledge-base)" : "") + ", or [connect your IDE](/connect/mcp).",
+      note: `Next: ${next.slice(0, -1).join(", ")}${next.length > 1 ? ", or " : ""}${next[next.length - 1]}.`,
     });
 
     return steps;
@@ -541,7 +668,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
       ["The connector shows as offline", "Run `doctor` and read `[egress]`. See [Network requirements](/connect/network-requirements). A proxy or TLS inspection is the usual cause."],
       ["`invalid or expired enrollment token` in the log", "The token expired, was used already, or is from another environment. Create a new one and run the installer again with it: an existing install re-enrolls."],
     ];
-    if (c.isDb) {
+    if (c.isDb || c.withService) {
       items.push(["`doctor` can't parse the file", "A byte-order mark, or an unescaped backslash in a JSON string. Save as UTF-8 without BOM and write `\\\\` for each `\\`."]);
     }
     if (c.isSqlServer && c.auth === "sql") {
@@ -564,6 +691,13 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     }
     if (c.withFiles) {
       items.push(["The share is listed but not readable", c.os === "windows" ? "The service runs as `NT AUTHORITY\\NetworkService`: give it read access to the folder, or run the service as an account that has it." : c.os === "linux" ? "The service runs as the `timbal-connect` user and the unit sets `ProtectHome=true`, so anything under `/home` is hidden. Use another path and give that user read access." : "Check the folder is readable by the service (it runs as root under launchd) and not blocked by macOS privacy settings."]);
+    }
+    if (c.withService) {
+      items.push(["`422 gateway_unsupported` from Timbal", "The connector is older than 0.1.35 or the service did not load. [Upgrade](/connect/operate#upgrade), restart, and check the log for `gateway: serving on-prem services over the tunnel`."]);
+      items.push(["`[service]` fails in `doctor` with no answer, or `502 upstream_unreachable`", "The service is down, the URL is wrong, or its TLS failed. For a private CA add `\"tls\": { \"ca_file\": \"...\" }` to the entry."]);
+      items.push(["`502 upstream_unauthorized`", "The service refused the credential in `auth`. Check the token or password" + (c.os === "linux" ? ` in \`connector.env\` (\`${c.svcEnv}\`).` : ".")]);
+      items.push(["`502 upstream_redirect`", "The service redirects to another address. Set `url` to that address, often with a trailing `/` added or removed."]);
+      items.push(["The connector does not start after adding `services`", "The log names the service and the field. A version older than 0.1.35 refuses the key." + (c.os === "linux" ? ` An unset \`${c.svcEnv}\` also stops it.` : "")]);
     }
     return items;
   };
@@ -742,7 +876,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
   const changeSource = (source) =>
     setS((prev) => {
       const keep = {};
-      ["fsName", "fsPath", "proxy", "svcAccount", "ntlmUser"].forEach((k) => {
+      ["fsName", "fsPath", "proxy", "svcAccount", "ntlmUser", "svcName", "svcUrl", "svcHeader", "svcUser"].forEach((k) => {
         if (prev.o && prev.o[k] !== undefined) keep[k] = prev.o[k];
       });
       return { ...prev, source, o: keep };
@@ -769,16 +903,25 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
                 { id: "mariadb", label: "MariaDB" },
                 { id: "sqlserver", label: "SQL Server" },
                 { id: "none", label: "A folder only" },
+                { id: "service", label: "A web service only", hint: "An MCP server on your network. Connector 0.1.35 or newer" },
               ],
               s.source,
               changeSource
             )}
-            {s.source !== "none" ? (
-              <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14, marginTop: 10, color: t.text }}>
-                <input type="checkbox" checked={s.withFiles} onChange={(e) => set({ withFiles: e.target.checked })} />
-                Also share a folder
-              </label>
-            ) : null}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 18 }}>
+              {s.source !== "none" ? (
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14, marginTop: 10, color: t.text }}>
+                  <input type="checkbox" checked={s.withFiles} onChange={(e) => set({ withFiles: e.target.checked })} />
+                  Also share a folder
+                </label>
+              ) : null}
+              {s.source !== "service" ? (
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14, marginTop: 10, color: t.text }}>
+                  <input type="checkbox" checked={s.withService} onChange={(e) => set({ withService: e.target.checked })} />
+                  Also make a web service reachable
+                </label>
+              ) : null}
+            </div>
           </>
         )}
 
@@ -904,6 +1047,42 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
                   {field("fsPath", "Path on the server", val("fsPath"), (v) => setO("fsPath", v), "A local folder, or a share already mounted there", FS_PATHS[s.os])}
                 </>
               )
+            )
+          : null}
+
+        {c.withService
+          ? group(
+              "Web service (MCP server)",
+              <>
+                <div style={{ fontSize: 12, color: t.muted }}>Needs connector 0.1.35 or newer. Only MCP servers that speak streamable HTTP are supported for now.</div>
+                {grid(
+                  <>
+                    {field("svcName", "Service name", val("svcName"), (v) => setO("svcName", v), "Lowercase letters, digits and -. It goes in the URL clients use", "crm")}
+                    {field("svcUrl", "Service URL", val("svcUrl"), (v) => setO("svcUrl", v), "Its MCP endpoint, as the connector server reaches it", "http://crm.internal:8080/mcp")}
+                  </>
+                )}
+                <div style={{ marginTop: 10 }}>
+                  {choice(
+                    [
+                      { id: "header", label: "Token in a header (recommended)" },
+                      { id: "basic", label: "User and password" },
+                      { id: "none", label: "No credential" },
+                    ],
+                    s.svcAuth,
+                    (svcAuth) => set({ svcAuth })
+                  )}
+                </div>
+                {s.svcAuth === "header" ? (
+                  <div style={{ maxWidth: 380, marginTop: 8 }}>
+                    {field("svcHeader", "Header", val("svcHeader"), (v) => setO("svcHeader", v), "Authorization sends Bearer <token>; any other header sends the token as is", "Authorization")}
+                  </div>
+                ) : null}
+                {s.svcAuth === "basic" ? (
+                  <div style={{ maxWidth: 380, marginTop: 8 }}>
+                    {field("svcUser", "User", val("svcUser"), (v) => setO("svcUser", v), undefined, "timbal")}
+                  </div>
+                ) : null}
+              </>
             )
           : null}
 
