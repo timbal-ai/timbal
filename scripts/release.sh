@@ -89,6 +89,10 @@ fi
 
 # The Python package is built and published to PyPI at the end (scripts/publish-pypi.sh).
 
+# zig 0.14 cannot link against the macOS 26 SDK: build against the Command Line Tools' one (see the file).
+. "$REPO_ROOT/scripts/zig_macos_sdk.sh"
+zig_macos_sdk
+
 cd cli
 
 # Check if build output already exists
