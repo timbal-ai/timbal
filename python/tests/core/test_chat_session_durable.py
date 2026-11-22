@@ -26,6 +26,11 @@ from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.events import ApprovalEvent, OutputEvent
 from timbal.types.message import Message
 
+# A test that times out because nothing in its process ran, or because something blocked the event loop, says
+# so, with the stacks (conftest.py `loop_watchdog`): on loaded CI runners a test process has stood still for
+# 70-260 s, and the sessions it was waiting for looked stuck.
+pytestmark = pytest.mark.usefixtures("loop_watchdog")
+
 
 @pytest.fixture(autouse=True)
 def isolated_context():
@@ -51,6 +56,16 @@ class CrashableSqlite(SqliteTracingProvider):
 def db(tmp_path):
     provider = CrashableSqlite.configured(_path=tmp_path / "timbal.db", crashed=False)
     return provider, SqliteChatSessionStore(tmp_path / "timbal.db")
+
+
+def _stable_id(value):
+    """A parametrize id that is the same in every process: pytest-xdist workers must collect identical ids,
+    and ``repr`` is not (an ``object()``'s address, an ``ApprovalResolution``'s ``decided_at``)."""
+    if isinstance(value, ApprovalResolution):
+        return f"ApprovalResolution(approved={value.approved})"
+    if type(value) is object:
+        return "object()"
+    return repr(value)
 
 
 def tool_call(name, call_id):
@@ -122,7 +137,7 @@ def make_agent(provider, gate, charged=None):
     )
 
 
-async def records(session, kind, count, timeout=5.0, after=0):
+async def records(session, kind, count, timeout=30.0, after=0):  # a hang guard (slow runners stretch timers)
     found = []
 
     async def collect():
@@ -167,6 +182,17 @@ def held_before_its_turn(session) -> asyncio.Event:
 
     session._admit = admit
     return go
+
+
+async def worker_stopped(session):
+    """Stop a session's worker while it waits (no turn running) and keep it stopped: what the session is sent
+    from then on is stored and stays queued, as in a process that dies before its worker gets to it."""
+    assert session._turn is None, "a turn is running"
+    session._hold_worker = True
+    worker = session._worker
+    if worker is not None:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
 
 
 def root_outputs(session):
@@ -1108,6 +1134,161 @@ def flaky_db(tmp_path):
     return provider, SqliteChatSessionStore(tmp_path / "timbal.db")
 
 
+class TestAStoppedTurnThatDied:
+    """The user stops a turn (a message sent as ``interrupt``) and the process dies before the stop took effect
+    in what was stored. The turn had run no tool call, so a restart would queue its message again: behind the
+    stop, where it reads as the user's latest words, and the gated tool it asked for is asked for again (and,
+    approved, runs). Live, the stop cut that turn and its request was never acted on again (CI, Windows: the
+    `approval_abandoned_as_it_parks` sweep under a trace outage, its `dispatched` write never landing)."""
+
+    async def _stopped_before_its_tool(self, db, charge):
+        """``pay``'s model asks for the charge; the turn is held before it records that call (the write that
+        would, never landed), and the stop is sent and stored (acknowledged), the cut not made yet."""
+        provider, store = db
+        session = ChatSession(gated_agent(provider, charge), session_store=store)
+        about_to_dispatch = asyncio.Event()
+
+        async def held(_in_flight, _agent_path, _calls):
+            about_to_dispatch.set()
+            await asyncio.Event().wait()
+
+        session._note_dispatch = held
+        session.send("pay")
+        await asyncio.wait_for(about_to_dispatch.wait(), 30)
+        stop = session.send("never mind", mode="interrupt", defer_cut=True)
+        await session.flush()
+        stored = await store.load(session.id)
+        assert stored.in_flight is not None and not stored.in_flight.get("dispatched")
+        assert [event["text"] for event in stored.pending] == ["never mind"]
+        return provider, store, session, stop
+
+    async def _restored(self, provider, store, session, charge):
+        if not session.closed:
+            await crash(session)
+        provider.crashed = False
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        await until(lambda: not restored.busy and not restored.pending_messages())
+        return restored
+
+    async def _the_stop_holds(self, restored, charge):
+        assert not restored.parked, "the stopped request asked for the charge again"
+        assert charge.gate.calls == 0
+        outputs = root_outputs(restored)
+        assert [output.output.collect_text() for output in outputs] == ["echo: never mind"]
+        # Not lost: the next turn read it, named as what the user stopped.
+        run = await restored._load_run(outputs[-1].run_id)
+        texts = [str(message.get("content")) for message in run.root_span().memory]
+        notice = next(text for text in texts if "stopped that turn" in text)
+        assert '"pay"' in notice and "cut off by a server restart" in notice
+
+    async def test_only_the_stop_message_was_stored(self, db):
+        charge = Charge(released=True)
+        provider, store, session, _ = await self._stopped_before_its_tool(db, charge)
+        assert not (await store.load(session.id)).in_flight.get("stopped")
+        restored = await self._restored(provider, store, session, charge)
+        await self._the_stop_holds(restored, charge)
+        await restored.close()
+
+    async def test_the_stop_was_stored_with_the_turn(self, db):
+        charge = Charge(released=True)
+        provider, store, session, stop = await self._stopped_before_its_tool(db, charge)
+        # The cut reached the turn (_interrupt_now marks it stopped and stores that), and the process died
+        # before the turn was cancelled and settled.
+        session._in_flight["stopped"] = True
+        session._persist()
+        await session.flush()
+        assert (await store.load(session.id)).in_flight["stopped"] is True
+        restored = await self._restored(provider, store, session, charge)
+        await self._the_stop_holds(restored, charge)
+        await restored.close()
+
+    async def test_its_messages_listed_as_pending_too_are_not_queued_again(self, db):
+        """A turn cut before it started hands its messages back, so a snapshot can list them both with the turn
+        and as pending. Dropped as stopped, they are not restored from the pending list either."""
+        charge = Charge(released=True)
+        provider, store, session, _ = await self._stopped_before_its_tool(db, charge)
+        await crash(session)
+        stored = await store.load(session.id)
+        stored.pending = [*stored.in_flight["events"], *stored.pending]
+        await store.save(stored, expect_version=stored.version, owner=process_owner())
+        restored = await self._restored(provider, store, session, charge)
+        await self._the_stop_holds(restored, charge)
+        await restored.close()
+
+    async def test_a_resume_stopped_before_its_tool_is_not_answered_again(self, db):
+        """The user approves, then stops the turn acting on it before it records the charge; only the stop message
+        is stored. The answers go back with the question, which the stop abandons: approved or not, the charge
+        does not run."""
+        provider, store = db
+        charge = Charge(released=True)
+        session, approval = await parked(provider, store, charge)
+        about_to_dispatch = asyncio.Event()
+
+        async def held(_in_flight, _agent_path, _calls):
+            about_to_dispatch.set()
+            await asyncio.Event().wait()
+
+        session._note_dispatch = held
+        session.resume({approval.approval_id: True})
+        await asyncio.wait_for(about_to_dispatch.wait(), 30)
+        session.send("never mind", mode="interrupt", defer_cut=True)
+        await session.flush()
+        stored = await store.load(session.id)
+        assert stored.in_flight["resume"] and not stored.in_flight.get("stopped")
+        await crash(session)
+        provider.crashed = False
+        restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
+        await records(restored, "turn_finished", 2, after=after_restore(restored))
+        await until(lambda: not restored.busy and not restored.pending_messages())
+        assert not restored.parked and charge.gate.calls == 0
+        assert root_outputs(restored)[-1].output.collect_text() == "echo: never mind"
+        await restored.close()
+
+    async def test_a_wake_turn_stopped_before_its_tool_does_not_run_again(self, db):
+        """A turn the application started (a wake) is stopped by the user's message; the process dies before the
+        turn records its call. The wake is not run again after the restart (it would redo what was stopped):
+        it is named to the next turn, as the user's stopped messages are."""
+        provider, store = db
+
+        def pays(messages):
+            if messages[-1].role == "tool":
+                return "paid"
+            text = last_user_text(messages)
+            return tool_call("charge", "call-pay") if "pay" in text else f"echo: {text}"
+
+        charge = Charge(released=True)
+        session = ChatSession(gated_agent(provider, charge, model_handler=pays), session_store=store)
+        about_to_dispatch = asyncio.Event()
+
+        async def held(_in_flight, _agent_path, _calls):
+            about_to_dispatch.set()
+            await asyncio.Event().wait()
+
+        session._note_dispatch = held
+        session.wake("pay the invoice", key="pay", tool_policy=None)
+        await asyncio.wait_for(about_to_dispatch.wait(), 30)
+        session.send("never mind", mode="interrupt", defer_cut=True)
+        await session.flush()
+        stored = await store.load(session.id)
+        assert stored.in_flight["wake"] is not None and not stored.in_flight.get("dispatched")
+        await crash(session)
+        provider.crashed = False
+
+        restored = await ChatSession.from_store(gated_agent(provider, charge, model_handler=pays), store, session.id)
+        assert not restored._wakes, "the stopped wake was queued again"
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        await until(lambda: not restored.busy and not restored.pending_messages())
+        assert not restored.parked and charge.gate.calls == 0
+        outputs = root_outputs(restored)
+        assert [output.output.collect_text() for output in outputs] == ["echo: never mind"]
+        run = await restored._load_run(outputs[-1].run_id)
+        texts = [str(message.get("content")) for message in run.root_span().memory]
+        notice = next(text for text in texts if "stopped that turn" in text)
+        assert '"pay the invoice"' in notice
+        await restored.close()
+
+
 class TestAParkedRunThatIsGone:
     """The snapshot says the session waits for an answer, and the run that asked is not in the trace store
     (traces kept apart from the sessions and rotated, a platform run that is a 404). Nothing can answer it:
@@ -1116,6 +1297,10 @@ class TestAParkedRunThatIsGone:
     async def _restored_without_its_traces(self, db, tmp_path, *, then):
         provider, store = db
         session, approval = await parked(provider, store, Charge(released=True))
+        # The process stores what it is sent and dies before its worker takes any of it. Left running, the
+        # worker would take a queued answer at once and, on a slow machine, have its charge started before
+        # the close: a different restart (a recovery turn), every time the test was slow.
+        await worker_stopped(session)
         then(session, approval)
         await session.flush()
         await session.close(keep=True)
@@ -3362,7 +3547,7 @@ class TestAnswersAreStoredAsTheGateReadsThem:
             ({"type": "timbal.cancel"}, False),
             ({}, False),
         ],
-        ids=repr,
+        ids=_stable_id,
     )
     async def test_the_recovery_notice_names_a_call_only_when_the_answer_approves_it(self, db, answer, approves):
         """``in_flight.approved``: the gated calls a dead resume had been told to run. A typed approval is
@@ -3400,7 +3585,7 @@ class TestASnapshotThatCannotBeWritten:
     @pytest.mark.parametrize(
         "value",
         [float("nan"), float("inf"), float("-inf"), object(), {1, 2}, b"raw", (1, 2), "ok", 1.5, None, {"a": [1]}],
-        ids=repr,
+        ids=_stable_id,
     )
     def test_the_check_and_the_write_use_one_encoder(self, value):
         """``storable`` is what the session asks before it keeps a value; ``to_json`` is what writes it. They

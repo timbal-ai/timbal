@@ -527,6 +527,33 @@ def _recovery_notice(
     return "\n".join(lines)
 
 
+def _stopped_notice(asked: list[str]) -> str:
+    """For a dead turn its user had stopped (see :meth:`ChatSession._recover`): what it was answering, kept in
+    the conversation, and not to be acted on."""
+    return "\n".join(
+        [
+            _RECOVERY_HEADER,
+            "It was answering: " + "; ".join(json.dumps(_brief(text, 500)) for text in asked) + ".",
+            "The user stopped that turn before the restart. Do not act on it: answer what they send next, and "
+            "ask before doing any of it.",
+        ]
+    )
+
+
+def _interrupts_waiting(pending: list[dict[str, Any]] | None, taken: list[dict[str, Any]]) -> bool:
+    """A user message that interrupts (``mode="interrupt"``) is stored and queued behind a turn that did not take
+    it: sent while that turn ran, to stop it. Stored before it cuts anything, so a process that died in between
+    left it as the only record of the stop."""
+    taken_ids = {event.get("id") for event in taken}
+    return any(
+        event.get("source") == "user"
+        and event.get("announce") == "interrupt"
+        and not event.get("sent_by")
+        and event.get("id") not in taken_ids
+        for event in pending or ()
+    )
+
+
 def _split_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """Turn arguments as a snapshot can hold them, and the names of those it cannot (not JSON: a callable,
     a model class): :meth:`ChatSession.from_store` asks for these again."""
@@ -1277,7 +1304,7 @@ class ChatSession:
             if snapshot.in_flight is not None:
                 # First: the messages a dead turn took were sent before anything still pending, and go back
                 # ahead of it.
-                recovered = await session._recover(snapshot.in_flight, snapshot.last_options)
+                recovered = await session._recover(snapshot.in_flight, snapshot.last_options, snapshot.pending)
             # Not the ones the dead run's stored memory shows: it took them, and the snapshot that would have
             # said so was never written.
             session._restore_events([event for event in snapshot.pending if event["id"] not in session._shown_events])
@@ -1636,16 +1663,14 @@ class ChatSession:
             if self._wakes and await self._dropped_question_holds():
                 continue
             recovering = bool(self._wakes) and self._wakes[0].kind == RECOVERY_KIND
-            if recovering and scheduler.other_turn_first():
-                # Another turn is ahead (the call's, another client's): the recovery turn goes right after
-                # it, not after whatever was typed meanwhile.
-                await self._until_scheduler_or_work()
-                continue
-            if (
-                self._wakes
-                and (recovering or (not scheduler.lent and scheduler.pending_turn() is None))
-                and not scheduler.other_turn_first()
-            ):
+            if self._wakes and (recovering or (not scheduler.lent and scheduler.pending_turn() is None)):
+                if scheduler.other_turn_first():
+                    # Another turn is ahead (the call's, another client's): the wake goes right after it (a
+                    # recovery turn too, not after whatever was typed meanwhile). Its end is a change of the
+                    # scheduler, not new work (_turn_due waits for work alone once nothing pending asks for a
+                    # turn of its own, and the wake would wait for the next message).
+                    await self._until_scheduler_or_work()
+                    continue
                 wake = self._wakes.pop(0)
                 scheduler.turn_started()
                 await self._run_turn(wake=wake)
@@ -1672,15 +1697,16 @@ class ChatSession:
         return work
 
     async def _until_scheduler_or_work(self) -> None:
-        loop = asyncio.get_running_loop()
-        changed = loop.create_task(self._scheduler._wait_change())
-        work = loop.create_task(self._work.wait())
+        # The scheduler's future is taken now, in the step that read its state: from a task of its own it was
+        # taken a step later, and a turn of another client ending in between (its notice going to no future)
+        # left the worker waiting for new work. Shared with other waiters: waited on, never cancelled.
+        changed = self._scheduler.changed()
+        work = asyncio.get_running_loop().create_task(self._work.wait())
         try:
             await asyncio.wait({changed, work}, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            for task in (changed, work):
-                if not task.done():
-                    task.cancel()
+            if not work.done():
+                work.cancel()
 
     async def _turn_due(self) -> bool:
         """True once the scheduler says a turn is due; False when other work arrived first (a wake, a resume)."""
@@ -2383,6 +2409,24 @@ class ChatSession:
             if event.source == "user":
                 self._watch(event)
 
+    def _drop_stopped(self, events: list[dict[str, Any]], wake: dict[str, Any] | None, dead_run_id: str | None) -> None:
+        """The input of a dead turn its user stopped, its messages or its wake: delivered to it (the messages'
+        receipts settle), and named to the next turn in a silent notice, which rides with it (that turn answers
+        the stop). Their ids join ``_shown_events``: a snapshot can list them as pending too (a turn cut before
+        it started hands its messages back), and from there they would be queued again."""
+        for data in events:
+            self._shown_events.add(data.get("id"))
+            held = self._kept_events.pop(data.get("id"), None)
+            if held is not None:
+                held._settle("delivered", dead_run_id)
+        if self.on_dead_turn != "drop":
+            asked = [event.get("text") or "" for event in events]
+            if wake is not None:
+                asked.append(wake.get("text") or "")
+            self._store.post_event(
+                _stopped_notice([text for text in asked if text]), key=RECOVERY_KIND, announce="silent"
+            )
+
     def _requeue_kept_events(self, dead_run_id: str | None) -> None:
         """The events the task store held that the snapshot did not queue again: posted after its last
         write (they go back behind the stored ones, in their order), or taken by the dead run, as its
@@ -2413,9 +2457,15 @@ class ChatSession:
         loaded._trace = trace
         return loaded
 
-    async def _recover(self, in_flight: dict[str, Any], last_options: dict[str, Any] | None = None) -> str:
+    async def _recover(
+        self,
+        in_flight: dict[str, Any],
+        last_options: dict[str, Any] | None = None,
+        pending: list[dict[str, Any]] | None = None,
+    ) -> str:
         """Settle the turn that was running when the session was last stored (see :meth:`from_store`).
-        ``last_options``: the snapshot's, which an older one needs to tell what the turn was allowed."""
+        ``last_options``: the snapshot's, which an older one needs to tell what the turn was allowed.
+        ``pending``: the snapshot's queued events (an interrupting message among them stopped this turn)."""
         run_id = in_flight["run_id"]
         self._in_flight = None
         context = await self._load_run(run_id)
@@ -2440,6 +2490,10 @@ class ChatSession:
         calls = [call for call in dispatched if isinstance(call, dict)] if isinstance(dispatched, list) else []
         resumed = in_flight.get("resume") is not None
         events = in_flight.get("events") or []
+        # Its user stopped it: the stop reached it (`stopped`), or only the message that was to stop it was stored
+        # before the process died (it cuts nothing until it is). Live, the stop cut the turn and its input was
+        # never acted on again.
+        stopped = bool(in_flight.get("stopped")) or _interrupts_waiting(pending, events)
         if not dispatched:
             # It had run no tool call (each is stored before it runs, see _note_dispatch): whatever is stored
             # of it, it did nothing that cannot be done again. Its input goes back in the queue, the answers
@@ -2448,12 +2502,20 @@ class ChatSession:
             # model call (a shutdown, most often) stores a trace whose memory need not hold its prompt,
             # and the message would be answered by nobody.
             self._scheduler.head = in_flight.get("parent_id")
-            self._restore_events(events)
-            if in_flight.get("wake") is not None:
-                self._wakes.insert(0, _Wake.from_dict(in_flight["wake"]))
+            wake = in_flight.get("wake")
+            if stopped and not resumed and (events or wake is not None):
+                # Not run again. Messages run after the stop would be acted on as the user's latest words (the
+                # interrupting message goes first, and they would follow it): the gated tool asked for again and
+                # approved. A wake (an application's turn) would redo what its user stopped. Kept in the
+                # conversation instead, as something the user stopped.
+                self._drop_stopped(events, wake, run_id)
+            else:
+                self._restore_events(events)
+                if wake is not None:
+                    self._wakes.insert(0, _Wake.from_dict(wake))
             if resumed:
                 self._parked = True
-                if in_flight.get("stopped"):
+                if stopped:
                     # Its user stopped this resume before any of its calls ran, and the process died before
                     # the session could turn that into a cancel (_run_turn does, live). The answers go with
                     # the turn and the question is abandoned, as a stop on a parked session abandons it.

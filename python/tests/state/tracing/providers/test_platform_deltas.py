@@ -408,17 +408,25 @@ class TestDeltas:
         assert [s["span"]["call_id"] for s in last["spans"]] == [step.call_id]
         assert next(s for s in stored.as_records() if s.call_id == step.call_id).output == "late real output"
 
-    async def test_snapshots_keep_rising_in_a_new_process(self):
+    @pytest.mark.parametrize("clock", ["clock", "coarse_clock"])
+    async def test_snapshots_keep_rising_in_a_new_process(self, clock, monkeypatch):
         from timbal.state.tracing.providers import platform as platform_module
 
+        if clock == "coarse_clock":
+            # time_ns() in 15.6 ms ticks, as on Windows before Python 3.13: the new process's first number
+            # used to be that tick, equal to what the first process last sent (the platform drops it).
+            real, tick = platform_module.time_ns, 15_625_000
+            monkeypatch.setattr(platform_module, "time_ns", lambda: real() // tick * tick)
         server = FakePlatform()
         PlatformTracingProvider._host_caps(CONFIG.host).delta = True
         agent, provider = tool_loop(2)
         with patch("timbal.platform.utils._request", server.request):
             ctx, _ = await run(agent, provider)
             first = max(p["body"]["snapshot"] for p in server.patches)
-            # Another process continues the run (an approval resumed elsewhere): no counter carried over.
+            # Another process continues the run (an approval resumed elsewhere): no counter carried over, and
+            # its own clock calibration (in the same 15.6 ms tick as the last save, on Windows before 3.13).
             platform_module._last_snapshot = 0
+            platform_module._epoch_offset_ns = None
             PlatformTracingProvider._delta_runs.clear()
             step = next(s for s in ctx._trace.as_records() if s.path == "agent.step")
             step._output_dump = "resumed elsewhere"

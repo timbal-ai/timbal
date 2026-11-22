@@ -23,6 +23,12 @@ def _tool_call(tool_name: str, input: dict, *, id: str = "c1") -> Message:
     )
 
 
+# The root deadline of test_parallel_workflow_stops_handlers_after_swallowed_cancellation: room for the
+# agent/workflow wrappers to start both children before it fires. 0.1 s was not always enough on a busy
+# Windows runner (timers in 15.6 ms ticks before Python 3.13): the timeout came before any child streamed.
+ROOT_TIMEOUT = 0.5
+
+
 async def _slow(seconds: float) -> str:
     await asyncio.sleep(seconds)
     return "slept"
@@ -609,7 +615,9 @@ class TestNestedWorkflowTimeoutRegressions:
                 closed.add(label)
 
         workflow = (
-            Workflow(name="root" if wrapper == "direct" else "fanout", timeout=0.1 if wrapper == "direct" else None)
+            Workflow(
+                name="root" if wrapper == "direct" else "fanout", timeout=ROOT_TIMEOUT if wrapper == "direct" else None
+            )
             .step(Tool(name="a", handler=streaming), label="a")
             .step(Tool(name="b", handler=streaming), label="b")
         )
@@ -619,11 +627,11 @@ class TestNestedWorkflowTimeoutRegressions:
                 name="root",
                 model=TestModel(responses=[_tool_call("fanout", {}), "Done."]),
                 tools=[workflow],
-                timeout=0.1,
+                timeout=ROOT_TIMEOUT,
             )
             inputs = {"prompt": "go"}
         elif wrapper == "workflow":
-            root = Workflow(name="root", timeout=0.1).step(workflow)
+            root = Workflow(name="root", timeout=ROOT_TIMEOUT).step(workflow)
         else:
             root = workflow
         stream = root(**inputs)
@@ -636,13 +644,13 @@ class TestNestedWorkflowTimeoutRegressions:
                 if expiry == "slow_consumer" and not delayed and isinstance(event, DeltaEvent):
                     await asyncio.wait_for(both_started.wait(), timeout=1.0)
                     delayed = True
-                    await asyncio.sleep(0.15)
+                    await asyncio.sleep(ROOT_TIMEOUT + 0.1)  # past the root's deadline
                 if isinstance(event, OutputEvent) and event.path == "root":
                     assert event.status.code == "timeout"
                     timeout_snapshot = (set(closed), [task for task in tasks if not task.done()], list(effects))
 
         try:
-            await asyncio.wait_for(consume(), timeout=2.0)
+            await asyncio.wait_for(consume(), timeout=5.0)
             assert started == cancelled == {"a", "b"}, "both children must reach the cancellation path"
             assert delayed == (expiry == "slow_consumer")
             assert timeout_snapshot is not None

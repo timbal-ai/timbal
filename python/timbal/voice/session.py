@@ -576,6 +576,8 @@ class VoiceSession:
         self._stale_partial_commit_secs = 2.5
         self._stale_partial_poll_secs = 0.5
         self._stale_commit_sent_at = 0.0
+        # Last value ``_event_stamp`` handed out (caller events are ordered by their stamps).
+        self._last_event_stamp = 0.0
 
         # Serial TTS runs off the agent ``async for`` critical path so we keep pulling
         # LLM/Agent events (and emit trace OUTPUT) while audio still synthesizes.
@@ -832,6 +834,19 @@ class VoiceSession:
         ):
             self._end_call_task.cancel()
         self._end_call_task = None
+
+    def _event_stamp(self) -> float:
+        """``time.monotonic()`` for a caller event (commit, partial), strictly after the previous stamp.
+
+        The session orders caller events by these stamps: a commit after ``end_call`` keeps the call up,
+        a partial newer than the last commit means the caller is speaking. Before Python 3.13,
+        ``time.monotonic()`` on Windows ticks every 15.6 ms, so two events in one tick compared equal
+        and the later one read as not newer (the call hung up on a caller who had just spoken). A stamp
+        is never more than microseconds ahead of the clock, so durations measured from it hold.
+        """
+        stamp = max(time.monotonic(), self._last_event_stamp + 1e-6)
+        self._last_event_stamp = stamp
+        return stamp
 
     def _end_call_busy(self, commit_at: float) -> bool:
         turn = self._current_turn_task
@@ -1564,7 +1579,7 @@ class VoiceSession:
                 if _likely_stt_echo(self._latest_partial_text, self._spoken_assistant_text()):
                     logger.debug("stt_stale_partial_echo_skipped", text_preview=self._latest_partial_text[:80])
                     continue
-                self._stale_commit_sent_at = time.monotonic()
+                self._stale_commit_sent_at = self._event_stamp()
                 stranded = self._latest_partial_text
                 # INFO on purpose: this is the only trace that a transcript was
                 # rescued from a provider that silently refused to commit.
@@ -1610,7 +1625,7 @@ class VoiceSession:
                             stranded_preview=self._latest_partial_text[:80],
                         )
                     elif text:
-                        self._last_partial_at = time.monotonic()
+                        self._last_partial_at = self._event_stamp()
                         self._latest_partial_text = text
                     decision = await self.turn_detector.on_partial(text, self._turn_state())
                     if decision is PartialDecision.BARGE_IN and self._vad_vetoes_barge_in(text):
@@ -1683,7 +1698,7 @@ class VoiceSession:
         self._cancel_hold()
         self._held_user_text = text
         self._hold_armed_timeout_secs = timeout_secs
-        self._last_commit_at = time.monotonic()
+        self._last_commit_at = self._event_stamp()
 
         # Anchor for "user resumed speaking": partials older than the commit
         # event are the held fragment's own trailing refinements and must not
@@ -1808,7 +1823,7 @@ class VoiceSession:
         self._turn_vad_endpointed = vad_endpointed
         self._turn_stt_latency = self._pending_stt_latency
         self._pending_stt_latency = None
-        self._last_commit_at = time.monotonic()
+        self._last_commit_at = self._event_stamp()
         if replace_user_entry and self._transcript and self._transcript[-1].role == "user":
             self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
         else:
@@ -1863,7 +1878,7 @@ class VoiceSession:
             self._commits_in_flight -= 1
 
     async def _handle_committed_inner(self, text: str) -> None:
-        self._commit_event_at = time.monotonic()
+        self._commit_event_at = self._event_stamp()
         # Measured now (the VAD / partial stamps are freshest here) but only
         # published once the commit is *accepted* below: a noise commit the
         # detector ignores mid-HOLD, or a late duplicate, must not overwrite the

@@ -23,6 +23,8 @@ def make_storage(delay: float = 0.0, fail: int = 0):
 
     class Storage(TracingProvider):
         stored: list[dict] = []
+        # The coroutine of the task each store ran on: the run's own (it waited) or a background upload's.
+        store_tasks: list[str] = []
         failures_left = fail
 
         @classmethod
@@ -31,6 +33,8 @@ def make_storage(delay: float = 0.0, fail: int = 0):
 
         @classmethod
         async def _store(cls, run_context):
+            task = asyncio.current_task()
+            cls.store_tasks.append(task.get_coro().__qualname__ if task is not None else "")
             await asyncio.sleep(delay)
             if cls.failures_left > 0:
                 cls.failures_left -= 1
@@ -40,6 +44,7 @@ def make_storage(delay: float = 0.0, fail: int = 0):
             cls.stored.append({"spans": len(spans), "finished": root.get("t1") is not None})
 
     Storage.stored = []
+    Storage.store_tasks = []
     return Storage
 
 
@@ -589,9 +594,15 @@ class TestDefaultDurability:
     async def test_a_buffered_default_does_not_hold_the_run(self, monkeypatch):
         monkeypatch.delenv(uploads.DURABILITY_ENV, raising=False)
         sync = make_storage(delay=0.1)
-        _, sync_seconds = await run_agent(sync, rounds=3, per_round=2)
+        await run_agent(sync, rounds=3, per_round=2)
         by_default = make_storage(delay=0.1).configured(default_durability="buffered", flush_interval_s=0.5)
-        output, default_seconds = await run_agent(by_default, rounds=3, per_round=2)
-        assert default_seconds < sync_seconds / 2, (default_seconds, sync_seconds)
+        output, _ = await run_agent(by_default, rounds=3, per_round=2)
+        # Counted, not timed (wall-clock ratios broke on busy CI runners): the stores the run itself waited
+        # for ran on its own tasks, the others on the background upload's.
+        background = uploads._drain.__qualname__
+        waited_sync = [task for task in sync.store_tasks if task != background]
+        waited_default = [task for task in by_default.store_tasks if task != background]
+        assert len(waited_sync) > 2, sync.store_tasks  # every mid-run save held the run
+        assert len(waited_default) <= 1, by_default.store_tasks  # only the run's end
         assert by_default.stored[-1]["finished"]
         assert not any(key.startswith("tracing:") for key in output.usage)

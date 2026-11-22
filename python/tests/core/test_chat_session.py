@@ -698,6 +698,34 @@ class TestRobustness:
             assert [m.collect_text() for m in memory if m.role == "user"] == ["start", "from elsewhere", "and now?"]
             assert finished[1]["status"]["code"] == "success"
 
+    async def test_a_wake_queued_behind_a_foreign_turn_runs_once_it_ends(self):
+        """The wake waits for another client's turn of the session, and that turn's end is what starts it: not
+        new work, which may never come (the worker once waited for the next message)."""
+        gate = Gate()
+        agent = make_agent(gate)
+        async with ChatSession(agent) as session:
+            session.send("hi")
+            await records(session, "turn_finished", 1)
+            foreign = asyncio.create_task(agent(prompt="start", parent_id=session.head).collect())
+            await asyncio.wait_for(gate.entered.wait(), 2)
+            session.wake("check the inbox")
+            await asyncio.sleep(0.05)
+            assert session.state()["wakes"]  # held behind the foreign turn
+            gate.release.set()
+            other = await asyncio.wait_for(foreign, 3)
+            _, woken = await records(session, "turn_started", 2)
+            assert woken["trigger"]["kind"] == "wake" and woken["parent_id"] == other.run_id
+            await records(session, "turn_finished", 2)
+
+    async def test_a_change_of_the_scheduler_right_after_the_worker_looked_is_not_missed(self):
+        """The worker reads the scheduler and waits for its next change: a change made in between (another
+        client's turn ending, a callback already queued) must end that wait, or it waits for new work."""
+        async with ChatSession(make_agent(Gate())) as session:
+            waiting = asyncio.ensure_future(session._until_scheduler_or_work())
+            # Runs after the waiter's first step (where it reads the scheduler), before anything it starts.
+            asyncio.get_running_loop().call_soon(session._scheduler._notify)
+            await asyncio.wait_for(waiting, 2)
+
     async def test_messages_wait_while_a_foreign_run_of_the_session_is_parked(self):
         def charge() -> str:
             return "charged"
