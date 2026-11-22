@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from structlog.testing import capture_logs
 from timbal import Agent, Tool, Workflow
 from timbal.core.test_model import TestModel
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
@@ -610,18 +611,20 @@ class TestUnknownApprovalDecisionsAreSurfaced:
     the bad id is silently swallowed. Make this debuggable."""
 
     @pytest.mark.asyncio
-    async def test_unknown_approval_id_logs_warning(self, capfd):
+    async def test_unknown_approval_id_logs_warning(self):
         """A decision dict with an id that doesn't match any gate should
         emit a warning so users can detect typos / stale ids.
 
-        The codebase emits via structlog (stderr); capfd grabs both streams.
+        Read with structlog's ``capture_logs``, not from stdout/stderr: once a test in the same process
+        has called ``setup_logging()`` (the server, codegen), logs go to the stream that was ``sys.stderr``
+        then, which with pytest-xdist can be an earlier test's capture.
         """
         tool = Tool(name="t", handler=lambda x: x, requires_approval=True)
 
-        events = [e async for e in tool(x=1, resume={"definitely-not-a-real-id": True})]
+        with capture_logs() as logs:
+            events = [e async for e in tool(x=1, resume={"definitely-not-a-real-id": True})]
 
-        captured = capfd.readouterr()
-        log_text = captured.out + captured.err
+        log_text = repr(logs)
 
         approval = _approval_event(events)
         assert approval.approval_id != "definitely-not-a-real-id"
@@ -636,24 +639,23 @@ class TestUnknownApprovalDecisionsAreSurfaced:
         )
 
     @pytest.mark.asyncio
-    async def test_unknown_id_in_mixed_decisions_warns_only_for_unused(self, capfd):
+    async def test_unknown_id_in_mixed_decisions_warns_only_for_unused(self):
         """One valid + one invalid decision → only the unused id should warn."""
         tool = Tool(name="t", handler=lambda x: x, requires_approval=True)
 
         events = [e async for e in tool(x=1)]
         approval = _approval_event(events)
-        capfd.readouterr()  # drain the gating call's logs so we only assert the resume call
 
-        result = await tool(
-            x=1,
-            resume={
-                approval.approval_id: True,
-                "stale-other-id": True,
-            },
-        ).collect()
+        with capture_logs() as logs:  # only the resume call's logs
+            result = await tool(
+                x=1,
+                resume={
+                    approval.approval_id: True,
+                    "stale-other-id": True,
+                },
+            ).collect()
 
-        captured = capfd.readouterr()
-        log_text = captured.out + captured.err
+        log_text = "\n".join(repr(entry) for entry in logs)
 
         assert result.status.code == "success"
         assert "stale-other-id" in log_text, (
