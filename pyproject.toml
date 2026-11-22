@@ -176,6 +176,7 @@ asyncio_default_fixture_loop_scope = "function"
 faulthandler_timeout = 300
 markers = [
   "integration: marks tests that need real services (LLM keys, Timbal platform/KB, network); default run uses '-m not integration'",
+  "load_sensitive: timing-sensitive under CPU contention; Windows CI runs them one at a time after the parallel pass",
 ]
 addopts = [
   "-v",

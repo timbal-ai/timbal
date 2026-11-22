@@ -91,10 +91,26 @@ jobs:
       - name: Audit models.yaml (offline)
         run: uv run python scripts/audit_models.py --offline
 
-      # One worker per core; `worksteal` rebalances the few long files (the durable-session sweeps)
-      # instead of leaving one worker with them at the end. One cell of the full lane measures coverage.
+      # One worker per core; `worksteal` rebalances the few long files (the durable-session sweeps) instead
+      # of leaving one worker with them at the end. One cell of the full lane measures coverage. On Windows
+      # (`split`) the `load_sensitive` tests run one at a time after the parallel pass: with every core
+      # busy they miss their deadlines there. Both passes run even when the first fails.
       - name: Run tests
-        run: uv run pytest -n auto --dist worksteal ${{ matrix.coverage && '--cov=timbal --cov-report=term-missing' || '' }}
+        shell: bash
+        env:
+          COVERAGE: ${{ matrix.coverage }}
+          SPLIT: ${{ matrix.split }}
+        run: |
+          cov=""
+          if [ "$COVERAGE" = "true" ]; then cov="--cov=timbal --cov-report=term-missing"; fi
+          if [ "$SPLIT" != "true" ]; then
+            uv run pytest -n auto --dist worksteal $cov
+            exit
+          fi
+          rc=0
+          uv run pytest -n auto --dist worksteal -m "not integration and not load_sensitive" $cov || rc=$?
+          uv run pytest -m "load_sensitive and not integration" || rc=$?
+          exit "$rc"
 
   result:
     name: CI result

@@ -54,10 +54,13 @@ def plan(event: str, files: list[str] | None, merge_queue: bool, os_input: str) 
     else:  # merge_group, workflow_dispatch
         lane = "full"
     if lane == "fast":
-        return lane, [{**FAST, "coverage": False}]
-    oses = [os_input] if os_input and os_input != "all" else OSES
-    cells = [{"os": o, "python": p} for o in oses for p in PYTHONS]
-    return lane, [{**c, "coverage": c == COVERAGE} for c in cells]
+        cells = [FAST]
+    else:
+        oses = [os_input] if os_input and os_input != "all" else OSES
+        cells = [{"os": o, "python": p} for o in oses for p in PYTHONS]
+    # Windows runners are slow enough that the `load_sensitive` tests (session leases, voice timing) miss
+    # their deadlines with every core busy: there they run one at a time, after the parallel pass.
+    return lane, [{**c, "coverage": c == COVERAGE, "split": c["os"] == "windows-latest"} for c in cells]
 
 
 def main(argv: list[str]) -> None:

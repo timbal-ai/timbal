@@ -39,6 +39,10 @@ from timbal.types.content import ToolUseContent
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
+# Timing-sensitive under CPU contention: on Windows CI these run one at a time, after the parallel
+# pass (pyproject.toml `load_sensitive`, scripts/ci_plan.py).
+pytestmark = pytest.mark.load_sensitive
+
 SIDE_EFFECTS = ("work", "ship", "charge", "doit", "dig")
 RECOVERY = "cut off by a server restart"
 WAKE_TEXT = "check the inbox"

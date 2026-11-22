@@ -26,6 +26,10 @@ from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.events import ApprovalEvent, OutputEvent
 from timbal.types.message import Message
 
+# Timing-sensitive under CPU contention: on Windows CI these run one at a time, after the parallel
+# pass (pyproject.toml `load_sensitive`, scripts/ci_plan.py).
+pytestmark = pytest.mark.load_sensitive
+
 
 @pytest.fixture(autouse=True)
 def isolated_context():
