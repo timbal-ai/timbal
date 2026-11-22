@@ -1567,7 +1567,7 @@ class TestInterruptionTruncation:
         agent = Agent(name="t", model=TestModel(handler=lambda _messages: next(replies)), tools=[])
         stt = DelayedMockSTT()
         tts = MockTTS(chunk=b"\x00\x01" * 50, num_chunks=4)
-        session = _RaceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+        session = _RaceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic", playback_tracker=tracker)
 
         events: list[VoiceSessionEvent] = []
 
@@ -2343,7 +2343,8 @@ class TestHoldExpiryTiming:
             timeout_secs=0.2,
             partial_after_commit_delay=None,
         )
-        assert elapsed < 2.0, f"hold expiry took {elapsed:.2f}s — pre-commit partial stretched it"
+        # A stretched hold takes >= grace_secs (5 s); 4 s leaves a busy runner room above the 0.2 s timeout.
+        assert elapsed < 4.0, f"hold expiry took {elapsed:.2f}s — pre-commit partial stretched it"
         assert session.transcript[0].text == "Thank you."
 
     async def test_post_arm_partial_extends_hold(self) -> None:
@@ -3028,29 +3029,42 @@ class TestEmptyCallerTurnRecovery:
         await session._run_turn("Hello")
         assert model.call_count == 1
 
-    async def test_retry_keeps_original_deadline(self):
+    async def test_retry_keeps_original_deadline(self, monkeypatch: pytest.MonkeyPatch):
+        import time
+
         from timbal.types.message import Message
 
+        # The session's clock moves only when the test says so. On the real clock the empty first
+        # attempt had to finish inside a 100 ms budget, and on a slow runner it did not: the turn
+        # timed out before it could retry.
+        now = 1000.0
+        monkeypatch.setattr(
+            "timbal.voice.session.time",
+            SimpleNamespace(**(vars(time) | {"monotonic": lambda: now})),
+        )
+        turn_timeout_secs = 30.0
         deadlines = []
         replies = iter([Message(role="assistant", content=[]), "Too late"])
 
-        async def delay():
+        def spend_half_the_budget():
+            # Once per attempt. After the retry's the original deadline is reached, while a
+            # deadline counted from the retry would have half its budget left.
+            nonlocal now
             deadlines.append(session._turn_deadline)
-            if len(deadlines) == 2:
-                await asyncio.Event().wait()
+            now += turn_timeout_secs / 2
 
         model = TestModel(handler=lambda _messages: next(replies))
         session = VoiceSession(
-            agent=Agent(name="desk", model=model, pre_hook=delay),
+            agent=Agent(name="desk", model=model, pre_hook=spend_half_the_budget),
             stt=MockSTT(),
             tts=MockTTS(),
             turn_detector="heuristic",
-            turn_timeout_secs=0.1,
+            turn_timeout_secs=turn_timeout_secs,
             turn_timeout_fallback=None,
         )
-        await asyncio.wait_for(session._run_turn("Hello"), 2)
-        assert len(deadlines) == 2
-        assert deadlines[0] == deadlines[1]
+        await asyncio.wait_for(session._run_turn("Hello"), 5)
+        assert deadlines == [1000.0 + turn_timeout_secs] * 2
+        # Cut at the original deadline, before the retry reached the model.
         assert model.call_count == 1
         assert len(session._metrics) == 1
 
