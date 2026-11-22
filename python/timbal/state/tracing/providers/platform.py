@@ -14,7 +14,7 @@ import os
 import threading
 import time
 from collections import OrderedDict, deque
-from time import time_ns
+from time import perf_counter_ns, time_ns
 from typing import TYPE_CHECKING, ClassVar
 
 import structlog
@@ -362,6 +362,26 @@ SELECT_HEADER = "x-timbal-select"
 _last_snapshot = 0
 # Event loops in other threads save too: two equal numbers would make the platform drop the second as stale.
 _snapshot_lock = threading.Lock()
+# time_ns() - perf_counter_ns(), taken at an edge of the wall clock's tick (see _epoch_ns); None until first use.
+_epoch_offset_ns: int | None = None
+
+
+def _epoch_ns() -> int:
+    """ns since the epoch with ``perf_counter``'s resolution.
+
+    Before Python 3.13, Windows' ``time_ns()`` ticks every 15.6 ms: a process continuing a run in the same
+    tick as the last save of another would send the same number, and the platform would drop it as stale.
+    The offset to ``perf_counter_ns()`` (fine everywhere) is taken once, right as the wall clock ticks over,
+    so it is exact; waiting for that edge costs at most one tick, once per process (nothing where the
+    wall clock is fine).
+    """
+    global _epoch_offset_ns
+    if _epoch_offset_ns is None:
+        start = time_ns()
+        while (now := time_ns()) == start:
+            pass
+        _epoch_offset_ns = now - perf_counter_ns()
+    return _epoch_offset_ns + perf_counter_ns()
 
 
 def _next_snapshot() -> int:
@@ -373,7 +393,7 @@ def _next_snapshot() -> int:
     """
     global _last_snapshot
     with _snapshot_lock:
-        _last_snapshot = max(_last_snapshot + 1, time_ns())
+        _last_snapshot = max(_last_snapshot + 1, _epoch_ns())
         return _last_snapshot
 
 
