@@ -97,6 +97,33 @@ await agent(prompt="Which is the capital of Germany?", language="catalan").colle
 - Dynamic behavior: the prompt can follow language, user, or instructions passed into the call
 - Sync or async: the callable can be either
 
+### Named sections
+
+A prompt that changes every turn, such as one with today's date, is a new prompt for the provider's cache every turn. Return the prompt as named sections instead, a `dict` of `{name: text}`, and the agent keeps the bytes it sends the same across the turns of a session:
+
+```python
+from datetime import datetime
+from timbal import Agent
+
+def system_prompt() -> dict[str, str]:
+    return {
+        "role": "You are a support assistant for Acme.",
+        "today": f"Today is {datetime.now():%A, %B %d, %Y}.",
+    }
+
+agent = Agent(name="assistant", model="anthropic/claude-haiku-4-5", system_prompt=system_prompt)
+```
+
+On the first turn the sections are pinned in the session's data, and that pinned prompt is sent on every later turn. When a section changes, appears, or goes away, the model is told once, in a runtime message placed before that turn's prompt. The run records it under `metadata.prompt_sections`.
+
+- **Updates carry a key.** The pinned prompt states a random key, and only an update with that key counts. A user who types the update tag cannot rewrite the instructions.
+- **Compaction re-pins.** When [memory compaction](/agents/memory-compaction) rewrites the history, the sections are pinned again with their current text.
+- **A paused turn waits.** A change is not announced inside a turn that resumes after an approval. The next turn announces it.
+- **Subagents** get the sections as plain text. A plain string, or a callable that returns one, works as before.
+- **Skills** become a section named `skills`.
+
+Measured with a 5,500-token prompt whose date line changes every turn: as a string, Claude Haiku 5.5 wrote the whole prompt to the cache on every turn. As sections, turns two and three read about 11,000 cached tokens, and the model used the updated date.
+
 
 ## Dynamic Tools
 Timbal provides the `ToolSet` class for dynamic tool resolution. ToolSets resolve tools at runtime before each LLM call, enabling dynamic tool availability based on execution context. Use ToolSets instead of static tool lists when:

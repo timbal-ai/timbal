@@ -404,6 +404,42 @@ print(result.output.collect_text())
 Response content can contain thinking, text, tool, and other blocks in a provider-dependent order. `content[0]` is not guaranteed to be text, and reasoning need not occupy a fixed position. Use `collect_text()` to extract the text response.
 </Warning>
 
+### Replying through a tool
+
+By default the reply is the agent's final text. With `delivery="tool"` the agent gets a `send_message(text, end_turn=False)` tool, and only what it sends with that tool reaches the user. A turn can then say several things, give an update before a slow tool finishes, or say nothing.
+
+```python
+agent = Agent(
+    name="assistant",
+    model="anthropic/claude-haiku-4-5",
+    tools=[search_orders],
+    delivery="tool",
+)
+
+async for event in agent(prompt="Where is my order?"):
+    if isinstance(event, DeltaEvent) and event.item.type == "custom":
+        data = event.item.data
+        if data.get("kind") == "message":
+            show_to_user(data["text"])  # {"kind": "message", "text", "index", "end_turn"}
+```
+
+- **Messages.** Each one is delivered when its call runs, as a `Custom` delta of kind `"message"`. Show these events to the user, not the tool call's input: the text is checked by the agent's `model_output` [guardrails](/agents/guardrails) before the event goes out.
+- **`end_turn=True`** ends the turn after that tool batch, with no further model call. If a message or an event joined the turn in the meantime, the agent answers it first.
+- **Other text is a draft.** The user does not see it. It is delivered (a `message` event with `fallback: True`) when the turn sent nothing, and when a step had no tools to send with, which happens once `max_iter` is spent or a denial limit withheld the tools. The output of a [slash command](/agents/commands) is delivered the same way.
+- **Output.** `result.output` is one assistant message that joins everything the turn sent. `metadata.messages_sent` lists the messages and `metadata.delivery` summarizes them.
+- **Guardrails.** A blocked message is not sent: the tool returns an error and the model rewrites it. A redacted message is sent as redacted, and the tool result tells the model what the user received.
+- **Approvals.** A turn that pauses for an [approval](#approval-required-tools) goes on in the run that resumes it: what it sent before the pause still counts, so a draft after the resume stays private.
+- **Denial limits.** A message sent does not reset `max_consecutive_denials` or count in `max_denials_window`: telling the user "trying again" is not a call that went through.
+- **Name.** The tool is called `send_message`. If one of the agent's tools has that name, including a tool from an MCP server, it is `send_to_user`, then `reply_to_user`. A [tool policy](/agents/tools) never hides it.
+
+`delivery` only applies to the agent the user talks to. An agent used as a tool answers with its text. Pass `delivery="text"` on a call to get the plain reply from an agent configured with `"tool"`. A voice call does this, because it reads the reply aloud as it streams. On any other agent, an input named `delivery` is passed through like any [custom input](#passing-input-parameters).
+
+```python
+result = await agent(prompt="Where is my order?", delivery="text").collect()
+```
+
+An agent with an [`output_model`](/agents/structured-output) answers with its structured output: `delivery="tool"` does not apply to it.
+
 ## Messages
 
 Messages are the structured data format that agents use to communicate. They contain a role and content, with automatic handling of different content types and provider compatibility.

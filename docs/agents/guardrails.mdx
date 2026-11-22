@@ -229,6 +229,7 @@ Sampled-out checks record nothing. `sample_rate` exists for shadow/`warn` monito
 - Any rail that can **block / retry / escalate** forces **buffer-until-verdict**: deltas are withheld and replayed once the rails allow the message — a blocked response never leaks a single chunk. This trades streaming latency for enforcement; use `warn`/shadow rails if you need live streaming with observation only.
 - Thinking blocks on stored messages are scrubbed by the redact rails too, so reasoning never carries PII into memory.
 - `GuardrailEvent` is a first-class stream event, so UIs can show "response withheld" the moment a rail fires.
+- With [`delivery="tool"`](/agents#replying-through-a-tool), the `model_output` rails check each message when it is sent, before its `message` event goes out. A block or retry verdict returns an error to the model, which rewrites the message. The text is also in the tool call's input, which streams unchecked like any tool's arguments, so show the `message` events. These checks are recorded in `metadata.guardrails` and do not emit a `GuardrailEvent`.
 
 ## Observability
 
