@@ -62,6 +62,10 @@ fi
 COMMIT_HASH=$(git rev-parse --short "${TAG}")
 COMMIT_DATE=$(git log -1 --format=%cs "${TAG}")
 
+# zig 0.14 cannot link against the macOS 26 SDK: build against the Command Line Tools' one (see the file).
+. "$REPO_ROOT/scripts/zig_macos_sdk.sh"
+zig_macos_sdk
+
 cd "${REPO_ROOT}/cli"
 
 if [ -d "zig-out/$VERSION" ]; then
