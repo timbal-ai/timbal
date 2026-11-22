@@ -3544,22 +3544,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # segment of its OutputEvent.
             tool_name = event.path.rsplit(".", 1)[-1]
             pinned = tool_name in pinned_tool_names
-            tool_result = Message.validate(
-                {
-                    "role": "tool",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "id": tool_call_id,
-                            "content": content,
-                            "pinned": pinned,
-                            "delivered": (event.metadata or {}).get(DELIVERED_KEY)
-                            if event.status.code == "success"
-                            else None,
-                        }
-                    ],
-                }
-            )
+            result = {"type": "tool_result", "id": tool_call_id, "content": content, "pinned": pinned}
+            if delivering and status_code == "success" and event.metadata and DELIVERED_KEY in event.metadata:
+                result["delivered"] = event.metadata[DELIVERED_KEY]
+            tool_result = Message.validate({"role": "tool", "content": [result]})
             # tool_result guardrails run BEFORE offload so rails see the full text and the
             # (possibly redacted) result is what gets spilled/persisted. Errors are exempt
             # (the model needs the full error), matching the offload contract below.
