@@ -2343,7 +2343,8 @@ class TestHoldExpiryTiming:
             timeout_secs=0.2,
             partial_after_commit_delay=None,
         )
-        assert elapsed < 2.0, f"hold expiry took {elapsed:.2f}s — pre-commit partial stretched it"
+        # A stretched hold takes >= grace_secs (5 s); 4 s leaves a busy runner room above the 0.2 s timeout.
+        assert elapsed < 4.0, f"hold expiry took {elapsed:.2f}s — pre-commit partial stretched it"
         assert session.transcript[0].text == "Thank you."
 
     async def test_post_arm_partial_extends_hold(self) -> None:

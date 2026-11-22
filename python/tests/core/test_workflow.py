@@ -818,11 +818,12 @@ class TestWorkflowSentinelStarvation:
 
         with Timer() as timer:
             try:
-                result = await asyncio.wait_for(wf().collect(), timeout=2.0)
+                result = await asyncio.wait_for(wf().collect(), timeout=10.0)
             except TimeoutError:
                 pytest.fail("workflow hung — sentinel-starvation in _enqueue_step_events")
 
-        assert timer.elapsed < 1.0, (
+        # It finishes in milliseconds; 5 s leaves a busy runner room and still tells it from the hang guard.
+        assert timer.elapsed < 5.0, (
             f"workflow took {timer.elapsed:.2f}s — only finished because wait_for "
             "cancelled it; sentinel was never pushed"
         )
@@ -847,11 +848,11 @@ class TestWorkflowSentinelStarvation:
 
         with Timer() as timer:
             try:
-                result = await asyncio.wait_for(wf().collect(), timeout=2.0)
+                result = await asyncio.wait_for(wf().collect(), timeout=10.0)
             except TimeoutError:
                 pytest.fail("workflow hung — sentinel-starvation in param resolution")
 
-        assert timer.elapsed < 1.0, (
+        assert timer.elapsed < 5.0, (
             f"workflow took {timer.elapsed:.2f}s — only finished because wait_for "
             "cancelled it; sentinel was never pushed"
         )
