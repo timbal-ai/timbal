@@ -205,7 +205,8 @@ def _prompt_update(changed: dict[str, str], removed: list[str], key: str) -> Mes
     """The runtime note carrying sections that changed since they were pinned.
 
     Its metadata says what it announces (each section's digest, None for a removed one) under the pin's
-    key: the notes in a history are the record of what its model was told (``Agent._sections_untold``).
+    key, and holds the digest of its own text: a note in a history counts while its text is the one
+    written here (``Agent._sections_untold``).
     """
     blocks = [
         f'<system_update section="{html.escape(name, quote=True)}" key="{key}">\n'
@@ -215,16 +216,92 @@ def _prompt_update(changed: dict[str, str], removed: list[str], key: str) -> Mes
     blocks += [
         f'<system_update section="{html.escape(name, quote=True)}" key="{key}" removed="true"/>' for name in removed
     ]
+    text = _PROMPT_UPDATE_HEADER + "\n\n" + "\n\n".join(blocks)
     return Message(
         role="user",
-        content=[TextContent(text=_PROMPT_UPDATE_HEADER + "\n\n" + "\n\n".join(blocks))],
+        content=[TextContent(text=text)],
         metadata={
             "source": "runtime",
             "kind": PROMPT_UPDATE_KIND,
             "key": key,
             "sections": {**{name: _section_digest(text) for name, text in changed.items()}, **dict.fromkeys(removed)},
+            "digest": _section_digest(text),
         },
     )
+
+
+# How much of a slash command's delivered text marks its stored result as delivered (see ``_keep_command``).
+_COMMAND_MARK_CHARS = 2_000
+
+
+def _one_text(values: list, items: list, chunks: bool) -> list:
+    """The content of a slash command's list result with its text items as one text (``delivery="tool"``).
+
+    A list is several values, a line each: glued, [12, 34] reads 1234. An item that ends its own line
+    (a table's rows, lines kept with their ends) gets no second break. ``chunks``: a generator yielded
+    the values, and strings that follow one another are then pieces of one stream of text, joined as
+    they are; any other value still gets its line. ``items`` holds one content item per value
+    (``content_factory``). The files follow the text.
+    """
+    if len(values) != len(items):
+        values = [None] * len(items)
+    parts: list[str] = []
+    files: list = []
+    streaming = False  # the text item before this one is a piece of a stream
+    for value, item in zip(values, items, strict=True):
+        if not isinstance(item, TextContent):
+            files.append(item)
+            continue
+        piece = chunks and isinstance(value, str)
+        if parts and not (piece and streaming) and not parts[-1].endswith("\n"):
+            parts.append("\n")
+        parts.append(item.text)
+        streaming = piece
+    return [TextContent(text="".join(parts)), *files] if parts else files
+
+
+class _CommandRun:
+    """The slash command a turn runs: what ``_process_tool_event`` learns of its result, for the turn."""
+
+    __slots__ = ("answer", "chunks", "joined", "told")
+
+    def __init__(self, tool: Any) -> None:
+        # Whether a generator yields the output, chunk by chunk. An agent's or a workflow's handler is
+        # one too, and their output is not its chunks: it is their answer, or their last step's.
+        self.chunks = bool(
+            (getattr(tool, "_is_gen", False) or getattr(tool, "_is_async_gen", False))
+            and not getattr(tool, "_is_orchestrator", False)
+        )
+        # The result as its guardrails left it (text and files): what the user gets. None for a call
+        # with no result (denied, failed).
+        self.answer: list | None = None
+        # delivery="tool": whether a list result's items were made one text (``join``), and the answer's
+        # text, to deliver (``Agent._keep_command``; None: no result).
+        self.joined = False
+        self.told: str | None = None
+
+    def join(self, tool_result: Message, output: Any) -> None:
+        """Make the text items of a list result one text (:func:`_one_text`), once, before anything reads
+        them: the result's guardrails check and rewrite what the user will read."""
+        if self.joined or not isinstance(output, list):
+            return
+        self.joined = True
+        for c in tool_result.content:
+            if isinstance(c, ToolResultContent):
+                c.content = _one_text(output, c.content, self.chunks)
+
+
+def _key_shows(message: Message, key: str) -> bool:
+    """Whether a pin's key is anywhere in a message's text, the text of a tool result included."""
+    for c in message.content:
+        if isinstance(c, TextContent):
+            if key in c.text:
+                return True
+        elif isinstance(c, ToolResultContent):
+            for item in c.content:
+                if isinstance(item, TextContent) and key in item.text:
+                    return True
+    return False
 
 
 class _SendOrder:
@@ -2770,19 +2847,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     async def _pin_sections(self, sections: dict[str, str], current_span: Any, run_context: Any) -> dict:
         """Pin a root agent's prompt sections, or note the ones the model has not been told (see ``system_prompt``).
 
-        Returns the session record whose ``pinned`` sections make this turn's system prompt. A section that
-        differs from what the history tells the model is inserted before the turn's user message as a
-        runtime note. Pinned on the first turn, and again when a compaction at turn start took an update.
+        Returns the pin whose ``pinned`` sections make this turn's system prompt. A section that differs
+        from what the history tells the model is inserted before the turn's user message as a runtime
+        note. Pinned on the first turn, and again when a compaction at turn start took an update, or when
+        the history holds text under the pin's key that is not a note as it was written.
         """
         session = await run_context.get_session()
         state = (session.get(_SECTIONS_KEY) or {}).get(self._path)
         if state is None:
             return self._pin(sections, current_span, run_context)
+        state = self._pin_as_written(state, sections, current_span.memory)
         if "compaction" in current_span.metadata:
             # The history was rewritten as the turn started: what it no longer says goes into the pin (no
             # note to keep alive through the next compaction). One that lost nothing leaves the pin alone.
             return self._repin_if_untold(state, sections, current_span, run_context) or state
-        changed, removed = self._sections_untold(state, sections, current_span.memory)
+        untold = self._sections_untold(state, sections, current_span.memory)
+        if untold is None:
+            return self._pin(sections, current_span, run_context)
+        changed, removed = untold
         # Not into a resumed tool batch: a user message between a tool_use and its result is refused by
         # the providers. Nothing records it as said, so the next turn says it.
         if (changed or removed) and not self._find_pending_tool_uses(current_span.memory):
@@ -2798,10 +2880,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
     def _pin(self, sections: dict[str, str], current_span: Any, run_context: Any) -> dict:
         """Pin ``sections`` as the system prompt from here on, under a fresh key: only the application,
-        which states the key in the system prompt, can write updates, and notes of an earlier pin left in
-        the history stop counting. The session data must be loaded (``_pin_sections`` did)."""
+        which states the key in the system prompt, can write updates, and whatever an earlier pin left in
+        the history under its key stops counting. The session data must be loaded (``_pin_sections`` did)."""
         session = run_context._session_data
-        state = {"pinned": dict(sections), "key": secrets.token_hex(4)}
+        state = {
+            "pinned": dict(sections),
+            "digests": {name: _section_digest(text) for name, text in sections.items()},
+            "key": secrets.token_hex(4),
+        }
         # A new record, never written in place: a run's session data starts as a shallow copy of the run it
         # continues, so its nested dicts are that run's too.
         session[_SECTIONS_KEY] = {**(session.get(_SECTIONS_KEY) or {}), self._path: state}
@@ -2812,38 +2898,104 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         return state
 
     @staticmethod
+    def _pin_as_written(state: dict, sections: dict[str, str], memory: list[Message]) -> dict:
+        """The stored pin, with the text it was written with wherever the application still gives it.
+
+        The record keeps each pinned section's digest next to its text, and the digest is what says
+        which text was pinned. A store may hand the text back altered (a trace redactor rewrites what
+        it stores): a prompt rendered from that would not be the bytes sent before, and would not say
+        what the application wrote. A section whose current text has the pinned digest is that text.
+
+        One that changed since keeps the stored copy, all there is of it, next to the note replacing
+        it, and keeps it from then on: a section the history's notes speak of is read from those notes,
+        and the prompt goes on showing the bytes it showed when the section first changed. A section
+        that comes back to its pinned text (one that toggles) does not move the prompt each time.
+        """
+        digests = state.get("digests")
+        if digests is None:  # a record written before the digests were kept
+            return {**state, "digests": {name: _section_digest(text) for name, text in state["pinned"].items()}}
+        pinned = state["pinned"]
+        written = {
+            name: sections[name]
+            for name, text in pinned.items()
+            if name in sections and text != sections[name] and digests.get(name) == _section_digest(sections[name])
+        }
+        if not written:
+            return state
+        key = state["key"]
+        for message in memory:
+            metadata = message.metadata
+            if message.role == "user" and metadata.get("kind") == PROMPT_UPDATE_KIND and metadata.get("key") == key:
+                for name in metadata.get("sections") or ():
+                    written.pop(name, None)
+        return {**state, "pinned": {**pinned, **written}} if written else state
+
+    @staticmethod
     def _sections_untold(
         state: dict, sections: dict[str, str], memory: list[Message]
-    ) -> tuple[dict[str, str], list[str]]:
-        """The sections that differ from what ``memory`` tells the model: the pinned prompt, then every
-        update note of that pin in it, in order. Returns those to say (changed or new) and those to remove.
+    ) -> tuple[dict[str, str], list[str]] | None:
+        """The sections that differ from what ``memory`` tells the model: the pin, then every update note
+        of that pin in it, in order. Returns those to say (changed or new) and those to remove, or None
+        when the history cannot be read that way and the sections have to be pinned again.
 
         Read from the history itself, not from a record of what was announced. The pin is right only
         together with the notes the model gets, and a history can lose them: a compaction, a history the
         caller supplies (``messages=``), a turn another agent answered in between, a turn cut before its
         memory was stored. A history without the note is one that never said it.
+
+        And a note says what its text says, which is all a model gets of it. Its metadata holds the
+        digest of the text it was written with, and a note with another text (a caller shortened it, a
+        trace redactor rewrote it) is no proof that the model reads what it records. That matters only
+        where nothing else would be said: a section that still is what such a note recorded. None then,
+        and the new pin says it. Where the section changed again, the note written now is the last word
+        on it, and the pin stays (a section that changes every turn costs a note a turn, not a pin).
+
+        The pin's key is the other half. Outside the model's own words it belongs in the pin's notes
+        only: a note stripped of its metadata or joined to another message, a block somebody typed, a
+        note read back through a tool, a rewritten note that speaks of sections it did not record. Any
+        of those is text the model may follow and the agent cannot answer for. None: a new pin has a
+        new key, which voids all of it.
         """
         key = state["key"]
-        told = {name: _section_digest(text) for name, text in state["pinned"].items()}
+        told = dict(state["digests"])
+        unsure: set[str] = set()  # sections whose last note no longer has the text it was written with
         for message in memory:
+            if message.role == "assistant":
+                continue
             metadata = message.metadata
             if message.role == "user" and metadata.get("kind") == PROMPT_UPDATE_KIND and metadata.get("key") == key:
-                for name, digest in (metadata.get("sections") or {}).items():
+                recorded = metadata.get("sections") or {}
+                text = message_text(message)
+                written = _section_digest(text) == metadata.get("digest")
+                if not written:
+                    named = re.findall(rf'<system_update section="([^"]*)" key="{re.escape(key)}"', text)
+                    if text.count(key) != len(named) or any(html.unescape(name) not in recorded for name in named):
+                        return None
+                for name, digest in recorded.items():
                     if digest is None:
                         told.pop(name, None)
                     else:
                         told[name] = digest
-        changed = {name: text for name, text in sections.items() if told.get(name) != _section_digest(text)}
+                    if written:
+                        unsure.discard(name)
+                    else:
+                        unsure.add(name)
+            elif _key_shows(message, key):
+                return None
+        current = {name: _section_digest(text) for name, text in sections.items()}
+        for name in unsure:
+            if (told.get(name) == current[name]) if name in sections else (name not in told):
+                return None
+        changed = {name: text for name, text in sections.items() if told.get(name) != current[name]}
         return changed, [name for name in told if name not in sections]
 
     def _repin_if_untold(
         self, state: dict, sections: dict[str, str], current_span: Any, run_context: Any
     ) -> dict | None:
         """After a compaction (as a turn starts, or inside one): pin again when the history no longer tells
-        the model the current sections (the compaction took an update note, or a section changed since).
-        None when it still does: the pinned bytes stay as they are."""
-        changed, removed = self._sections_untold(state, sections, current_span.memory)
-        if not changed and not removed:
+        the model the current sections (the compaction took an update note, or a section changed since),
+        or cannot be read (``_sections_untold``). None when it still does: the pinned bytes stay as they are."""
+        if self._sections_untold(state, sections, current_span.memory) == ({}, []):
             return None
         return self._pin(sections, current_span, run_context)
 
@@ -3027,23 +3179,61 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             tools = [*tools, self._send_message_tool(name)]
         return tools, name, system_prompt
 
-    def _deliver_command(self, current_span: Any, answer: list) -> OutputEvent:
+    def _keep_command(self, current_span: Any, tool_result: Message, command: _CommandRun, output: Any) -> None:
+        """What a slash command leaves in the turn's history with ``delivery="tool"``, next to its stored
+        call and result, and (``command.told``) the text to deliver: empty when the result has none, None
+        without a result.
+
+        ``command.answer``: the content of the command's result as its guardrails left it (None: no
+        result); ``output``: the command's own.
+
+        With a text, the result is marked ``delivered`` like a message sent, so that a compaction keeps
+        the call and the result: a store that keeps the history as calls hands the next turn these two.
+        The mark is the start of the text (``_COMMAND_MARK_CHARS``), not all of it: the result holds
+        the text, or what a result limit left of it, and a mark as long would store it a second time.
+
+        Without one (no result: denied, failed, timed out; or no text in it: a guardrail removed it all,
+        only files, no output) the user was told nothing, so no assistant message stands for the
+        command. The turn's memory gets the call and the result, as a store that keeps calls has them:
+        the next turn's model reads what became of the command, and its files.
+        """
+        told = None
+        if command.answer is not None:
+            told = ""
+            if output is not None:
+                told = "".join(item.text for item in command.answer if isinstance(item, TextContent)).strip()
+        command.told = told
+        if not told:
+            # (The command's call is the last thing stored: the result follows it.)
+            current_span.memory.extend([Message.validate(current_span._memory_dump[-1]), tool_result])
+            return
+        for c in tool_result.content:
+            if isinstance(c, ToolResultContent):
+                c.delivered = told[:_COMMAND_MARK_CHARS]
+
+    def _deliver_command(self, current_span: Any, command: _CommandRun) -> OutputEvent:
         """Deliver a slash command's answer (``delivery="tool"``) and return the turn's output.
 
-        ``answer``: the content of the command's result as its guardrails left it. Its text goes out as a
-        ``message`` (marked ``fallback``: no model ran that could send it), and the output is that text
-        with the result's files. The tool's own output event, which precedes it on the stream, holds the
-        raw output like any tool's. With no text left (a guardrail removed it all, or the result is only
-        files) no message goes out.
+        ``command.answer`` is the content of the command's result as its guardrails left it, and
+        ``command.told`` its text as one (``_keep_command``). The text goes out as a ``message`` (marked
+        ``fallback``: no model ran that could send it), and the output is that text with the result's
+        files. The tool's own output event, which precedes it on the stream, holds the raw output like
+        any tool's. With no text (a guardrail removed it all, or the result is only files) no message
+        goes out.
+
+        The assistant message the command leaves in memory is that text too: the next turn's model reads
+        as its reply what the user got, not the raw output (what a guardrail took out of the answer
+        would come back there).
         """
-        text = "".join(item.text for item in answer if isinstance(item, TextContent)).strip()
-        content: list = [item for item in answer if not isinstance(item, TextContent)]
+        text = command.told
+        content: list = [item for item in command.answer if not isinstance(item, TextContent)]
         current_span.metadata["delivery"] = {"mode": "tool", "messages": 0}
         if text:
             sent = current_span.metadata.setdefault("messages_sent", [])
             sent.append(text)
             current_span.metadata["delivery"] = {"mode": "tool", "messages": len(sent), "fallback": True}
             emit({"kind": "message", "text": text, "index": len(sent) - 1, "end_turn": True, "fallback": True})
+            current_span.memory.append(Message(role="assistant", content=[TextContent(text=text)]))
         reply = Message(role="assistant", content=[TextContent(text=text), *content], stop_reason="end_turn")
         return self._synthetic_event("delivery", RunStatus(code="success", reason="end_turn"), output=reply)
 
@@ -3721,9 +3911,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         send_offered = False
         # The publishing order of a batch that holds two sends or more (None for any other batch).
         send_order: _SendOrder | None = None
-        # A slash command's result as its guardrails left it (text and files): what the user gets. Set by
-        # _process_tool_event, and left None for a call that has no result (denied, failed).
-        command_answer: list | None = None
+        # The slash command this turn runs, if it runs one (set where it runs, read by _process_tool_event).
+        command_run: _CommandRun | None = None
         # Messages the turn sent in the run this one resumes (see resolve_memory): it has answered already.
         sent_before = current_span.metadata.get("sent_before_pause", 0) if delivering else 0
         if "end_turn" in current_span.metadata and not (
@@ -3798,7 +3987,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
-            nonlocal consecutive_denials, denial_window_crossed, command_answer
+            nonlocal consecutive_denials, denial_window_crossed
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
                 return
             # Native-event handlers (coding harness) forward their own OutputEvent
@@ -3890,6 +4079,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 and guardrail_runner.has_stage(GuardrailStage.TOOL_RESULT)
                 and status_code == "success"
             ):
+                if not append_to_messages and delivering:
+                    # A command's result that is delivered: checked as the user will read it.
+                    command_run.join(tool_result, event.output)
                 for c in tool_result.content:
                     if not isinstance(c, ToolResultContent):
                         continue
@@ -3916,7 +4108,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         if not append_to_messages:
                             # A slash command's result goes to the user: in the rail's words for a user,
                             # not the notice written for the model (and none of what the result held).
-                            command_answer = [
+                            command_run.answer = [
                                 TextContent(
                                     text=outcome.verdict.blocked_message
                                     or outcome.rail.blocked_message_for(GuardrailStage.TOOL_RESULT)
@@ -3924,12 +4116,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             ]
                     elif outcome.replaced:
                         replace_tool_result_text(c, outcome.text)
-            if not append_to_messages and command_answer is None and status_code == "success":
+            if not append_to_messages and command_run.answer is None and status_code == "success":
                 # A slash command's own result is the turn's answer. Taken here: as the guardrails above
                 # left it, and whole (the limit below reduces what enters the model's context, not what
                 # the user asked to see). Its text and its files; not a denial or an error, which are
                 # notices for a model.
-                command_answer = [
+                if delivering:
+                    command_run.join(tool_result, event.output)
+                command_run.answer = [
                     item for c in tool_result.content if isinstance(c, ToolResultContent) for item in c.content
                 ]
             # Production-time offload: reduce an oversized result once, before it enters
@@ -3950,7 +4144,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         if offload_record is not None:
                             current_span.metadata.setdefault("offload", []).append(offload_record)
                             logger.info("Reduced oversized tool result.", **offload_record)
-            if append_to_messages:
+            if not append_to_messages:
+                if delivering:
+                    self._keep_command(current_span, tool_result, command_run, event.output)
+            else:
                 current_span.memory.append(tool_result)
             tool_result_dump = await dump(tool_result)
             current_span._memory_dump.append(tool_result_dump)
@@ -4195,6 +4392,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 # same pending-cancel detection as the fast path)
                                 _cmd_task = asyncio.current_task()
                                 command_output: OutputEvent | None = None
+                                command_run = _CommandRun(tool)
                                 active_events = tool._stream(**tool_input)
                                 async for event in active_events:
                                     if _cmd_task is not None and _cmd_task.cancelling():
@@ -4213,21 +4411,26 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                                 event.status.message or "Run cancelled by user.",
                                                 reason=event.status.reason,
                                             )
-                                        current_span.memory.append(
-                                            Message.validate(
-                                                {
-                                                    "role": "assistant",
-                                                    "content": [TextContent(text=str(event.output))],
-                                                }
+                                        if not delivering:
+                                            current_span.memory.append(
+                                                Message.validate(
+                                                    {
+                                                        "role": "assistant",
+                                                        "content": [TextContent(text=str(event.output))],
+                                                    }
+                                                )
                                             )
-                                        )
-                                        if delivering and event.path == tool._path and event.run_id == run_context.id:
-                                            # The command's own output (not an event nested in it, nor one a
+                                        elif (
+                                            command_run.told is not None
+                                            and event.path == tool._path
+                                            and event.run_id == run_context.id
+                                        ):
+                                            # The command's own result (not an event nested in it, nor one a
                                             # harness forwards under its path) is the turn's answer, and no
-                                            # model runs that could send it. As a model would read it: the
-                                            # tool result its guardrails screened, not the raw output.
-                                            if command_answer is not None:
-                                                command_output = self._deliver_command(current_span, command_answer)
+                                            # model runs that could send it. Delivered, and kept in memory, as
+                                            # a model would read it: the tool result its guardrails screened,
+                                            # not the raw output. (No result: nothing to deliver.)
+                                            command_output = self._deliver_command(current_span, command_run)
                                     yield event
                                 active_events = None
                                 if command_output is not None:

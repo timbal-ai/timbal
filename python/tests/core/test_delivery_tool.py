@@ -36,7 +36,10 @@ async def run(agent: Agent, prompt: str = "go", **kwargs):
     messages = [
         e.item.data
         for e in events
-        if isinstance(e, DeltaEvent) and e.item.type == "custom" and e.item.data.get("kind") == "message"
+        if isinstance(e, DeltaEvent)
+        and e.item.type == "custom"
+        and isinstance(e.item.data, dict)  # (a generator tool's chunks are custom items too)
+        and e.item.data.get("kind") == "message"
     ]
     return events[-1], messages
 
@@ -883,6 +886,304 @@ class TestAStepWithoutTheTool:
         assert out.output.collect_text() == ""
         assert out.metadata["delivery"] == {"mode": "tool", "messages": 0}
 
+    async def test_a_slash_command_s_history_is_what_the_user_was_told(self, tmp_path):
+        """The next turn's model reads the command's answer as the user got it: not what a guardrail took out
+        of it, whichever store the history comes back from."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
+
+        def status() -> str:
+            return "status: internal draft"
+
+        rewrite = guardrail(
+            lambda text: text.replace("internal draft", "public summary"),
+            stages=["tool_result"],
+            action="redact",
+            name="rewrite",
+        )
+        block = guardrail(
+            lambda text: Verdict.block("a draft") if "internal draft" in text else True,
+            stages=["tool_result"],
+            name="no_drafts",
+            blocked_message="That result cannot be shown.",
+        )
+        wipe = guardrail(lambda _text: "", stages=["tool_result"], action="redact", name="wipe")
+        for number, (rail, told) in enumerate(
+            ((rewrite, "status: public summary"), (block, "That result cannot be shown."), (wipe, None))
+        ):
+            stored = JsonlTracingProvider.configured(_path=tmp_path / f"traces{number}.jsonl")
+            for provider in (InMemoryTracingProvider, stored):
+                read = []
+
+                def handler(messages, read=read):
+                    read.append(list(messages))
+                    return "must not be requested" if not read[1:] else "ok"
+
+                fresh()
+                set_run_context(RunContext(tracing_provider=provider))
+                agent = Agent(
+                    name="bot",
+                    model=TestModel(handler=handler),
+                    tools=[Tool(handler=status, command="status")],
+                    delivery="tool",
+                    guardrails=[rail],
+                    tracing_provider=provider,
+                )
+                out, messages = await run(agent, "/status")
+                assert not read and [m["text"] for m in messages] == ([told] if told else [])
+                set_run_context(RunContext(parent_id=out.run_id, tracing_provider=provider))
+                await run(agent, "and then?", delivery="text")
+                (history,) = read
+                assert "internal draft" not in repr(history)
+                if provider is InMemoryTracingProvider:
+                    # Kept as the assistant's reply: exactly what was delivered. With nothing delivered there
+                    # is no reply: the command is its call and what was left of its result.
+                    said = [c.text for m in history if m.role == "assistant" for c in m.content if c.type == "text"]
+                    assert said == ([told] if told else [])
+                    assert [m.role for m in history] == (
+                        ["user", "assistant", "user"] if told else ["user", "assistant", "tool", "user"]
+                    )
+
+    async def test_a_slash_command_s_history_has_no_output_of_the_calls_inside_it(self):
+        """A command that is an agent runs calls of its own. Their raw outputs are not replies of this agent."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        def lookup() -> str:
+            return "a raw record"
+
+        read = []
+
+        def handler(messages):
+            read.append(list(messages))
+            return "ok"
+
+        fresh()
+        set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+        helper = Agent(
+            name="helper",
+            model=TestModel(responses=[calls(("lookup", {})), "helper says hi"]),
+            tools=[lookup],
+            command="helper",
+        )
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=handler),
+            tools=[helper],
+            delivery="tool",
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out, messages = await run(agent, "/helper hello")
+        assert [m["text"] for m in messages] == ["helper says hi"]
+        set_run_context(RunContext(parent_id=out.run_id, tracing_provider=InMemoryTracingProvider))
+        await run(agent, "and then?", delivery="text")
+        (history,) = read
+        assert [(m.role, m.collect_text()) for m in history] == [
+            ("user", "/helper hello"),
+            ("assistant", "helper says hi"),
+            ("user", "and then?"),
+        ]
+
+    async def test_a_slash_command_s_list_keeps_its_items_apart(self):
+        """A list a command returns is several values. Glued, [12, 34] reads as another number: each item
+        is a line of the message, of the output, and of what the result's guardrails check and rewrite.
+        What a generator yields is one stream, and a message's text blocks one text: joined as they are."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.types.content import TextContent
+
+        def counts() -> list:
+            return [12, 34]
+
+        def mixed() -> list:
+            return [[1, 2], {"a": 1}, "x"]
+
+        def people() -> list:
+            return ["ann@x.io", "bob@y.io"]
+
+        def table() -> list:  # rows that end their own line: a blank line between them breaks the table
+            return ["| item | qty |\n", "|---|---|\n", "| bolts | 12 |\n"]
+
+        def config() -> list:  # lines that begin with their indentation are lines all the same
+            return "server:\n  host: db1\n\n  port: 5432".splitlines()
+
+        def note() -> Message:
+            return Message(role="assistant", content=[TextContent(text="Hello, "), TextContent(text="world.")])
+
+        async def report():  # a stream whose first item is not text is collected as a list of its chunks
+            yield {"progress": 0.5}
+            for chunk in ("The bu", "ild pass", "ed", ".", " See https://x.io/", "runs/", "42"):
+                yield chunk
+
+        def totals():  # values a generator yields are values all the same
+            yield 12
+            yield 34
+
+        def last_step(first: str) -> list:
+            return [12, 34] if first == "worked" else [first]
+
+        from timbal import Workflow
+        from timbal.state import get_run_context
+
+        steps = (  # a workflow's handler is a generator too: its output is its last step's, not chunks
+            Workflow(name="steps", command="steps")
+            .step(work)
+            .step(last_step, first=lambda: get_run_context().step_span("work").output)
+        )
+
+        checked = []
+        spy = guardrail(lambda text: checked.append(text) or True, stages=["tool_result"], name="spy")
+        redact = guardrail(
+            lambda text: text.replace("ann@x.io", "[email]"), stages=["tool_result"], action="redact", name="redact"
+        )
+        for handler, rails, text in (
+            (counts, [], "12\n34"),
+            (mixed, [], "[1, 2]\n{'a': 1}\nx"),
+            (people, [spy], "ann@x.io\nbob@y.io"),
+            (people, [redact], "[email]\nbob@y.io"),
+            (table, [], "| item | qty |\n|---|---|\n| bolts | 12 |"),
+            (config, [], "server:\n  host: db1\n\n  port: 5432"),
+            (note, [], "Hello, world."),
+            (report, [spy], "{'progress': 0.5}\nThe build passed. See https://x.io/runs/42"),
+            (totals, [], "12\n34"),
+            (steps, [], "12\n34"),
+        ):
+            read = []
+
+            def model(messages, read=read):
+                read.append(list(messages))
+                return "ok"
+
+            fresh()
+            set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+            command = getattr(handler, "__name__", None) or handler.name
+            agent = Agent(
+                name="bot",
+                model=TestModel(handler=model),
+                tools=[handler if handler is steps else Tool(handler=handler, command=command)],
+                delivery="tool",
+                guardrails=rails,
+                tracing_provider=InMemoryTracingProvider,
+            )
+            out, messages = await run(agent, f"/{command}")
+            assert [m["text"] for m in messages] == [text]
+            assert out.output.collect_text() == text
+            set_run_context(RunContext(parent_id=out.run_id, tracing_provider=InMemoryTracingProvider))
+            await run(agent, "and then?", delivery="text")
+            assert [m.collect_text() for m in read[0] if m.role == "assistant"] == [text]
+        # What the guardrail read is what the user would.
+        assert checked == ["ann@x.io\nbob@y.io", "{'progress': 0.5}\nThe build passed. See https://x.io/runs/42"]
+
+    def test_a_list_s_text_items_as_one_text(self):
+        from timbal.core.agent import _one_text
+        from timbal.types.content import TextContent
+
+        def text(values: list, chunks: bool = False) -> str:
+            (one,) = _one_text(values, [TextContent(text=str(value)) for value in values], chunks)
+            return one.text
+
+        assert text([12, 34]) == "12\n34" and text(["only"]) == "only" and _one_text([], [], False) == []
+        assert text(["a\n", "b\n", "c"]) == "a\nb\nc"  # no second break after an item that ends its line
+        assert text(["a", "", "b"]) == "a\n\nb" and text(["a", "  b", "\tc"]) == "a\n  b\n\tc"
+        assert text(["Total: ", "12"]) == "Total: \n12"
+        # What a generator yielded: strings that follow one another are one stream; a value has its line.
+        assert text(["Hel", "lo", ",", " world"], chunks=True) == "Hello, world"
+        assert text([{"n": 1}, "Hel", "lo", 7, 8, "!", "?"], chunks=True) == "{'n': 1}\nHello\n7\n8\n!?"
+        assert text([12, 34], chunks=True) == "12\n34"
+
+    async def test_a_slash_command_with_no_result_leaves_no_reply_in_history(self):
+        """A command that timed out or was denied told the user nothing. What it had produced until then,
+        which no guardrail screened, is not the assistant's reply on the next turn: the history has the
+        call and what became of it, as a store that keeps calls has."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.types.content import ToolResultContent, ToolUseContent
+        from timbal.types.events import ApprovalEvent
+
+        async def slow():
+            yield "internal draft, "
+            await asyncio.Event().wait()  # never: the timeout ends it
+
+        def charge() -> str:
+            return "charged"
+
+        for tool, prompt, notice in (
+            (Tool(handler=slow, command="slow", timeout=0.2), "/slow", "RunTimeout"),
+            (Tool(handler=charge, command="charge", requires_approval=True), "/charge", "[Approval denied]"),
+        ):
+            read = []
+
+            def model(messages, read=read):
+                read.append(list(messages))
+                return "ok"
+
+            fresh()
+            set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+            wipe = guardrail(lambda _text: "", stages=["tool_result"], action="redact", name="wipe")
+            agent = Agent(
+                name="bot",
+                model=TestModel(handler=model),
+                tools=[tool],
+                delivery="tool",
+                guardrails=[wipe],
+                tracing_provider=InMemoryTracingProvider,
+            )
+            events = [e async for e in in_time(agent(prompt=prompt))]
+            out = events[-1]
+            if prompt == "/charge":
+                assert out.status.reason == "approval_required"
+                approval = next(e for e in events if isinstance(e, ApprovalEvent))
+                set_run_context(RunContext(parent_id=out.run_id, tracing_provider=InMemoryTracingProvider))
+                out, messages = await run(agent, prompt, resume={approval.approval_id: False})
+                assert messages == [] and out.status.reason == "approval_denied"
+            else:
+                assert out.status.code == "timeout", out.status
+            set_run_context(RunContext(parent_id=out.run_id, tracing_provider=InMemoryTracingProvider))
+            await run(agent, "and then?", delivery="text")
+            (history,) = read
+            assert [m.role for m in history] == ["user", "assistant", "tool", "user"]
+            (call,), (result,) = history[1].content, history[2].content
+            assert isinstance(call, ToolUseContent) and isinstance(result, ToolResultContent)
+            assert call.id == result.id and result.delivered is None
+            assert notice in repr(result) and "internal draft" not in repr(history)
+
+    async def test_a_slash_command_s_answer_survives_compaction_like_a_message_sent(self, tmp_path, monkeypatch):
+        """With a store that keeps the history as calls, the answer is a tool result. It is what the user
+        was told: dropping old tool results must not take it."""
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.state.tracing.providers import JsonlTracingProvider
+        from timbal.types.content import ToolResultContent
+
+        def status() -> str:
+            return "Order 4411 ships on Friday."
+
+        provider = JsonlTracingProvider.configured(_path=tmp_path / "traces.jsonl")
+        read = []
+
+        def model(messages):
+            read.append(list(messages))
+            return "an answer long enough to fill the small window " * 6
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 1_000_000)
+        fresh()
+        set_run_context(RunContext(tracing_provider=provider))
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=model),
+            tools=[Tool(handler=status, command="status"), work],
+            delivery="tool",
+            memory_compaction=compact_tool_results(),
+            memory_compaction_ratio=0.5,
+            tracing_provider=provider,
+        )
+        out, messages = await run(agent, "/status")
+        assert [m["text"] for m in messages] == ["Order 4411 ships on Friday."]
+        set_run_context(RunContext(parent_id=out.run_id, tracing_provider=provider))
+        out, _ = await run(agent, "thanks", delivery="text")
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 200)
+        set_run_context(RunContext(parent_id=out.run_id, tracing_provider=provider))
+        out, _ = await run(agent, "when does it ship again?", delivery="text")
+        assert out.metadata["compaction"]["triggered"] is True
+        told = [c for m in read[-1] for c in m.content if isinstance(c, ToolResultContent)]
+        assert [c.delivered for c in told] == ["Order 4411 ships on Friday."]
+        assert "Order 4411 ships on Friday." in repr(read[-1])
+
     async def test_a_slash_command_that_returns_a_file(self, tmp_path):
         """A message event carries text. The result's files are in the run's output, as in text mode."""
         from timbal.types.content import FileContent, TextContent
@@ -936,7 +1237,7 @@ class TestAStepWithoutTheTool:
         """A result limit reduces what goes into the model's context. The user asked for the output."""
         from timbal.core import ToolResultLimit, Truncate
 
-        report = "line " * 200
+        report = "line " * 800
 
         def long() -> str:
             return report
@@ -948,10 +1249,16 @@ class TestAStepWithoutTheTool:
             model=model,
             tools=[Tool(handler=long, command="long")],
             delivery="tool",
-            tool_result_limit=ToolResultLimit(threshold=100, action=Truncate(strategy="head")),
+            tool_result_limit=ToolResultLimit(threshold=100, action=Truncate(strategy="head", max_chars=50)),
         )
         out, messages = await run(agent, "/long")
         assert [m["text"] for m in messages] == [report.strip()]
+        # Stored, the result is the reduction, and its mark as delivered is no second copy of the report.
+        from timbal.state import get_run_context
+
+        root = next(span for span in get_run_context()._trace.values() if span.path == "bot")
+        (stored,) = root._memory_dump[-1]["content"]
+        assert stored["delivered"] == report[:2_000] and report.strip() not in str(stored)
 
 
 class TestAcrossAPause:

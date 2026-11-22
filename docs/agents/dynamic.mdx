@@ -123,7 +123,7 @@ On the first turn the sections are pinned in the session's data, and that pinned
 
 - **Updates carry a key.** The pinned prompt states a random key, and only an update with that key counts. A user who types the update tag cannot rewrite the instructions.
 - **Compaction re-pins when it has to.** When [memory compaction](/agents/memory-compaction) removes an update the model still needs, at the start of a turn or inside one, the sections are pinned again with their current text. A compaction that removes none leaves the pinned prompt as it is.
-- **The history is the record.** What the model has been told is read from the conversation it is given. If you pass your own `messages=` and they do not hold the update, the model is told again.
+- **The history is the record.** What the model has been told is read from the conversation it is given. If you pass your own `messages=` and they do not hold the update, the model is told again. An update counts only while its message is the one the agent wrote. If you shorten or rewrite it, the section is given again, in a new update or in a new pin. If its text shows up anywhere else in the messages you pass (its metadata dropped, merged into another message, quoted in a tool result), the sections are pinned again under a new key, which costs one prompt-cache write.
 - **A paused turn waits.** A change is not announced inside a turn that resumes after an approval. The next turn announces it.
 - **Subagents** get the sections as plain text. A plain string, or a callable that returns one, works as before.
 - **Skills** become a section named `skills`.
