@@ -216,4 +216,194 @@ class TestWithOtherTurns:
         assert len(notes(seen[2])) == 1
         trace = await trace_of(first)
         root = next(span for span in trace.values() if span.parent_call_id is None)
-        assert root.session["__prompt_sections"]["bot"]["announced"]["today"] == "Today is Monday."  # as it left it
+        assert root.session["__prompt_sections"]["bot"]["pinned"]["today"] == "Today is Monday."  # as it left it
+
+
+def told(messages, system_prompt: str, name: str, text: str) -> bool:
+    """Whether a model call was told that section ``name`` reads ``text``: in the pinned prompt, or in an
+    update note that carries the prompt's key and comes after any other note for the section."""
+    key = re.search(r'key="([0-9a-f]+)"', system_prompt).group(1)
+    current = re.search(rf'<section name="{name}">\n(.*?)\n</section>', system_prompt, re.S)
+    current = current.group(1) if current else None
+    for note in notes(messages):
+        for found in re.finditer(rf'<system_update section="{name}" key="{key}">\n(.*?)\n</system_update>', note, re.S):
+            current = found.group(1)
+    return current == text
+
+
+async def llm_calls(out) -> list[tuple[str, list]]:
+    """Each model call of a run, in order: its system prompt and the messages it was given."""
+    trace = await trace_of(out)
+    return [(s.input.get("system_prompt"), s.input.get("messages")) for s in trace.values() if s.path == "bot.llm"]
+
+
+class TestTheModelIsToldWhateverHappensToTheHistory:
+    """The pin is right only together with the update notes in the history the model gets. Wherever the
+    history loses them, the model must still be told the current sections."""
+
+    async def test_compaction_inside_a_turn_that_drops_the_note(self, monkeypatch):
+        from timbal import Tool
+        from timbal.core.memory_compaction import keep_last_n_messages
+
+        # A small window: the fetched payload crosses the ratio, so the turn compacts before its next call.
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 1_000)
+        fresh()
+        sections = Sections(role="You are a bot.", today="Today is Monday.")
+
+        def handler(messages):
+            if messages[-1].role != "tool":
+                asked = [m for m in messages if m.role == "user" and not m.is_runtime()]
+                if asked[-1].collect_text() == "two":
+                    return Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="f1", name="fetch", input={})],
+                        stop_reason="tool_use",
+                    )
+            return "ok"
+
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=handler),
+            system_prompt=sections,
+            tools=[Tool(name="fetch", handler=lambda: "payload: " + "x" * 4_000)],
+            memory_compaction=keep_last_n_messages(1),
+            memory_compaction_ratio=0.75,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        first = await turn(agent, "one")
+        sections.sections["today"] = "Today is Tuesday."
+        second = await turn(agent, "two", first)
+        calls_made = await llm_calls(second)
+        assert len(calls_made) == 2
+        trace = await trace_of(second)
+        root = next(span for span in trace.values() if span.parent_call_id is None)
+        assert root.metadata["compaction"]["triggered"] is True  # between the two calls
+        for prompt, messages in calls_made:
+            assert told(messages, prompt, "today", "Today is Tuesday.")
+        assert notes(calls_made[0][1]) and not notes(calls_made[1][1])  # the note went with the compaction
+
+        # A turn that does not compact as it starts (which pins again by itself) keeps that pin.
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 1_000_000)
+        third = await turn(agent, "three", second)
+        ((prompt, messages),) = await llm_calls(third)
+        assert told(messages, prompt, "today", "Today is Tuesday.")
+        assert prompt == calls_made[1][0]  # the same bytes as the call after the compaction: nothing to repeat
+
+    async def test_compaction_inside_a_turn_that_keeps_the_note_changes_nothing(self, monkeypatch):
+        from timbal import Tool
+        from timbal.core.memory_compaction import compact_tool_results
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 1_000)
+        fresh()
+        sections = Sections(role="You are a bot.", today="Today is Monday.")
+        asked = []
+
+        def handler(_messages):
+            asked.append(1)
+            if len(asked) in (2, 3):  # the second turn: two fetches, so a pass has something to drop
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id=f"f{len(asked)}", name="fetch", input={})],
+                    stop_reason="tool_use",
+                )
+            return "ok"
+
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=handler),
+            system_prompt=sections,
+            tools=[Tool(name="fetch", handler=lambda: "payload: " + "x" * 4_000)],
+            memory_compaction=compact_tool_results(),
+            memory_compaction_ratio=0.75,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        first = await turn(agent, "one")
+        sections.sections["today"] = "Today is Tuesday."
+        second = await turn(agent, "two", first)
+        calls_made = await llm_calls(second)
+        trace = await trace_of(second)
+        root = next(span for span in trace.values() if span.parent_call_id is None)
+        assert root.metadata["compaction"]["triggered"] is True
+        assert len({prompt for prompt, _ in calls_made}) == 1  # the pinned bytes did not move
+        for prompt, messages in calls_made:
+            assert told(messages, prompt, "today", "Today is Tuesday.")
+        # Nor on the next turn (one that does not compact as it starts, which pins again by itself).
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 1_000_000)
+        third = await turn(agent, "three", second)
+        ((prompt, messages),) = await llm_calls(third)
+        assert prompt == calls_made[0][0] and told(messages, prompt, "today", "Today is Tuesday.")
+        assert len(notes(messages)) == 1  # the one note, not said again
+
+    async def test_compaction_as_a_turn_starts_that_loses_nothing_changes_nothing(self, monkeypatch):
+        """A history that is compacted as turns start: the pin moves only when an update went with it."""
+        from timbal.core.memory_compaction import keep_last_n_messages
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 200)
+        fresh()
+        sections = Sections(role="You are a bot.", today="Today is Monday.")
+        agent = Agent(
+            name="bot",
+            model=TestModel(responses=["an answer long enough to fill the small window " * 6]),
+            system_prompt=sections,
+            memory_compaction=keep_last_n_messages(1),
+            memory_compaction_ratio=0.5,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out, prompts, compacted = None, [], []
+        for number in range(6):
+            out = await turn(agent, f"turn {number}", out)
+            ((prompt, messages),) = await llm_calls(out)
+            prompts.append(prompt)
+            trace = await trace_of(out)
+            root = next(span for span in trace.values() if span.parent_call_id is None)
+            compacted.append("compaction" in root.metadata)
+            assert told(messages, prompt, "today", "Today is Monday.")
+        assert compacted.count(True) >= 2  # several turns compacted as they started
+        assert len(set(prompts)) == 1  # and the pinned bytes never moved
+
+        # An update is told on every turn after it, whatever the compaction takes, and pinned at most once.
+        sections.sections["today"] = "Today is Tuesday."
+        later = []
+        for number in range(6, 12):
+            out = await turn(agent, f"turn {number}", out)
+            ((prompt, messages),) = await llm_calls(out)
+            later.append(prompt)
+            assert told(messages, prompt, "today", "Today is Tuesday.")
+        assert len(set(later)) <= 2 and later[-1] == later[-2]
+
+    async def test_a_history_the_caller_supplies(self):
+        """``messages=`` replaces the history: the notes earlier turns left are not in it."""
+        fresh()
+        seen = []
+        sections = Sections(role="You are a bot.", today="Today is Monday.")
+        agent = make_agent(sections, seen)
+        first = await turn(agent, "one")
+        sections.sections["today"] = "Today is Tuesday."
+        second = await turn(agent, "two", first)
+        supplied = [Message.validate({"role": "user", "content": "three, with a history of my own"})]
+        third = await agent(messages=supplied, parent_id=second.run_id).collect()
+        assert third.status.code == "success", third.error
+        ((prompt, messages),) = await llm_calls(third)
+        assert told(messages, prompt, "today", "Today is Tuesday.")
+
+        # And a supplied history that does hold the note is not told twice.
+        ((_, second_messages),) = await llm_calls(second)
+        fourth = await agent(messages=[*second_messages, *supplied], parent_id=third.run_id).collect()
+        ((prompt, messages),) = await llm_calls(fourth)
+        assert told(messages, prompt, "today", "Today is Tuesday.") and len(notes(messages)) == 1
+
+    async def test_a_history_that_does_not_continue_the_agents_own(self):
+        """The run it continues has no turn of this agent (another agent answered it): no history, so no note."""
+        fresh()
+        seen = []
+        sections = Sections(role="You are a bot.", today="Today is Monday.")
+        agent = make_agent(sections, seen)
+        first = await turn(agent, "one")
+        sections.sections["today"] = "Today is Tuesday."
+        second = await turn(agent, "two", first)
+        other = Agent(name="other", model=TestModel(responses=["hi"]), tracing_provider=InMemoryTracingProvider)
+        between = await other(prompt="x", parent_id=second.run_id).collect()
+        assert between.status.code == "success", between.error
+        third = await turn(agent, "three", between)
+        ((prompt, messages),) = await llm_calls(third)
+        assert told(messages, prompt, "today", "Today is Tuesday.")

@@ -184,21 +184,6 @@ _SECTIONS_PREAMBLE = (
 )
 
 
-def _output_text(output: Any) -> str:
-    """A tool's output as text for a person: a message's text, a string as it is, anything else as JSON
-    (its ``str()`` when it is not JSON), never a Python repr of a message or a dict."""
-    if isinstance(output, str):
-        return output.strip()
-    if isinstance(output, Message):
-        return message_text(output).strip()
-    if isinstance(output, BaseModel):
-        return output.model_dump_json()
-    try:
-        return json.dumps(output, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(output).strip()
-
-
 def _render_sections(sections: dict[str, str]) -> str | None:
     texts = [text.strip() for text in sections.values() if text.strip()]
     return "\n\n".join(texts) or None
@@ -212,8 +197,16 @@ def _render_pinned(sections: dict[str, str], key: str) -> str:
     return "\n\n".join([*blocks, _SECTIONS_PREAMBLE.format(key=key)])
 
 
+def _section_digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
 def _prompt_update(changed: dict[str, str], removed: list[str], key: str) -> Message:
-    """The runtime note carrying sections that changed since they were pinned."""
+    """The runtime note carrying sections that changed since they were pinned.
+
+    Its metadata says what it announces (each section's digest, None for a removed one) under the pin's
+    key: the notes in a history are the record of what its model was told (``Agent._sections_untold``).
+    """
     blocks = [
         f'<system_update section="{html.escape(name, quote=True)}" key="{key}">\n'
         f"{text.replace('</system_update', '</ system_update')}\n</system_update>"
@@ -225,8 +218,47 @@ def _prompt_update(changed: dict[str, str], removed: list[str], key: str) -> Mes
     return Message(
         role="user",
         content=[TextContent(text=_PROMPT_UPDATE_HEADER + "\n\n" + "\n\n".join(blocks))],
-        metadata={"source": "runtime", "kind": PROMPT_UPDATE_KIND},
+        metadata={
+            "source": "runtime",
+            "kind": PROMPT_UPDATE_KIND,
+            "key": key,
+            "sections": {**{name: _section_digest(text) for name, text in changed.items()}, **dict.fromkeys(removed)},
+        },
     )
+
+
+class _SendOrder:
+    """The ``send_message`` calls of one tool batch, in the order the model wrote them.
+
+    The calls of a batch run at once, and each message is screened on its own, so a later one can be
+    ready first. A call waits here until every send before it is settled, and only then publishes.
+
+    Settled means its message has left the agent, not that its handler returned: a call's emitted event
+    reaches the stream only once the call's span has been stored, so a later send released at the
+    handler's return could still overtake it there. The agent settles a send as its ``message`` event
+    passes (``Agent._in_send_order``), or at its output whatever became of it (refused before its
+    handler ran, failed, cancelled). A send that publishes nothing settles itself.
+    """
+
+    __slots__ = ("_settled",)
+
+    def __init__(self, call_ids: list[str]) -> None:
+        self._settled = {call_id: asyncio.Event() for call_id in call_ids}
+
+    async def turn(self, call_id: str | None) -> None:
+        """Wait until every send written before ``call_id`` is settled. A call the order does not know
+        waits for none: it has no place in it, and waiting for all of them would be waiting for itself."""
+        if call_id not in self._settled:
+            return
+        for other, settled in self._settled.items():
+            if other == call_id:
+                return
+            await settled.wait()
+
+    def settle(self, call_id: str | None) -> None:
+        settled = self._settled.get(call_id)
+        if settled is not None:
+            settled.set()
 
 
 CALL_TOOL_NAME = "call_tool"
@@ -1110,6 +1142,8 @@ class Agent(Runnable):
             )
         # Plain instance attributes (not PrivateAttr) — read on every agent turn.
         self._send_tools: dict[str, Tool] = {}
+        # Batches that hold two sends or more, by the call id of the agent span running them.
+        self._send_orders: dict[str, _SendOrder] = {}
         self._system_prompt_fn: Callable | None = None
         self._system_prompt_fn_is_async: bool = False
         self._system_prompt_skills: str | None = None
@@ -2733,33 +2767,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         tool.nest(self._path)
         return tool
 
-    async def _pin_sections(self, sections: dict[str, str], current_span: Any, run_context: Any) -> dict | None:
-        """Pin a root agent's prompt sections, or note the ones that changed since (see ``system_prompt``).
+    async def _pin_sections(self, sections: dict[str, str], current_span: Any, run_context: Any) -> dict:
+        """Pin a root agent's prompt sections, or note the ones the model has not been told (see ``system_prompt``).
 
-        Returns the session record whose ``pinned`` sections make this turn's system prompt. A changed or
-        removed (or new) section is inserted before the turn's user message as a runtime note, once; the
-        record is re-pinned on its first turn and after compaction rewrote the history (at turn start, or
-        flagged by a compaction inside the previous turn).
+        Returns the session record whose ``pinned`` sections make this turn's system prompt. A section that
+        differs from what the history tells the model is inserted before the turn's user message as a
+        runtime note. Pinned on the first turn, and again when a compaction at turn start took an update.
         """
-        sections = {name: text.strip() for name, text in sections.items() if text.strip()}
         session = await run_context.get_session()
-        # Copied, never written in place: a run's session data starts as a shallow copy of the run it
-        # continues, so the record is that run's too, and another turn continuing it (an answer asked for
-        # again) must find what that run announced, not what this one did.
-        store = session.get(_SECTIONS_KEY) or {}
-        state = store.get(self._path)
-        if state is None or state.get("refresh") or "compaction" in current_span.metadata:
-            # A fresh key per pin: only the application, which states it in the system prompt, can write updates.
-            key = secrets.token_hex(4)
-            state = {"pinned": dict(sections), "announced": dict(sections), "key": key}
-            session[_SECTIONS_KEY] = {**store, self._path: state}
-            current_span.metadata["prompt_sections"] = {"pinned": list(sections)}
-            return state
-        announced = state["announced"]
-        changed = {name: text for name, text in sections.items() if announced.get(name) != text}
-        removed = [name for name in announced if name not in sections]
+        state = (session.get(_SECTIONS_KEY) or {}).get(self._path)
+        if state is None:
+            return self._pin(sections, current_span, run_context)
+        if "compaction" in current_span.metadata:
+            # The history was rewritten as the turn started: what it no longer says goes into the pin (no
+            # note to keep alive through the next compaction). One that lost nothing leaves the pin alone.
+            return self._repin_if_untold(state, sections, current_span, run_context) or state
+        changed, removed = self._sections_untold(state, sections, current_span.memory)
         # Not into a resumed tool batch: a user message between a tool_use and its result is refused by
-        # the providers. Left unannounced, so the next turn says it.
+        # the providers. Nothing records it as said, so the next turn says it.
         if (changed or removed) and not self._find_pending_tool_uses(current_span.memory):
             note = _prompt_update(changed, removed, state["key"])
             memory = current_span.memory
@@ -2767,11 +2792,68 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 memory.insert(-1, note)
             else:
                 memory.append(note)
-            state = {**state, "announced": dict(sections)}
-            session[_SECTIONS_KEY] = {**store, self._path: state}
             current_span.metadata["prompt_sections"] = {"updated": list(changed), "removed": removed}
             run_context.update_usage("prompt_sections:updated", len(changed) + len(removed))
         return state
+
+    def _pin(self, sections: dict[str, str], current_span: Any, run_context: Any) -> dict:
+        """Pin ``sections`` as the system prompt from here on, under a fresh key: only the application,
+        which states the key in the system prompt, can write updates, and notes of an earlier pin left in
+        the history stop counting. The session data must be loaded (``_pin_sections`` did)."""
+        session = run_context._session_data
+        state = {"pinned": dict(sections), "key": secrets.token_hex(4)}
+        # A new record, never written in place: a run's session data starts as a shallow copy of the run it
+        # continues, so its nested dicts are that run's too.
+        session[_SECTIONS_KEY] = {**(session.get(_SECTIONS_KEY) or {}), self._path: state}
+        current_span.metadata["prompt_sections"] = {
+            **(current_span.metadata.get("prompt_sections") or {}),
+            "pinned": list(sections),
+        }
+        return state
+
+    @staticmethod
+    def _sections_untold(
+        state: dict, sections: dict[str, str], memory: list[Message]
+    ) -> tuple[dict[str, str], list[str]]:
+        """The sections that differ from what ``memory`` tells the model: the pinned prompt, then every
+        update note of that pin in it, in order. Returns those to say (changed or new) and those to remove.
+
+        Read from the history itself, not from a record of what was announced. The pin is right only
+        together with the notes the model gets, and a history can lose them: a compaction, a history the
+        caller supplies (``messages=``), a turn another agent answered in between, a turn cut before its
+        memory was stored. A history without the note is one that never said it.
+        """
+        key = state["key"]
+        told = {name: _section_digest(text) for name, text in state["pinned"].items()}
+        for message in memory:
+            metadata = message.metadata
+            if message.role == "user" and metadata.get("kind") == PROMPT_UPDATE_KIND and metadata.get("key") == key:
+                for name, digest in (metadata.get("sections") or {}).items():
+                    if digest is None:
+                        told.pop(name, None)
+                    else:
+                        told[name] = digest
+        changed = {name: text for name, text in sections.items() if told.get(name) != _section_digest(text)}
+        return changed, [name for name in told if name not in sections]
+
+    def _repin_if_untold(
+        self, state: dict, sections: dict[str, str], current_span: Any, run_context: Any
+    ) -> dict | None:
+        """After a compaction (as a turn starts, or inside one): pin again when the history no longer tells
+        the model the current sections (the compaction took an update note, or a section changed since).
+        None when it still does: the pinned bytes stay as they are."""
+        changed, removed = self._sections_untold(state, sections, current_span.memory)
+        if not changed and not removed:
+            return None
+        return self._pin(sections, current_span, run_context)
+
+    @staticmethod
+    def _sections_prompt(state: dict, send_name: str | None) -> str:
+        """The system prompt of a pin, with the delivery note when the turn has named its send tool."""
+        prompt = _render_pinned(state["pinned"], state["key"])
+        if send_name is not None:
+            prompt = f"{prompt}\n\n{DEFAULT_DELIVERY_NOTE.format(tool=send_name)}"
+        return prompt
 
     def _send_tool_name(self, names: Collection[str] | None = None) -> str:
         """``send_message``, renamed if one of the agent's own tools already has the name.
@@ -2801,48 +2883,63 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             """
             run_context = get_run_context()
             agent_span = run_context.parent_span()
-            text = text.strip() if isinstance(text, str) else ""
-            if not text:
-                raise ValueError("Nothing was sent: the message is empty.")
-            token = run_context._silence_token
-            if token is not None and text == token:
-                # The silent reply sent as a message: the user must not receive it. The turn is a silent one
-                # only if it has told the user nothing (in this run, or in the one it resumes).
-                agent_span.metadata["end_turn"] = True
-                if not (agent_span.metadata.get("messages_sent") or agent_span.metadata.get("sent_before_pause")):
-                    agent_span.metadata["silent"] = True
-                return "Nothing was sent: you stay silent. The turn ends after this step."
-            runner = self._guardrail_runner
-            changed = False
-            if runner is not None and runner.has_stage(GuardrailStage.MODEL_OUTPUT):
-                # What the user reads is screened like a final answer would be.
-                payload = Message(role="assistant", content=[TextContent(text=text)])
-                ctx = GuardrailContext(stage=GuardrailStage.MODEL_OUTPUT, agent_path=self._path, payload=payload)
-                outcome = await runner.run_stage(GuardrailStage.MODEL_OUTPUT, text, ctx)
-                record_guardrails_metadata(agent_span, outcome.triggered, run_context=run_context)
-                if outcome.verdict is not None:
-                    reason = getattr(outcome.verdict, "reason", None)
-                    raise ValueError(
-                        f"Not sent: the {outcome.rail.name} guardrail stopped this message"
-                        + (f" ({reason})" if reason else "")
-                        + ". Rewrite it."
-                    )
-                if outcome.replaced and outcome.text.strip() != text:
-                    changed = True
-                    text = outcome.text.strip()
-                    if not text:
-                        # Nothing is left of it: an empty message is not one, and the turn has not answered.
-                        raise ValueError("Not sent: a guardrail removed all of this message. Rewrite it.")
-            sent = agent_span.metadata.setdefault("messages_sent", [])
-            sent.append(text)
-            agent_span.metadata.pop("silent", None)  # a call of the same batch may have stayed silent first
-            run_context.current_span().metadata[DELIVERED_KEY] = text
-            if end_turn:
-                agent_span.metadata["end_turn"] = True
-            emit({"kind": "message", "text": text, "index": len(sent) - 1, "end_turn": end_turn})
-            # The receipt says what went out: after a guardrail rewrote it, that is not what the model wrote.
-            receipt = f"Sent, after a guardrail changed it. The user received: {text}" if changed else "Sent."
-            return f"{receipt} The turn ends after this step." if end_turn else receipt
+            order = self._send_orders.get(agent_span.call_id) if self._send_orders else None
+            call_id = run_context.current_span().metadata.get("tool_call_id") if order is not None else None
+            published = False
+            try:
+                text = text.strip() if isinstance(text, str) else ""
+                if not text:
+                    raise ValueError("Nothing was sent: the message is empty.")
+                token = run_context._silence_token
+                silent = token is not None and text == token
+                runner = self._guardrail_runner
+                changed = False
+                if not silent and runner is not None and runner.has_stage(GuardrailStage.MODEL_OUTPUT):
+                    # What the user reads is screened like a final answer would be.
+                    payload = Message(role="assistant", content=[TextContent(text=text)])
+                    ctx = GuardrailContext(stage=GuardrailStage.MODEL_OUTPUT, agent_path=self._path, payload=payload)
+                    outcome = await runner.run_stage(GuardrailStage.MODEL_OUTPUT, text, ctx)
+                    record_guardrails_metadata(agent_span, outcome.triggered, run_context=run_context)
+                    if outcome.verdict is not None:
+                        reason = getattr(outcome.verdict, "reason", None)
+                        raise ValueError(
+                            f"Not sent: the {outcome.rail.name} guardrail stopped this message"
+                            + (f" ({reason})" if reason else "")
+                            + ". Rewrite it."
+                        )
+                    if outcome.replaced and outcome.text.strip() != text:
+                        changed = True
+                        text = outcome.text.strip()
+                        if not text:
+                            # Nothing is left of it: an empty message is not one, and the turn has not answered.
+                            raise ValueError("Not sent: a guardrail removed all of this message. Rewrite it.")
+                if order is not None:
+                    # In the order the model wrote them: not before the sends ahead of it in the batch.
+                    await order.turn(call_id)
+                # Nothing awaits from here to the return: recorded and published in one step.
+                if silent:
+                    # The silent reply sent as a message: the user must not receive it. The turn is a silent
+                    # one only if it has told the user nothing (in this run, or in the one it resumes).
+                    agent_span.metadata["end_turn"] = True
+                    if not (agent_span.metadata.get("messages_sent") or agent_span.metadata.get("sent_before_pause")):
+                        agent_span.metadata["silent"] = True
+                    return "Nothing was sent: you stay silent. The turn ends after this step."
+                sent = agent_span.metadata.setdefault("messages_sent", [])
+                sent.append(text)
+                agent_span.metadata.pop("silent", None)  # a call of the same batch may have stayed silent first
+                run_context.current_span().metadata[DELIVERED_KEY] = text
+                if end_turn:
+                    agent_span.metadata["end_turn"] = True
+                emit({"kind": "message", "text": text, "index": len(sent) - 1, "end_turn": end_turn})
+                published = True
+                # The receipt says what went out: after a guardrail rewrote it, that is not what the model wrote.
+                receipt = f"Sent, after a guardrail changed it. The user received: {text}" if changed else "Sent."
+                return f"{receipt} The turn ends after this step." if end_turn else receipt
+            finally:
+                if order is not None and not published:
+                    # Nothing of this call is on its way to the stream: the sends after it go on. One that
+                    # published is settled by the agent, once its message has passed (_in_send_order).
+                    order.settle(call_id)
 
         tool = Tool(
             name=name,
@@ -2852,6 +2949,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             ),
             handler=send_message,
             read_only=True,
+            # It reads nothing, but it acts: a 'now' message does not cut a send in flight. One cut after it
+            # recorded its message and before the message was out would leave the run saying it sent
+            # what the user never got.
+            interruptible=False,
         )
         tool.nest(self._path)
         self._send_tools[name] = tool
@@ -2925,6 +3026,56 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if offered:
             tools = [*tools, self._send_message_tool(name)]
         return tools, name, system_prompt
+
+    def _deliver_command(self, current_span: Any, answer: list) -> OutputEvent:
+        """Deliver a slash command's answer (``delivery="tool"``) and return the turn's output.
+
+        ``answer``: the content of the command's result as its guardrails left it. Its text goes out as a
+        ``message`` (marked ``fallback``: no model ran that could send it), and the output is that text
+        with the result's files. The tool's own output event, which precedes it on the stream, holds the
+        raw output like any tool's. With no text left (a guardrail removed it all, or the result is only
+        files) no message goes out.
+        """
+        text = "".join(item.text for item in answer if isinstance(item, TextContent)).strip()
+        content: list = [item for item in answer if not isinstance(item, TextContent)]
+        current_span.metadata["delivery"] = {"mode": "tool", "messages": 0}
+        if text:
+            sent = current_span.metadata.setdefault("messages_sent", [])
+            sent.append(text)
+            current_span.metadata["delivery"] = {"mode": "tool", "messages": len(sent), "fallback": True}
+            emit({"kind": "message", "text": text, "index": len(sent) - 1, "end_turn": True, "fallback": True})
+        reply = Message(role="assistant", content=[TextContent(text=text), *content], stop_reason="end_turn")
+        return self._synthetic_event("delivery", RunStatus(code="success", reason="end_turn"), output=reply)
+
+    def _order_sends(
+        self, current_span: Any, tools: list[Tool], tool_calls: list[ToolUseContent], send_name: str | None
+    ) -> "_SendOrder | None":
+        """Before a batch runs: the order its sends are published in, when it holds two or more (else None)."""
+        if self.tool_search == "dispatch":
+            tool_calls = [self._dispatched(tools, call) for call in tool_calls]  # as they will run
+        call_ids = [call.id for call in tool_calls if call.name == send_name]
+        if len(call_ids) < 2:
+            return None
+        order = self._send_orders[current_span.call_id] = _SendOrder(call_ids)
+        return order
+
+    async def _in_send_order(self, events: AsyncGenerator, order: "_SendOrder") -> AsyncGenerator:
+        """The events of a tool batch (``_multiplex_tools``), settling each send once it has left the agent:
+        when its ``message`` event has been taken, or at its own output whatever became of it."""
+        depth = self._path.count(".") + 1
+        try:
+            async for tool_call, event in events:
+                yield tool_call, event
+                # Back for the next event: this one has been taken (by the agent, and by whoever reads it).
+                if isinstance(event, OutputEvent):
+                    if event.path.count(".") == depth:  # the call's own output, not one nested in it
+                        order.settle(tool_call.id)
+                elif isinstance(event, DeltaEvent) and event.item.type == "custom":
+                    data = event.item.data
+                    if isinstance(data, dict) and data.get("kind") == "message":
+                        order.settle(tool_call.id)
+        finally:
+            await events.aclose()
 
     def _deliver_final(self, current_span: Any, offered: bool, before: int, stored: bool) -> OutputEvent | None:
         """At a final answer (``delivery="tool"``): the turn's output, after delivering the draft when it is
@@ -3553,13 +3704,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # After memory is assembled (and before the dump): push any background
         # completions that finished since the last turn into the conversation.
         self._inject_background_completions(current_span)
+        sections: dict[str, str] | None = None
         sections_state = None
-        compaction_at_pin = None
         if isinstance(system_prompt, dict):
             if current_span.parent_call_id is None:
+                sections = {name: text.strip() for name, text in system_prompt.items() if text.strip()}
                 # After compaction (at turn start) is known, and before the dump: an update note joins memory.
-                sections_state = await self._pin_sections(system_prompt, current_span, run_context)
-                compaction_at_pin = current_span.metadata.get("compaction")
+                sections_state = await self._pin_sections(sections, current_span, run_context)
                 system_prompt = _render_pinned(sections_state["pinned"], sections_state["key"])
             else:
                 system_prompt = _render_sections(system_prompt)
@@ -3568,6 +3719,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         send_name: str | None = None
         # Whether the current step offers the tool: text from a step that could not send is not a draft.
         send_offered = False
+        # The publishing order of a batch that holds two sends or more (None for any other batch).
+        send_order: _SendOrder | None = None
+        # A slash command's result as its guardrails left it (text and files): what the user gets. Set by
+        # _process_tool_event, and left None for a call that has no result (denied, failed).
+        command_answer: list | None = None
         # Messages the turn sent in the run this one resumes (see resolve_memory): it has answered already.
         sent_before = current_span.metadata.get("sent_before_pause", 0) if delivering else 0
         if "end_turn" in current_span.metadata and not (
@@ -3642,7 +3798,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
-            nonlocal consecutive_denials, denial_window_crossed
+            nonlocal consecutive_denials, denial_window_crossed, command_answer
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
                 return
             # Native-event handlers (coding harness) forward their own OutputEvent
@@ -3757,8 +3913,25 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # paired result, and the model should know why it can't see it.
                         reason = outcome.verdict.reason or "content policy"
                         replace_tool_result_text(c, f"[Blocked by guardrail '{outcome.rail.name}'] {reason}")
+                        if not append_to_messages:
+                            # A slash command's result goes to the user: in the rail's words for a user,
+                            # not the notice written for the model (and none of what the result held).
+                            command_answer = [
+                                TextContent(
+                                    text=outcome.verdict.blocked_message
+                                    or outcome.rail.blocked_message_for(GuardrailStage.TOOL_RESULT)
+                                )
+                            ]
                     elif outcome.replaced:
                         replace_tool_result_text(c, outcome.text)
+            if not append_to_messages and command_answer is None and status_code == "success":
+                # A slash command's own result is the turn's answer. Taken here: as the guardrails above
+                # left it, and whole (the limit below reduces what enters the model's context, not what
+                # the user asked to see). Its text and its files; not a denial or an error, which are
+                # notices for a model.
+                command_answer = [
+                    item for c in tool_result.content if isinstance(c, ToolResultContent) for item in c.content
+                ]
             # Production-time offload: reduce an oversized result once, before it enters
             # memory or the dump, so history stays append-only (prompt-cache friendly) and
             # the reduction persists into traces. Errors are never reduced — the model needs
@@ -4021,6 +4194,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 # Run the tool (raw stream — see _multiplex_tools;
                                 # same pending-cancel detection as the fast path)
                                 _cmd_task = asyncio.current_task()
+                                command_output: OutputEvent | None = None
                                 active_events = tool._stream(**tool_input)
                                 async for event in active_events:
                                     if _cmd_task is not None and _cmd_task.cancelling():
@@ -4049,13 +4223,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         )
                                         if delivering and event.path == tool._path and event.run_id == run_context.id:
                                             # The command's own output (not an event nested in it, nor one a
-                                            # harness forwards under its path): it is the turn's answer, and no
-                                            # model runs that could send it.
-                                            answer = _output_text(event.output)
-                                            if answer:
-                                                self._deliver_text(current_span, answer, sent_before)
+                                            # harness forwards under its path) is the turn's answer, and no
+                                            # model runs that could send it. As a model would read it: the
+                                            # tool result its guardrails screened, not the raw output.
+                                            if command_answer is not None:
+                                                command_output = self._deliver_command(current_span, command_answer)
                                     yield event
                                 active_events = None
+                                if command_output is not None:
+                                    yield command_output  # the turn's output is what was delivered
                                 return
 
                 # Resume path: if the trailing assistant message has tool_uses
@@ -4078,6 +4254,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             self._path, [(call.id, call.name, call.input) for call in tool_calls]
                         )
                     active_events = self._multiplex_tools(tools, tool_calls, cut=cut)
+                    if delivering and len(tool_calls) > 1:
+                        send_order = self._order_sends(current_span, tools, tool_calls, send_name)
+                        if send_order is not None:
+                            active_events = self._in_send_order(active_events, send_order)
                     async for tool_call, event in active_events:
                         await _process_tool_event(event, tool_call.id, append_to_messages=True)
                         for pending_event in pending_guardrail_events:
@@ -4103,6 +4283,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         ):
                             first_pending = event
                     active_events = None
+                    if send_order is not None:
+                        self._send_orders.pop(current_span.call_id, None)
+                        send_order = None
                     if lost_claim is not None:
                         raise RunCancelled(lost_claim.status.message or "", reason=lost_claim.status.reason)
                     if first_pending is not None:
@@ -4145,6 +4328,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         if measured is not None:
                             removed = len(mem_before) - len(current_span.memory)
                             measured["messages"] = max(0, measured["messages"] - removed)
+                        if sections_state is not None:
+                            # The pin is right only with the update notes in the history: once a compaction
+                            # took one, the calls left in this turn get the current sections pinned.
+                            repinned = self._repin_if_untold(sections_state, sections, current_span, run_context)
+                            if repinned is not None:
+                                sections_state = repinned
+                                system_prompt = self._sections_prompt(repinned, send_name)
 
                 # Output-side guardrails: model_output rails run on the final assistant
                 # message; model_step rails run on EVERY assistant message (including
@@ -4582,6 +4772,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         self._path, [(call.id, call.name, call.input) for call in tool_calls]
                     )
                 active_events = self._multiplex_tools(tools, tool_calls, cut=cut)
+                if delivering and len(tool_calls) > 1:
+                    send_order = self._order_sends(current_span, tools, tool_calls, send_name)
+                    if send_order is not None:
+                        active_events = self._in_send_order(active_events, send_order)
                 async for tool_call, event in active_events:
                     await _process_tool_event(event, tool_call.id, append_to_messages=True)
                     for pending_event in pending_guardrail_events:
@@ -4605,6 +4799,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     ):
                         first_pending = event
                 active_events = None
+                if send_order is not None:
+                    self._send_orders.pop(current_span.call_id, None)
+                    send_order = None
                 if lost_claim is not None:
                     raise RunCancelled(lost_claim.status.message or "", reason=lost_claim.status.reason)
                 if first_pending is not None:
@@ -4643,13 +4840,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             finally:
                 if not _llm_memory_saved:
                     await self._salvage_interrupted_llm_output(run_context, current_span)
-                if sections_state is not None and current_span.metadata.get("compaction") is not compaction_at_pin:
-                    # Compacted inside this turn: update notes may be gone with the history, so re-pin next turn.
-                    # (A new record, like every write of it: see _pin_sections.)
-                    session = run_context._session_data
-                    session[_SECTIONS_KEY] = {
-                        **(session.get(_SECTIONS_KEY) or {}),
-                        self._path: {**sections_state, "refresh": True},
-                    }
+                if send_order is not None:
+                    self._send_orders.pop(current_span.call_id, None)
         if self.memory_compaction is not None and self.memory_compaction_prepare_ratio is not None:
             self._prepare_for_next_turn(current_span, run_context, prepared)

@@ -483,6 +483,150 @@ class TestTheToolsName:
         assert delivered == [None, "hi"]  # compaction would turn the first into assistant text
 
 
+async def in_time(stream, seconds: float = 60):
+    """``stream``'s events, each awaited with a deadline: a batch that waits on itself fails here."""
+    iterator = stream.__aiter__()
+    while True:
+        try:
+            yield await asyncio.wait_for(iterator.__anext__(), seconds)
+        except StopAsyncIteration:
+            return
+
+
+def message_events(events) -> list[tuple[str, str]]:
+    """The ``message`` events of a stream in the order they arrived: (text, the call that sent it)."""
+    return [
+        (e.item.data["text"], e.call_id)
+        for e in events
+        if isinstance(e, DeltaEvent)
+        and e.item.type == "custom"
+        and isinstance(e.item.data, dict)
+        and e.item.data.get("kind") == "message"
+    ]
+
+
+def assert_within_their_calls(events) -> None:
+    """Every ``message`` event arrives after its own call's START and before that call's OUTPUT."""
+    position = {id(e): n for n, e in enumerate(events)}
+    for e in events:
+        data = getattr(getattr(e, "item", None), "data", None)
+        if not (isinstance(data, dict) and data.get("kind") == "message"):
+            continue
+        own = [x for x in events if x.call_id == e.call_id]
+        start = next(x for x in own if x.type == "START")
+        output = next(x for x in own if x.type == "OUTPUT")
+        assert position[id(start)] < position[id(e)] < position[id(output)], data
+
+
+class TestOrderInABatch:
+    """Several sends in one step go out in the order the model wrote them, whatever screening each one takes."""
+
+    def _slow(self, slow: str, others: int):
+        """An output guardrail that takes longer over ``slow`` than over the batch's ``others`` messages:
+        it lets that one through only once every other one has been screened."""
+        screened = []
+        all_others = asyncio.Event()
+
+        async def rail(text: str) -> bool:
+            if text == slow:
+                await asyncio.wait_for(all_others.wait(), 30)
+            else:
+                screened.append(text)
+                if len(screened) >= others:
+                    all_others.set()
+            return True
+
+        return guardrail(rail, stages=["model_output"], name="slow")
+
+    async def test_a_slow_guardrail_does_not_move_a_later_message_ahead(self):
+        fresh()
+        model = TestModel(responses=[calls(send("First."), send("Last.", end_turn=True)), "must not be requested"])
+        agent = Agent(name="bot", model=model, delivery="tool", guardrails=[self._slow("First.", others=1)])
+        events = [event async for event in in_time(agent(prompt="go"))]
+        out = events[-1]
+        assert out.status.code == "success", out.error
+        messages = [e.item.data for e in events if isinstance(e, DeltaEvent) and e.item.type == "custom"]
+        assert [(m["text"], m["index"], m["end_turn"]) for m in messages] == [("First.", 0, False), ("Last.", 1, True)]
+        assert out.output.collect_text() == "First.\n\nLast."
+        assert model.call_count == 1
+        assert_within_their_calls(events)
+
+    async def test_a_slow_trace_save_does_not_move_a_later_message_ahead_either(self, monkeypatch):
+        """A call's emitted event reaches the stream once the call's span has been stored. The next send
+        must not go out while the first one's message waits behind that save."""
+        from timbal.core.agent import _SendOrder
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        held, second_at_its_turn = [], asyncio.Event()
+        original = _SendOrder.turn
+
+        async def turn(self, call_id):
+            if call_id == "c1-send_message":
+                second_at_its_turn.set()  # screened, and asking to publish
+            await original(self, call_id)
+
+        monkeypatch.setattr(_SendOrder, "turn", turn)
+
+        class HoldsTheFirstSave(InMemoryTracingProvider):
+            @classmethod
+            async def _store(cls, run_context):
+                sent = run_context.root_span().metadata.get("messages_sent") or ()
+                if not held and "First." in sent:  # the save that follows the first send's handler
+                    held.append(1)
+                    await asyncio.wait_for(second_at_its_turn.wait(), 30)
+                await super()._store(run_context)
+
+        fresh()
+        model = TestModel(responses=[calls(send("First."), send("Last.", end_turn=True)), "must not be requested"])
+        agent = Agent(name="bot", model=model, delivery="tool", tracing_provider=HoldsTheFirstSave)
+        events = [event async for event in in_time(agent(prompt="go"))]
+        assert held == [1]
+        assert [text for text, _ in message_events(events)] == ["First.", "Last."]
+        assert_within_their_calls(events)
+
+    async def test_three_messages_with_the_middle_one_slow(self):
+        fresh()
+        batch = calls(send("One."), send("Two."), send("Three.", end_turn=True))
+        model = TestModel(responses=[batch, "must not be requested"])
+        agent = Agent(name="bot", model=model, delivery="tool", guardrails=[self._slow("Two.", others=2)])
+        out, messages = await asyncio.wait_for(run(agent), 60)
+        assert [m["text"] for m in messages] == ["One.", "Two.", "Three."]
+        assert out.output.collect_text() == "One.\n\nTwo.\n\nThree."
+
+    async def test_a_message_that_is_not_sent_does_not_hold_the_ones_after_it(self):
+        """Refused before its handler runs (no text), by a guardrail, or empty: the next ones still go out."""
+        no_secrets = guardrail(
+            lambda text: Verdict.block("secret") if "42" in text else True, stages=["model_output"], name="no_secrets"
+        )
+        for first in ((SEND_MESSAGE_NAME, {"end_turn": False}), send("The code is 42."), send("   ")):
+            fresh()
+            model = TestModel(responses=[calls(first, send("Second."), send("Third.", end_turn=True)), "not requested"])
+            agent = Agent(name="bot", model=model, delivery="tool", guardrails=[no_secrets])
+            out, messages = await asyncio.wait_for(run(agent), 60)
+            assert out.status.code == "success", out.error
+            assert [(m["text"], m["index"]) for m in messages] == [("Second.", 0), ("Third.", 1)]
+
+    async def test_in_dispatch_mode(self):
+        fresh()
+        batch = calls(
+            ("call_tool", {"name": SEND_MESSAGE_NAME, "arguments": {"text": "First."}}),
+            send("Last.", end_turn=True),
+        )
+        weather = Tool(
+            name="get_weather", description="Weather.", handler=lambda city: f"sunny in {city}", defer_loading=True
+        )
+        agent = Agent(
+            name="bot",
+            model=TestModel(responses=[batch, "must not be requested"]),
+            tools=[weather],
+            delivery="tool",
+            tool_search="dispatch",
+            guardrails=[self._slow("First.", others=1)],
+        )
+        out, messages = await asyncio.wait_for(run(agent), 60)
+        assert [m["text"] for m in messages] == ["First.", "Last."]
+
+
 class TestWhatCountsAsSent:
     async def test_a_turn_that_sent_a_message_is_not_silent(self):
         for responses in (
@@ -655,24 +799,159 @@ class TestAStepWithoutTheTool:
         out, messages = await run(agent, "/ping")
         assert model.call_count == 0
         assert messages == [{"kind": "message", "text": "pong", "index": 0, "end_turn": True, "fallback": True}]
+        assert out.output.collect_text() == "pong"  # the turn's output is what was delivered
+        assert out.metadata["delivery"] == {"mode": "tool", "messages": 1, "fallback": True}
 
     async def test_a_slash_command_whose_output_is_not_a_string(self):
-        """What the user reads is the output's text, not the Python repr of a message or a dict."""
+        """What the user reads is the tool result's text, as a model would read it: never the Python repr of
+        a message."""
 
         def balance() -> dict:
             return {"balance": 12}
 
         helper = Agent(name="helper", model=TestModel(responses=["helper says hi"]), command="helper")
         for command, tool, text in (
-            ("/balance", Tool(handler=balance, command="balance"), '{"balance": 12}'),
+            ("/balance", Tool(handler=balance, command="balance"), "{'balance': 12}"),
             ("/helper hello", helper, "helper says hi"),
         ):
             fresh()
-            agent = Agent(
-                name="bot", model=TestModel(responses=["must not be requested"]), tools=[tool], delivery="tool"
-            )
+            model = TestModel(responses=["must not be requested"])
+            agent = Agent(name="bot", model=model, tools=[tool], delivery="tool")
             out, messages = await run(agent, command)
             assert [m["text"] for m in messages] == [text]  # once: not the helper's own model call too
+
+    async def test_a_slash_command_s_result_is_delivered_as_its_guardrails_left_it(self):
+        """The command's result is the turn's answer. What goes to the user is the result the tool-result
+        guardrails screened, not the tool's raw output."""
+
+        def status() -> str:
+            return "status: internal draft"
+
+        def rewrite(text: str) -> str:
+            return text.replace("internal draft", "public summary")
+
+        on_agent = guardrail(rewrite, stages=["tool_result"], action="redact", name="rewrite")
+        on_tool = guardrail(rewrite, stages=["tool_result"], action="redact", name="rewrite")
+        for agent_rails, tool_rails in (([on_agent], []), ([], [on_tool])):
+            fresh()
+            tool = Tool(handler=status, command="status", guardrails=tool_rails)
+            model = TestModel(responses=["must not be requested"])
+            agent = Agent(name="bot", model=model, tools=[tool], delivery="tool", guardrails=agent_rails)
+            out, messages = await run(agent, "/status")
+            assert model.call_count == 0
+            assert [m["text"] for m in messages] == ["status: public summary"]
+            assert out.output.collect_text() == "status: public summary"  # and the run's own output
+
+    async def test_a_slash_command_s_result_a_guardrail_blocks_is_not_delivered(self):
+        def status() -> str:
+            return "the key is hunter2"
+
+        fresh()
+        no_keys = guardrail(
+            lambda text: Verdict.block("a credential") if "hunter2" in text else True,
+            stages=["tool_result"],
+            name="no_keys",
+            blocked_message="That result cannot be shown.",
+        )
+        model = TestModel(responses=["must not be requested"])
+        agent = Agent(
+            name="bot",
+            model=model,
+            tools=[Tool(handler=status, command="status")],
+            delivery="tool",
+            guardrails=[no_keys],
+        )
+        out, messages = await run(agent, "/status")
+        # The user is told it was withheld, in the rail's words for a user: not the result, not the rail's reason.
+        assert [m["text"] for m in messages] == ["That result cannot be shown."]
+        assert out.output.collect_text() == "That result cannot be shown."
+
+    async def test_a_slash_command_s_result_a_guardrail_leaves_nothing_of(self):
+        """Nothing is left to deliver, and the run's output is not the raw result either."""
+
+        def status() -> str:
+            return "status: internal draft"
+
+        fresh()
+        wipe = guardrail(lambda _text: "", stages=["tool_result"], action="redact", name="wipe")
+        model = TestModel(responses=["must not be requested"])
+        agent = Agent(
+            name="bot", model=model, tools=[Tool(handler=status, command="status")], delivery="tool", guardrails=[wipe]
+        )
+        out, messages = await run(agent, "/status")
+        assert messages == []
+        assert out.output.collect_text() == ""
+        assert out.metadata["delivery"] == {"mode": "tool", "messages": 0}
+
+    async def test_a_slash_command_that_returns_a_file(self, tmp_path):
+        """A message event carries text. The result's files are in the run's output, as in text mode."""
+        from timbal.types.content import FileContent, TextContent
+        from timbal.types.file import File
+
+        path = tmp_path / "chart.txt"
+        path.write_text("1,2,3")
+
+        def chart(caption: str = "") -> Message:
+            content = [TextContent(text=caption)] if caption else []
+            return Message(role="assistant", content=[*content, FileContent(file=File.validate(str(path)))])
+
+        for command, texts in (("/chart", []), ("/chart Here.", ["Here."])):
+            fresh()
+            model = TestModel(responses=["must not be requested"])
+            agent = Agent(name="bot", model=model, tools=[Tool(handler=chart, command="chart")], delivery="tool")
+            out, messages = await run(agent, command)
+            assert out.status.code == "success", out.error
+            assert [m["text"] for m in messages] == texts
+            assert out.output.collect_text() == "".join(texts)
+            assert len([c for c in out.output.content if isinstance(c, FileContent)]) == 1
+
+    async def test_a_slash_command_that_is_denied_delivers_no_notice(self):
+        """A denial is not a result: what a model would be told about it is not a message for the user."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.types.events import ApprovalEvent
+
+        def charge() -> str:
+            return "charged"
+
+        fresh()
+        set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+        model = TestModel(responses=["must not be requested"])
+        agent = Agent(
+            name="bot",
+            model=model,
+            tools=[Tool(handler=charge, command="charge", requires_approval=True)],
+            delivery="tool",
+            tracing_provider=InMemoryTracingProvider,
+        )
+        events, messages = [e async for e in agent(prompt="/charge")], []
+        parked = events[-1]
+        assert parked.status.reason == "approval_required"
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        set_run_context(RunContext(parent_id=parked.run_id, tracing_provider=InMemoryTracingProvider))
+        out, messages = await run(agent, "/charge", resume={approval.approval_id: False})
+        assert messages == []
+        assert out.status.reason == "approval_denied" and "delivery" not in out.metadata
+
+    async def test_a_slash_command_s_long_result_is_delivered_whole(self):
+        """A result limit reduces what goes into the model's context. The user asked for the output."""
+        from timbal.core import ToolResultLimit, Truncate
+
+        report = "line " * 200
+
+        def long() -> str:
+            return report
+
+        fresh()
+        model = TestModel(responses=["must not be requested"])
+        agent = Agent(
+            name="bot",
+            model=model,
+            tools=[Tool(handler=long, command="long")],
+            delivery="tool",
+            tool_result_limit=ToolResultLimit(threshold=100, action=Truncate(strategy="head")),
+        )
+        out, messages = await run(agent, "/long")
+        assert [m["text"] for m in messages] == [report.strip()]
 
 
 class TestAcrossAPause:
@@ -956,3 +1235,41 @@ class TestWithChatSession:
             texts, finished = await asyncio.wait_for(finished_turn(session), 30)
         assert texts == ["It finished a minute ago."]
         assert not finished.get("silent")
+
+    async def test_a_now_message_does_not_cut_a_send_that_was_published(self):
+        """A send acts: once it has recorded its message, a ``now`` message must not cancel the call before
+        the message is out, or the run would say something went out that the user never got."""
+        from timbal.core.chat_session import ChatSession
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        held, holding, release = [], asyncio.Event(), asyncio.Event()
+
+        class HoldsTheFirstSave(InMemoryTracingProvider):
+            @classmethod
+            async def _store(cls, run_context):
+                root = run_context.root_span()
+                sent = (root.metadata.get("messages_sent") or ()) if root is not None else ()
+                if not held and "S0" in sent:  # the save between the first send's handler and its event
+                    held.append(1)
+                    holding.set()
+                    await asyncio.wait_for(release.wait(), 30)
+                await super()._store(run_context)
+
+        def handler(messages):
+            said = [m.collect_text() for m in messages if m.role == "user" and not m.is_runtime()]
+            if said[-1] == "start":
+                return calls(send("S0"), send("S1", end_turn=True))
+            return calls(send("Answering the new message.", end_turn=True))
+
+        fresh()
+        agent = Agent(name="bot", model=TestModel(handler=handler), delivery="tool", tracing_provider=HoldsTheFirstSave)
+        async with ChatSession(agent) as session:
+            session.send("start")
+            await asyncio.wait_for(holding.wait(), 30)
+            session.send("a new question", mode="now")  # cuts what may be cut
+            release.set()
+            texts, finished = await asyncio.wait_for(finished_turn(session), 60)
+        assert texts == ["S0", "S1", "Answering the new message."]
+        trace = await RunContext(tracing_provider=HoldsTheFirstSave)._get_parent_trace(finished["run_id"])
+        root = next(span for span in trace.values() if span.parent_call_id is None)
+        assert root.metadata["messages_sent"] == texts  # what the run says it sent is what went out

@@ -431,9 +431,9 @@ async for event in agent(prompt="Where is my order?"):
             print(data["text"])  # {"kind": "message", "text", "index", "end_turn"}
 ```
 
-- **Messages.** Each one is delivered when its call runs, as a `Custom` delta of kind `"message"`. Show these events to the user, not the tool call's input: the text is checked by the agent's `model_output` [guardrails](/agents/guardrails) before the event goes out.
+- **Messages.** Each one is delivered when its call runs, as a `Custom` delta of kind `"message"`. Several sends in one step go out in the order the model wrote them. Show these events to the user, not the tool call's input: the text is checked by the agent's `model_output` [guardrails](/agents/guardrails) before the event goes out.
 - **`end_turn=True`** ends the turn after that tool batch, with no further model call. If a message or an event joined the turn in the meantime, the agent answers it first.
-- **Other text is a draft.** The user does not see it. It is delivered (a `message` event with `fallback: True`) when the turn sent nothing, and when a step had no tools to send with, which happens once `max_iter` is spent or a denial limit withheld the tools. The output of a [slash command](/agents/commands) is delivered the same way.
+- **Other text is a draft.** The user does not see it. It is delivered (a `message` event with `fallback: True`) when the turn sent nothing, and when a step had no tools to send with, which happens once `max_iter` is spent or a denial limit withheld the tools. The result of a [slash command](/agents/commands) is delivered the same way, as the tool's `tool_result` guardrails left it.
 - **Output.** `result.output` is one assistant message that joins everything the turn sent. `metadata.messages_sent` lists the messages and `metadata.delivery` summarizes them.
 - **Guardrails.** A blocked message is not sent: the tool returns an error and the model rewrites it. A redacted message is sent as redacted, and the tool result tells the model what the user received.
 - **Approvals.** A turn that pauses for an [approval](#approval-required-tools) goes on in the run that resumes it: what it sent before the pause still counts, so a draft after the resume stays private.
