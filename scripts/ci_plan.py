@@ -58,9 +58,7 @@ def plan(event: str, files: list[str] | None, merge_queue: bool, os_input: str) 
     else:
         oses = [os_input] if os_input and os_input != "all" else OSES
         cells = [{"os": o, "python": p} for o in oses for p in PYTHONS]
-    # Windows runs the tests one at a time, as before: its runners are slow enough that the session-lease
-    # and voice timing tests miss their deadlines there with every core busy (PR #294's runs).
-    return lane, [{**c, "coverage": c == COVERAGE, "parallel": c["os"] != "windows-latest"} for c in cells]
+    return lane, [{**c, "coverage": c == COVERAGE} for c in cells]
 
 
 def main(argv: list[str]) -> None:

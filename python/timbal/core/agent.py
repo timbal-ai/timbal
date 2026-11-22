@@ -334,6 +334,19 @@ def _predecessors_handoff(run_context: Any, path: str) -> "_Handoff | None":
     return handoff
 
 
+_last_policy_decision_ns = 0
+
+
+def _policy_decision_ns() -> int:
+    """``time.time_ns()`` for a tool-policy decision, strictly after the previous one in this process.
+
+    The restore keeps each agent's latest decision by this stamp. Before Python 3.13, Windows' clock ticks
+    every 15.6 ms, so two decisions in one tick tied and the restore could bring back the earlier one."""
+    global _last_policy_decision_ns
+    _last_policy_decision_ns = max(time.time_ns(), _last_policy_decision_ns + 1)
+    return _last_policy_decision_ns
+
+
 def _retrieve_result(task: "asyncio.Task") -> None:
     if not task.cancelled():
         task.exception()
@@ -2434,7 +2447,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Ordered by when it was made, not by when its span started: concurrent spans of one agent decide out
         # of start order, and the restore must not bring back a permission a later decision took away.
         allowed = sorted(path for tool in tools if (path := getattr(tool, "_path", None)))
-        decided_at = time.time_ns()
+        decided_at = _policy_decision_ns()
         span.metadata["tool_policy_allowed"] = allowed
         span.metadata["tool_policy_decided_at"] = decided_at
         # A run started inside a call of the run the policy came from keeps its spans in a trace of its own: note

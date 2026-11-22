@@ -392,7 +392,9 @@ class Client:
             elif self._alive():
                 self.session.withdraw(wake_id)
 
-    async def until(self, condition, timeout=10.0) -> bool:
+    # Hang guards, not timing checks: a scenario takes well under a second, but polling and store retries
+    # stretch with a slow runner's timers (Windows before Python 3.13 sleeps in 15.6 ms ticks).
+    async def until(self, condition, timeout=60.0) -> bool:
         """True once ``condition()`` holds; False if the process died first."""
         deadline = asyncio.get_running_loop().time() + timeout
         while not condition():
@@ -427,7 +429,7 @@ class Client:
                 self.session.withdraw_answers(values)
         return True
 
-    async def settle(self, timeout=10.0) -> None:
+    async def settle(self, timeout=60.0) -> None:
         """Until the session has nothing left to do, answering whatever it parks on."""
         deadline = asyncio.get_running_loop().time() + timeout
         while self._alive():

@@ -132,7 +132,7 @@ def make_agent(provider, gate, charged=None):
     )
 
 
-async def records(session, kind, count, timeout=5.0, after=0):
+async def records(session, kind, count, timeout=30.0, after=0):  # a hang guard (slow runners stretch timers)
     found = []
 
     async def collect():

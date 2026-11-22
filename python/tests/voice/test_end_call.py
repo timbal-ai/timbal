@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
+from types import SimpleNamespace
 
+import pytest
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
 from timbal.voice import (
@@ -23,6 +26,24 @@ from .test_session import FakePlaybackTracker, _FakeEndpointer
 from .test_voice_events import _Model, _session, _texts, _until
 
 GOODBYE = "Perfecto, hasta luego."
+
+# Windows' ``time.monotonic()`` before Python 3.13 ticks every 15.6 ms; a slow runner then puts the caller's
+# next words in the same tick as the hangup decision. 100 ms makes that certain on any machine.
+COARSE_TICK = 0.1
+
+
+@pytest.fixture(autouse=True, params=["clock", "coarse_clock"])
+def _session_clock(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test also runs with the session's clock in coarse ticks, as on Windows with Python 3.11/3.12: a
+    caller event in the same tick as the hangup decision must still count as after it (the old strict
+    timestamp comparison hung up on that caller). Only the session module's clock is coarse; asyncio's
+    timers are untouched."""
+    if request.param == "coarse_clock":
+        import timbal.voice.session as session_module
+
+        coarse = SimpleNamespace(**{name: getattr(time, name) for name in dir(time) if not name.startswith("_")})
+        coarse.monotonic = lambda: time.monotonic() // COARSE_TICK * COARSE_TICK
+        monkeypatch.setattr(session_module, "time", coarse)
 
 
 async def end_call() -> str:

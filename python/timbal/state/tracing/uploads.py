@@ -149,7 +149,9 @@ def schedule(run_context: RunContext) -> bool:
     if run is None:
         run = _RUNS[_key(run_context)] = _RunUploads(run_context, provider)
     now = loop.time()
-    if run.unsent_since is not None and now - run.unsent_since > _max_lag(provider):
+    # At or past the limit (inclusive: on a coarse clock, Windows before Python 3.13, a backlog started in
+    # this 15.6 ms tick reads as 0 s behind, and max_lag_s=0 must still mean "always synchronous").
+    if run.unsent_since is not None and now - run.unsent_since >= _max_lag(provider):
         count(run_context, "tracing:lag_exceeded")
         return False
     run.requests += 1
