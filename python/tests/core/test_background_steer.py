@@ -1,8 +1,10 @@
 """Steering background sub-agents: messages a running background agent reads between its steps."""
 
 import asyncio
+import gc
 import threading
 import time
+import weakref
 
 import pytest
 from timbal import Agent, Tool
@@ -895,6 +897,45 @@ class TestChatSession:
             await asyncio.wait_for(_until(lambda: receipts and receipts[0].state != "pending"), 5)
             (settled,) = [item for item in session.log.peek()[0] if _kind(item) == "task_message_settled"]
             assert (settled["event_id"], settled["state"]) == (receipts[0].id, "undelivered")
+
+    @pytest.mark.asyncio
+    async def test_a_closed_session_is_not_kept_by_a_message_the_task_still_holds(self):
+        """A detached child outlives the chats that wrote to it, and holds their messages' receipts
+        until it reads them or ends. A receipt must not hold the chat in turn: a long-running child
+        would keep every closed session that ever messaged it, event log and all."""
+        from timbal.core.chat_session import ChatSession
+
+        child = Child()
+        parent = Agent(
+            name="lead",
+            model=TestModel(responses=[_call("researcher", {"prompt": "research cats"}), "Started."]),
+            tools=[child.agent()],
+        )
+
+        async def chat(text: str, parent_id: str | None = None):
+            """Open a chat on the conversation, write to the child, close. Only what does not hold it comes back."""
+            session = ChatSession(parent, parent_id=parent_id)
+            async with session:
+                if parent_id is None:
+                    session.send("go")
+                    await asyncio.wait_for(child.started.wait(), 5)
+                    await asyncio.wait_for(_until(lambda: session.turns == 1 and not session.busy), 5)
+                (task,) = session.store.list()
+                receipt = session.message_task(task["task_id"], text)
+                return weakref.ref(session), session.store, session.head, task["task_id"], receipt
+
+        first, store, head, task_id, receipt_one = await chat("tigers")
+        second, same_store, _, _, receipt_two = await chat("lions", parent_id=head)
+        assert same_store is store and not store.get(task_id).task.done()
+        assert (receipt_one.state, receipt_two.state) == ("pending", "pending")  # the child still holds both
+        await asyncio.sleep(0)  # what a close leaves for the loop's next turn is gone
+        gc.collect()
+        try:
+            assert first() is None and second() is None
+        finally:
+            child.gate.set()
+            await asyncio.wait_for(asyncio.shield(store.get(task_id).task), 5)
+        assert (receipt_one.state, receipt_two.state) == ("delivered", "delivered")
 
 
 def _kind(item) -> str | None:

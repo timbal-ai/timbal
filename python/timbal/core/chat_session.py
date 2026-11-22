@@ -8,6 +8,7 @@ import json
 import math
 import os
 import time
+import weakref
 from collections.abc import AsyncIterator, Callable, Collection
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -840,7 +841,17 @@ class ChatSession:
         self._record("task_message", task_id=task_id, event_id=event.id, text=event.text)
         # What became of it, for the user's side: the parent is not shown a user's message the task
         # never read (nothing screened it), so this record is where the user learns it did not arrive.
-        event.on_settle(lambda settled: self._task_message_settled(task_id, settled))
+        # Through a weak reference: the task holds the receipt until it reads the message or ends, and
+        # it outlives the session (close() leaves detached children running). A callback that held
+        # the session would keep every closed chat that wrote to a long-running task, log and all.
+        session = weakref.ref(self)
+
+        def settled(event: SessionEvent) -> None:
+            live = session()
+            if live is not None:
+                live._task_message_settled(task_id, event)
+
+        event.on_settle(settled)
         return event
 
     def _task_message_settled(self, task_id: str, event: SessionEvent) -> None:
