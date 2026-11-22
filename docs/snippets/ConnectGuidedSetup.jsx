@@ -59,6 +59,7 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     const defaultPort = isSqlServer && s.reach === "named_port" ? "52001" : src.port;
     const isDb = s.source !== "none" && s.source !== "service";
     const svcName = pick("svcName", "crm");
+    const svcEnv = `${svcName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_${s.svcAuth === "basic" ? "PASSWORD" : "TOKEN"}`;
     const svcUrl = pick("svcUrl", "http://crm.internal:8080/mcp");
     const svcAddr = svcUrl.match(/^(https?):\/\/(\[[^\]]+\]|[^/:?#]+)(?::(\d+))?/i);
     return {
@@ -92,7 +93,9 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
       svcAuth: s.svcAuth,
       svcHeader: pick("svcHeader", "Authorization"),
       svcUser: pick("svcUser", "timbal"),
-      svcEnv: `${svcName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_${s.svcAuth === "basic" ? "PASSWORD" : "TOKEN"}`,
+      svcEnv,
+      // Distinct from CHANGE_ME, so a database password in the same file can be replaced on its own.
+      svcPlaceholder: `REPLACE_WITH_${svcEnv}`,
       proxy: pick("proxy", ""),
     };
   };
@@ -125,11 +128,11 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     return entry;
   };
 
-  // On Linux the secret goes in connector.env and the entry references it; elsewhere it is written
-  // in config.json, as CHANGE_ME until the reader replaces it.
+  // On Linux the secret goes in connector.env and the entry references it. Elsewhere it is written
+  // in config.json under its own placeholder, so it never collides with a database's CHANGE_ME.
   const buildService = (c) => {
     const entry = { kind: "mcp", url: c.svcUrl };
-    const secret = c.os === "linux" ? `\${${c.svcEnv}}` : PLACEHOLDER;
+    const secret = c.os === "linux" ? `\${${c.svcEnv}}` : c.svcPlaceholder;
     if (c.svcAuth === "header") {
       const value = c.svcHeader.toLowerCase() === "authorization" ? `Bearer ${secret}` : secret;
       entry.auth = { mode: "header", headers: { [c.svcHeader]: value } };
@@ -537,9 +540,9 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
       const target = filePath(c.os, "config.json");
       steps.push({
         id: "service-secret",
-        title: `Replace ${PLACEHOLDER} with the service's ${c.svcAuth === "basic" ? "password" : "token"}`,
+        title: `Replace ${c.svcPlaceholder} with the service's ${c.svcAuth === "basic" ? "password" : "token"}`,
         where: where.server,
-        text: `Open \`${target}\` and, in \`services.${c.svcName}.auth\`, replace \`${PLACEHOLDER}\` with the ${
+        text: `Open \`${target}\` and, in \`services.${c.svcName}.auth\`, replace \`${c.svcPlaceholder}\` with the ${
           c.svcAuth === "basic" ? `password of \`${c.svcUser}\`` : "token the service expects"
         }. In JSON, write \`\\\\\` for a backslash and \`\\"\` for a quote.`,
         blocks: [
@@ -695,9 +698,14 @@ export const ConnectGuidedSetup = ({ __expose } = {}) => {
     if (c.withService) {
       items.push(["`422 gateway_unsupported` from Timbal", "The connector is older than 0.1.35 or the service did not load. [Upgrade](/connect/operate#upgrade), restart, and check the log for `gateway: serving on-prem services over the tunnel`."]);
       items.push(["`[service]` fails in `doctor` with no answer, or `502 upstream_unreachable`", "The service is down, the URL is wrong, or its TLS failed. For a private CA add `\"tls\": { \"ca_file\": \"...\" }` to the entry."]);
-      items.push(["`502 upstream_unauthorized`", "The service refused the credential in `auth`. Check the token or password" + (c.os === "linux" ? ` in \`connector.env\` (\`${c.svcEnv}\`).` : ".")]);
+      items.push([
+        "`502 upstream_unauthorized`",
+        c.svcAuth === "none"
+          ? "The service asks for a credential. Pick a token or a user and password above, and add it to the entry."
+          : "The service refused the credential in `auth`. Check the token or password" + (c.os === "linux" ? ` in \`connector.env\` (\`${c.svcEnv}\`).` : "."),
+      ]);
       items.push(["`502 upstream_redirect`", "The service redirects to another address. Set `url` to that address, often with a trailing `/` added or removed."]);
-      items.push(["The connector does not start after adding `services`", "The log names the service and the field. A version older than 0.1.35 refuses the key." + (c.os === "linux" ? ` An unset \`${c.svcEnv}\` also stops it.` : "")]);
+      items.push(["The connector does not start after adding `services`", "The log names the service and the field. A version older than 0.1.35 refuses the key." + (c.os === "linux" && c.svcAuth !== "none" ? ` An unset \`${c.svcEnv}\` also stops it.` : "")]);
     }
     return items;
   };
