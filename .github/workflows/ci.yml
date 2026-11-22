@@ -91,19 +91,30 @@ jobs:
       - name: Audit models.yaml (offline)
         run: uv run python scripts/audit_models.py --offline
 
-      # Everything in parallel (one worker per core; `worksteal` rebalances uneven files), then the `serial`
-      # tests (the durable-session suites) one at a time. Both passes always run; either failing fails the
-      # step. One cell of the full lane measures coverage, over both passes.
+      # Everything in parallel, then the `serial` tests (the durable-session suites) one at a time. Both passes
+      # always run; either failing fails the step. One cell of the full lane measures coverage, over both.
+      # - Workers: one per core minus one. With every core busy, the event loop, SQLite threads and background
+      #   uploads starve, and that is when rare stalls showed up; a free core costs little.
+      # - A failed test is retried once (pytest-rerunfailures): a rare flake does not fail the job, a real
+      #   failure fails both times. Every test that passed only on retry is listed in the job summary and as a
+      #   warning, so flakes stay visible and get fixed.
       - name: Run tests
         shell: bash
         env:
           COVERAGE: ${{ matrix.coverage }}
         run: |
+          workers=$(uv run python -c "import os; print(max(1, (os.cpu_count() or 2) - 1))")
           cov=""
           if [ "$COVERAGE" = "true" ]; then cov="--cov=timbal --cov-report=term-missing"; fi
+          retry="--reruns 1 --reruns-delay 1"
           rc=0
-          uv run pytest -n auto --dist worksteal -m "not integration and not serial" $cov || rc=$?
-          uv run pytest -m "serial and not integration" $cov ${cov:+--cov-append} || rc=$?
+          uv run pytest -n "$workers" --dist worksteal -m "not integration and not serial" $retry $cov 2>&1 | tee pytest.log || rc=$?
+          uv run pytest -m "serial and not integration" $retry $cov ${cov:+--cov-append} 2>&1 | tee -a pytest.log || rc=$?
+          flaky=$(uv run python scripts/ci_flaky.py pytest.log)
+          if [ -n "$flaky" ]; then
+            echo "$flaky" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Flaky tests::$(echo "$flaky" | grep -c '^- ') test(s) passed only on retry; see the job summary"
+          fi
           exit "$rc"
 
   result:

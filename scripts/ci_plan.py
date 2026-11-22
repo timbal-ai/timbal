@@ -28,7 +28,7 @@ COVERAGE = {"os": "ubuntu-latest", "python": "3.13"}  # one cell of the full mat
 
 # Files the tests (or the CI job itself) depend on. Anything else (docs, other workflows) skips the tests.
 TESTED = re.compile(
-    r"^(python/|docs/models/|pyproject\.toml$|uv\.lock$|scripts/(audit_models|generate_models|ci_plan)\.py$"
+    r"^(python/|docs/models/|pyproject\.toml$|uv\.lock$|scripts/(audit_models|generate_models|ci_plan|ci_flaky)\.py$"
     r"|\.github/workflows/ci\.yml$)"
 )
 

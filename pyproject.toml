@@ -86,6 +86,7 @@ dev = [
   "pytest>=8.3.4",
   "pytest-asyncio>=0.25.2",
   "pytest-cov>=7.0.0",
+  "pytest-rerunfailures>=15.0",
   "pytest-xdist>=3.8.0",
   "yappi>=1.7.6",
 ]
