@@ -942,6 +942,36 @@ class TestNestedAgentText:
         assert replies == ["Your document is ready."]
 
 
+class TestDeliveryAndPromptSections:
+    """What the agent says on a call is read aloud as it streams: the agent's text is the reply."""
+
+    def _llm_inputs(self, session: VoiceSession) -> list[dict]:
+        return [span.input for span in session._last_run_context._trace.values() if span.path == "test_voice.llm"]
+
+    async def test_an_agent_that_delivers_by_tool_answers_a_call_in_text(self) -> None:
+        agent = Agent(name="test_voice", model=TestModel(responses=["Hello, caller."]), delivery="tool")
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=tts, turn_detector="heuristic")
+        await session._run_turn("hi")
+
+        assert "Hello, caller." in " ".join(tts.synthesized_texts)
+        (llm_input,) = self._llm_inputs(session)
+        # Nothing tells the model its text is private, and it has no tool to answer with instead.
+        assert not llm_input.get("system_prompt")
+        assert [tool.name for tool in llm_input.get("tools") or []] == []
+        assert "delivery" not in session._last_run_context.root_span().metadata
+
+    async def test_named_sections_reach_the_call_as_text(self) -> None:
+        agent = Agent(
+            name="test_voice",
+            model=TestModel(responses=["Hello, caller."]),
+            system_prompt={"role": "You are Ada.", "today": "Today is Monday."},
+        )
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector="heuristic")
+        # Joined with the greeting's own lines, and passed as turn one's prompt after an opener.
+        assert await session._agent_system_prompt() == "You are Ada.\n\nToday is Monday."
+
+
 # ---------------------------------------------------------------------------
 # Tests: multi-turn conversation (DelayedMockSTT)
 # ---------------------------------------------------------------------------
