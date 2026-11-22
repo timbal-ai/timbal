@@ -1,12 +1,15 @@
 """Steering background sub-agents: messages a running background agent reads between its steps."""
 
 import asyncio
+import threading
+import time
 
 import pytest
 from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
+from timbal.guardrails import guardrail
 from timbal.state import get_run_context, list_background_tasks, message_background_task
-from timbal.state.background import store_for_run
+from timbal.state.background import BackgroundTask, BackgroundTaskStore, store_for_run
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
 
@@ -183,6 +186,263 @@ class TestMessageTask:
 
         text = format_background_completion_notice([note]).collect_text()
         assert "finished before reading your message: one more thing" in text
+
+    @pytest.mark.asyncio
+    async def test_a_message_accepted_from_another_thread_as_the_task_ends_is_in_its_notice(self):
+        """Accepted while the task ran, by a thread that is not the loop's; the task's last step was
+        already next in line. Whatever is accepted is read or reported: never dropped in between."""
+        store = BackgroundTaskStore()
+        gate = asyncio.Event()
+
+        async def work() -> str:
+            await gate.wait()
+            return "done"
+
+        record = BackgroundTask(
+            "t1", name="researcher", input={}, task=asyncio.ensure_future(work()), started_at=int(time.time() * 1000)
+        )
+        record.steerable = True
+        store.add(record, consume_reservation=False)
+        await asyncio.sleep(0)  # at its gate
+        gate.set()  # its last step is queued on the loop...
+        receipts: list = []
+        thread = threading.Thread(target=lambda: receipts.append(store.message_task("t1", "one more thing")))
+        thread.start()
+        thread.join(5)  # ...and the message came in behind it, the task still running
+        (receipt,) = receipts
+        await asyncio.wait_for(asyncio.shield(record.task), 5)
+        await asyncio.wait_for(_until(lambda: store.pending_completions()), 5)
+        assert receipt.state == "undelivered"
+        (note,) = store.pending_completions()
+        assert note["unread_messages"] == ["one more thing"]
+
+    @pytest.mark.asyncio
+    async def test_a_parent_that_polls_the_finished_task_is_told_what_it_never_read(self):
+        """Polling a finished task takes the place of its completion notice (the notice is dropped):
+        the unread message must be in what the poll returns, or the parent never learns of it."""
+        child = Child()
+        _, run_id, task_id = await _spawn(child, ["Started."])
+        store = store_for_run(run_id)
+        record = store.get(task_id)
+        take = record.take_messages
+
+        def take_messages():
+            taken = take()
+            if child.calls > child.steps:
+                store.message_task(task_id, "one more thing")
+            return taken
+
+        record.take_messages = take_messages
+        child.gate.set()
+        await _finish(run_id, task_id)
+        assert store.pending_completions()
+        assert store.list(ack_completion=True)[0]["unread_messages"] == ["one more thing"]
+        assert not store.pending_completions()  # the listing stood in for the notice
+        assert store.snapshot(task_id, ack_completion=True)["unread_messages"] == ["one more thing"]
+
+    @pytest.mark.asyncio
+    async def test_a_poll_ahead_of_the_completion_notice_reports_it_too(self):
+        """The task has ended and its notice is not made yet (done callbacks run in order): a poll in
+        between replaces the notice, so it is the poll that says what was never read."""
+        store = BackgroundTaskStore()
+        gate = asyncio.Event()
+
+        async def work() -> str:
+            await gate.wait()
+            return "done"
+
+        task = asyncio.ensure_future(work())
+        polled: list = []
+        task.add_done_callback(lambda _: polled.append(store.snapshot("t1", ack_completion=True)))
+        record = BackgroundTask("t1", name="researcher", input={}, task=task, started_at=int(time.time() * 1000))
+        record.steerable = True
+        store.add(record, consume_reservation=False)
+        receipt = store.message_task("t1", "one more thing")
+        gate.set()
+        await asyncio.wait_for(asyncio.shield(task), 5)
+        await asyncio.wait_for(_until(lambda: receipt.state != "pending"), 5)
+        (snap,) = polled
+        assert snap["status"] == "completed" and snap["unread_messages"] == ["one more thing"]
+        assert receipt.state == "undelivered" and not store.pending_completions()
+        with pytest.raises(ValueError, match="has finished"):
+            store.message_task("t1", "too late")
+
+    @pytest.mark.asyncio
+    async def test_a_poll_of_a_cancelled_task_still_unwinding_reports_it_too(self):
+        """A cancelled (timed out, stalled) task reads as ended before its asyncio task is done. A poll
+        then is the last word its parent gets: it lists what was not read, and no message is taken after."""
+        store = BackgroundTaskStore()
+
+        async def work() -> None:
+            await asyncio.Event().wait()
+
+        record = BackgroundTask(
+            "t1", name="researcher", input={}, task=asyncio.ensure_future(work()), started_at=int(time.time() * 1000)
+        )
+        record.steerable = True
+        store.add(record, consume_reservation=False)
+        await asyncio.sleep(0)
+        receipt = store.message_task("t1", "one more thing")
+        store.cancel("t1")
+        assert not record.task.done()
+        snap = store.snapshot("t1", ack_completion=True)
+        assert snap["status"] == "cancelled" and snap["unread_messages"] == ["one more thing"]
+        assert receipt.state == "undelivered" and record.take_messages() == []
+        with pytest.raises(ValueError, match="has finished"):
+            store.message_task("t1", "too late")
+        await asyncio.wait({record.task}, timeout=5)
+        assert record.task.done() and not store.pending_completions()
+
+    @pytest.mark.asyncio
+    async def test_a_message_taken_but_never_brought_into_memory_is_not_delivered(self):
+        """The task took the message and was still screening it (an input guardrail) when it was
+        cancelled: the model never had it. That is a message it never read, reported like any other."""
+        screening = asyncio.Event()
+
+        async def slow_rail(text: str) -> bool:
+            if "one more thing" in text:
+                screening.set()
+                await asyncio.Event().wait()
+            return True
+
+        child = Child()
+        _, run_id, task_id = await _spawn(child, ["Started."], guardrails=[guardrail(slow_rail, stages=["input"])])
+        store = store_for_run(run_id)
+        receipt = store.message_task(task_id, "one more thing")
+        child.gate.set()  # its step ends: it takes the message and screens it
+        await asyncio.wait_for(screening.wait(), 5)
+        assert receipt.state == "pending"  # taken, not read yet
+        store.cancel(task_id)
+        await asyncio.wait({store.get(task_id).task}, timeout=5)
+        await asyncio.wait_for(_until(lambda: store.pending_completions()), 5)
+        (note,) = store.pending_completions()
+        assert note["status"] == "cancelled" and note["unread_messages"] == ["one more thing"]
+        assert receipt.state == "undelivered"
+        # Nor counted as delivered: the span and the usage say what the receipt says.
+        span = _task_span(run_id, task_id)
+        assert "task_messages" not in span.metadata
+        assert "background:messages_delivered" not in span.usage
+
+    @pytest.mark.asyncio
+    async def test_a_message_screened_down_to_nothing_was_not_read(self):
+        """An input guardrail that redacts the whole message leaves nothing to put in memory, and no
+        notice either: the task goes on without it, so its sender is told it was not read."""
+        child = Child()
+        strip = guardrail(lambda text: "" if "one more thing" in text else True, stages=["input"], action="redact")
+        _, run_id, task_id = await _spawn(child, ["Started."], guardrails=[strip])
+        store = store_for_run(run_id)
+        receipt = store.message_task(task_id, "one more thing")
+        child.gate.set()
+        snap = await _finish(run_id, task_id)
+        assert _answer(snap) == "Did: research cats"
+        assert receipt.state == "undelivered"
+        assert snap["unread_messages"] == ["one more thing"]
+        (note,) = store.pending_completions()
+        assert note["unread_messages"] == ["one more thing"]
+        assert "task_messages" not in _task_span(run_id, task_id).metadata
+
+    @pytest.mark.asyncio
+    async def test_a_poll_from_a_receipts_own_callback_finds_every_unread_message(self):
+        """Receipts settle one by one as the task ends, and a receipt's callback may poll the task: that
+        poll takes the notice's place, so it must already list all of them, its own included."""
+        store = BackgroundTaskStore()
+        gate = asyncio.Event()
+
+        async def work() -> str:
+            await gate.wait()
+            return "done"
+
+        record = BackgroundTask(
+            "t1", name="researcher", input={}, task=asyncio.ensure_future(work()), started_at=int(time.time() * 1000)
+        )
+        record.steerable = True
+        store.add(record, consume_reservation=False)
+        first = store.message_task("t1", "one")
+        second = store.message_task("t1", "two")
+        polled: list = []
+        first.on_settle(lambda _: polled.append(store.snapshot("t1", ack_completion=True)))
+        gate.set()
+        await asyncio.wait_for(asyncio.shield(record.task), 5)
+        await asyncio.wait_for(_until(lambda: polled), 5)
+        assert polled[0]["unread_messages"] == ["one", "two"]
+        assert (first.state, second.state) == ("undelivered", "undelivered")
+
+    @pytest.mark.asyncio
+    async def test_a_status_asked_from_another_thread_never_raises(self):
+        """``message_task`` reads the status on the sender's thread. A task cancelled from outside the
+        store between two looks at it (not done, then done) must read as cancelled, not raise."""
+
+        class Flipping:
+            """An asyncio task as another thread sees it end: not done at the first look, cancelled after."""
+
+            def __init__(self) -> None:
+                self.looks = 0
+
+            def done(self) -> bool:
+                self.looks += 1
+                return self.looks > 1
+
+            def cancelled(self) -> bool:
+                return True
+
+            def exception(self):
+                raise asyncio.CancelledError
+
+        record = BackgroundTask("t1", name="researcher", input={}, task=Flipping(), started_at=0)  # type: ignore[arg-type]
+        assert record.status_code() == "running"  # as of its one look
+        assert record.status_code() == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_messages_from_many_threads_are_each_read_or_reported(self):
+        """Senders on other threads while the task takes messages and then ends: every message that was
+        accepted is delivered or listed as unread, every other one was refused. None is lost."""
+        store = BackgroundTaskStore()
+        read: list = []
+        stop = threading.Event()
+
+        async def work() -> str:
+            for _ in range(20):
+                read.extend(record.take_messages())
+                record.mark_read("run-1")
+                await asyncio.sleep(0.002)
+            return "done"
+
+        record = BackgroundTask(
+            "t1", name="researcher", input={}, task=asyncio.ensure_future(work()), started_at=int(time.time() * 1000)
+        )
+        record.steerable = True
+        store.add(record, consume_reservation=False)
+        accepted: list = []
+        refused: list = []
+
+        def sender(number: int) -> None:
+            count = 0
+            while not stop.is_set() and count < 2000:
+                text = f"{number}:{count}"
+                try:
+                    accepted.append(store.message_task("t1", text))
+                except ValueError:
+                    refused.append(text)
+                count += 1
+                time.sleep(0.0005)
+
+        threads = [threading.Thread(target=sender, args=(number,)) for number in range(4)]
+        for thread in threads:
+            thread.start()
+        try:
+            await asyncio.wait_for(asyncio.shield(record.task), 10)
+            await asyncio.wait_for(_until(lambda: store.pending_completions()), 5)
+            await asyncio.wait_for(_until(lambda: refused), 5)  # the senders have met the closed inbox
+        finally:
+            stop.set()
+            for thread in threads:
+                await asyncio.to_thread(thread.join, 5)
+        (note,) = store.pending_completions()
+        unread = record._unread
+        assert {id(message) for message in accepted} == {id(message) for message in [*read, *unread]}
+        assert len(read) + len(unread) == len(accepted) and accepted and refused
+        assert all(message.state == "undelivered" for message in unread)
+        assert len(note.get("unread_messages", [])) == len(unread)
 
     @pytest.mark.asyncio
     async def test_rejections(self):

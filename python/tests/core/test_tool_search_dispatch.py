@@ -13,6 +13,7 @@ from timbal.core.agent import (
     is_call_tool_name,
 )
 from timbal.core.test_model import TestModel
+from timbal.core.tool_set import ToolSet
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
 
@@ -247,12 +248,50 @@ class TestDispatch:
         ctx = context()
 
         async def offered():
-            return [tool.name for tool in (await a._plan_tool_search((await a._resolve_tools(0))[0], a.model))[0]]
+            tools, _, every_name = await a._resolve_step_tools(0)
+            return [tool.name for tool in (await a._plan_tool_search(tools, a.model, every_name))[0]]
 
         usual = await offered()
         assert usual[:2] == ["call_tool", "search_tools"] and len(set(usual)) == len(usual)
         ctx._tool_policy = "read_only"
         assert await offered() == usual[2:]  # the agent's own two are hidden, the added ones named as before
+
+    @pytest.mark.parametrize("mode", ["dispatch", "client"])
+    async def test_a_tool_policy_does_not_resolve_the_catalog_a_second_time(self, mode):
+        """Keeping the hidden names taken must not cost a resolution: a ToolSet is asked once per model
+        call, and what the model was offered in a step is what that step can run."""
+        ran = []
+
+        class Advancing(ToolSet):
+            """A catalog that moves on every time it is asked: lookup_1, then lookup_2, ..."""
+
+            asked: int = 0
+
+            async def resolve(self):
+                self.asked += 1
+                number = self.asked
+
+                def lookup() -> str:
+                    ran.append(number)
+                    return f"found {number}"
+
+                return [Tool(name=f"lookup_{number}", handler=lookup, defer_loading=True, read_only=True)]
+
+        catalog_ = Advancing()
+        write = Tool(name="write", handler=lambda: "written")
+        direct = (
+            mode == "client"
+        )  # a deferred tool called by its own name runs in both; dispatch goes through call_tool
+        first = call("lookup_1") if direct else dispatch("lookup_1", arguments={})
+        second = call("lookup_2", "c2") if direct else dispatch("lookup_2", "c2", arguments={})
+        model = TestModel(responses=[first, second, "done"])
+        a = agent(model, [write, catalog_], tool_search=mode)
+        ctx = context()
+        ctx._tool_policy = "read_only"
+        out = await a(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        assert model.call_count == 3 and catalog_.asked == 3
+        assert ran == [1, 2]
 
     def test_a_generated_name_is_the_lowest_free_number(self):
         every = {CALL_TOOL_NAME, *_CALL_TOOL_FALLBACKS}

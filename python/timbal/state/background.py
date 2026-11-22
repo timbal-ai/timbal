@@ -42,6 +42,7 @@ import asyncio
 import contextvars
 import html
 import os
+import threading
 import time
 import weakref
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -1029,18 +1030,75 @@ class BackgroundTask:
         # read by the frame whose span is ``call_id`` (not by agents nested inside it).
         self.steerable = False
         self.call_id: str | None = None
+        # A message is accepted on whatever thread sends it (message_task). Acceptance and the task's
+        # end meet under this lock: one that got in is read (take_messages, then mark_read once it is
+        # in the task's memory) or left in ``_unread`` when the end closes the inbox, and one that
+        # comes after that is refused. Nothing in between.
         self._inbox: list[SessionEvent] = []
+        self._taken: list[SessionEvent] = []  # taken by the task, not in its memory yet
+        self._inbox_lock = threading.Lock()
+        self._inbox_closed = False
+        self._unread: list[SessionEvent] = []
+
+    def _accept(self, message: SessionEvent) -> bool:
+        """Queue ``message`` for the task's next look. False once the task's end closed its inbox."""
+        with self._inbox_lock:
+            if self._inbox_closed:
+                return False
+            self._inbox.append(message)
+            return True
 
     def take_messages(self) -> list[SessionEvent]:
-        """The messages sent to the task since its last step, oldest first."""
-        messages, self._inbox = self._inbox, []
+        """The messages sent to the task since its last step, oldest first.
+
+        Taken is not read: they are the task's to bring into its memory (screening them first can
+        take a while), and it says so with :meth:`mark_read`. A task that ends in between never read
+        them, and they are reported with the rest.
+        """
+        with self._inbox_lock:
+            messages, self._inbox = self._inbox, []
+            self._taken.extend(messages)
         return messages
 
+    def mark_read(self, run_id: str | None = None) -> list[SessionEvent]:
+        """The messages taken so far are in the task's memory: their receipts settle ``delivered``."""
+        with self._inbox_lock:
+            read, self._taken = self._taken, []
+        for message in read:
+            message._settle("delivered", run_id)
+        return read
+
+    def leave_unread(self) -> list[SessionEvent]:
+        """The messages taken so far did not reach the task's memory (screened down to nothing).
+
+        The task goes on without them, so they are settled ``undelivered`` now and listed with what it
+        never read when it ends, or when it is polled.
+        """
+        with self._inbox_lock:
+            dropped, self._taken = self._taken, []
+            self._unread.extend(dropped)
+        for message in dropped:
+            message._settle("undelivered")
+        return dropped
+
     def _drop_unread(self) -> list[SessionEvent]:
-        unread, self._inbox = self._inbox, []
+        """Close the inbox of a task that has ended. Returns every message it never read.
+
+        On the loop's thread (receipts settle here). Again is harmless: the inbox stays closed.
+        """
+        with self._inbox_lock:
+            self._inbox_closed = True
+            unread, self._taken, self._inbox = self._taken + self._inbox, [], []
+            # Before the receipts settle: a receipt's callback may poll the task, and that poll stands
+            # in for the notice. It has to find every one of them listed.
+            self._unread.extend(unread)
         for message in unread:
             message._settle("undelivered")
-        return unread
+        return self._unread
+
+    def unread_texts(self) -> list[str]:
+        """What the task ended without reading, as its completion notice and its summary list it."""
+        return [_truncate(message.text, _COMPLETION_SUMMARY_CHARS) for message in self._unread]
 
     def clear_watchdogs(self) -> None:
         self.clear_timeout()
@@ -1157,10 +1215,14 @@ class BackgroundTask:
             return "timed_out"
         if self._stalled:
             return "stalled"
-        if self._cancel_requested or (task.done() and task.cancelled()):
+        if self._cancel_requested:
             return "cancelled"
+        # ``done()`` read once: message_task asks from other threads, and a task cancelled between two
+        # reads (not done, then done) would reach ``exception()``, which raises for a cancelled one.
         if not task.done():
             return "running"
+        if task.cancelled():
+            return "cancelled"
         if task.exception() is not None:
             return "error"
         return "completed"
@@ -1190,6 +1252,8 @@ class BackgroundTask:
         if status == "running" and self.stall_timeout is not None:
             snapshot["summary"]["seconds_since_event"] = round(time.monotonic() - self.last_event_at, 3)
         snapshot.update(self.metadata)
+        if self._unread:
+            snapshot["unread_messages"] = self.unread_texts()
         if self._timed_out:
             timeout = self.timeout
             snapshot["error"] = f"Timed out after {timeout:g}s" if timeout else "Timed out"
@@ -1214,6 +1278,8 @@ class BackgroundTask:
         }
         if self.steerable:
             listing["takes_messages"] = True
+        if self._unread:
+            listing["unread_messages"] = self.unread_texts()
         return listing
 
 
@@ -1366,6 +1432,9 @@ class BackgroundTaskStore:
         return self._tasks.get(task_id)
 
     def list(self, *, ack_completion: bool = False) -> list[dict[str, Any]]:
+        if ack_completion:
+            for record in self._tasks.values():
+                self._ended(record)
         listings = [record.listing() for record in self._tasks.values()]
         if ack_completion:
             for item in listings:
@@ -1377,6 +1446,8 @@ class BackgroundTaskStore:
         record = self._tasks.get(task_id)
         if record is None:
             return {"status": "not_found", "task_id": task_id}
+        if ack_completion:
+            self._ended(record)
         snap = record.summarize()
         if ack_completion and snap.get("status") in _TERMINAL_STATUSES:
             self.ack_completion(task_id)
@@ -1432,6 +1503,18 @@ class BackgroundTaskStore:
         if self._completion_inbox:
             self._completion_inbox = [n for n in self._completion_inbox if n["task_id"] != task_id]
 
+    @staticmethod
+    def _ended(record: BackgroundTask) -> None:
+        """Before a poll stands in for a finished task's notice (``ack_completion``): close its inbox.
+
+        The poll drops the notice, or keeps it from being made, so what the task never read has to
+        be in the summary the poll returns (``unread_messages``), not only in the notice. By its
+        status, as the poll reads it: a cancelled, timed out or stalled task counts as ended while
+        its asyncio task still unwinds, and takes no message from then on.
+        """
+        if record.status_code() in _TERMINAL_STATUSES:
+            record._drop_unread()
+
     def _enqueue_completion(self, record: BackgroundTask) -> None:
         """Push a lean notice if this child just became terminal (once)."""
         # status_code() can report cancelled as soon as cancel is requested,
@@ -1464,7 +1547,7 @@ class BackgroundTaskStore:
         if record.announce is not None:
             note["announce"] = record.announce
         if unread:
-            note["unread_messages"] = [_truncate(message.text, _COMPLETION_SUMMARY_CHARS) for message in unread]
+            note["unread_messages"] = record.unread_texts()
         self._completion_inbox.append(note)
         self._supersede_progress(record.task_id)
 
@@ -1610,10 +1693,12 @@ class BackgroundTaskStore:
         """Send a running background agent a message: it reads it after its current step.
 
         Returns its receipt (``delivered`` once the task read it, ``undelivered``
-        if it finished first; the completion notice then lists it). Raises
-        ``LookupError`` for an unknown task and ``ValueError`` for one that has
-        finished or is not an agent that takes messages. Safe to call from
-        another thread.
+        if it finished first; its completion notice then lists it, and so does
+        a poll of the finished task). Raises ``LookupError`` for an unknown task
+        and ``ValueError`` for one that has finished or is not an agent that
+        takes messages. Safe to call from another thread: a message is accepted
+        under the task's own lock, so one this returns a receipt for is read or
+        reported, also when the task ends at that moment.
         """
         if source not in ("parent", "app", "user"):
             raise ValueError(f"source must be 'parent', 'app' or 'user', got {source!r}")
@@ -1627,21 +1712,14 @@ class BackgroundTaskStore:
             raise LookupError(f"No background task {task_id!r} in this session.")
         if not record.steerable:
             raise ValueError(f"Background task {task_id!r} is not an agent: it cannot take messages.")
-        if record.task.done() or record._cancel_requested:
+        if record.status_code() != "running":  # also one cancelled or timed out that still unwinds
             raise ValueError(f"Background task {task_id!r} has finished ({record.status_code()}).")
         message = SessionEvent(text, key=None, source=source, task_id=task_id)  # type: ignore[arg-type]
-        loop = self._loop
-        if loop is not None and not loop.is_closed() and _running_loop() is not loop:
-            loop.call_soon_threadsafe(self._deliver_to_task, record, message)
-        else:
-            self._deliver_to_task(record, message)
+        # Not handed to the loop to deliver later: the task could end before that ran, after the
+        # caller was told the message was taken, and nothing would report it.
+        if not record._accept(message):
+            raise ValueError(f"Background task {task_id!r} has finished ({record.status_code()}).")
         return message
-
-    def _deliver_to_task(self, record: BackgroundTask, message: SessionEvent) -> None:
-        if record.task.done():
-            message._settle("undelivered")
-            return
-        record._inbox.append(message)
 
     def pending_events(self) -> list[SessionEvent]:
         """Peek the events no turn has taken yet."""

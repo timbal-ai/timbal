@@ -11,7 +11,7 @@ import re
 import threading
 import time
 import traceback
-from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Coroutine, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -1811,10 +1811,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             sent = record.take_messages() if record is not None else []
             if not sent:
                 return []
-            for message in sent:
-                message._settle("delivered", run_context.id)
-            current_span.metadata.setdefault("task_messages", []).extend(message.id for message in sent)
-            run_context.update_usage("background:messages_delivered", len(sent))
+            # Not settled or counted here: delivered once they are in memory (the caller, record.mark_read).
+            # A task that ends while they are screened never read them, and its end reports them.
             steered = format_user_message(sent, steered=True)
             steered.metadata["sources"] = sorted({message.source for message in sent})
             return [steered]
@@ -2405,8 +2403,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
     async def _resolve_tools(self, i: int, tool_policy: Any = _UNSET_POLICY) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
+        tools, commands, _ = await self._resolve_step_tools(i, tool_policy)
+        return tools, commands
+
+    async def _resolve_step_tools(
+        self, i: int, tool_policy: Any = _UNSET_POLICY
+    ) -> tuple[list[Tool], dict[str, Tool], set[str]]:
+        """:meth:`_resolve_tools`, plus the name of every tool the agent has at this step.
+
+        The names include the tools a tool policy then hides from the run: whatever the step adds
+        (``search_tools``, ``call_tool``) must not take one of those either, and they are known only
+        here, before the filter. Every ``ToolSet`` is asked once per step of the loop, so the names have
+        to come from this resolution: a second one would be another catalog (and another round trip).
+        """
         if i >= self.max_iter:
-            return [], {}
+            return [], {}, set()
 
         tools = []
         tools_names: set[str] = set()
@@ -2468,16 +2479,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 tools = [tool for tool in tools if self._tool_allowed(tool, tool_policy)]
                 commands = {key: tool for key, tool in commands.items() if tool in tools}
                 self._record_allowed_tools(tools, tool_policy)
-        return tools, commands
+        return tools, commands, tools_names
 
     async def _plan_tool_search(
-        self, tools: list[Tool], model: Any
+        self, tools: list[Tool], model: Any, names: Collection[str]
     ) -> tuple[list[Tool], list[Tool], list[str] | None, set[str]]:
         """Split a step's tools for tool search (``tool_search``).
 
         Returns the tools offered to the model, the tools it may call (the same,
         plus every deferred one), the names Anthropic defers natively (or None),
         and the deferred names not loaded yet.
+
+        ``names``: every tool name of the agent at this step (:meth:`_resolve_step_tools`), those a
+        tool policy hides from the run included (required: left out, the hidden names would be free to
+        take again). The tools added here take none of them: the policy
+        narrows what a run may call, not what a name means. Picked among the visible tools only, the
+        dispatcher of a read-only wake took the name of the agent's own hidden ``call_tool``: one
+        name, two tools in one conversation, and a call of it kept for a run without the policy (a
+        resume) would reach the agent's tool with the dispatcher's input.
         """
         deferred = [
             tool for tool in tools if getattr(tool, "defer_loading", False) and tool.name not in _READ_ONLY_BUILTINS
@@ -2489,7 +2508,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         restricted = get_run_context()._tool_policy is not None
         deferred_ids = {id(tool) for tool in deferred}
         if self.tool_search == "dispatch":
-            taken = await self._taken_names(tools, restricted)
+            taken = {tool.name for tool in tools}.union(names)
             search_name = _unused_name(SEARCH_TOOLS_NAME, _SEARCH_TOOLS_FALLBACKS, taken)
             call_name = _unused_name(CALL_TOOL_NAME, _CALL_TOOL_FALLBACKS, taken)
             added = [
@@ -2505,27 +2524,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         offered = [tool for tool in tools if id(tool) not in deferred_ids] + loaded
         dispatch = list(tools)
         if hidden:
-            taken = await self._taken_names(tools, restricted)
+            taken = {tool.name for tool in tools}.union(names)
             name = _unused_name(SEARCH_TOOLS_NAME, _SEARCH_TOOLS_FALLBACKS, taken)
             search = self._search_tools(hidden, name, restricted=restricted)
             offered.append(search)
             dispatch.append(search)
         return offered, dispatch, None, {tool.name for tool in hidden}
-
-    async def _taken_names(self, tools: list[Tool], restricted: bool) -> set[str]:
-        """The names a tool this step adds (``search_tools``, ``call_tool``) must not take.
-
-        Every tool of the agent, those a tool policy hides from this run included (``restricted``): the
-        policy narrows what a run may call, not what the names mean. Picked among the visible tools only,
-        the dispatcher of a read-only wake took the name of the agent's own hidden ``call_tool``: one name,
-        two tools in one conversation, and a call of it kept for a run without the policy (a resume) would
-        reach the agent's tool with the dispatcher's input.
-        """
-        taken = {tool.name for tool in tools}
-        if restricted:
-            everything, _ = await self._resolve_tools(0, None)
-            taken.update(tool.name for tool in everything)
-        return taken
 
     async def _load_tools(self, names: list[str], span: Any, query: str | None = None) -> None:
         """Keep tools search_tools found offered for the rest of the session."""
@@ -3412,6 +3416,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 messages = self._take_steering(run_context, current_span)
                 steered = bool(messages)
                 steered_user = False
+                brought_in = False  # into memory: the message itself, or the notice that stands for a blocked one
                 runner = self._guardrail_runner
                 screen = runner is not None and runner.has_stage(GuardrailStage.INPUT)
                 for message in messages:
@@ -3434,11 +3439,23 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     metadata={"source": "runtime", "kind": "steer_blocked"},
                                 )
                             )
+                            brought_in = True
                             continue
                         if outcome.replaced and outcome.text != text:
                             replace_message_text(message, outcome.text)
-                    await _append_memory(message)
+                    if await _append_memory(message):
+                        brought_in = True
                     steered_user = steered_user or not message.is_runtime()
+                if messages and current_span.parent_call_id is not None:
+                    record = self._task_record(current_span)
+                    if record is not None and brought_in:
+                        # A background task's messages (they join as one): in its memory now.
+                        read = record.mark_read(run_context.id)
+                        current_span.metadata.setdefault("task_messages", []).extend(message.id for message in read)
+                        run_context.update_usage("background:messages_delivered", len(read))
+                    elif record is not None:
+                        # Redacted down to nothing: nothing was kept and no notice says so. Not read.
+                        record.leave_unread()
 
         # Set once max_consecutive_denials is reached: the next model call gets no tools.
         withhold_tools = False
@@ -3509,7 +3526,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 need_retry = False
                 _llm_memory_saved = False
                 # ? We could resolve the system prompt at each iteration
-                tools, commands = await self._resolve_tools(i, tool_policy)
+                tools, commands, tool_names = await self._resolve_step_tools(i, tool_policy)
                 # A retry of this same call (guardrail, validation, empty answer) keeps it tool-less.
                 withheld = withhold_tools
                 if withhold_tools:
@@ -3518,7 +3535,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if not may_defer or not _has_deferred(tools):
                     llm_tools, deferred_tools, unloaded_tools = tools, None, _NO_NAMES
                 else:
-                    llm_tools, tools, deferred_tools, unloaded_tools = await self._plan_tool_search(tools, model)
+                    llm_tools, tools, deferred_tools, unloaded_tools = await self._plan_tool_search(
+                        tools, model, tool_names
+                    )
                 if i >= self.max_iter and not max_iter_handled:
                     # Budget spent: _resolve_tools withheld tools for this call. Apply on_max_iter.
                     max_iter_handled = True
