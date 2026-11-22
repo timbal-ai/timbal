@@ -45,6 +45,48 @@ def work() -> str:
     return "worked"
 
 
+def llm_calls() -> list[tuple[str | None, list[str]]]:
+    """Each model call of the run that just ended: its system prompt and the names of the tools it was offered."""
+    from timbal.state import get_run_context
+
+    return [
+        (
+            span.input.get("system_prompt"),
+            [tool["name"] if isinstance(tool, dict) else tool.name for tool in span.input.get("tools") or []],
+        )
+        for span in get_run_context()._trace.values()
+        if span.path.endswith(".llm")
+    ]
+
+
+def results(out) -> list[str]:
+    """The text of every tool result in the run's memory, in order."""
+    from timbal.types.content import ToolResultContent
+
+    return [
+        "".join(item.text for item in c.content)
+        for m in memory_of(out)
+        for c in m.content
+        if isinstance(c, ToolResultContent)
+    ]
+
+
+async def finished_turn(session) -> tuple[list[str], dict]:
+    """What the session's first turn to finish sent the user, and its ``turn_finished`` record."""
+    texts = []
+    async for item in session.events():
+        data = getattr(getattr(item, "item", None), "data", None)
+        if isinstance(data, dict) and data.get("kind") == "message":
+            texts.append(data["text"])
+        if isinstance(item, dict) and item.get("kind") == "turn_finished":
+            return texts, item
+    raise AssertionError("the session closed before a turn finished")
+
+
+async def turn_texts(session) -> list[str]:
+    return (await finished_turn(session))[0]
+
+
 class TestSendMessage:
     async def test_several_messages_and_end_turn_skips_the_last_call(self):
         fresh()
@@ -106,7 +148,13 @@ class TestSendMessage:
         no_secrets = guardrail(
             lambda text: Verdict.block("secret") if "42" in text else True, stages=["model_output"], name="no_secrets"
         )
-        model = TestModel(responses=[calls(send("The code is 42.")), calls(send("I can't share that.", end_turn=True))])
+        model = TestModel(
+            responses=[
+                calls(send("The code is 42.")),
+                calls(send("I can't share that.", end_turn=True)),
+                "must not be requested",
+            ]
+        )
         agent = Agent(name="bot", model=model, delivery="tool", guardrails=[no_secrets])
         out, messages = await run(agent)
         assert [m["text"] for m in messages] == ["I can't share that."]
@@ -123,7 +171,13 @@ class TestSendMessage:
         inner_agent = Agent(name="helper", model=TestModel(handler=inner), delivery="tool")
         outer = Agent(
             name="bot",
-            model=TestModel(responses=[calls(("helper", {"prompt": "x"})), calls(send("Got it.", end_turn=True))]),
+            model=TestModel(
+                responses=[
+                    calls(("helper", {"prompt": "x"})),
+                    calls(send("Got it.", end_turn=True)),
+                    "must not be requested",
+                ]
+            ),
             tools=[inner_agent],
             delivery="tool",
         )
@@ -158,7 +212,9 @@ class TestCompaction:
 
         fresh()
         rail = guardrail(lambda text: text.replace("4111", "[card]"), stages=["model_output"], action="redact")
-        model = TestModel(responses=[calls(("work", {}), send("Card 4111 charged.")), calls(send("Done.", True))])
+        model = TestModel(
+            responses=[calls(("work", {}), send("Card 4111 charged.")), calls(send("Done.", True)), "not requested"]
+        )
         agent = Agent(
             name="bot", model=model, tools=[Tool(name="work", handler=work)], delivery="tool", guardrails=[rail]
         )
@@ -194,10 +250,443 @@ class TestCompaction:
         assert all(m.role != "tool" for m in compact_tool_results()(memory))
 
         fresh()
-        model = TestModel(responses=[calls(send("   ")), calls(send("fine", True))])  # an empty message fails
+        # An empty message fails.
+        model = TestModel(responses=[calls(send("   ")), calls(send("fine", True)), "must not be requested"])
         out, _ = await run(Agent(name="bot", model=model, delivery="tool"))
         delivered = [c.delivered for m in memory_of(out) for c in m.content if isinstance(c, ToolResultContent)]
         assert delivered == [None, "fine"]
+
+
+class TestTheToolsName:
+    async def test_a_tool_set_that_has_the_name(self):
+        """An MCP server's own ``send_message`` is known only once resolved: two tools of one name is a 400."""
+        from timbal.core.tool_set import ToolSet
+
+        class Messenger(ToolSet):
+            async def resolve(self):
+                return [Tool(name=SEND_MESSAGE_NAME, handler=lambda to, body: f"posted {body} to {to}")]
+
+        fresh()
+        model = TestModel(
+            responses=[
+                calls(
+                    (SEND_MESSAGE_NAME, {"to": "ops", "body": "hi"}),
+                    ("send_to_user", {"text": "Told ops.", "end_turn": True}),
+                ),
+                "must not be requested",
+            ]
+        )
+        agent = Agent(name="bot", model=model, tools=[Messenger()], delivery="tool")
+        out, messages = await run(agent)
+        assert out.status.code == "success", out.error
+        assert model.call_count == 1
+        ((prompt, tools),) = llm_calls()
+        assert tools == [SEND_MESSAGE_NAME, "send_to_user"]
+        assert "send_to_user" in prompt  # the note names the tool the model was given
+        assert [m["text"] for m in messages] == ["Told ops."]
+        assert results(out) == ["posted hi to ops", "Sent. The turn ends after this step."]
+
+    def test_every_other_name_is_taken_too(self):
+        names = (SEND_MESSAGE_NAME, "send_to_user", "reply_to_user")
+        tools = [Tool(name=name, handler=lambda: "x") for name in names]
+        agent = Agent(name="bot", model=TestModel(responses=["x"]), tools=tools, delivery="tool")
+        assert agent._send_tool_name() == "send_message_2"
+
+    async def test_a_name_a_tool_policy_hides_is_not_taken(self):
+        """The policy narrows what a run may call, not what a name means."""
+        fresh()
+        ctx = RunContext()
+        ctx._tool_policy = []
+        set_run_context(ctx)
+        model = TestModel(responses=[calls(("send_to_user", {"text": "hi", "end_turn": True})), "not requested"])
+        own = Tool(name=SEND_MESSAGE_NAME, handler=lambda to: f"posted to {to}")
+        out, messages = await run(Agent(name="bot", model=model, tools=[own], delivery="tool"))
+        assert [tools for _, tools in llm_calls()] == [["send_to_user"]]  # the reply is not a tool the policy hides
+        assert [m["text"] for m in messages] == ["hi"]
+
+    async def test_with_tool_search(self):
+        """Never deferred: offered on every step next to ``search_tools``, and reachable through ``call_tool``."""
+        for mode, first, text in (
+            ("client", calls(send("direct")), "direct"),
+            (
+                "dispatch",
+                calls(("call_tool", {"name": SEND_MESSAGE_NAME, "arguments": {"text": "dispatched"}})),
+                "dispatched",
+            ),
+        ):
+            fresh()
+            model = TestModel(responses=[first, calls(send("bye", end_turn=True)), "must not be requested"])
+            weather = Tool(
+                name="get_weather",
+                description="Weather for a city.",
+                handler=lambda city: f"sunny in {city}",
+                defer_loading=True,
+            )
+            agent = Agent(
+                name="bot",
+                model=model,
+                tools=[weather, Tool(name="work", handler=work)],
+                delivery="tool",
+                tool_search=mode,
+            )
+            out, messages = await run(agent)
+            assert out.status.code == "success", out.error
+            offered = ["work", SEND_MESSAGE_NAME, "search_tools"] + (["call_tool"] if mode == "dispatch" else [])
+            assert [tools for _, tools in llm_calls()] == [offered, offered]
+            assert [m["text"] for m in messages] == [text, "bye"]
+
+    async def test_only_the_delivery_tool_marks_a_result_delivered(self):
+        from timbal.state import get_run_context
+        from timbal.types.content import ToolResultContent
+
+        def mark() -> str:
+            get_run_context().current_span().metadata["delivered"] = "words the assistant never said"
+            return "ok"
+
+        fresh()
+        model = TestModel(responses=[calls(("mark", {}), send("hi", True)), "must not be requested"])
+        out, _ = await run(Agent(name="bot", model=model, tools=[Tool(name="mark", handler=mark)], delivery="tool"))
+        delivered = [c.delivered for m in memory_of(out) for c in m.content if isinstance(c, ToolResultContent)]
+        assert delivered == [None, "hi"]  # compaction would turn the first into assistant text
+
+
+class TestWhatCountsAsSent:
+    async def test_a_turn_that_sent_a_message_is_not_silent(self):
+        for responses in (
+            [calls(send("Standup in 5.")), "NO_REPLY"],  # the silent reply as its last text
+            [calls(send("Standup in 5."), send("NO_REPLY")), "must not be requested"],  # or as a message
+        ):
+            fresh()
+            ctx = RunContext()
+            ctx._silence_token = "NO_REPLY"
+            set_run_context(ctx)
+            out, messages = await run(Agent(name="bot", model=TestModel(responses=responses), delivery="tool"))
+            assert [m["text"] for m in messages] == ["Standup in 5."]
+            assert out.output.collect_text() == "Standup in 5."
+            assert "silent" not in out.metadata  # a channel hides a silent turn
+
+    async def test_a_message_a_guardrail_leaves_nothing_of_is_not_sent(self):
+        fresh()
+        wipe = guardrail(
+            lambda text: "" if "secret" in text else text, stages=["model_output"], action="redact", name="wipe"
+        )
+        model = TestModel(
+            responses=[calls(send("secret secret")), calls(send("I can't say.", end_turn=True)), "not requested"]
+        )
+        out, messages = await run(Agent(name="bot", model=model, delivery="tool", guardrails=[wipe]))
+        assert [m["text"] for m in messages] == ["I can't say."]  # no empty message
+        assert out.output.collect_text() == "I can't say."
+        assert "removed all of this message" in results(out)[0]
+
+    async def test_the_receipt_says_what_a_guardrail_changed(self):
+        fresh()
+        rail = guardrail(lambda text: text.replace("4111", "[card]"), stages=["model_output"], action="redact")
+        model = TestModel(responses=[calls(send("Card 4111 charged.")), calls(send("Done.", True)), "not requested"])
+        out, messages = await run(Agent(name="bot", model=model, delivery="tool", guardrails=[rail]))
+        assert [m["text"] for m in messages] == ["Card [card] charged.", "Done."]
+        assert results(out) == [
+            "Sent, after a guardrail changed it. The user received: Card [card] charged.",
+            "Sent. The turn ends after this step.",
+        ]
+
+    async def test_an_empty_answer_delivers_nothing(self):
+        """An empty answer is not kept in memory, so the last message there is the user's prompt, or a
+        runtime notice: neither is the agent's reply."""
+        fresh()
+        agent = Agent(name="bot", model=TestModel(responses=[""]), delivery="tool")
+        out, messages = await run(agent, "what is my balance?")
+        assert messages == [] and "delivery" not in out.metadata
+
+        fresh()
+        model = TestModel(responses=[calls(("work", {})), ""])  # the budget notice is last in memory
+        agent = Agent(name="bot", model=model, tools=[Tool(name="work", handler=work)], delivery="tool", max_iter=1)
+        out, messages = await run(agent)
+        assert messages == [] and "delivery" not in out.metadata
+
+    async def test_a_message_sent_does_not_reset_the_denial_count(self):
+        """Telling the user "trying again" is not a call that went through."""
+        refused = guardrail(lambda _args: Verdict.block("no"), stages=["tool_args"])
+
+        def agent(**limits):
+            model = TestModel(
+                responses=[
+                    calls(send("Trying."), ("act", {})),  # refused once, next to a message
+                    calls(send("Trying again.")),  # a step that only tells the user
+                    calls(("act", {})),  # refused twice: nothing went through in between
+                    "I could not do that.",
+                    "must not be requested",
+                ]
+            )
+            tools = [Tool(name="act", handler=lambda: "acted", guardrails=[refused])]
+            return Agent(name="bot", model=model, tools=tools, delivery="tool", **limits)
+
+        for limits, record in (
+            ({"max_consecutive_denials": 2}, {"denials": 2}),
+            ({"max_consecutive_denials": None, "max_denials_window": (2, 2)}, {"denials": 2, "window": 2}),
+        ):
+            fresh()
+            out, messages = await run(agent(**limits))
+            assert out.metadata.get("denial_limit") == [record], limits
+            offered = ["act", SEND_MESSAGE_NAME]
+            assert [tools for _, tools in llm_calls()] == [offered, offered, offered, []]
+            # The step the limit left without tools answers in text, which is the reply.
+            assert [m["text"] for m in messages] == ["Trying.", "Trying again.", "I could not do that."]
+
+    async def test_a_draft_is_screened_before_it_is_delivered(self):
+        """The fallback is the turn's final answer: the model-output guardrails have seen it by then."""
+        fresh()
+        no_secrets = guardrail(
+            lambda text: Verdict.block("secret") if "42" in text else True, stages=["model_output"], name="no_secrets"
+        )
+        agent = Agent(
+            name="bot", model=TestModel(responses=["The code is 42."]), delivery="tool", guardrails=[no_secrets]
+        )
+        out, messages = await run(agent)
+        assert out.status.code == "blocked" and messages == []
+
+        fresh()
+        redact = guardrail(lambda text: text.replace("42", "[code]"), stages=["model_output"], action="redact")
+        agent = Agent(name="bot", model=TestModel(responses=["The code is 42."]), delivery="tool", guardrails=[redact])
+        out, messages = await run(agent)
+        assert [m["text"] for m in messages] == ["The code is [code]."]
+        assert out.output.collect_text() == "The code is [code]."
+
+
+class TestAStepWithoutTheTool:
+    """A step with no tools cannot send: its text is the reply, also after messages the turn sent."""
+
+    async def test_the_answer_at_max_iter(self):
+        fresh()
+        model = TestModel(responses=[calls(send("On it."), ("work", {})), "All done: worked."])
+        agent = Agent(name="bot", model=model, tools=[Tool(name="work", handler=work)], delivery="tool", max_iter=1)
+        out, messages = await run(agent)
+        assert [tools for _, tools in llm_calls()] == [["work", SEND_MESSAGE_NAME], []]
+        assert [m["text"] for m in messages] == ["On it.", "All done: worked."]
+        assert messages[-1] == {
+            "kind": "message",
+            "text": "All done: worked.",
+            "index": 1,
+            "end_turn": True,
+            "fallback": True,
+        }
+        assert out.output.collect_text() == "On it.\n\nAll done: worked."
+        assert out.metadata["delivery"] == {"mode": "tool", "messages": 2, "fallback": True}
+
+    async def test_the_question_after_a_denial_limit(self):
+        fresh()
+        refused = guardrail(lambda _args: Verdict.block("no"), stages=["tool_args"])
+        model = TestModel(responses=[calls(send("Trying."), ("act", {})), "I could not do that. Another way?"])
+        agent = Agent(
+            name="bot",
+            model=model,
+            tools=[Tool(name="act", handler=lambda: "acted", guardrails=[refused])],
+            delivery="tool",
+            max_consecutive_denials=1,
+        )
+        out, messages = await run(agent)
+        assert [tools for _, tools in llm_calls()] == [["act", SEND_MESSAGE_NAME], []]
+        assert [m["text"] for m in messages] == ["Trying.", "I could not do that. Another way?"]
+
+    async def test_the_reply_of_on_max_iter(self):
+        from timbal.core.agent import DEFAULT_MAX_ITER_STOP_MESSAGE
+
+        stopped = DEFAULT_MAX_ITER_STOP_MESSAGE.format(max_iter=1)
+        for first, sent in (
+            (calls(send("On it."), ("work", {})), ["On it.", stopped]),
+            (calls(("work", {})), [stopped]),
+        ):
+            fresh()
+            model = TestModel(responses=[first, "must not be requested"])
+            agent = Agent(
+                name="bot",
+                model=model,
+                tools=[Tool(name="work", handler=work)],
+                delivery="tool",
+                max_iter=1,
+                on_max_iter="stop",
+            )
+            out, messages = await run(agent)
+            assert model.call_count == 1 and out.status.reason == "max_iter"
+            assert [m["text"] for m in messages] == sent
+            assert out.output.collect_text() == "\n\n".join(sent)
+
+    async def test_a_slash_command_reaches_the_user(self):
+        """A command's output is the turn's answer and no model runs: nothing else could send it."""
+
+        def ping() -> str:
+            return "pong"
+
+        fresh()
+        model = TestModel(responses=["must not be requested"])
+        agent = Agent(name="bot", model=model, tools=[Tool(handler=ping, command="ping")], delivery="tool")
+        out, messages = await run(agent, "/ping")
+        assert model.call_count == 0
+        assert messages == [{"kind": "message", "text": "pong", "index": 0, "end_turn": True, "fallback": True}]
+
+    async def test_a_slash_command_whose_output_is_not_a_string(self):
+        """What the user reads is the output's text, not the Python repr of a message or a dict."""
+
+        def balance() -> dict:
+            return {"balance": 12}
+
+        helper = Agent(name="helper", model=TestModel(responses=["helper says hi"]), command="helper")
+        for command, tool, text in (
+            ("/balance", Tool(handler=balance, command="balance"), '{"balance": 12}'),
+            ("/helper hello", helper, "helper says hi"),
+        ):
+            fresh()
+            agent = Agent(
+                name="bot", model=TestModel(responses=["must not be requested"]), tools=[tool], delivery="tool"
+            )
+            out, messages = await run(agent, command)
+            assert [m["text"] for m in messages] == [text]  # once: not the helper's own model call too
+
+
+class TestAcrossAPause:
+    """A turn paused for an approval goes on in the run that resumes it: what it sent still counts."""
+
+    def _agent(self, handler, charged):
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        return Agent(
+            name="bot",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: charged.append(1) or "charged", requires_approval=True)],
+            delivery="tool",
+            tracing_provider=InMemoryTracingProvider,
+        )
+
+    async def _pause_and_resume(self, agent, sent=("Charging your card now.",), silence=None, resumed_silence=None):
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.types.events import ApprovalEvent
+
+        def context(parent_id=None):
+            ctx = RunContext(parent_id=parent_id, tracing_provider=InMemoryTracingProvider)
+            ctx._silence_token = resumed_silence if parent_id else silence
+            set_run_context(ctx)
+
+        fresh()
+        context()
+        events = [event async for event in agent(prompt="pay")]
+        parked = events[-1]
+        assert parked.status.reason == "approval_required"
+        texts = [e.item.data["text"] for e in events if isinstance(e, DeltaEvent) and e.item.type == "custom"]
+        assert texts == list(sent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        context(parked.run_id)
+        return await run(agent, "pay", resume={approval.approval_id: True})
+
+    async def test_a_draft_after_the_resume_stays_private(self):
+        charged = []
+
+        def handler(messages):
+            if not any(m.role == "tool" for m in messages):
+                return calls(send("Charging your card now."), ("charge", {}))
+            return "note to self: it went through"
+
+        out, messages = await self._pause_and_resume(self._agent(handler, charged))
+        assert out.status.code == "success", out.error
+        assert charged == [1]
+        assert messages == []  # the turn had answered: the note is a draft, not the reply of a turn that said nothing
+        assert out.output.collect_text() == ""
+        assert out.metadata["delivery"] == {"mode": "tool", "messages": 0, "before_pause": 1}
+
+    async def test_end_turn_asked_before_the_pause_ends_the_turn_after_it(self):
+        charged = []
+        asked = []
+
+        def handler(messages):
+            asked.append(len(messages))
+            if len(asked) > 1:
+                return "must not be requested"
+            return calls(send("Charging your card now.", end_turn=True), ("charge", {}))
+
+        out, messages = await self._pause_and_resume(self._agent(handler, charged))
+        assert out.status.code == "success", out.error
+        assert charged == [1]
+        assert len(asked) == 1  # no model call after the batch it ended its turn with
+        assert messages == []
+        assert out.metadata["delivery"] == {"mode": "tool", "messages": 0, "before_pause": 1, "end_turn": True}
+
+    async def test_staying_silent_before_the_pause_ends_the_turn_silently_after_it(self):
+        # Resumed by the channel that allowed the silence, or by a plain call that carries no token.
+        for resumed_silence, output in (("NO_REPLY", "NO_REPLY"), (None, "")):
+            charged = []
+            asked = []
+
+            def handler(messages, asked=asked):
+                asked.append(len(messages))
+                if len(asked) > 1:
+                    return "must not be requested"
+                return calls(send("NO_REPLY"), ("charge", {}))
+
+            out, messages = await self._pause_and_resume(
+                self._agent(handler, charged), sent=(), silence="NO_REPLY", resumed_silence=resumed_silence
+            )
+            assert out.status.code == "success", out.error
+            assert charged == [1]
+            assert len(asked) == 1 and messages == []  # no model call whose text would go out as the reply
+            assert out.metadata.get("silent") is True and out.output.collect_text() == output
+            assert out.metadata["delivery"] == {"mode": "tool", "messages": 0, "silent": True, "end_turn": True}
+
+    async def test_a_turn_that_spoke_and_then_stayed_silent_is_not_a_silent_turn(self):
+        """Silent means the turn told the user nothing: the same with a pause in it as without one."""
+        charged = []
+        asked = []
+
+        def handler(messages):
+            asked.append(len(messages))
+            if len(asked) == 1:
+                return calls(send("Charging your card now."))
+            if len(asked) == 2:
+                return calls(send("NO_REPLY"), ("charge", {}))
+            return "must not be requested"
+
+        out, messages = await self._pause_and_resume(
+            self._agent(handler, charged), silence="NO_REPLY", resumed_silence="NO_REPLY"
+        )
+        assert out.status.code == "success", out.error
+        assert charged == [1] and len(asked) == 2 and messages == []
+        assert "silent" not in out.metadata
+        assert out.metadata["delivery"] == {"mode": "tool", "messages": 0, "before_pause": 1, "end_turn": True}
+
+
+class TestPerCall:
+    async def test_a_call_can_ask_for_text(self):
+        fresh()
+        agent = Agent(name="bot", model=TestModel(responses=["Plain answer."]), delivery="tool")
+        out, messages = await run(agent, delivery="text")
+        assert messages == [] and out.output.collect_text() == "Plain answer."
+        assert llm_calls() == [(None, [])]  # no tool to send with, no note about one
+        assert "delivery" not in out.metadata
+
+    async def test_only_text_and_only_for_an_agent_that_delivers_by_tool(self):
+        """``delivery`` may be an application's own input: nothing else about it changes."""
+        fresh()
+        plain = Agent(name="bot", model=TestModel(responses=["Plain answer."]))
+        out, messages = await run(plain, delivery="tool")  # not a way to turn it on
+        assert messages == [] and llm_calls() == [(None, [])]
+        assert out.input["delivery"] == "tool"  # still there for the application's own code
+
+        fresh()
+        agent = Agent(name="bot", model=TestModel(responses=["Plain answer."]), delivery="tool")
+        out, messages = await run(agent, delivery="courier")  # any other value is not an override
+        assert out.status.code == "success", out.error
+        assert [m["text"] for m in messages] == ["Plain answer."] and messages[0]["fallback"] is True
+
+    async def test_a_structured_answer_is_the_answer(self):
+        """With ``output_model`` the turn ends on the model's first answer and runs no tool call of it."""
+        from pydantic import BaseModel
+
+        class Answer(BaseModel):
+            answer: str
+
+        fresh()
+        model = TestModel(responses=['{"answer": "x"}'])
+        out, messages = await run(Agent(name="bot", model=model, output_model=Answer, delivery="tool"))
+        assert out.output == Answer(answer="x") and messages == []
+        assert [tools for _, tools in llm_calls()] == [[]]  # no tool it could call and never see run
+        assert "send_message" not in (llm_calls()[0][0] or "")
 
 
 class TestWithChatSession:
@@ -223,15 +712,71 @@ class TestWithChatSession:
         )
         async with ChatSession(agent) as session:
             session.send("start")
-            await asyncio.wait_for(entered.wait(), 2)
-            session.send("and one more thing", mode="steer")
-            await asyncio.sleep(0.05)
+            await asyncio.wait_for(entered.wait(), 30)
+            session.send("and one more thing", mode="steer")  # queued by the time send() returns
             release.set()
-            texts = []
-            async for item in session.events():
-                data = getattr(getattr(item, "item", None), "data", None)
-                if isinstance(data, dict) and data.get("kind") == "message":
-                    texts.append(data["text"])
-                if isinstance(item, dict) and item.get("kind") == "turn_finished":
-                    break
+            texts = await asyncio.wait_for(turn_texts(session), 30)
         assert texts == ["Started, that's all.", "Also handled: and one more thing"]
+
+    async def test_end_turn_does_not_end_a_turn_that_an_event_joined(self):
+        """Like a final answer in text: what joined the turn's memory is answered before the turn ends."""
+        from timbal.core.chat_session import ChatSession
+
+        fresh()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def slow() -> str:
+            entered.set()
+            await release.wait()
+            return "slow done"
+
+        seen = []
+
+        def handler(messages):
+            seen.append([m.collect_text() for m in messages if m.is_runtime()])
+            if not any(m.role == "tool" for m in messages):
+                return calls(("slow", {}), send("Started, that's all.", end_turn=True))
+            return calls(send("And the deploy finished.", end_turn=True))
+
+        agent = Agent(
+            name="bot", model=TestModel(handler=handler), tools=[Tool(name="slow", handler=slow)], delivery="tool"
+        )
+        async with ChatSession(agent) as session:
+            session.send("start")
+            await asyncio.wait_for(entered.wait(), 30)
+            event = session.store.post_event("the deploy finished", lane="next")  # the application's
+            release.set()
+            texts = await asyncio.wait_for(turn_texts(session), 30)
+        assert event.state == "delivered"
+        # Taken by the turn, so shown to its model before it ends: nothing else would ever answer it.
+        assert texts == ["Started, that's all.", "And the deploy finished."]
+        assert any("the deploy finished" in text for text in seen[-1])
+
+    async def test_a_turn_that_goes_on_after_staying_silent_can_still_answer(self):
+        """Silence was its last word until the user wrote: what it says next is not a silent turn's draft."""
+        from timbal.core.chat_session import ChatSession
+
+        fresh()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def slow() -> str:
+            entered.set()
+            await release.wait()
+            return "slow done"
+
+        def handler(messages):
+            if not any(m.role == "tool" for m in messages):
+                return calls(("slow", {}), send("NO_REPLY"))
+            return "It finished a minute ago."
+
+        agent = Agent(
+            name="bot", model=TestModel(handler=handler), tools=[Tool(name="slow", handler=slow)], delivery="tool"
+        )
+        async with ChatSession(agent) as session:
+            session.store.post_event("the deploy finished")  # the application's: its turn may stay silent
+            await asyncio.wait_for(entered.wait(), 30)
+            session.send("wait, what happened?", mode="steer")
+            release.set()
+            texts, finished = await asyncio.wait_for(finished_turn(session), 30)
+        assert texts == ["It finished a minute ago."]
+        assert not finished.get("silent")

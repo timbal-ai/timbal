@@ -184,6 +184,21 @@ _SECTIONS_PREAMBLE = (
 )
 
 
+def _output_text(output: Any) -> str:
+    """A tool's output as text for a person: a message's text, a string as it is, anything else as JSON
+    (its ``str()`` when it is not JSON), never a Python repr of a message or a dict."""
+    if isinstance(output, str):
+        return output.strip()
+    if isinstance(output, Message):
+        return message_text(output).strip()
+    if isinstance(output, BaseModel):
+        return output.model_dump_json()
+    try:
+        return json.dumps(output, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(output).strip()
+
+
 def _render_sections(sections: dict[str, str]) -> str | None:
     texts = [text.strip() for text in sections.values() if text.strip()]
     return "\n\n".join(texts) or None
@@ -1653,6 +1668,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # re-executed by the agent loop (see _find_pending_tool_uses), so we must
         # NOT inject synthetic "tool failed" results for them.
         is_resume = _is_pause(previous_span.status)
+        if is_resume and previous_span.metadata:
+            # delivery="tool": the turn goes on in this run. What it sent before the pause still counts (a
+            # draft is no longer its only answer), and so does an end_turn asked for in the paused batch.
+            paused = previous_span.metadata
+            sent = paused.get("sent_before_pause", 0) + len(paused.get("messages_sent") or ())
+            if sent:
+                current_span.metadata["sent_before_pause"] = sent
+            if paused.get("end_turn"):
+                current_span.metadata["end_turn"] = True
+                if paused.get("silent"):
+                    current_span.metadata["silent"] = True  # it ended its turn by staying silent
         prepared = None
         if (
             self.memory_compaction is not None
@@ -2740,14 +2766,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             run_context.update_usage("prompt_sections:updated", len(changed) + len(removed))
         return state
 
-    def _send_tool_name(self) -> str:
-        """``send_message``, renamed if one of the agent's own tools already has the name."""
-        taken = {tool.name for tool in self.tools if not isinstance(tool, ToolSet)}
-        return next(n for n in (SEND_MESSAGE_NAME, *_SEND_MESSAGE_FALLBACKS) if n not in taken)
+    def _send_tool_name(self, names: Collection[str] | None = None) -> str:
+        """``send_message``, renamed if one of the agent's own tools already has the name.
 
-    def _send_message_tool(self) -> Tool:
-        """The ``send_message`` tool of ``delivery="tool"``: built once per agent (a stable schema)."""
-        name = self._send_tool_name()
+        ``names``: every tool name of the agent at a step (:meth:`_resolve_step_tools`): those of its tool
+        sets, which are known only once resolved (an MCP server's own ``send_message``), and those a tool
+        policy hides from the run. Without them, the agent's own tools.
+        """
+        if names is None:
+            names = {tool.name for tool in self.tools if not isinstance(tool, ToolSet)}
+        return _unused_name(SEND_MESSAGE_NAME, _SEND_MESSAGE_FALLBACKS, names)
+
+    def _send_message_tool(self, name: str | None = None) -> Tool:
+        """The ``send_message`` tool of ``delivery="tool"``: built once per agent and name (a stable schema)."""
+        if name is None:
+            name = self._send_tool_name()
         tool = self._send_tools.get(name)
         if tool is not None:
             return tool
@@ -2766,10 +2799,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 raise ValueError("Nothing was sent: the message is empty.")
             token = run_context._silence_token
             if token is not None and text == token:
-                # The silent reply sent as a message: the user must not receive it.
-                agent_span.metadata["silent"] = agent_span.metadata["end_turn"] = True
+                # The silent reply sent as a message: the user must not receive it. The turn is a silent one
+                # only if it has told the user nothing (in this run, or in the one it resumes).
+                agent_span.metadata["end_turn"] = True
+                if not (agent_span.metadata.get("messages_sent") or agent_span.metadata.get("sent_before_pause")):
+                    agent_span.metadata["silent"] = True
                 return "Nothing was sent: you stay silent. The turn ends after this step."
             runner = self._guardrail_runner
+            changed = False
             if runner is not None and runner.has_stage(GuardrailStage.MODEL_OUTPUT):
                 # What the user reads is screened like a final answer would be.
                 payload = Message(role="assistant", content=[TextContent(text=text)])
@@ -2783,14 +2820,22 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         + (f" ({reason})" if reason else "")
                         + ". Rewrite it."
                     )
-                text = outcome.text
+                if outcome.replaced and outcome.text.strip() != text:
+                    changed = True
+                    text = outcome.text.strip()
+                    if not text:
+                        # Nothing is left of it: an empty message is not one, and the turn has not answered.
+                        raise ValueError("Not sent: a guardrail removed all of this message. Rewrite it.")
             sent = agent_span.metadata.setdefault("messages_sent", [])
             sent.append(text)
+            agent_span.metadata.pop("silent", None)  # a call of the same batch may have stayed silent first
             run_context.current_span().metadata[DELIVERED_KEY] = text
             if end_turn:
                 agent_span.metadata["end_turn"] = True
             emit({"kind": "message", "text": text, "index": len(sent) - 1, "end_turn": end_turn})
-            return "Sent. The turn ends after this step." if end_turn else "Sent."
+            # The receipt says what went out: after a guardrail rewrote it, that is not what the model wrote.
+            receipt = f"Sent, after a guardrail changed it. The user received: {text}" if changed else "Sent."
+            return f"{receipt} The turn ends after this step." if end_turn else receipt
 
         tool = Tool(
             name=name,
@@ -2805,20 +2850,116 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         self._send_tools[name] = tool
         return tool
 
-    def _delivered(self, current_span: Any) -> OutputEvent | None:
-        """The turn's output with ``delivery="tool"``: what it sent, as one assistant message (None if nothing)."""
+    def _delivered(self, current_span: Any, before: int = 0) -> OutputEvent | None:
+        """The turn's output with ``delivery="tool"``: what it sent, as one assistant message (None if nothing).
+
+        ``before``: the messages the turn sent in the run this one resumes (a pause for an approval or an
+        answer). The output is this run's own messages; with none, an empty one, since the turn did answer.
+        """
         sent = current_span.metadata.get("messages_sent")
-        token = get_run_context()._silence_token
         if not sent:
-            if not (current_span.metadata.get("silent") and token):
+            if current_span.metadata.get("silent") and not before:
+                # Silent, like a text turn that answered the silent reply. (No token in this run: it stayed
+                # silent in the run this one resumes.)
+                token = get_run_context()._silence_token or ""
+                current_span.metadata["delivery"] = {"mode": "tool", "messages": 0, "silent": True}
+                reply = Message(role="assistant", content=[TextContent(text=token)], stop_reason="end_turn")
+                return self._synthetic_event("delivery", RunStatus(code="success", reason="silent"), output=reply)
+            if not before:
                 return None
-            # Silent, like a text turn that answered the silent reply.
-            current_span.metadata["delivery"] = {"mode": "tool", "messages": 0, "silent": True}
-            reply = Message(role="assistant", content=[TextContent(text=token)], stop_reason="end_turn")
-            return self._synthetic_event("delivery", RunStatus(code="success", reason="silent"), output=reply)
+            # It spoke before the pause: not a silent turn, though this run adds nothing.
+            current_span.metadata.pop("silent", None)
+            current_span.metadata["delivery"] = {"mode": "tool", "messages": 0, "before_pause": before}
+            reply = Message(role="assistant", content=[TextContent(text="")], stop_reason="end_turn")
+            return self._synthetic_event("delivery", RunStatus(code="success", reason="end_turn"), output=reply)
+        # It said something: not a silent turn, whatever it ended on (the silent reply as its last text or message).
+        current_span.metadata.pop("silent", None)
         current_span.metadata["delivery"] = {"mode": "tool", "messages": len(sent)}
+        if before:
+            current_span.metadata["delivery"]["before_pause"] = before
         reply = Message(role="assistant", content=[TextContent(text="\n\n".join(sent))], stop_reason="end_turn")
         return self._synthetic_event("delivery", RunStatus(code="success", reason="end_turn"), output=reply)
+
+    def _deliver_text(self, current_span: Any, text: str, before: int = 0) -> bool:
+        """Deliver text that did not go through ``send_message`` (``delivery="tool"``): a ``message`` event
+        marked ``fallback``. Returns whether it joined the messages the turn sent, and with them its output;
+        alone it is the turn's output already, and the event and ``metadata.delivery`` say it went out."""
+        joined = bool(current_span.metadata.get("messages_sent") or before)
+        if joined:
+            sent = current_span.metadata.setdefault("messages_sent", [])
+            sent.append(text)
+            index = len(sent) - 1
+        else:
+            current_span.metadata["delivery"] = {"mode": "tool", "messages": 0, "fallback": True}
+            index = 0
+        emit({"kind": "message", "text": text, "index": index, "end_turn": True, "fallback": True})
+        return joined
+
+    def _with_send_tool(
+        self, tools: list[Tool], names: Collection[str], name: str | None, system_prompt: str | None, offered: bool
+    ) -> tuple[list[Tool], str, str | None]:
+        """A step's tools with the delivery tool (``delivery="tool"``), the tool's name, and the system prompt.
+
+        The name is picked at the turn's first step (``name`` is None then) among every name the agent has
+        there (``names``: those of its tool sets, and those a tool policy hides), and fixed for the turn: the
+        system prompt names it from that step on. ``offered``: whether this step may send (not with the tools
+        withheld, nor past the budget).
+        """
+        if name is None:
+            name = self._send_tool_name(names)
+            note = DEFAULT_DELIVERY_NOTE.format(tool=name)
+            system_prompt = f"{system_prompt}\n\n{note}" if system_prompt else note
+        elif offered and name in names:
+            # A tool set that changed its catalog inside the turn: the name is the reply's.
+            logger.warning(
+                "A tool took the name of the delivery tool mid-turn; it is not offered.", path=self._path, tool=name
+            )
+            tools = [tool for tool in tools if tool.name != name]
+        if offered:
+            tools = [*tools, self._send_message_tool(name)]
+        return tools, name, system_prompt
+
+    def _deliver_final(self, current_span: Any, offered: bool, before: int, stored: bool) -> OutputEvent | None:
+        """At a final answer (``delivery="tool"``): the turn's output, after delivering the draft when it is
+        the reply. None: the draft is the output already (the turn sent nothing else), or there is none.
+
+        A draft is private unless it is all the user can get: nothing was sent all turn (the draft is the
+        reply rather than silence), or its step had no send tool (``offered`` is False: the budget is spent,
+        or a denial limit took the tools away). ``stored``: whether the answer is in memory. An empty one
+        is not kept, and the last message there is then the user's prompt or a runtime notice.
+        """
+        metadata = current_span.metadata
+        draft = ""
+        if stored and not metadata.get("silent"):
+            draft = message_text(current_span.memory[-1]).strip()
+        joined = False
+        if draft and not (offered and (before or metadata.get("messages_sent"))):
+            joined = self._deliver_text(current_span, draft, before)
+        delivered = self._delivered(current_span, before)
+        if delivered is not None and joined:
+            metadata["delivery"]["fallback"] = True
+        return delivered
+
+    def _deliver_reply(self, current_span: Any, reply: Message, before: int) -> Message:
+        """Deliver ``on_max_iter``'s own reply (``delivery="tool"``): no step is left to send it with the tool.
+        Returns the turn's output: the reply, or after messages the turn sent, all it told the user."""
+        text = message_text(reply).strip()
+        if not text or not self._deliver_text(current_span, text, before):
+            return reply
+        told = self._delivered(current_span, before).output
+        current_span.metadata["delivery"]["fallback"] = True
+        return Message(role="assistant", content=told.content, stop_reason=reply.stop_reason, metadata=reply.metadata)
+
+    def _end_turn(self, current_span: Any, before: int, joined: bool) -> OutputEvent | None:
+        """The turn's output when ``end_turn`` ends it. None: the turn goes on, because something joined its
+        memory meanwhile (``joined``), or because it has said nothing to end on."""
+        delivered = None if joined else self._delivered(current_span, before)
+        if delivered is None:
+            # Staying silent was its last word until now: what it says next is not a silent turn's draft.
+            current_span.metadata.pop("silent", None)
+            return None
+        current_span.metadata["delivery"]["end_turn"] = True
+        return delivered
 
     @staticmethod
     def _record_allowed_tools(tools: list[Any], policy: Any) -> None:
@@ -3386,7 +3527,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         system_prompt = kwargs.pop("system_prompt", None)
         if not system_prompt:
             system_prompt = await self._resolve_system_prompt()
-        delivering = self.delivery == "tool" and current_span.parent_call_id is None
+        delivering = False
+        if self.delivery == "tool":
+            # Not a subagent (it answers with text), and not with an output model (the turn ends on the
+            # model's first answer, before any tool call of it runs). A caller that cannot show ``message``
+            # events asks for text with ``delivery="text"`` (a voice call reads the answer aloud). Only
+            # that way round, and only here: an input of that name passed to any other agent stays what it
+            # was, the application's own.
+            delivering = (
+                kwargs.pop("delivery", None) != "text"
+                and current_span.parent_call_id is None
+                and self.output_model is None
+            )
 
         await self.resolve_memory()
         # Session BG caps (concurrent / depth) before tools can spawn this turn.
@@ -3404,9 +3556,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 system_prompt = _render_pinned(sections_state["pinned"], sections_state["key"])
             else:
                 system_prompt = _render_sections(system_prompt)
-        if delivering:
-            note = DEFAULT_DELIVERY_NOTE.format(tool=self._send_tool_name())
-            system_prompt = f"{system_prompt}\n\n{note}" if system_prompt else note
+        # delivery="tool". The tool's name, fixed at the turn's first step (the system prompt says it): it
+        # depends on the names of the step's tools, a tool set's included.
+        send_name: str | None = None
+        # Whether the current step offers the tool: text from a step that could not send is not a draft.
+        send_offered = False
+        # Messages the turn sent in the run this one resumes (see resolve_memory): it has answered already.
+        sent_before = current_span.metadata.get("sent_before_pause", 0) if delivering else 0
+        if "end_turn" in current_span.metadata and not (
+            delivering and self._find_pending_tool_uses(current_span.memory)
+        ):
+            # Carried from the run this one resumes, with no call of that batch left to run, or into a run
+            # that answers in text: nothing to end after, and nothing a later resume should end on.
+            del current_span.metadata["end_turn"]
+            current_span.metadata.pop("silent", None)
 
         prev_dump = getattr(current_span, "_prev_memory_dump", None)
         if prev_dump is not None and "compaction" not in current_span.metadata:
@@ -3523,11 +3686,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 content = [c for c in event.output.content if isinstance(c, TextContent | FileContent)]
             else:
                 content = event.output
+            tool_name = event.path.rsplit(".", 1)[-1]
             if denied:
                 consecutive_denials += 1
-            elif consecutive_denials:
+            elif consecutive_denials and not (delivering and tool_name == send_name):
+                # (A message sent to the user is not a call that went through: the streak stands.)
                 consecutive_denials = 0
-            if self.max_denials_window is not None:
+            if self.max_denials_window is not None and (denied or not (delivering and tool_name == send_name)):
                 window = await _denial_window()
                 window.append(1 if denied else 0)
                 del window[: -self.max_denials_window[1]]
@@ -3542,10 +3707,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # Pin the result when the originating tool opted in (e.g. read_skill), so memory
             # compaction never strips this durable context. The tool name is the final path
             # segment of its OutputEvent.
-            tool_name = event.path.rsplit(".", 1)[-1]
             pinned = tool_name in pinned_tool_names
             result = {"type": "tool_result", "id": tool_call_id, "content": content, "pinned": pinned}
-            if delivering and status_code == "success" and event.metadata and DELIVERED_KEY in event.metadata:
+            if (
+                delivering
+                and tool_name == send_name
+                and status_code == "success"
+                and event.metadata
+                and DELIVERED_KEY in event.metadata
+            ):
                 result["delivered"] = event.metadata[DELIVERED_KEY]
             tool_result = Message.validate({"role": "tool", "content": [result]})
             # tool_result guardrails run BEFORE offload so rails see the full text and the
@@ -3753,8 +3923,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 withheld = withhold_tools
                 if withhold_tools:
                     tools, commands, withhold_tools = [], {}, False
-                elif delivering and i < self.max_iter:
-                    tools = [*tools, self._send_message_tool()]
+                if delivering:
+                    # Not with the tools withheld (a denial limit) nor past the budget: that step answers in text.
+                    send_offered = not withheld and i < self.max_iter
+                    tools, send_name, system_prompt = self._with_send_tool(
+                        tools, tool_names, send_name, system_prompt, send_offered
+                    )
                 # `tools` stays what the model may call: a deferred tool called by name runs (and loads).
                 if not may_defer or not _has_deferred(tools):
                     llm_tools, deferred_tools, unloaded_tools = tools, None, _NO_NAMES
@@ -3776,6 +3950,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if reply is not None:
                         await _append_memory(reply)
                         if reply.role == "assistant":
+                            if delivering:
+                                reply = self._deliver_reply(current_span, reply, sent_before)
                             yield self._synthetic_event(
                                 "max_iter", RunStatus(code="success", reason="max_iter"), output=reply
                             )
@@ -3864,6 +4040,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                                 }
                                             )
                                         )
+                                        if delivering and event.path == tool._path and event.run_id == run_context.id:
+                                            # The command's own output (not an event nested in it, nor one a
+                                            # harness forwards under its path): it is the turn's answer, and no
+                                            # model runs that could send it.
+                                            answer = _output_text(event.output)
+                                            if answer:
+                                                self._deliver_text(current_span, answer, sent_before)
                                     yield event
                                 active_events = None
                                 return
@@ -3928,6 +4111,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             yield steer_event
                         if steered_user:
                             i, max_iter_handled, withhold_tools = 0, False, False
+                    if delivering and current_span.metadata.pop("end_turn", False):
+                        # Asked for before the pause (resolve_memory carried it), or by a call of this batch.
+                        delivered = self._end_turn(current_span, sent_before, steered)
+                        if delivered is not None:
+                            yield delivered
+                            break
                     continue
 
                 # Mid-loop compaction: a single turn that makes many (or large) tool calls
@@ -4359,15 +4548,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     ):
                         current_span.metadata["silent"] = True
                     if delivering:
-                        delivered = self._delivered(current_span)
+                        delivered = self._deliver_final(current_span, send_offered, sent_before, last_output_stored)
                         if delivered is not None:
                             yield delivered  # the turn's answer is what it sent; this last text was a draft
-                        elif not current_span.metadata.get("silent"):
-                            draft = message_text(current_span.memory[-1]).strip()
-                            if draft:
-                                # Nothing was sent all turn: the draft is the reply rather than silence.
-                                current_span.metadata["delivery"] = {"mode": "tool", "messages": 0, "fallback": True}
-                                emit({"kind": "message", "text": draft, "index": 0, "end_turn": True, "fallback": True})
                     break
 
                 called_unloaded = (
@@ -4432,13 +4615,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # A user message is a new request: it gets the full tool budget, and its tools back
                         # even when the denial breaker took them away for this step.
                         i, max_iter_handled, withhold_tools = 0, False, False
-                if delivering and current_span.metadata.pop("end_turn", False) and not steered_user:
-                    # The model said its last word: no further call (a message the user sent meanwhile is answered).
-                    delivered = self._delivered(current_span)
+                if delivering and current_span.metadata.pop("end_turn", False):
+                    # The model said its last word: no further call. Unless something joined the turn meanwhile
+                    # (a message of the user's, an event of the application's, the notice for a message a
+                    # guardrail dropped): like a final answer in text, the turn does not end before answering it.
+                    delivered = self._end_turn(current_span, sent_before, steered)
                     if delivered is not None:
-                        current_span.metadata["delivery"]["end_turn"] = True
                         yield delivered
-                    break
+                        break
         except BaseException:
             # A pause, a cut, a failure: the next turn (or the resume) compacts as it finds the history. Not in
             # the background while a strategy of this one is still running on a thread (see _drop_prepared).
