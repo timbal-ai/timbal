@@ -124,8 +124,8 @@ class TestClientSearch:
     async def test_deferred_hidden_behind_search_tools(self):
         context()
         a = agent(TestModel(responses=["ok"]))
-        tools, _ = await a._resolve_tools(0)
-        offered, dispatch, native, unloaded = await a._plan_tool_search(tools, a.model)
+        tools, _, names = await a._resolve_step_tools(0)
+        offered, dispatch, native, unloaded = await a._plan_tool_search(tools, a.model, names)
         assert [t.name for t in offered] == ["lookup", SEARCH_TOOLS_NAME]
         assert native is None
         assert unloaded == {"get_weather", "create_invoice", "list_repos"}
@@ -222,11 +222,12 @@ class TestClientSearch:
         a = agent(TestModel(responses=["ok"]), tools)
         ctx = context()
         ctx._tool_policy = "read_only"
-        resolved, _ = await a._resolve_tools(0)
-        offered, *_ = await a._plan_tool_search(resolved, a.model)
+        resolved, _, names = await a._resolve_step_tools(0)
+        offered, *_ = await a._plan_tool_search(resolved, a.model, names)
         assert "can't be found" in offered[-1].description
         ctx._tool_policy = None
-        offered, *_ = await a._plan_tool_search((await a._resolve_tools(0))[0], a.model)
+        resolved, _, names = await a._resolve_step_tools(0)
+        offered, *_ = await a._plan_tool_search(resolved, a.model, names)
         assert "can't be found" not in offered[-1].description
 
     async def test_direct_call_of_unloaded_tool_runs_and_loads(self):
@@ -242,8 +243,8 @@ class TestClientSearch:
         a = agent(TestModel(responses=["ok"]), tools)
         ctx = context()
         ctx._tool_policy = "read_only"
-        resolved, _ = await a._resolve_tools(0)
-        offered, dispatch, _, unloaded = await a._plan_tool_search(resolved, a.model)
+        resolved, _, names = await a._resolve_step_tools(0)
+        offered, dispatch, _, unloaded = await a._plan_tool_search(resolved, a.model, names)
         assert unloaded == {"get_weather"}
         assert "create_invoice" not in {t.name for t in dispatch}
         assert "create_invoice" not in offered[-1].description
@@ -268,16 +269,16 @@ class TestClientSearch:
     async def test_off_sends_everything(self):
         context()
         a = agent(TestModel(responses=["ok"]), tool_search="off")
-        tools, _ = await a._resolve_tools(0)
-        offered, _, native, unloaded = await a._plan_tool_search(tools, a.model)
+        tools, _, names = await a._resolve_step_tools(0)
+        offered, _, native, unloaded = await a._plan_tool_search(tools, a.model, names)
         assert [t.name for t in offered] == ["lookup", "get_weather", "create_invoice", "list_repos"]
         assert native is None and not unloaded
 
     async def test_nothing_deferred_no_search_tool(self):
         context()
         a = agent(TestModel(responses=["ok"]), [catalog()[0]])
-        tools, _ = await a._resolve_tools(0)
-        offered, _, native, _ = await a._plan_tool_search(tools, a.model)
+        tools, _, names = await a._resolve_step_tools(0)
+        offered, _, native, _ = await a._plan_tool_search(tools, a.model, names)
         assert [t.name for t in offered] == ["lookup"] and native is None
 
 
@@ -303,8 +304,8 @@ class TestNativeAnthropic:
     async def test_model_gating(self, model, native):
         context()
         a = agent(model)
-        tools, _ = await a._resolve_tools(0)
-        offered, _, deferred, _ = await a._plan_tool_search(tools, model)
+        tools, _, names = await a._resolve_step_tools(0)
+        offered, _, deferred, _ = await a._plan_tool_search(tools, model, names)
         if native:
             assert deferred == ["get_weather", "create_invoice", "list_repos"]
             assert len(offered) == 4  # all sent; Anthropic hides the deferred ones
@@ -315,8 +316,8 @@ class TestNativeAnthropic:
     async def test_client_mode_overrides_native(self):
         context()
         a = agent("anthropic/claude-haiku-4-5", tool_search="client")
-        tools, _ = await a._resolve_tools(0)
-        _, _, deferred, _ = await a._plan_tool_search(tools, a.model)
+        tools, _, names = await a._resolve_step_tools(0)
+        _, _, deferred, _ = await a._plan_tool_search(tools, a.model, names)
         assert deferred is None
 
     async def test_request_marks_deferred_and_adds_search_tool(self):
@@ -776,8 +777,8 @@ class TestChatSession:
         a = agent(TestModel(handler=handler))
         original = a._plan_tool_search
 
-        async def spy(tools, model):
-            planned = await original(tools, model)
+        async def spy(tools, model, names):
+            planned = await original(tools, model, names)
             offered.append([t.name for t in planned[0]])
             return planned
 
@@ -819,8 +820,8 @@ class TestChatSession:
         offered = []
         original = a._plan_tool_search
 
-        async def spy(tools, model):
-            planned = await original(tools, model)
+        async def spy(tools, model, names):
+            planned = await original(tools, model, names)
             offered.append([t.name for t in planned[0]])
             return planned
 
@@ -869,8 +870,8 @@ class TestChatSession:
         offered = []
         original = a._plan_tool_search
 
-        async def spy(tools, model):
-            planned = await original(tools, model)
+        async def spy(tools, model, names):
+            planned = await original(tools, model, names)
             offered.append(planned)
             return planned
 
@@ -907,8 +908,8 @@ class TestNativeOpenAI:
         monkeypatch.setattr(registry, "TIMBAL_OPENAI_API", "chat_completions")
         context()
         a = agent("openai/gpt-6-luna")
-        tools, _ = await a._resolve_tools(0)
-        offered, _, deferred, _ = await a._plan_tool_search(tools, a.model)
+        tools, _, names = await a._resolve_step_tools(0)
+        offered, _, deferred, _ = await a._plan_tool_search(tools, a.model, names)
         assert deferred is None and offered[-1].name == SEARCH_TOOLS_NAME
 
     async def test_request_marks_deferred_and_adds_tool_search(self):

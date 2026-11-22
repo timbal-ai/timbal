@@ -5,11 +5,12 @@ import asyncio
 import pytest
 from timbal import Agent, Tool
 from timbal.core.chat_session import ChatSession, _ToolPaths, _TurnOptions
-from timbal.core.session_scheduler import take_followup, user_batch
+from timbal.core.session_scheduler import pending_user_batch, take_followup, user_batch
 from timbal.core.test_model import TestModel
 from timbal.guardrails import Verdict, guardrail
 from timbal.state import get_run_context, post_session_event, set_call_id, set_parent_call_id, set_run_context
 from timbal.state.background import BackgroundTaskStore
+from timbal.state.chat_store import InMemoryChatSessionStore
 from timbal.state.context import RunContext
 from timbal.state.tracing.providers import InMemoryTracingProvider
 from timbal.types.content import ToolUseContent
@@ -157,6 +158,20 @@ class TestPostUserMessage:
         urgent = store.post_event("now", source="user", announce="interrupt")
         assert user_batch(store.pending_events()) == [urgent]
 
+    def test_the_batch_asked_about_is_the_batch_taken(self):
+        """A message kept for a session that will be restored is nobody else's to take: it is not in the
+        batch a turn starts with, and so not in the batch whoever times that turn (a collect window) reads."""
+        store = BackgroundTaskStore()
+        kept = store.post_event("for a session that is away", source="user", mode="followup")
+        kept.kept_for = "another-session"
+        a = store.post_event("a", source="user", mode="collect")
+        b = store.post_event("b", source="user", mode="collect")
+        assert user_batch(store.pending_events()) == [kept]  # what the store holds, not what a turn takes
+        assert pending_user_batch(store) == [a, b]
+        assert take_followup(store).events == [a, b]
+        assert store.pending_events() == [kept] and kept.state == "pending"
+        assert pending_user_batch(store) == [] and take_followup(store) is None
+
     def test_take_followup_starts_with_the_user_and_leaves_the_rest(self):
         store = BackgroundTaskStore()
         app = store.post_event("deploy finished")
@@ -270,6 +285,28 @@ class TestSteering:
             # The tool's result is kept: the work done before the steer is not thrown away.
             assert [m.role for m in memory][:3] == ["user", "assistant", "tool"]
 
+    async def test_a_steer_a_guardrail_empties_does_not_reopen_the_answer(self):
+        """A message that arrives as the turn answers and that a rail redacts down to nothing joins
+        nothing: the turn ends on its answer, with no model call on a history that ends with it."""
+        calls = []
+        sent = []
+
+        def model(messages):
+            calls.append([m.role for m in messages])
+            if not sent:  # the answer is on its way: the message lands now
+                sent.append(session.send("strip me", mode="steer"))
+            return "the answer"
+
+        strip = guardrail(lambda text: "" if "strip me" in text else True, stages=["input"], action="redact")
+        async with ChatSession(make_agent(Gate(), model=TestModel(handler=model), guardrails=[strip])) as session:
+            session.send("hello")
+            (finished,) = await records(session, "turn_finished", 1)
+            assert finished["status"]["code"] == "success"
+            assert calls == [["user"]]
+            (output,) = root_outputs(session)
+            assert output.output.collect_text() == "the answer"
+            assert [m.role for m in await stored_memory(output)] == ["user", "assistant"]
+
     async def test_a_steer_a_guardrail_rewrites_is_kept_rewritten(self):
         gate = Gate()
         rail = guardrail(
@@ -318,6 +355,35 @@ class TestModes:
             gate.release.set()
             await records(session, "turn_finished", 2)
             assert [o.output.collect_text() for o in root_outputs(session)] == ["done", "echo: a\n\nb"]
+
+    async def test_the_collect_window_looks_at_the_messages_the_turn_will_take(self):
+        """A message another session keeps for its own restore sits ahead in the shared task store. It is
+        not this session's turn's to take, so it must not decide the wait either: the window is for the
+        collected messages the turn will start with. Measured, not slept through: the turn must not start
+        before the window, however slow the machine."""
+        gate = Gate()
+        first = ChatSession(make_agent(gate), session_store=InMemoryChatSessionStore())
+        second = None
+        try:
+            first.send("start")
+            await asyncio.wait_for(gate.entered.wait(), 2)
+            kept = first.send("for the first session", mode="followup")
+            await first.flush()
+            await first.close(keep=True)  # lives on in its store, with that message
+            gate.release.set()
+            second = ChatSession(make_agent(gate), parent_id=first.head, collect_window=0.5)
+            assert second.store is first.store and kept.state == "pending"
+            sent = second.send("a", mode="collect")
+            [started] = await records(second, "turn_started", 1, timeout=30)
+            held = started["t"] / 1000 - sent.posted_at  # by the record's own time, not when the test saw it
+            assert held >= 0.25, f"the turn started {held:.3f}s after the message, inside its collect window"
+            await records(second, "turn_finished", 1, timeout=30)
+            assert [o.output.collect_text() for o in root_outputs(second)] == ["echo: a"]
+            assert kept.state == "pending"
+        finally:
+            for session in (first, second):
+                if session is not None:
+                    await session.close()
 
     async def test_interrupt_cuts_the_turn_and_goes_first(self):
         gate = Gate()
