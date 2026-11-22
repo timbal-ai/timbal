@@ -73,4 +73,7 @@ everything without uploading. **PyPI never accepts a version twice, even after i
 against the release branch it targets. To run CI on a branch without a PR:
 `gh workflow run ci.yml --ref release/2.8`.
 
-Recommended GitHub settings: protect `release/**` like `main` (a PR and passing CI to merge, no direct pushes).
+GitHub settings (rulesets): `main` has a merge queue, and a pull request into it runs the fast lane (one job)
+while the queue runs every OS before merging. GitHub's merge queue takes no branch pattern, so the `release`
+ruleset (`release/**`) requires a PR with one approval and `CI result`, without a queue: a backport PR runs
+every OS on each push instead. No direct pushes, force pushes or deletions on either.
