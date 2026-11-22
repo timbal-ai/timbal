@@ -1139,6 +1139,49 @@ class TestAStoppedTurnThatDied:
         assert root_outputs(restored)[-1].output.collect_text() == "echo: never mind"
         await restored.close()
 
+    async def test_a_wake_turn_stopped_before_its_tool_does_not_run_again(self, db):
+        """A turn the application started (a wake) is stopped by the user's message; the process dies before the
+        turn records its call. The wake is not run again after the restart (it would redo what was stopped):
+        it is named to the next turn, as the user's stopped messages are."""
+        provider, store = db
+
+        def pays(messages):
+            if messages[-1].role == "tool":
+                return "paid"
+            text = last_user_text(messages)
+            return tool_call("charge", "call-pay") if "pay" in text else f"echo: {text}"
+
+        charge = Charge(released=True)
+        session = ChatSession(gated_agent(provider, charge, model_handler=pays), session_store=store)
+        about_to_dispatch = asyncio.Event()
+
+        async def held(_in_flight, _agent_path, _calls):
+            about_to_dispatch.set()
+            await asyncio.Event().wait()
+
+        session._note_dispatch = held
+        session.wake("pay the invoice", key="pay", tool_policy=None)
+        await asyncio.wait_for(about_to_dispatch.wait(), 30)
+        session.send("never mind", mode="interrupt", defer_cut=True)
+        await session.flush()
+        stored = await store.load(session.id)
+        assert stored.in_flight["wake"] is not None and not stored.in_flight.get("dispatched")
+        await crash(session)
+        provider.crashed = False
+
+        restored = await ChatSession.from_store(gated_agent(provider, charge, model_handler=pays), store, session.id)
+        assert not restored._wakes, "the stopped wake was queued again"
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        await until(lambda: not restored.busy and not restored.pending_messages())
+        assert not restored.parked and charge.gate.calls == 0
+        outputs = root_outputs(restored)
+        assert [output.output.collect_text() for output in outputs] == ["echo: never mind"]
+        run = await restored._load_run(outputs[-1].run_id)
+        texts = [str(message.get("content")) for message in run.root_span().memory]
+        notice = next(text for text in texts if "stopped that turn" in text)
+        assert '"pay the invoice"' in notice
+        await restored.close()
+
 
 class TestAParkedRunThatIsGone:
     """The snapshot says the session waits for an answer, and the run that asked is not in the trace store

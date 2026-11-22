@@ -2124,15 +2124,18 @@ class ChatSession:
             if event.source == "user":
                 self._watch(event)
 
-    def _drop_stopped_events(self, events: list[dict[str, Any]], dead_run_id: str | None) -> None:
-        """The messages of a dead turn its user stopped: delivered to it (their receipts settle), and named to the
-        next turn in a silent notice, which rides with it (that turn answers the stop)."""
+    def _drop_stopped(self, events: list[dict[str, Any]], wake: dict[str, Any] | None, dead_run_id: str | None) -> None:
+        """The input of a dead turn its user stopped, its messages or its wake: delivered to it (the messages'
+        receipts settle), and named to the next turn in a silent notice, which rides with it (that turn answers
+        the stop)."""
         for data in events:
             held = self._kept_events.pop(data.get("id"), None)
             if held is not None:
                 held._settle("delivered", dead_run_id)
         if self.on_dead_turn != "drop":
             asked = [event.get("text") or "" for event in events]
+            if wake is not None:
+                asked.append(wake.get("text") or "")
             self._store.post_event(
                 _stopped_notice([text for text in asked if text]), key=RECOVERY_KIND, announce="silent"
             )
@@ -2212,15 +2215,17 @@ class ChatSession:
             # model call (a shutdown, most often) stores a trace whose memory need not hold its prompt,
             # and the message would be answered by nobody.
             self._scheduler.head = in_flight.get("parent_id")
-            if stopped and not resumed and events:
-                # Not queued again: run after the stop, they would be acted on as the user's latest words (the
-                # interrupting message goes first, and they would follow it), the gated tool asked for again
-                # and approved. Kept in the conversation instead, as something the user stopped.
-                self._drop_stopped_events(events, run_id)
+            wake = in_flight.get("wake")
+            if stopped and not resumed and (events or wake is not None):
+                # Not run again. Messages run after the stop would be acted on as the user's latest words (the
+                # interrupting message goes first, and they would follow it): the gated tool asked for again and
+                # approved. A wake (an application's turn) would redo what its user stopped. Kept in the
+                # conversation instead, as something the user stopped.
+                self._drop_stopped(events, wake, run_id)
             else:
                 self._restore_events(events)
-            if in_flight.get("wake") is not None:
-                self._wakes.insert(0, _Wake.from_dict(in_flight["wake"]))
+                if wake is not None:
+                    self._wakes.insert(0, _Wake.from_dict(wake))
             if resumed:
                 self._parked = True
                 if stopped:
