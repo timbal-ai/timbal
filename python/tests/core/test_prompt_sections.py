@@ -156,3 +156,64 @@ class TestPinnedSections:
         prompts = {s.path: s.input.get("system_prompt") for s in trace.values() if s.path.endswith(".llm")}
         assert prompts["bot.llm"].startswith('<section name="role">\nBot.\n</section>')
         assert prompts["bot.helper.llm"] == "Helper.\n\nBe terse."  # subagents: the sections as they are
+
+
+class TestWithOtherTurns:
+    async def test_a_changed_section_is_not_put_into_a_resumed_tool_batch(self):
+        """A resume runs the calls the paused run left: a note between a call and its result is refused by
+        the providers. The change is said on the turn after."""
+        from timbal import Tool
+        from timbal.types.events import ApprovalEvent
+
+        fresh()
+        seen = []
+        sections = Sections(role="You are a bot.", today="Today is Monday.")
+
+        def handler(messages):
+            seen.append(list(messages))
+            if not any(m.role == "tool" for m in messages):
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="charge", input={})],
+                    stop_reason="tool_use",
+                )
+            return "Paid."
+
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=handler),
+            system_prompt=sections,
+            tools=[Tool(name="charge", handler=lambda: "charged", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        events = [event async for event in agent(prompt="pay")]
+        parked = events[-1]
+        assert parked.status.reason == "approval_required"
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        sections.sections["today"] = "Today is Tuesday."
+        set_run_context(RunContext(parent_id=parked.run_id, tracing_provider=InMemoryTracingProvider))
+        resumed = await agent(prompt="pay", resume={approval.approval_id: True}).collect()
+        assert resumed.status.code == "success", resumed.error
+        assert [m.role for m in seen[-1]] == ["user", "assistant", "tool"]  # the result right after its call
+        assert notes(seen[-1]) == []
+        await turn(agent, "and now?", resumed)
+        (note,) = notes(seen[-1])
+        assert "Today is Tuesday." in note
+        assert seen[-1][-1].collect_text() == "and now?" and seen[-1][-2].metadata["kind"] == PROMPT_UPDATE_KIND
+
+    async def test_another_turn_continuing_the_same_run_is_told_too(self):
+        """What a turn announced is its own: a second turn from the run it continued (an answer asked for
+        again) has not been told."""
+        fresh()
+        seen = []
+        sections = Sections(role="You are a bot.", today="Today is Monday.")
+        agent = make_agent(sections, seen)
+        first = await turn(agent, "one")
+        sections.sections["today"] = "Today is Tuesday."
+        await turn(agent, "two", first)
+        await turn(agent, "two, asked again", first)
+        assert len(notes(seen[1])) == 1
+        assert len(notes(seen[2])) == 1
+        trace = await trace_of(first)
+        root = next(span for span in trace.values() if span.parent_call_id is None)
+        assert root.session["__prompt_sections"]["bot"]["announced"]["today"] == "Today is Monday."  # as it left it

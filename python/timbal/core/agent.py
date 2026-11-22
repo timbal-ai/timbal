@@ -2743,25 +2743,32 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """
         sections = {name: text.strip() for name, text in sections.items() if text.strip()}
         session = await run_context.get_session()
-        store = session.setdefault(_SECTIONS_KEY, {})
+        # Copied, never written in place: a run's session data starts as a shallow copy of the run it
+        # continues, so the record is that run's too, and another turn continuing it (an answer asked for
+        # again) must find what that run announced, not what this one did.
+        store = session.get(_SECTIONS_KEY) or {}
         state = store.get(self._path)
         if state is None or state.get("refresh") or "compaction" in current_span.metadata:
             # A fresh key per pin: only the application, which states it in the system prompt, can write updates.
             key = secrets.token_hex(4)
-            state = store[self._path] = {"pinned": dict(sections), "announced": dict(sections), "key": key}
+            state = {"pinned": dict(sections), "announced": dict(sections), "key": key}
+            session[_SECTIONS_KEY] = {**store, self._path: state}
             current_span.metadata["prompt_sections"] = {"pinned": list(sections)}
             return state
         announced = state["announced"]
         changed = {name: text for name, text in sections.items() if announced.get(name) != text}
         removed = [name for name in announced if name not in sections]
-        if changed or removed:
+        # Not into a resumed tool batch: a user message between a tool_use and its result is refused by
+        # the providers. Left unannounced, so the next turn says it.
+        if (changed or removed) and not self._find_pending_tool_uses(current_span.memory):
             note = _prompt_update(changed, removed, state["key"])
             memory = current_span.memory
             if memory and memory[-1].role == "user":
                 memory.insert(-1, note)
             else:
                 memory.append(note)
-            state["announced"] = dict(sections)
+            state = {**state, "announced": dict(sections)}
+            session[_SECTIONS_KEY] = {**store, self._path: state}
             current_span.metadata["prompt_sections"] = {"updated": list(changed), "removed": removed}
             run_context.update_usage("prompt_sections:updated", len(changed) + len(removed))
         return state
@@ -4638,6 +4645,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     await self._salvage_interrupted_llm_output(run_context, current_span)
                 if sections_state is not None and current_span.metadata.get("compaction") is not compaction_at_pin:
                     # Compacted inside this turn: update notes may be gone with the history, so re-pin next turn.
-                    sections_state["refresh"] = True
+                    # (A new record, like every write of it: see _pin_sections.)
+                    session = run_context._session_data
+                    session[_SECTIONS_KEY] = {
+                        **(session.get(_SECTIONS_KEY) or {}),
+                        self._path: {**sections_state, "refresh": True},
+                    }
         if self.memory_compaction is not None and self.memory_compaction_prepare_ratio is not None:
             self._prepare_for_next_turn(current_span, run_context, prepared)
