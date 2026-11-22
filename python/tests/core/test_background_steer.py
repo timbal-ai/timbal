@@ -9,7 +9,12 @@ from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
 from timbal.guardrails import guardrail
 from timbal.state import get_run_context, list_background_tasks, message_background_task
-from timbal.state.background import BackgroundTask, BackgroundTaskStore, store_for_run
+from timbal.state.background import (
+    BackgroundTask,
+    BackgroundTaskStore,
+    format_background_completion_notice,
+    store_for_run,
+)
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
 
@@ -182,8 +187,6 @@ class TestMessageTask:
         assert receipt.state == "undelivered"
         (note,) = store.pending_completions()
         assert note["unread_messages"] == ["one more thing"]
-        from timbal.state.background import format_background_completion_notice
-
         text = format_background_completion_notice([note]).collect_text()
         assert "finished before reading your message: one more thing" in text
 
@@ -336,10 +339,84 @@ class TestMessageTask:
         snap = await _finish(run_id, task_id)
         assert _answer(snap) == "Did: research cats"
         assert receipt.state == "undelivered"
-        assert snap["unread_messages"] == ["one more thing"]
+        # Reported, by its id: the text a guardrail took out is in no report the parent's model reads.
+        (unread,) = snap["unread_messages"]
+        assert receipt.id in unread and "guardrail" in unread and "one more thing" not in unread
         (note,) = store.pending_completions()
-        assert note["unread_messages"] == ["one more thing"]
+        assert note["unread_messages"] == [unread]
+        assert store.list()[0]["unread_messages"] == [unread]
+        notice = format_background_completion_notice([note]).collect_text()
+        assert receipt.id in notice and "one more thing" not in notice
         assert "task_messages" not in _task_span(run_id, task_id).metadata
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["delivered", "undelivered"])
+    async def test_a_sender_waiting_on_another_loop_is_woken_when_its_receipt_settles(self, outcome):
+        """A sender with a loop of its own (another thread) awaits ``receipt.settled()``. The receipt
+        settles on the task's loop: the sender's loop has to be told, or it sleeps on until something
+        else wakes it (here its own 20 s deadline)."""
+        store = BackgroundTaskStore()
+        gate = asyncio.Event()
+
+        async def work() -> str:
+            await gate.wait()
+            if outcome == "delivered":
+                record.take_messages()
+                record.mark_read("run-1")
+            return "done"
+
+        record = BackgroundTask(
+            "t1", name="researcher", input={}, task=asyncio.ensure_future(work()), started_at=int(time.time() * 1000)
+        )
+        record.steerable = True
+        store.add(record, consume_reservation=False)
+        waiting = threading.Event()
+        result: dict = {}
+
+        def sender() -> None:
+            async def send() -> None:
+                receipt = store.message_task("t1", "one more thing")
+                wait = asyncio.ensure_future(receipt.settled())
+                await asyncio.sleep(0)  # the wait is registered, on this loop
+                waiting.set()
+                started = time.monotonic()
+                try:
+                    result["state"] = await asyncio.wait_for(wait, 20)
+                except TimeoutError:
+                    result["state"] = f"not woken ({receipt.state} meanwhile)"
+                result["waited"] = time.monotonic() - started
+
+            asyncio.run(send())
+
+        thread = threading.Thread(target=sender)
+        thread.start()
+        try:
+            assert await asyncio.to_thread(waiting.wait, 30)
+            gate.set()
+        finally:
+            await asyncio.to_thread(thread.join, 60)
+        assert result["state"] == outcome
+        assert result["waited"] < 10, f"woken only after {result['waited']:.1f}s"
+
+    @pytest.mark.asyncio
+    async def test_an_abandoned_wait_cleans_up_inside_a_block_that_holds_the_receipt_lock(self):
+        """A wait nobody resumes cleans up when its coroutine is collected, wherever that happens: also
+        inside a block that holds the receipts' lock on the same thread. It must not wait for itself."""
+        from timbal.state import background
+
+        lock = background._RECEIPT_LOCK
+        with lock:
+            assert lock.acquire(blocking=False), "not re-entrant: the cleanup below would hang this thread"
+            lock.release()
+        event = background.SessionEvent("x", key=None, source="app")
+        wait = event.settled()
+        wait.send(None)  # registered, waiting
+        assert event._waiters
+        with background._RECEIPT_LOCK:
+            wait.close()  # as the collector would
+        assert not event._waiters
+        event._settle("delivered")  # nobody left to wake: no error
+        assert await event.settled() == "delivered"
 
     @pytest.mark.asyncio
     async def test_a_message_screened_down_to_nothing_does_not_reopen_a_finished_answer(self):
@@ -364,7 +441,9 @@ class TestMessageTask:
         snap = await _finish(run_id, task_id)
         assert child.calls == 2, [[m.role for m in seen] for seen in child.seen]  # its step, its answer
         assert _answer(snap) == "Did: research cats"
-        assert sent["receipt"].state == "undelivered" and snap["unread_messages"] == ["one more thing"]
+        (unread,) = snap["unread_messages"]
+        assert sent["receipt"].state == "undelivered" and sent["receipt"].id in unread
+        assert "one more thing" not in unread
 
     @pytest.mark.asyncio
     async def test_a_poll_from_a_receipts_own_callback_finds_every_unread_message(self):

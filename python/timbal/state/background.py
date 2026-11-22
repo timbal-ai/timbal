@@ -680,6 +680,29 @@ turn for every collected message, once they stop arriving (the channel's quiet w
 USER_MESSAGE_MODES: tuple[str, ...] = ("steer", "followup", "collect")
 
 
+# Guards a receipt's state against its waiters and callbacks: a receipt settles on the loop of the run
+# that takes it, and whoever sent it may wait on another thread's loop. One lock for all receipts (held
+# for a few instructions; a lock per receipt would cost every event one). Re-entrant: an abandoned
+# wait cleans up after itself wherever its coroutine is collected, and that can be inside a block that
+# holds the lock on the same thread.
+_RECEIPT_LOCK = threading.RLock()
+
+
+def _new_receipt_lock() -> None:
+    """In a forked child: the parent's lock may have been held by a thread that does not exist here."""
+    global _RECEIPT_LOCK
+    _RECEIPT_LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_new_receipt_lock)
+
+
+def _resolve_waiter(waiter: asyncio.Future[None]) -> None:
+    if not waiter.done():
+        waiter.set_result(None)
+
+
 class SessionEvent:
     """Receipt for one event posted to a session (:meth:`BackgroundTaskStore.post_event`).
 
@@ -719,7 +742,7 @@ class SessionEvent:
         "posted_at",
         "state",
         "run_id",
-        "_settled",
+        "_waiters",
         "_on_settle",
     )
 
@@ -751,7 +774,8 @@ class SessionEvent:
         self.posted_at = time.time()
         self.state: SessionEventState = "pending"
         self.run_id: str | None = None
-        self._settled: asyncio.Event | None = None
+        # Whoever awaits settled(), each with the loop it waits on: a future is woken on its own loop.
+        self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] | None = None
         self._on_settle: list[Callable[[SessionEvent], None]] | None = None
 
     def on_settle(self, callback: Callable[[SessionEvent], None]) -> None:
@@ -760,22 +784,42 @@ class SessionEvent:
         Synchronous, on the loop that settles it: a channel can record the
         delivery before anything the receiving run does next.
         """
-        if self.state != "pending":
+        with _RECEIPT_LOCK:
+            pending = self.state == "pending"
+            if pending:
+                if self._on_settle is None:
+                    self._on_settle = []
+                self._on_settle.append(callback)
+        if not pending:
             callback(self)
-            return
-        if self._on_settle is None:
-            self._on_settle = []
-        self._on_settle.append(callback)
 
     def __repr__(self) -> str:
         return f"SessionEvent(id={self.id!r}, key={self.key!r}, state={self.state!r}, run_id={self.run_id!r})"
 
     async def settled(self) -> SessionEventState:
-        """Wait until the event leaves ``pending``. Cancelling the wait does not withdraw it."""
-        if self.state == "pending":
-            if self._settled is None:
-                self._settled = asyncio.Event()
-            await self._settled.wait()
+        """Wait until the event leaves ``pending``. Cancelling the wait does not withdraw it.
+
+        From any loop: the receipt settles on the loop of the run that takes the event, and a sender
+        on another thread waits on its own. Each waiter is woken on the loop it waits on.
+        """
+        if self.state != "pending":
+            return self.state
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[None] = loop.create_future()
+        entry = (loop, waiter)
+        with _RECEIPT_LOCK:
+            pending = self.state == "pending"  # again, under the lock: it may have settled on another thread
+            if pending:
+                if self._waiters is None:
+                    self._waiters = []
+                self._waiters.append(entry)
+        if pending:
+            try:
+                await waiter
+            finally:
+                with _RECEIPT_LOCK:
+                    if self._waiters is not None and entry in self._waiters:  # the wait was cancelled
+                        self._waiters.remove(entry)
         return self.state
 
     def to_dict(self) -> dict[str, Any]:
@@ -802,12 +846,26 @@ class SessionEvent:
         return receipt
 
     def _settle(self, state: SessionEventState, run_id: str | None = None) -> None:
-        self.state = state
-        if run_id is not None:
-            self.run_id = run_id
-        if self._settled is not None:
-            self._settled.set()
-        callbacks, self._on_settle = self._on_settle, None
+        with _RECEIPT_LOCK:
+            self.state = state
+            if run_id is not None:
+                self.run_id = run_id
+            waiters, self._waiters = self._waiters, None
+            callbacks, self._on_settle = self._on_settle, None
+        if waiters:
+            try:
+                here = asyncio.get_running_loop()
+            except RuntimeError:
+                here = None
+            for loop, waiter in waiters:
+                if loop is here:
+                    _resolve_waiter(waiter)
+                    continue
+                try:
+                    # A future belongs to its loop: set from this thread, that loop would not wake for it.
+                    loop.call_soon_threadsafe(_resolve_waiter, waiter)
+                except RuntimeError:
+                    pass  # that loop is closed: nobody waits on it any more
         for callback in callbacks or ():
             try:
                 callback(self)
@@ -986,6 +1044,9 @@ class BackgroundEventLog:
             self.forgotten_through += drop
 
 
+UNREAD_REMOVED_BY_GUARDRAIL = "[message {id}: a guardrail removed all of its text, so it was not read; not shown]"
+
+
 class BackgroundTask:
     """One detached child: asyncio.Task + durable event log."""
 
@@ -1039,6 +1100,7 @@ class BackgroundTask:
         self._inbox_lock = threading.Lock()
         self._inbox_closed = False
         self._unread: list[SessionEvent] = []
+        self._removed: set[str] = set()  # ids of unread messages a guardrail took all the text out of
 
     def _accept(self, message: SessionEvent) -> bool:
         """Queue ``message`` for the task's next look. False once the task's end closed its inbox."""
@@ -1076,6 +1138,7 @@ class BackgroundTask:
         """
         with self._inbox_lock:
             dropped, self._taken = self._taken, []
+            self._removed.update(message.id for message in dropped)
             self._unread.extend(dropped)
         for message in dropped:
             message._settle("undelivered")
@@ -1097,8 +1160,19 @@ class BackgroundTask:
         return self._unread
 
     def unread_texts(self) -> list[str]:
-        """What the task ended without reading, as its completion notice and its summary list it."""
-        return [_truncate(message.text, _COMPLETION_SUMMARY_CHARS) for message in self._unread]
+        """What the task ended without reading, as its completion notice and its summary list it.
+
+        Both are read by the parent's model, and the notice is a runtime message its input guardrails
+        do not screen. A message a guardrail redacted down to nothing (:meth:`leave_unread`) is named
+        by its id, never quoted: the report would put back what the guardrail took out. The others
+        are quoted (nothing took their text out: the task ended before it read them).
+        """
+        return [
+            UNREAD_REMOVED_BY_GUARDRAIL.format(id=message.id)
+            if message.id in self._removed
+            else _truncate(message.text, _COMPLETION_SUMMARY_CHARS)
+            for message in self._unread
+        ]
 
     def clear_watchdogs(self) -> None:
         self.clear_timeout()
