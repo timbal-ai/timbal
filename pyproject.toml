@@ -130,6 +130,12 @@ path = "python"
 [tool.hatch.version]
 source = "vcs"
 
+# Versions come from git tags. On a release branch (`release/2.8`) the next version is the next patch
+# (2.8.5.devN after v2.8.4); anywhere else (main, feature branches) it is the next minor (2.9.0.devN),
+# so main never builds with a version a release line will publish. See RELEASING.md.
+[tool.hatch.version.raw-options]
+version_scheme = "release-branch-semver"
+
 [tool.hatch.build.hooks.vcs]
 version-file = "python/timbal/_version.py"
 
