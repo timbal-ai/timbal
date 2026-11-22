@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Development and Testing
 - **Install dependencies**: `uv sync --dev` (from repo root — `pyproject.toml` is at root)
-- **Run all tests**: `uv run pytest` (from repo root)
+- **Run all tests**: `uv run pytest -n auto` (from repo root; `-n auto` = one pytest-xdist worker per core, serial without it). Coverage is opt-in: add `--cov=timbal --cov-report=term-missing`
 - **Run single test**: `uv run pytest python/tests/core/test_agent.py::TestClass::test_method`
 - **Linting**: `uv run ruff check`
 - **Format**: `uv run ruff format`
@@ -786,6 +786,8 @@ async with OTelExporter(endpoint="http://localhost:4318") as exporter:
 - `tmp_path` pytest fixture for file-based provider tests
 - A test must not be able to wait forever: every `await` on the network stack or another task gets a deadline (`test_voice_rtc.py` `_step`). Backstops: `faulthandler_timeout = 300` (`pyproject.toml`) prints every thread's stack for a test still running after 5 minutes, and the CI test job has `timeout-minutes: 60`
 - No fixed sleeps or tick counts for "X has happened by now": wait for the state (an event, `until(...)`, `records(...)`), and install a fault before the step it must catch, not in a time window after it. `TIMBAL_TEST_SLOW_IO=0.08 uv run pytest <files>` (`python/tests/conftest.py`; `_JITTER=1`, `_SEED=`) delays every chat-session store read/write and SQLite/JSONL trace save, which is how a slow CI runner breaks such a test: run the session tests under it (also at 0.25 and with jitter) after changing them
+- Tests run in parallel (pytest-xdist) in CI and with `-n auto` locally: each worker is its own process and every worker must collect the same test ids, so a `parametrize` id must not depend on the process (`ids=repr` of an `object()` or of a value holding a timestamp breaks collection; `test_chat_session_durable.py` `_stable_id`), and a test must not share files, ports or global state with another test except through its own `tmp_path`
+- CI (`.github/workflows/ci.yml`, planned by `scripts/ci_plan.py`) has two lanes. **Full**: every OS × Python 3.11–3.13, in the merge queue, on manual runs (`gh workflow run ci.yml --ref <branch> [-f os=windows-latest]`) and on pull requests until the merge queue is on. **Fast**: Ubuntu + Python 3.11 on pull requests once the repo variable `CI_MERGE_QUEUE=true`. A PR that changes nothing the tests read runs no tests. `CI result` is the one check to require
 - Test classes group related tests: `TestProviderName`, `TestFeature`
 - `python/tests/guardrails/conftest.py` provides `StreamingTestModel`, which streams real
   `TextDelta`/`ThinkingDelta`/`ToolUse` items through the router — use it whenever a test

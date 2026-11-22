@@ -53,6 +53,16 @@ def db(tmp_path):
     return provider, SqliteChatSessionStore(tmp_path / "timbal.db")
 
 
+def _stable_id(value):
+    """A parametrize id that is the same in every process: pytest-xdist workers must collect identical ids,
+    and ``repr`` is not (an ``object()``'s address, an ``ApprovalResolution``'s ``decided_at``)."""
+    if isinstance(value, ApprovalResolution):
+        return f"ApprovalResolution(approved={value.approved})"
+    if type(value) is object:
+        return "object()"
+    return repr(value)
+
+
 def tool_call(name, call_id):
     return Message(role="assistant", content=[ToolUseContent(id=call_id, name=name, input={})], stop_reason="tool_use")
 
@@ -3270,7 +3280,7 @@ class TestAnswersAreStoredAsTheGateReadsThem:
             ({"type": "timbal.cancel"}, False),
             ({}, False),
         ],
-        ids=repr,
+        ids=_stable_id,
     )
     async def test_the_recovery_notice_names_a_call_only_when_the_answer_approves_it(self, db, answer, approves):
         """``in_flight.approved``: the gated calls a dead resume had been told to run. A typed approval is
@@ -3308,7 +3318,7 @@ class TestASnapshotThatCannotBeWritten:
     @pytest.mark.parametrize(
         "value",
         [float("nan"), float("inf"), float("-inf"), object(), {1, 2}, b"raw", (1, 2), "ok", 1.5, None, {"a": [1]}],
-        ids=repr,
+        ids=_stable_id,
     )
     def test_the_check_and_the_write_use_one_encoder(self, value):
         """``storable`` is what the session asks before it keeps a value; ``to_json`` is what writes it. They
