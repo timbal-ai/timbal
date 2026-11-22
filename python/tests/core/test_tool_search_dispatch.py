@@ -4,7 +4,14 @@ import json
 
 import pytest
 from timbal import Tool
-from timbal.core.agent import CALL_TOOL_NAME, SEARCH_TOOLS_NAME
+from timbal.core.agent import (
+    _CALL_TOOL_FALLBACKS,
+    _SEARCH_TOOLS_FALLBACKS,
+    CALL_TOOL_NAME,
+    SEARCH_TOOLS_NAME,
+    _unused_name,
+    is_call_tool_name,
+)
 from timbal.core.test_model import TestModel
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
@@ -187,6 +194,96 @@ class TestDispatch:
         resumed = await a(prompt="pay", resume={approval.approval_id: True}).collect()
         assert resumed.status.code == "success", resumed.error
         assert charged == [5]
+
+    async def test_a_catalog_that_takes_every_dispatcher_name_still_gets_one(self):
+        ran = []
+
+        def lookup(q: str = "x") -> str:
+            ran.append(q)
+            return "found"
+
+        mine = [
+            Tool(name=name, handler=lambda: "mine") for name in ("call_tool", "call_found_tool", "call_deferred_tool")
+        ]
+        tools = [*mine, Tool(name="lookup", handler=lookup, defer_loading=True)]
+        out = await agent(TestModel(responses=["hola"]), tools, tool_search="dispatch")(prompt="hola").collect()
+        assert out.status.code == "success", out.error
+        offered = names((await tool_lists(out))[0])
+        [generated] = [name for name in offered if name not in {tool.name for tool in tools} | {SEARCH_TOOLS_NAME}]
+        assert generated not in {tool.name for tool in mine}
+        # The generated name dispatches like the usual one.
+        asked = Message(
+            role="assistant",
+            content=[ToolUseContent(id="c1", name=generated, input={"name": "lookup", "arguments": {"q": "y"}})],
+            stop_reason="tool_use",
+        )
+        context()  # a run of its own, not a turn after the greeting
+        out = await agent(TestModel(responses=[asked, "ok"]), tools, tool_search="dispatch")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        assert ran == ["y"]
+        # Under the tool's own name in the trace, as with the usual dispatcher name.
+        assert any(span.path == "agent.lookup" for span in (await trace_of(out)).values())
+
+    @pytest.mark.parametrize("mode", ["dispatch", "client"])
+    async def test_a_catalog_that_takes_every_search_name_still_gets_one(self, mode):
+        mine = [
+            Tool(name=name, handler=lambda: "mine")
+            for name in ("search_tools", "find_tools", "load_tools", "search_deferred_tools")
+        ]
+        tools = [*mine, Tool(name="lookup", handler=lambda: "found", defer_loading=True)]
+        out = await agent(TestModel(responses=["hola"]), tools, tool_search=mode)(prompt="hola").collect()
+        assert out.status.code == "success", out.error
+        offered = names((await tool_lists(out))[0])
+        assert len(offered) == len(set(offered)) and len(offered) == len(mine) + (2 if mode == "dispatch" else 1)
+
+    @pytest.mark.parametrize("mode", ["dispatch", "client"])
+    async def test_the_added_tools_keep_their_names_under_a_tool_policy(self, mode):
+        """A policy hides tools from a run, not from the conversation: their names stay taken. A dispatcher
+        named after a hidden tool would make one name two tools in one history, and a call of it kept
+        for a later run (a resume) would reach the agent's own tool."""
+        mine = [Tool(name="call_tool", handler=lambda: "mine"), Tool(name="search_tools", handler=lambda: "mine")]
+        found = Tool(name="lookup", handler=lambda: "found", defer_loading=True, read_only=True)
+        a = agent(TestModel(responses=["ok"]), [*mine, found], tool_search=mode)
+        ctx = context()
+
+        async def offered():
+            return [tool.name for tool in (await a._plan_tool_search((await a._resolve_tools(0))[0], a.model))[0]]
+
+        usual = await offered()
+        assert usual[:2] == ["call_tool", "search_tools"] and len(set(usual)) == len(usual)
+        ctx._tool_policy = "read_only"
+        assert await offered() == usual[2:]  # the agent's own two are hidden, the added ones named as before
+
+    def test_a_generated_name_is_the_lowest_free_number(self):
+        every = {CALL_TOOL_NAME, *_CALL_TOOL_FALLBACKS}
+        assert _unused_name(CALL_TOOL_NAME, _CALL_TOOL_FALLBACKS, set()) == CALL_TOOL_NAME
+        assert _unused_name(CALL_TOOL_NAME, _CALL_TOOL_FALLBACKS, {CALL_TOOL_NAME}) == _CALL_TOOL_FALLBACKS[0]
+        assert _unused_name(CALL_TOOL_NAME, _CALL_TOOL_FALLBACKS, every) == "call_tool_2"
+        assert (
+            _unused_name(CALL_TOOL_NAME, _CALL_TOOL_FALLBACKS, every | {"call_tool_2", "call_tool_3"}) == "call_tool_4"
+        )
+        taken = {SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS}
+        assert _unused_name(SEARCH_TOOLS_NAME, _SEARCH_TOOLS_FALLBACKS, taken) == "search_tools_2"
+
+    def test_every_name_the_dispatcher_can_get_is_recognized(self):
+        """What reads a stored call by name alone (a recovery notice) knows every name the picker can give."""
+        taken: set[str] = set()
+        for _ in range(8):
+            name = _unused_name(CALL_TOOL_NAME, _CALL_TOOL_FALLBACKS, taken)
+            assert is_call_tool_name(name), name
+            taken.add(name)
+        # Only those: not a number the picker never gives, in a spelling it never uses.
+        others = ("lookup", "call_tool_now", "call_tool_", "call_tools", "search_tools", None, 3)
+        never_picked = (
+            "call_tool_0",
+            "call_tool_1",
+            "call_tool_02",
+            "call_tool_\u00b2",
+            "call_tool_\u0663",
+            "call_tool_2 ",
+        )
+        for other in (*others, *never_picked):
+            assert not is_call_tool_name(other), other
 
     async def test_a_tool_named_call_tool_keeps_its_name(self):
         def call_tool(x: str) -> str:

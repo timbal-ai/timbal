@@ -159,6 +159,45 @@ SEARCH_TOOLS_NAME = "search_tools"
 _SEARCH_TOOLS_FALLBACKS = ("find_tools", "load_tools", "search_deferred_tools")
 CALL_TOOL_NAME = "call_tool"
 _CALL_TOOL_FALLBACKS = ("call_found_tool", "call_deferred_tool")
+# A catalog that has taken all of those gets a numbered one (call_tool_2, ...), see _unused_name.
+_CALL_TOOL_NUMBERED = CALL_TOOL_NAME + "_"
+_FIRST_NUMBERED = 2
+
+
+def _unused_name(base: str, fallbacks: tuple[str, ...], taken: set[str]) -> str:
+    """A name no tool of the agent has: ``base``, else the first free one of ``fallbacks``, else ``base``
+    with the lowest free number (``call_tool_2``, ``search_tools_2``, ...).
+
+    The fallbacks are a short list, and an agent's own tools can take every one of them (an MCP server
+    that ships ``call_tool`` and its variants): running out must not stop the turn before the model runs.
+    """
+    for name in (base, *fallbacks):
+        if name not in taken:
+            return name
+    number = _FIRST_NUMBERED
+    while f"{base}_{number}" in taken:
+        number += 1
+    return f"{base}_{number}"
+
+
+def is_call_tool_name(name: Any) -> bool:
+    """Whether ``name`` can be the ``call_tool`` dispatcher's: its usual name, a fallback, or a numbered one.
+
+    Exactly the names :func:`_unused_name` can give it, no wider (``call_tool_2`` and up, as it writes
+    them: not ``call_tool_1``, ``call_tool_02``). By name alone, so a first test only: an agent's own
+    tool can carry any of these names when the dispatcher has another, and whoever has the tools
+    (``Agent._dispatched``) still checks the one called is the dispatcher.
+    """
+    if not isinstance(name, str):
+        return False
+    if name == CALL_TOOL_NAME or name in _CALL_TOOL_FALLBACKS:
+        return True
+    if not name.startswith(_CALL_TOOL_NUMBERED):
+        return False
+    number = name[len(_CALL_TOOL_NUMBERED) :]
+    return number.isascii() and number.isdigit() and number[0] != "0" and int(number) >= _FIRST_NUMBERED
+
+
 # Session key: tools search_tools loaded, per agent path, in load order.
 _LOADED_TOOLS_KEY = "__loaded_tools"
 # Models with provider-side tool search: Claude 4.5 and later; OpenAI gpt-5.4 and later (Responses API).
@@ -2450,9 +2489,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         restricted = get_run_context()._tool_policy is not None
         deferred_ids = {id(tool) for tool in deferred}
         if self.tool_search == "dispatch":
-            taken = {tool.name for tool in tools}
-            search_name = next(n for n in (SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS) if n not in taken)
-            call_name = next(n for n in (CALL_TOOL_NAME, *_CALL_TOOL_FALLBACKS) if n not in taken)
+            taken = await self._taken_names(tools, restricted)
+            search_name = _unused_name(SEARCH_TOOLS_NAME, _SEARCH_TOOLS_FALLBACKS, taken)
+            call_name = _unused_name(CALL_TOOL_NAME, _CALL_TOOL_FALLBACKS, taken)
             added = [
                 self._search_tools(deferred, search_name, restricted=restricted, dispatch=call_name),
                 _CallTool.build(call_name, search_name, self._path),
@@ -2466,12 +2505,27 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         offered = [tool for tool in tools if id(tool) not in deferred_ids] + loaded
         dispatch = list(tools)
         if hidden:
-            taken = {tool.name for tool in tools}
-            name = next(n for n in (SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS) if n not in taken)
+            taken = await self._taken_names(tools, restricted)
+            name = _unused_name(SEARCH_TOOLS_NAME, _SEARCH_TOOLS_FALLBACKS, taken)
             search = self._search_tools(hidden, name, restricted=restricted)
             offered.append(search)
             dispatch.append(search)
         return offered, dispatch, None, {tool.name for tool in hidden}
+
+    async def _taken_names(self, tools: list[Tool], restricted: bool) -> set[str]:
+        """The names a tool this step adds (``search_tools``, ``call_tool``) must not take.
+
+        Every tool of the agent, those a tool policy hides from this run included (``restricted``): the
+        policy narrows what a run may call, not what the names mean. Picked among the visible tools only,
+        the dispatcher of a read-only wake took the name of the agent's own hidden ``call_tool``: one name,
+        two tools in one conversation, and a call of it kept for a run without the policy (a resume) would
+        reach the agent's tool with the dispatcher's input.
+        """
+        taken = {tool.name for tool in tools}
+        if restricted:
+            everything, _ = await self._resolve_tools(0, None)
+            taken.update(tool.name for tool in everything)
+        return taken
 
     async def _load_tools(self, names: list[str], span: Any, query: str | None = None) -> None:
         """Keep tools search_tools found offered for the rest of the session."""
@@ -2732,7 +2786,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     @staticmethod
     def _dispatched(tools: list[Tool], tool_call: ToolUseContent) -> ToolUseContent:
         """A ``call_tool`` call as the call it stands for (same id, so its result answers it); else unchanged."""
-        if tool_call.name != CALL_TOOL_NAME and tool_call.name not in _CALL_TOOL_FALLBACKS:
+        if not is_call_tool_name(tool_call.name):
             return tool_call
         dispatcher = next((t for t in tools if isinstance(t, _CallTool) and t.name == tool_call.name), None)
         if dispatcher is None or not isinstance(tool_call.input, dict):

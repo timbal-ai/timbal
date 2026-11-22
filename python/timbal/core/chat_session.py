@@ -41,7 +41,7 @@ from ..types.approval import ApprovalResolution, Cancel
 from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.message import RUNTIME_SOURCE, Message
-from .session_scheduler import Followup, SessionScheduler, is_parked, user_batch
+from .session_scheduler import Followup, SessionScheduler, is_parked, pending_user_batch
 from .tool_policy import ReadOnlyWithin, read_only_within, restore_tool_policy
 from .tool_policy import ToolPaths as _ToolPaths  # noqa: F401 — re-exported for callers and tests
 from .tool_policy import allowed_tool_paths as _allowed_tool_paths  # noqa: F401
@@ -439,9 +439,8 @@ def _tool_calls(context: RunContext, dispatched: list[dict[str, Any]] | tuple = 
     (saved before that step, or not since) is unconfirmed too: it may have run. A ``call_tool`` request
     (``tool_search="dispatch"``) ran as the tool it names, under that tool's span: the two are one call.
     """
-    from .agent import _CALL_TOOL_FALLBACKS, CALL_TOOL_NAME
+    from .agent import is_call_tool_name
 
-    dispatchers = (CALL_TOOL_NAME, *_CALL_TOOL_FALLBACKS)
     root = context.root_span()
     llm_path = f"{root.path}.llm"
     children = [span for span in context._trace.as_records() if span.parent_call_id == root.call_id]
@@ -475,7 +474,7 @@ def _tool_calls(context: RunContext, dispatched: list[dict[str, Any]] | tuple = 
         span = by_request.get(request_id)
         if span is None:
             ran = name
-            if name in dispatchers and not spans.get(name) and isinstance(args, dict):
+            if is_call_tool_name(name) and not spans.get(name) and isinstance(args, dict):
                 target = args.get("name")
                 if isinstance(target, str) and spans.get(target):
                     ran = target
@@ -1689,9 +1688,8 @@ class ChatSession:
             if self._scheduler.session_parked:
                 await self._scheduler._wait_change()
                 continue
-            collected = [
-                event.posted_at for event in user_batch(self._store.pending_events()) if event.mode == "collect"
-            ]
+            # The batch the turn will take (the same function): not a message that is not its to take.
+            collected = [event.posted_at for event in pending_user_batch(self._store) if event.mode == "collect"]
             if not collected:
                 return
             delay = max(collected) + self.collect_window - time.time()

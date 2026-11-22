@@ -145,6 +145,18 @@ def user_batch(events: list[SessionEvent]) -> list[SessionEvent]:
     return _one_sender(batch)
 
 
+def pending_user_batch(store: BackgroundTaskStore) -> list[SessionEvent]:
+    """The user messages a turn started now would begin with: :func:`user_batch` of what is there to take.
+
+    Not what a session closed to be restored keeps (``SessionEvent.kept_for``): that waits for its
+    session, and no turn takes it. One function for the turn (:func:`take_followup`) and for whoever
+    decides when it may start (a chat's collect window): a kept message at the front of the store
+    would otherwise settle the wait for a batch it is not part of, and the collected messages behind
+    it would go at once, each fragment its own turn.
+    """
+    return user_batch([event for event in store.pending_events() if event.kept_for is None])
+
+
 def _one_sender(batch: list[SessionEvent]) -> list[SessionEvent]:
     """The leading messages of ``batch`` posted the same way as its first: by a person, or by a call's code."""
     by_code = batch[0].sent_by is not None
@@ -168,8 +180,7 @@ def take_followup(
     channel's to take (a call leaves typed messages to the chat it borrowed
     the session from, which answers nothing else meanwhile).
     """
-    # Not what a session closed to be restored keeps (SessionEvent.kept_for): it comes back for those.
-    batch = user_batch([event for event in store.pending_events() if event.kept_for is None]) if users else []
+    batch = pending_user_batch(store) if users else []
     if batch:
         taken = {id(event) for event in batch}
         events = store.drain_events(settle=False, where=lambda event: id(event) in taken)
