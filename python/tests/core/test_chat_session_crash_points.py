@@ -649,14 +649,24 @@ _RUNS = iter(range(10**9))
 
 
 async def stalled(fault, session) -> None:
-    """After a ``"stall"`` fault: back from it, the session finds its lease gone and stops, for another process
-    to restore (it may hold the session by now)."""
-    if not fault.stalled or fault.gone.is_set():
+    """A session that lost its lease stopped without writing, for another process to restore: what a server
+    does with it (it restores a handed-off session on its next request). After a ``"stall"`` fault it must
+    have; it also happens unplanned (a CI runner that stops the test process for minutes, a save sent before
+    a stall that lands after the next copy has loaded the row). Checked as if final, such a session would
+    "lose" messages the store holds."""
+    if fault.gone.is_set():
         return
-    await asyncio.wait_for(session.wait_closed(), 10)
-    assert session.lost, f"a session stalled past its lease went on: {session.state()}"
-    fault.gone.set()
-    fault.closing = asyncio.ensure_future(session.wait_closed())
+    if fault.stalled:
+        await asyncio.wait_for(session.wait_closed(), 10)
+        assert session.lost, f"a session stalled past its lease went on: {session.state()}"
+    if not session.closed:
+        # Its writes landed, or one of them found the row moved on (the session is lost then).
+        with contextlib.suppress(Exception):
+            await session.flush()
+    if session.lost:
+        await asyncio.wait_for(session.wait_closed(), 10)
+        fault.gone.set()
+        fault.closing = asyncio.ensure_future(session.wait_closed())
 
 
 async def run_once(tmp_path, scenario, durability, *faults):
@@ -676,6 +686,7 @@ async def run_once(tmp_path, scenario, durability, *faults):
     await stalled(fault, session)
     writes = [fault.writes]
     while fault.gone.is_set():
+        assert len(writes) <= 8, f"{scenario}: restored {len(writes)} times and never settled"
         if fault.dead:
             await bury(session)
         else:
@@ -851,6 +862,29 @@ async def test_a_stall_past_the_lease_at_any_write_loses_and_repeats_nothing(
     Clock.install(monkeypatch)
     failures, points = await sweep(tmp_path, scenario, durability, "stall")
     assert not failures, f"{len(failures)} of {points} stalls:\n" + "\n".join(failures)
+
+
+@pytest.mark.parametrize("scenario", ["plain", "collected", "queued", "approved", "questioned", "woken"])
+async def test_a_stall_while_restoring_after_a_shutdown_loses_and_repeats_nothing(tmp_path, scenario, monkeypatch):
+    """The process shuts down at a write, and the one restoring the session stands still past its lease at one
+    of its first writes (CI: a shutdown point of `collected` whose restore stalled 263 s, then read as having
+    lost 'work'). A save it had sent may land after the next copy loaded the row: that copy is lost too, and
+    restored again. Nothing the store holds is lost."""
+    Clock.install(monkeypatch)
+    clean = await run_once(tmp_path, scenario, "end")
+    await check(clean, f"{scenario}/no fault")
+    failures, points = [], 0
+    for first in range(clean["writes"][0] + 1):
+        for second in range(6):
+            points += 1
+            label = f"{scenario}/close at write {first + 1}, the restore stalls at its write {second + 1}"
+            try:
+                await check(
+                    await run_once(tmp_path, scenario, "end", Fault(first, "close"), Fault(second, "stall")), label
+                )
+            except (AssertionError, SessionNotStored) as error:
+                failures.append(str(error).splitlines()[0])
+    assert not failures, f"{len(failures)} of {points} points:\n" + "\n".join(failures)
 
 
 @pytest.mark.parametrize("end", ["die", "close"])
