@@ -52,6 +52,35 @@ class TestFromFqn:
 
 
 class TestHomeExpansion:
+    def test_tilde_workspace_base(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        spec = ImportSpec.from_fqn("entry.py::handler", base_path=Path("~/project"))
+        assert spec.path == tmp_path / "project" / "entry.py"
+
+    @pytest.mark.parametrize("name", ["~definitely_not_a_user_734.py", "~definitely_not_a_user_734/entry.py"])
+    def test_literal_tilde_name_in_workspace(self, tmp_path, name):
+        spec = ImportSpec.from_fqn(name + "::handler", base_path=tmp_path)
+        assert spec.path == tmp_path / name
+
+    def test_literal_tilde_name_with_dot_base(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        spec = ImportSpec.from_fqn("~draft.py::handler", base_path=Path("."))
+        assert spec.path == tmp_path / "~draft.py"
+
+    def test_dot_prefixed_home_component_is_literal(self, tmp_path):
+        spec = ImportSpec.from_fqn("./~/entry.py::handler", base_path=tmp_path)
+        assert spec.path == tmp_path / "~" / "entry.py"
+
+    @pytest.mark.parametrize("fqn,base", [("~/entry.py::handler", None), ("entry.py::handler", Path("~/project"))])
+    def test_unresolvable_home_raises_value_error(self, monkeypatch, fqn, base):
+        def unavailable_home(_path):
+            raise RuntimeError("Could not determine home directory.")
+
+        monkeypatch.setattr(Path, "expanduser", unavailable_home)
+        with pytest.raises(ValueError, match="[Hh]ome"):
+            ImportSpec.from_fqn(fqn, base_path=base)
+
     @pytest.mark.parametrize("with_base", [False, True])
     def test_home_entry_point_can_be_loaded(self, tmp_path: Path, monkeypatch, with_base):
         home = tmp_path / "home"

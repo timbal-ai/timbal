@@ -409,8 +409,11 @@ def _load_runnable(runnable_fqn: str, eval_file_path: Path) -> Runnable:
     # current working directory (so eval files in e.g. an "evals/" subdirectory can
     # reference project-root modules like "agent.py::agent").
     runnable_path_obj = Path(runnable_path)
-    if runnable_path_obj.parts and runnable_path_obj.parts[0] == "~":
-        runnable_path_obj = runnable_path_obj.expanduser()
+    if runnable_path == "~" or runnable_path.startswith(("~/", "~\\")):
+        try:
+            runnable_path_obj = runnable_path_obj.expanduser()
+        except RuntimeError as exc:
+            raise ValueError(f"Could not expand home directory in runnable {runnable_fqn!r}") from exc
     if not runnable_path_obj.is_absolute():
         candidate = (eval_file_path.parent / runnable_path_obj).resolve()
         if not candidate.exists():
@@ -419,7 +422,7 @@ def _load_runnable(runnable_fqn: str, eval_file_path: Path) -> Runnable:
                 candidate = cwd_candidate
         runnable_path_obj = candidate
     else:
-        runnable_path_obj = runnable_path_obj.expanduser().resolve()
+        runnable_path_obj = runnable_path_obj.resolve()
 
     runnable_spec = ImportSpec(
         path=runnable_path_obj,

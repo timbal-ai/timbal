@@ -7,6 +7,7 @@ import pytest
 from timbal.evals.models import EvalSummary
 from timbal.evals.runner import run_eval
 from timbal.evals.utils import (
+    _load_runnable,
     _resolve_usage_key,
     discover_config,
     discover_eval_files,
@@ -35,6 +36,73 @@ def touch(path: Path, contents: str = "") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(contents)
     return path
+
+
+@pytest.fixture
+def isolated_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    yield home
+    for name in ("review_home_entry", "review_control", "~review_literal", "review_eval_agent"):
+        sys.modules.pop(name, None)
+
+
+class TestHomeRunnableResolution:
+    @pytest.mark.usefixtures("isolated_home")
+    def test_dot_prefixed_home_component_is_literal(self, tmp_path):
+        touch(tmp_path / "~" / "review_home_entry.py", "handler = 43\n")
+        assert _load_runnable("./~/review_home_entry.py::handler", tmp_path / "eval.yaml") == 43
+
+    def test_unresolvable_home_raises_value_error(self, tmp_path, monkeypatch):
+        def unavailable_home(_path):
+            raise RuntimeError("Could not determine home directory.")
+
+        monkeypatch.setattr(Path, "expanduser", unavailable_home)
+        with pytest.raises(ValueError, match="[Hh]ome"):
+            _load_runnable("~/entry.py::handler", tmp_path / "eval.yaml")
+
+    def test_eval_home_runnable_loads_from_home(self, tmp_path, isolated_home):
+        (isolated_home / "review_home_entry.py").write_text("handler = 42\n")
+        eval_dir = tmp_path / "evals"
+        eval_dir.mkdir()
+        assert _load_runnable("~/review_home_entry.py::handler", eval_dir / "eval.yaml") == 42
+
+    @pytest.mark.parametrize("mode", ["relative", "absolute", "cwd", "literal_tilde"])
+    @pytest.mark.usefixtures("isolated_home")
+    def test_eval_existing_resolution_modes(self, tmp_path, monkeypatch, mode):
+        eval_dir = tmp_path / "evals"
+        eval_dir.mkdir()
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        name = "~review_literal.py" if mode == "literal_tilde" else "review_control.py"
+        target = (cwd if mode == "cwd" else eval_dir) / name
+        target.write_text("handler = 77\n")
+        supplied = str(target) if mode == "absolute" else name
+        assert _load_runnable(supplied + "::handler", eval_dir / "eval.yaml") == 77
+
+    def test_parse_eval_home_runnable(self, tmp_path, isolated_home):
+        module = isolated_home / "review_eval_agent.py"
+        module.write_text(
+            "from timbal import Agent\n"
+            "from timbal.core.test_model import TestModel\n"
+            'agent = Agent(name="review-agent", model=TestModel(responses=["ok"]), tools=[])\n'
+        )
+        path = tmp_path / "evals.yaml"
+        path.write_text(
+            "- name: home-runnable\n"
+            "  runnable: ~/review_eval_agent.py::agent\n"
+            "  params:\n"
+            "    prompt: hello\n"
+            "  output:\n"
+            "    not_null!: true\n"
+        )
+        result = parse_eval_file(path)
+        assert len(result) == 1
+        assert result[0].runnable.name == "review-agent"
 
 
 class TestDiscoverEvalFiles:
@@ -197,7 +265,10 @@ class TestResolveUsageKey:
         assert _resolve_usage_key(usage, "output_text_tokens") == 15
 
     def test_model_prefix_sums_snapshots(self):
-        usage = {"anthropic/claude-haiku-4-5-20251001:input_tokens": 100, "anthropic/claude-haiku-4-5-20241120:input_tokens": 50}
+        usage = {
+            "anthropic/claude-haiku-4-5-20251001:input_tokens": 100,
+            "anthropic/claude-haiku-4-5-20241120:input_tokens": 50,
+        }
         assert _resolve_usage_key(usage, "anthropic/claude-haiku-4-5:input_tokens") == 150
 
     def test_unsuffixed_metric_matches_long_context_tier(self):
