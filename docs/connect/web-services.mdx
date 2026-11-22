@@ -1,0 +1,206 @@
+---
+title: "Web services"
+description: "Reach an MCP server on your own network from Timbal, through the connector"
+---
+
+The connector can also make a web service on your network reachable from Timbal. Cursor, any MCP client or a Timbal agent calls it through Timbal, and the connector passes the requests on to the service. You don't open an inbound port, and the service's address and credential stay on the server: Timbal knows the service only by its name.
+
+<Note>
+Needs connector **0.1.35** or newer. Only MCP servers that speak streamable HTTP are supported for now. Plain web services (`"kind": "http"`) are not available yet.
+</Note>
+
+## Add a service
+
+<Steps>
+  <Step title="List the service in config.json">
+    Services go in `config.json`, under `services`. The key is the name Timbal uses for that service; the address and credential stay on the server.
+
+    | Platform | File |
+    | -------- | ---- |
+    | Windows | `C:\ProgramData\TimbalConnect\config.json` |
+    | Linux / macOS | `/etc/timbal-connect/config.json` |
+
+    On Windows and macOS the installer already created this file: add `services` and leave the other keys alone. On Linux `config.json` does not exist yet: create it with only the map. If `doctor` doesn't show the services you put there, add `TIMBAL_CONNECT_CONFIG=/etc/timbal-connect/config.json` to `connector.env`, then restart.
+
+    ```json
+    {
+      "services": {
+        "crm": {
+          "kind": "mcp",
+          "url": "http://crm.internal:8080/mcp",
+          "auth": { "mode": "header", "headers": { "Authorization": "Bearer ${CRM_TOKEN}" } }
+        },
+        "erp": {
+          "kind": "mcp",
+          "url": "https://erp.internal/mcp",
+          "auth": { "mode": "basic", "user": "${ERP_USER}", "password": "${ERP_PASSWORD}" },
+          "tls": { "ca_file": "/etc/timbal-connect/corp-ca.pem" }
+        }
+      }
+    }
+    ```
+  </Step>
+  <Step title="Restart and run doctor">
+    <Tabs>
+      <Tab title="Windows">
+        ```powershell
+        Restart-Service timbal-connect
+        & "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" doctor
+        ```
+      </Tab>
+      <Tab title="Linux">
+        ```bash
+        sudo systemctl restart timbal-connect
+        sudo bash -c 'set -a; . /etc/timbal-connect/connector.env; exec /opt/timbal-connect/current/timbal-connect doctor'
+        ```
+      </Tab>
+      <Tab title="macOS">
+        ```bash
+        sudo launchctl kickstart -k system/ai.timbal.connect
+        sudo /opt/timbal-connect/current/timbal-connect doctor
+        ```
+      </Tab>
+    </Tabs>
+
+    Each service gets its own block. It passes when the server answers an MCP handshake sent with the service's credential:
+
+    ```text
+    [service: crm]  kind=mcp
+           url: http://crm.internal:8080/mcp  auth: header (Authorization)  identity: jwt (X-Timbal-Identity is forwarded)
+      [ ok ] resolves to 10.0.4.12
+      [ ok ] MCP initialize ok (protocol 2025-06-18)
+    ```
+
+    A failing check says what to change. A 401 or 403 from a service that expects the [caller's identity](#know-who-is-calling) is only a warning, because `doctor` has no caller to send.
+  </Step>
+  <Step title="Connect a client">
+    Point Cursor, another MCP client or a Timbal agent at the service's URL: see [Connect a client](#connect-a-client).
+  </Step>
+</Steps>
+
+### Fields
+
+| Field | Required | Default | Notes |
+| ----- | -------- | ------- | ----- |
+| `kind` | Yes | | `mcp` |
+| `url` | Yes | | The service's address, `http://` or `https://`. No user, password or query string in it: use `auth` |
+| `description` | No | | A label for the service |
+| `auth` | No | `{"mode": "none"}` | How the connector signs in to the service: `none`, `header` (`"headers": {...}`) or `basic` (`"user"`, `"password"`) |
+| `identity` | No | `{"mode": "jwt"}` | `jwt` tells the service who is calling (see [below](#know-who-is-calling)); `none` doesn't |
+| `tls` | No | The server's trust store | `ca_file` for a private CA; `client_cert` and `client_key` for mutual TLS |
+| `allow_link_local` | No | `false` | Allow a link-local or cloud-metadata address (`169.254.x.x` and similar), refused by default |
+| `timeout_secs` | No | 60 | Seconds to wait for the service to answer. A streamed answer, once started, is not cut |
+| `max_request_mb` | No | 10 | Largest request body, up to 1024 |
+
+### Keep the secret out of the file
+
+`${NAME}` in `url` and in `auth` values is replaced with the environment variable of that name when the service starts. A variable that isn't set stops the connector from starting, with its name in the log, so it can never send an empty credential.
+
+- **Linux:** add the variable to `/etc/timbal-connect/connector.env` (`CRM_TOKEN=...`) and restart. The `doctor` command above loads that file too.
+- **Windows and macOS:** you can write the value directly in `config.json` instead. Protect the file like a credential.
+
+### Rules
+
+- The name (`crm` above) is lowercase letters, digits and `-`, up to 63 characters. It is the `{service}` in the URL clients use.
+- The connector reaches the service directly, not through its [proxy](/connect/network-requirements#proxies).
+- Services are set on the server only. A [configuration pushed from Timbal](/connect/operate#change-the-configuration-from-timbal) doesn't carry them.
+- Connectors older than 0.1.35 refuse to start with a `services` key. Don't add it on a server that may go back to an older version.
+- An invalid entry stops the connector from starting, and the log names the service and the field.
+
+With at least one service configured, the connector reports the `gateway:v1` capability, and its log shows `gateway: serving on-prem services over the tunnel` with the service names.
+
+## Connect a client
+
+Each service has its own MCP URL:
+
+```text
+https://api.timbal.ai/orgs/{org_id}/connectors/{connector_id}/services/{service}/mcp
+```
+
+<Tabs>
+  <Tab title="Cursor">
+    Add this to `~/.cursor/mcp.json`, or to `.cursor/mcp.json` in a project:
+
+    ```json
+    {
+      "mcpServers": {
+        "crm-on-prem": {
+          "url": "https://api.timbal.ai/orgs/<org_id>/connectors/<connector_id>/services/crm/mcp",
+          "headers": { "Authorization": "Bearer <api_key>" }
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Timbal agent">
+    ```python
+    import os
+
+    from timbal import Agent
+    from timbal.core import MCPServer
+
+    crm = MCPServer(
+        name="crm",
+        transport="http",
+        url="https://api.timbal.ai/orgs/<org_id>/connectors/<connector_id>/services/crm/mcp",
+        headers={"Authorization": f"Bearer {os.environ['TIMBAL_API_KEY']}"},
+    )
+
+    agent = Agent(
+        name="crm_assistant",
+        model="anthropic/claude-sonnet-4-6",
+        max_tokens=2048,
+        tools=[crm],
+    )
+    ```
+  </Tab>
+</Tabs>
+
+The tools, resources and prompts are the service's own: Timbal passes the MCP traffic through, streaming included.
+
+- **Who can call:** a person with the **ConnectorsManage** role in the organization. Service accounts can't call it yet.
+- **What the service receives:** the MCP requests with the credential from its `auth` entry. The caller's Timbal API key never reaches it.
+- **Limits:** 600 requests a minute per service and 1,200 per connector, for all callers together. Request bodies up to `max_request_mb`, uncompressed.
+- Every request is recorded in the organization's audit log.
+
+<Warning>
+The API key in `mcp.json` is an **organization-wide** key. Protect the file like a credential and never commit it to version control.
+</Warning>
+
+## Know who is calling
+
+With `identity` set to `jwt` (the default), every request carries an `X-Timbal-Identity` header: a token signed by Timbal that says who is calling. A service can use it to apply its own permissions per user, or ignore it.
+
+It contains `sub` (`user:{id}`), `org_id`, `email` and `aud` (`urn:timbal:connector:{connector_id}:service:{service}`), and expires 60 seconds after it is signed. To trust it, the service checks:
+
+- the signature, with the keys at `https://api.timbal.ai/.well-known/jwks.json` (ES256);
+- `iss` is `https://api.timbal.ai`;
+- `aud` is its own;
+- `exp` has not passed, allowing a few seconds for clock differences.
+
+The token is not a Timbal credential: the Timbal API refuses it.
+
+## Errors
+
+| Answer | Cause | What to do |
+| ------ | ----- | ---------- |
+| `422 gateway_unsupported` | The connector has no `services`, or is older than 0.1.35 | Add a service and restart, or [upgrade](/connect/operate#upgrade) |
+| `503` "connector has no live tunnel" | The connector is offline | Check the service and the [network](/connect/network-requirements) |
+| `404 unknown_service` | The connector has no service with that name | Check the name in `config.json` and restart |
+| `502 upstream_unreachable` | The service is down, or its TLS failed | Run `doctor` on the server |
+| `502 upstream_unauthorized` | The service refused the credential in `auth` | Check `auth` and its environment variables |
+| `502 upstream_redirect` | The service redirects to another address | Set `url` to that address (often a trailing `/` added or removed) |
+| `504 upstream_timeout` | The service didn't answer within `timeout_secs` | Check the service, or raise `timeout_secs` |
+| `403 egress_refused` | The address is link-local or cloud metadata | Use the service's real address |
+| `429` | Rate limit reached | Wait for the `Retry-After` time |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configure connections" icon="database" href="/connect/connections">
+    Databases and file shares on the same connector.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/connect/troubleshooting">
+    When `doctor` or the service log names a failure.
+  </Card>
+</CardGroup>

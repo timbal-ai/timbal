@@ -712,6 +712,7 @@
             "pages": [
               "connect/connections",
               "connect/filesystems",
+              "connect/web-services",
               "connect/operate",
               "connect/troubleshooting"
             ]
