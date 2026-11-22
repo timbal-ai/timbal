@@ -13,6 +13,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Fix lint**: `uv run ruff check --fix`
 - **Line length**: 120 chars (configured in `pyproject.toml`)
 
+### Releases
+- **Release branches**: `main` is developed on; `release/<major>.<minor>` (e.g. `release/2.8`) carries patch releases. Changes land on `main` first and reach a release branch only as backports: `scripts/backport.sh <pr> [<line>]` cherry-picks a merged PR and opens a PR into `release/<line>`. Never commit to a release branch directly. Tag, then `scripts/release.sh <version>` (GitHub release + CLI binaries, then PyPI via `scripts/publish-pypi.sh`). Versions come from tags (`release-branch-semver`: `main` builds as the next minor, a release branch as its next patch). Full flow: `RELEASING.md`.
+
 ### Benchmarks
 - **LangGraph benchmarks**: `uv pip install -r benchmarks/langchain/requirements.txt`, then `uv run --no-sync python benchmarks/langchain/bench_agent.py` (or the other standalone `bench_*.py` scripts). JavaScript dependencies: `npm ci --prefix benchmarks/langgraph_js`.
 - **Quick mode**: pass `--quick`; full mode is the default. `bench_revision.py` emits repeated-comparison samples as JSON.
