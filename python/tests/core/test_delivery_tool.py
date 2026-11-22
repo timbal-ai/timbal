@@ -59,6 +59,13 @@ def llm_calls() -> list[tuple[str | None, list[str]]]:
     ]
 
 
+def llm_inputs(path: str = "bot.llm") -> list[dict]:
+    """The input of each model call at ``path`` in the run that just ended: what the call's inputs became."""
+    from timbal.state import get_run_context
+
+    return [span.input for span in get_run_context()._trace.values() if span.path == path]
+
+
 def results(out) -> list[str]:
     """The text of every tool result in the run's memory, in order."""
     from timbal.types.content import ToolResultContent
@@ -205,10 +212,31 @@ def memory_of(out):
     return [Message.validate(m) for m in get_run_context()._trace[out.call_id].memory]
 
 
+def sends_and_text(memory) -> tuple[list[str], list[str]]:
+    """What a history holds of the agent's own words: the messages it sent (the calls, by their text) and
+    its plain text."""
+    from timbal.types.content import TextContent
+
+    blocks = [c for m in memory if m.role == "assistant" for c in m.content]
+    sends = [c.input["text"] for c in blocks if isinstance(c, ToolUseContent) and c.name == SEND_MESSAGE_NAME]
+    return sends, [c.text for c in blocks if isinstance(c, TextContent)]
+
+
+def pairs(memory) -> tuple[set[str], set[str]]:
+    """The ids of the tool calls and of the tool results in a history: providers want them to match."""
+    from timbal.types.content import ToolResultContent
+
+    blocks = [c for m in memory for c in m.content]
+    uses = {c.id for c in blocks if isinstance(c, ToolUseContent)}
+    return uses, {c.id for c in blocks if isinstance(c, ToolResultContent)}
+
+
 class TestCompaction:
-    async def test_compacting_tool_results_keeps_what_the_user_was_told_as_text(self):
+    """What the agent told the user is the conversation: ``compact_tool_results`` keeps those calls, as calls."""
+
+    async def test_compacting_tool_results_keeps_what_the_user_was_told(self):
         from timbal.core.memory_compaction import compact_tool_results
-        from timbal.types.content import TextContent, ToolResultContent
+        from timbal.types.content import ToolResultContent
 
         fresh()
         rail = guardrail(lambda text: text.replace("4111", "[card]"), stages=["model_output"], action="redact")
@@ -223,18 +251,18 @@ class TestCompaction:
         results = [c for m in memory if m.role == "tool" for c in m.content if isinstance(c, ToolResultContent)]
         assert [c.delivered for c in results] == [None, "Card [card] charged.", "Done."]  # what the user saw
 
-        for compact in (compact_tool_results(), compact_tool_results(replacement="[{tool_name} output removed]")):
+        for compact, work_left in (
+            (compact_tool_results(), False),
+            (compact_tool_results(replacement="[{tool_name} output removed]"), True),
+        ):
             compacted = compact(memory)
-            assistant = [
-                c.text for m in compacted if m.role == "assistant" for c in m.content if isinstance(c, TextContent)
-            ]
-            assert assistant == ["Card [card] charged.", "Done."]
-            assert not any(
-                isinstance(c, ToolUseContent) and c.name == SEND_MESSAGE_NAME for m in compacted for c in m.content
-            )
-            ids = {c.id for m in compacted for c in m.content if isinstance(c, ToolResultContent | ToolUseContent)}
-            assert all(not c.delivered for m in compacted for c in m.content if isinstance(c, ToolResultContent))
-            assert ids <= {"c0-work"}  # only the real tool's pair may remain (as a placeholder)
+            sends, plain = sends_and_text(compacted)
+            assert sends == ["Card 4111 charged.", "Done."] and plain == []  # still calls, in order
+            kept = [c for m in compacted if m.role == "tool" for c in m.content if isinstance(c, ToolResultContent)]
+            # Their results too, which say what went out after the guardrail.
+            assert [c.delivered for c in kept if c.delivered] == ["Card [card] charged.", "Done."]
+            uses, answered = pairs(compacted)
+            assert uses == answered and ("c0-work" in uses) is work_left  # the real tool's pair is compacted
 
     async def test_a_failed_send_or_an_ordinary_send_message_tool_is_compacted_like_any_tool(self):
         from timbal.core.memory_compaction import compact_tool_results
@@ -250,11 +278,116 @@ class TestCompaction:
         assert all(m.role != "tool" for m in compact_tool_results()(memory))
 
         fresh()
-        # An empty message fails.
-        model = TestModel(responses=[calls(send("   ")), calls(send("fine", True)), "must not be requested"])
+        # An empty message fails. (Its own id, as a provider gives every call.)
+        failed = Message(
+            role="assistant",
+            content=[ToolUseContent(id="failed", name=SEND_MESSAGE_NAME, input={"text": "   "})],
+            stop_reason="tool_use",
+        )
+        model = TestModel(responses=[failed, calls(send("fine", True)), "must not be requested"])
         out, _ = await run(Agent(name="bot", model=model, delivery="tool"))
-        delivered = [c.delivered for m in memory_of(out) for c in m.content if isinstance(c, ToolResultContent)]
+        memory = memory_of(out)
+        delivered = [c.delivered for m in memory for c in m.content if isinstance(c, ToolResultContent)]
         assert delivered == [None, "fine"]
+        assert sends_and_text(compact_tool_results()(memory))[0] == ["fine"]  # the failed one goes
+
+    async def test_a_draft_is_never_turned_into_what_was_said(self):
+        """The model's own text is a draft the user never read: next to a message in the same step, or in
+        a message of its own. Whatever is compacted, it must stay told apart from what was sent."""
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.types.content import TextContent
+
+        fresh()
+        first = Message(
+            role="assistant",
+            content=[
+                TextContent(text="private: the user sounds annoyed"),
+                ToolUseContent(id="c0", name=SEND_MESSAGE_NAME, input={"text": "Here you go."}),
+                ToolUseContent(id="c1", name="work", input={}),
+            ],
+            stop_reason="tool_use",
+        )
+        model = TestModel(responses=[first, calls(send("One more thing.")), "note to self: follow up tomorrow"])
+        agent = Agent(name="bot", model=model, tools=[Tool(name="work", handler=work)], delivery="tool")
+        out, messages = await run(agent)
+        received = [m["text"] for m in messages]
+        assert received == ["Here you go.", "One more thing."]
+        for compact in (
+            compact_tool_results(),
+            compact_tool_results(replacement="[{tool_name} output removed]"),
+            compact_tool_results(keep_last_n=1),
+        ):
+            compacted = compact(memory_of(out))
+            sends, plain = sends_and_text(compacted)
+            assert sends == received  # what was said: the calls
+            assert plain == ["private: the user sounds annoyed", "note to self: follow up tomorrow"]  # what was not
+            uses, answered = pairs(compacted)
+            assert uses == answered
+
+    async def test_what_was_said_survives_passes_and_folds_inside_a_turn(self, monkeypatch):
+        """A pass inside a turn can leave the history ending on the assistant's side (a draft whose call was
+        dropped), and that message is folded into the next step's. A later pass over the folded message
+        must lose nothing the user was told, and must not make a draft of it either."""
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.types.content import TextContent, ToolResultContent
+
+        # A small window: each fetched payload crosses the ratio, so the turn compacts after each one.
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 1_000)
+
+        def fetch(n: int) -> str:
+            return f"payload-{n}: " + "x" * 4_000
+
+        def step(number: int, *blocks) -> Message:
+            # Every call with an id of its own, as a provider gives them.
+            content = [
+                TextContent(text=block)
+                if isinstance(block, str)
+                else ToolUseContent(id=f"s{number}-{i}", name=block[0], input=block[1])
+                for i, block in enumerate(blocks)
+            ]
+            return Message(role="assistant", content=content, stop_reason="tool_use")
+
+        steps = [
+            step(1, send("Looking into it.")),
+            step(2, "draft: fetch the first page", ("fetch", {"n": 1})),
+            step(3, "draft: tell them, fetch more", send("Found it, fixing."), ("fetch", {"n": 2})),
+            step(4, ("fetch", {"n": 3})),
+            step(5, "draft: one more page", ("fetch", {"n": 4})),
+            step(6, send("All done.", end_turn=True)),
+        ]
+        asked = []
+
+        def handler(_messages):
+            asked.append(1)
+            return steps[len(asked) - 1] if len(asked) <= len(steps) else "must not be requested"
+
+        fresh()
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="fetch", handler=fetch)],
+            delivery="tool",
+            memory_compaction=compact_tool_results(),
+            memory_compaction_ratio=0.75,
+        )
+        out, messages = await run(agent)
+        assert out.status.code == "success", out.error
+        received = [m["text"] for m in messages]
+        assert received == ["Looking into it.", "Found it, fixing.", "All done."]
+        assert out.metadata["compaction"]["passes"] >= 2
+        memory = memory_of(out)
+        # A fold happened: no step wrote two texts, so a message holding two is two steps' messages in one.
+        texts_per_message = [
+            len([c for c in m.content if isinstance(c, TextContent)]) for m in memory if m.role == "assistant"
+        ]
+        assert max(texts_per_message) >= 2, texts_per_message
+        sends, plain = sends_and_text(memory)
+        assert sends == received  # every one of them, once, in order, still a call
+        assert all(text.startswith("draft:") for text in plain)  # and nothing said became a draft
+        blocks = [c for m in memory for c in m.content]
+        uses = sorted(c.id for c in blocks if isinstance(c, ToolUseContent))
+        answered = sorted(c.id for c in blocks if isinstance(c, ToolResultContent))
+        assert uses == answered  # as lists: each call has its one result
 
 
 class TestTheToolsName:
@@ -687,6 +820,49 @@ class TestPerCall:
         assert out.output == Answer(answer="x") and messages == []
         assert [tools for _, tools in llm_calls()] == [[]]  # no tool it could call and never see run
         assert "send_message" not in (llm_calls()[0][0] or "")
+
+    async def test_any_other_value_goes_where_the_other_inputs_go(self):
+        """Only ``"text"`` is the agent's to take. An application's own ``delivery`` input reaches the model
+        call's input like its other inputs, as it does for an agent that does not deliver by tool."""
+        for value in ("courier", "tool", "TEXT", 7, {"slot": "am"}):
+            fresh()
+            agent = Agent(name="bot", model=TestModel(responses=["Plain answer."]), delivery="tool")
+            out, messages = await run(agent, delivery=value, user="ada")
+            assert out.status.code == "success", out.error
+            (llm_input,) = llm_inputs()
+            assert llm_input["delivery"] == value and llm_input["user"] == "ada"
+            assert [m["text"] for m in messages] == ["Plain answer."]  # and it is not an override either
+
+        fresh()
+        agent = Agent(name="bot", model=TestModel(responses=["Plain answer."]), delivery="tool")
+        out, messages = await run(agent, delivery="text", user="ada")
+        (llm_input,) = llm_inputs()
+        assert "delivery" not in llm_input and llm_input["user"] == "ada"  # the override is the agent's
+        assert messages == []
+
+    async def test_an_agent_with_nothing_to_override_keeps_an_input_of_that_name(self):
+        """A subagent and an agent with an output model answer in text whatever is passed: for them every
+        value, ``"text"`` too, is the application's, as it is for an agent not set to deliver by tool."""
+        from pydantic import BaseModel
+
+        for value in ("courier", "text"):
+            fresh()
+            helper = Agent(name="helper", model=TestModel(responses=["inner answer"]), delivery="tool")
+            model = TestModel(responses=[calls(("helper", {"prompt": "x", "delivery": value})), "done"])
+            out, _ = await run(Agent(name="bot", model=model, tools=[helper]))
+            assert out.status.code == "success", out.error
+            (llm_input,) = llm_inputs("bot.helper.llm")
+            assert llm_input["delivery"] == value
+
+        class Answer(BaseModel):
+            answer: str
+
+        fresh()
+        model = TestModel(responses=['{"answer": "x"}'])
+        out, _ = await run(Agent(name="bot", model=model, output_model=Answer, delivery="tool"), delivery="text")
+        assert out.output == Answer(answer="x")
+        (llm_input,) = llm_inputs()
+        assert llm_input["delivery"] == "text"
 
 
 class TestWithChatSession:

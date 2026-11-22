@@ -440,7 +440,7 @@ async for event in agent(prompt="Where is my order?"):
 - **Denial limits.** A message sent does not reset `max_consecutive_denials` or count in `max_denials_window`: telling the user "trying again" is not a call that went through.
 - **Name.** The tool is called `send_message`. If one of the agent's tools has that name, including a tool from an MCP server, it is `send_to_user`, then `reply_to_user`. A [tool policy](/agents/tools) never hides it.
 
-`delivery` only applies to the agent the user talks to. An agent used as a tool answers with its text. Pass `delivery="text"` on a call to get the plain reply from an agent configured with `"tool"`. A voice call does this, because it reads the reply aloud as it streams. On any other agent, an input named `delivery` is passed through like any [custom input](#passing-input-parameters).
+`delivery` only applies to the agent the user talks to. An agent used as a tool answers with its text. Pass `delivery="text"` on a call to get the plain reply from an agent configured with `"tool"`. A voice call does this, because it reads the reply aloud as it streams. Only `"text"` is read this way. Any other value, and any value passed to an agent that is not set to `"tool"`, is passed through like any [custom input](#passing-input-parameters).
 
 ```python
 result = await agent(prompt="Where is my order?", delivery="text").collect()

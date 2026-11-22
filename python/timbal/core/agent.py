@@ -3534,18 +3534,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         system_prompt = kwargs.pop("system_prompt", None)
         if not system_prompt:
             system_prompt = await self._resolve_system_prompt()
-        delivering = False
-        if self.delivery == "tool":
-            # Not a subagent (it answers with text), and not with an output model (the turn ends on the
-            # model's first answer, before any tool call of it runs). A caller that cannot show ``message``
-            # events asks for text with ``delivery="text"`` (a voice call reads the answer aloud). Only
-            # that way round, and only here: an input of that name passed to any other agent stays what it
-            # was, the application's own.
-            delivering = (
-                kwargs.pop("delivery", None) != "text"
-                and current_span.parent_call_id is None
-                and self.output_model is None
-            )
+        # Not a subagent (it answers with text), and not with an output model (the turn ends on the
+        # model's first answer, before any tool call of it runs).
+        delivering = self.delivery == "tool" and current_span.parent_call_id is None and self.output_model is None
+        if delivering:
+            asked = kwargs.get("delivery")
+            if isinstance(asked, str) and asked == "text":
+                # A caller that cannot show ``message`` events asks for the answer as text (a voice call
+                # reads it aloud). Taken out of the call's inputs here, where it overrides something, and
+                # nowhere else: any other value, and any value passed to an agent that would not deliver
+                # by tool anyway, is an input of the application's own and goes on with the rest of them.
+                del kwargs["delivery"]
+                delivering = False
 
         await self.resolve_memory()
         # Session BG caps (concurrent / depth) before tools can spawn this turn.
