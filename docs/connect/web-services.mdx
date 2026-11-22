@@ -161,7 +161,7 @@ The tools, resources and prompts are the service's own: Timbal passes the MCP tr
 - **Who can call:** a person with the **ConnectorsManage** role in the organization. Service accounts can't call it yet.
 - **What the service receives:** the MCP requests with the credential from its `auth` entry. The caller's Timbal API key never reaches it.
 - **Limits:** 600 requests a minute per service and 1,200 per connector, for all callers together. Request bodies up to `max_request_mb`, uncompressed.
-- Every request is recorded in the organization's audit log.
+- Every request is recorded in the audit log.
 
 <Warning>
 The API key in `mcp.json` is an **organization-wide** key. Protect the file like a credential and never commit it to version control.
