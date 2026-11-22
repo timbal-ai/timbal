@@ -2,7 +2,7 @@ name: Perf gate
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, "release/**"]  # release/** = backport PRs (RELEASING.md)
     paths:
       - "python/timbal/**"
       - "benchmarks/instructions/**"
