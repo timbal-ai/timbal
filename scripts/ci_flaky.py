@@ -2,8 +2,8 @@
 """The tests that passed only on retry in a pytest log (pytest-rerunfailures), as a Markdown list.
 
 Used by the `Run tests` step of `.github/workflows/ci.yml`: prints nothing when every test passed on its first
-try, else a heading and one line per flaky test, for the job summary. A test that also failed its retry is
-a failure, not a flake, and is left out (the job fails on it anyway).
+try, else a heading and one line per flaky test, for the job summary. A test that also failed its retry (or
+errored in setup/teardown again) is a failure, not a flake, and is left out (the job fails on it anyway).
 
 Reads both report formats: `[gw0] [ 45%] RERUN <id>` (pytest-xdist) and `<id> RERUN [ 45%]` (one process).
 """
@@ -16,7 +16,8 @@ import sys
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TEST_ID = r"(python/tests/\S+::\S+)"
 RERUN = re.compile(rf"RERUN {TEST_ID}|{TEST_ID} RERUN\b")
-FAILED = re.compile(rf"^(?:\[gw\d+\] \[\s*\d+%\] )?FAILED {TEST_ID}|{TEST_ID} FAILED\b")
+# FAILED (the test) or ERROR (its setup or teardown): either way it did not pass its retry.
+FAILED = re.compile(rf"^(?:\[gw\d+\] \[\s*\d+%\] )?(?:FAILED|ERROR) {TEST_ID}|{TEST_ID} (?:FAILED|ERROR)\b")
 
 
 def flaky(log: str) -> list[str]:
