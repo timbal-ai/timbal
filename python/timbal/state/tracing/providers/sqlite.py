@@ -37,8 +37,9 @@ class _Database:
         # Which file this is a connection to: the path can come to name another one (see alive()).
         self._file = self._file_at_path()
         # Per run: which spans are finished and committed to this file (not rewritten until the root ends),
-        # and the order spans were first seen. Kept per connection: a file recreated after being deleted
-        # holds none of them. Bounded: a run whose process died never ends.
+        # the order spans were first seen, and how many snapshots its saves took and which is the newest
+        # committed. Kept per connection: a file recreated after being deleted holds none of them. Bounded:
+        # a run whose process died never ends.
         self.runs: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     def _file_at_path(self) -> tuple[int, int] | None:
@@ -59,7 +60,7 @@ class _Database:
     def run_state(self, run_id: str) -> dict[str, Any]:
         state = self.runs.get(run_id)
         if state is None:
-            state = self.runs[run_id] = {"stored": set(), "seq": {}}
+            state = self.runs[run_id] = {"stored": set(), "seq": {}, "snapshots": 0, "committed": 0}
             while len(self.runs) > _RUN_STATE_MAX:
                 self.runs.popitem(last=False)
         else:
@@ -324,6 +325,10 @@ class SqliteTracingProvider(TracingProvider):
         ended = root is not None and root.t1 is not None
 
         state = db.run_state(run_id)
+        # Snapshots are taken in order, here on the event loop. Commits are not: each write is on a worker
+        # thread of its own, whichever takes the connection first goes first, and the write of a save whose
+        # caller was cancelled still happens. The number tells an older snapshot from a newer one then.
+        snapshot = state["snapshots"] = state["snapshots"] + 1
         order: dict[str, int] = state["seq"]
         rows = []
         finished = []
@@ -340,18 +345,26 @@ class SqliteTracingProvider(TracingProvider):
         blob = "[" + ",".join(row[3] for row in rows) + "]" if ended else ""
 
         def _write() -> None:
-            with db.lock, db.conn:  # one transaction: committed whole, or rolled back on any error
-                db.conn.execute(
-                    """
-                    INSERT INTO runs (run_id, parent_id, spans, stored_at) VALUES (?, ?, ?, ?)
-                    ON CONFLICT (run_id) DO UPDATE SET parent_id = excluded.parent_id, spans = excluded.spans,
-                        stored_at = excluded.stored_at
-                    """,
-                    (run_id, parent_id, blob, stored_at),
-                )
-                db.conn.executemany(
-                    "INSERT OR REPLACE INTO spans (run_id, call_id, seq, span) VALUES (?, ?, ?, ?)", rows
-                )
+            with db.lock:
+                if state["committed"] > snapshot:
+                    # A newer snapshot of this run is stored. It holds everything this one does (each span
+                    # as it was then or later; a span this one has and that one left out was finished and
+                    # stored before), so this one would only take the run back: the root's end over the
+                    # late output of background work, or a run still going over one that ended.
+                    return
+                with db.conn:  # one transaction: committed whole, or rolled back on any error
+                    db.conn.execute(
+                        """
+                        INSERT INTO runs (run_id, parent_id, spans, stored_at) VALUES (?, ?, ?, ?)
+                        ON CONFLICT (run_id) DO UPDATE SET parent_id = excluded.parent_id, spans = excluded.spans,
+                            stored_at = excluded.stored_at
+                        """,
+                        (run_id, parent_id, blob, stored_at),
+                    )
+                    db.conn.executemany(
+                        "INSERT OR REPLACE INTO spans (run_id, call_id, seq, span) VALUES (?, ?, ?, ?)", rows
+                    )
+                state["committed"] = snapshot
 
         await asyncio.to_thread(_write)
         # Only once committed: a save that failed leaves them for the next one to write.

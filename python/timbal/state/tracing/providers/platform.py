@@ -518,6 +518,11 @@ class PlatformTracingProvider(TracingProvider):
     the run goes are stored in the background instead; its end, and every other barrier, still waits.
     ``durability="sync"`` or ``TIMBAL_TRACE_DURABILITY=sync`` awaits every save again."""
 
+    overlapping_saves = True
+    """``_store`` keeps a run's saves in order itself: one PATCH on the wire per run, the saves asked for
+    meanwhile folded into the next, each numbered (``X-Timbal-Snapshot``) so the host drops one that is not
+    newer than the last it applied. Queued one behind the other they would each be a round trip."""
+
     compress: bool | None = None
     """Gzip each PATCH body (``Content-Encoding: gzip``). ``None``: when ``TIMBAL_TRACE_GZIP`` is set, or
     once the endpoint advertised it (``Accept-Encoding: gzip`` on a response, RFC 7694; for an app's runs, the

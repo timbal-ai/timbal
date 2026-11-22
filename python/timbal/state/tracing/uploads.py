@@ -11,6 +11,14 @@ backoff.
 Background work that outlives the root run saves the same way: scheduled while it runs, and each piece's
 end is a barrier.
 
+``durability="sync"`` awaits every save, and holds the same order: saves of one run that overlap (the end
+of the root run and the end of background work, parallel calls that end together) are written one at a
+time. A save takes its snapshot when its write starts and commits some time later, so two on their way at
+once could land the older one last, for good when it is the run's last save. A save that waited is not
+written again when a write that began after it was asked for has landed: that write holds its state (calls
+that end together while one write is in flight cost one more write, not one each). A provider that keeps
+that order itself opts out (``TracingProvider.overlapping_saves``).
+
 The live trace is the buffer, so memory does not grow with pending changes; what grows is the lag, the age
 of the oldest change not yet stored. A run whose uploads fail or fall behind by more than ``max_lag_s``
 goes back to synchronous saves until one succeeds: the state may be the only copy, so it is retried, never
@@ -137,6 +145,22 @@ class _RunUploads:
 _RUNS: dict[tuple[int, str], _RunUploads] = {}
 
 
+class _Turns:
+    """A run's saves on a ``sync`` provider, from the moment two of them overlapped: one write at a time.
+
+    ``started`` counts the writes begun, ``landed`` is the latest of them that succeeded. A save asked for
+    when n had begun is stored once write n + 1 or a later one has landed: that write took its snapshot
+    after the save was asked for.
+    """
+
+    __slots__ = ("lock", "started", "landed")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.started = 1  # the write in flight this was made for
+        self.landed = 0
+
+
 def _key(run_context: RunContext) -> tuple[int, str]:
     return id(run_context._tracing_provider), run_context.id
 
@@ -177,14 +201,48 @@ async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[
     It waits for an upload in flight or another barrier's write (the root's end and a background task's end
     can overlap), never for a drain waiting out its interval or a retry backoff; saves requested while it
     writes are uploaded after it; what it covers is not uploaded again. Raises what ``put`` raises.
+
+    Every save of a ``sync`` provider comes through here, and waits the same way for one of its run that is
+    being written (see the module docstring). A run whose saves never overlap takes no lock: its write in
+    flight is only marked (``RunContext._save_turn``), and the save that finds the mark makes the lock the
+    run's saves queue on from then on. ``put`` must not save the same run itself: that save would wait for
+    the one it is part of.
     """
     key = _key(run_context)
     run = _RUNS.get(key)
     if run is None:
-        if durability(run_context._tracing_provider) == "sync":
-            await put(run_context)
+        provider = run_context._tracing_provider
+        if durability(provider) == "sync":
+            if provider.overlapping_saves:
+                await put(run_context)
+                return
+            state = run_context.__dict__
+            turn = state.get("_save_turn")
+            if turn is None:
+                state["_save_turn"] = True
+                try:
+                    await put(run_context)
+                finally:
+                    turn = state["_save_turn"]
+                    if turn is True:
+                        state["_save_turn"] = None
+                    else:
+                        turn.lock.release()
+                return
+            if turn is True:
+                # A write of this run is in flight and holds no lock: take one in its name, which it lets go
+                # of when it ends. A lock nobody holds is taken without waiting, so that write cannot end first.
+                turn = state["_save_turn"] = _Turns()
+                await turn.lock.acquire()
+            covering = turn.started + 1
+            async with turn.lock:
+                if turn.landed >= covering:
+                    return  # a write that began after this save was asked for has landed
+                turn.started = mine = turn.started + 1
+                await put(run_context)
+                turn.landed = mine
             return
-        run = _RUNS[key] = _RunUploads(run_context, run_context._tracing_provider)
+        run = _RUNS[key] = _RunUploads(run_context, provider)
     run.writers += 1
     try:
         async with run.lock:

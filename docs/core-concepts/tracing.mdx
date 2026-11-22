@@ -80,6 +80,14 @@ The mode is `configured(durability=...)`, then `TIMBAL_TRACE_DURABILITY`, then t
 - `TIMBAL_TRACE_MAX_LAG_S`: how old the oldest unsaved change may get, in seconds, before saves are awaited again. Default: `30`.
 - `TIMBAL_TRACE_METRICS`: set to `1`, `true`, or `yes` to add `tracing:*` usage keys. Setting durability explicitly to `buffered` or `end` adds them as well. The platform default does not.
 
+### Save order
+
+Saves of one run can be asked for while another is still being written: parallel calls that end together, or the end of the run and the end of background work that outlives it. In every mode the provider's `put()` is called for one of them at a time, so a snapshot taken earlier never lands after a later one. With `sync`, a save that waited is skipped when a `put()` that began after it was asked for has returned, since that one holds its state: calls that end together while a save is being written cost one more write, not one each.
+
+A custom provider needs no ordering of its own, with two things to know. A `put()` that never returns holds back the run's later saves, so give its requests a timeout. And a write that goes on after its caller was cancelled (a worker thread, a shielded request) must not land over a later save: `SqliteTracingProvider` numbers its snapshots and drops one older than the newest it has committed.
+
+A provider that keeps that order itself sets `overlapping_saves = True` and receives `sync` saves as they come. `PlatformTracingProvider` does (one request per run at a time, the saves asked for meanwhile folded into the next), and so does `InMemoryTracingProvider`, which stores the trace in the step that asks.
+
 ### When a save fails
 
 Each finished span requests a save. With the platform default that mid-run save is not awaited: it is stored in the background and coalesced, and the run waits at its end and at other barriers. A crash can lose up to 30 seconds of that progress; past that, the save is awaited. If the provider fails to store a snapshot, for example the platform rejecting a run whose parent it has no record of, or an outage that outlasts the retries, the run still completes and returns its output. The failure is logged as an error. An awaited save is counted as `tracing:save_failed` in the run's usage. A background save counts that failure only when tracing metrics are on. Cancellation is not caught.
