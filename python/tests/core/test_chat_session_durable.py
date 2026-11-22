@@ -26,6 +26,10 @@ from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.events import ApprovalEvent, OutputEvent
 from timbal.types.message import Message
 
+# Runs one at a time in CI, after the parallel pass (pyproject.toml `serial`): under a fully loaded runner a
+# restored session's worker has sat idle with work queued (30-60 s); being investigated on its own.
+pytestmark = pytest.mark.serial
+
 
 @pytest.fixture(autouse=True)
 def isolated_context():

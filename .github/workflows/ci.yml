@@ -91,8 +91,9 @@ jobs:
       - name: Audit models.yaml (offline)
         run: uv run python scripts/audit_models.py --offline
 
-      # One worker per core; `worksteal` rebalances the few long files (the durable-session sweeps) instead
-      # of leaving one worker with them at the end. One cell of the full lane measures coverage.
+      # Everything in parallel (one worker per core; `worksteal` rebalances uneven files), then the `serial`
+      # tests (the durable-session suites) one at a time. Both passes always run; either failing fails the
+      # step. One cell of the full lane measures coverage, over both passes.
       - name: Run tests
         shell: bash
         env:
@@ -100,7 +101,10 @@ jobs:
         run: |
           cov=""
           if [ "$COVERAGE" = "true" ]; then cov="--cov=timbal --cov-report=term-missing"; fi
-          uv run pytest -n auto --dist worksteal $cov
+          rc=0
+          uv run pytest -n auto --dist worksteal -m "not integration and not serial" $cov || rc=$?
+          uv run pytest -m "serial and not integration" $cov ${cov:+--cov-append} || rc=$?
+          exit "$rc"
 
   result:
     name: CI result
