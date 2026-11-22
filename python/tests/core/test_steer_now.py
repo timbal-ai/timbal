@@ -356,6 +356,27 @@ class TestAnswerCutWhileTheModelIsSilent:
         (record,) = root.metadata["steer_now"]
         assert record == {"cut": "answer", "kept_chars": 7}
 
+    async def test_a_cut_by_a_message_a_guardrail_empties_takes_the_partial_answer_back(self):
+        """The message that cut the answer is redacted down to nothing: nothing joined, so the partial
+        answer is not kept either (the history would end with it) and the answer is given again. The
+        record says what is in memory: nothing of the cut answer."""
+        from timbal.guardrails import guardrail
+
+        long = "Once upon a time there was a lighthouse keeper who " * 6
+        model = StalledStream([text_stream(long)])  # asked the same again, it tells the story again
+        strip = guardrail(lambda text: "" if "strip me" in text else True, stages=["input"], action="redact")
+        async with ChatSession(agent(model, guardrails=[strip])) as session:
+            session.send("tell me a long story")
+            await asyncio.wait_for(model.stalled.wait(), 30)
+            session.send("strip me", mode="now")
+            (finished,) = await records(session, "turn_finished", 1, timeout=30)
+        assert finished["status"]["code"] == "success"
+        assert model.call_count == 2  # the same step once more, not a loop
+        root, memory = await memory_of(session)
+        assert [m.role for m in memory] == ["user", "assistant"]
+        assert root.output.collect_text() == long.strip()  # whole this time
+        assert root.metadata["steer_now"] == [{"cut": "answer", "kept_chars": 0}]
+
     async def test_cuts_a_stream_that_has_not_sent_anything_yet(self):
         # One script: the model picks it by the assistant messages so far, and the cut call leaves none.
         model = StalledStream([text_stream("Sure: BANANA.")], chunks_before=0)

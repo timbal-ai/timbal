@@ -342,6 +342,31 @@ class TestMessageTask:
         assert "task_messages" not in _task_span(run_id, task_id).metadata
 
     @pytest.mark.asyncio
+    async def test_a_message_screened_down_to_nothing_does_not_reopen_a_finished_answer(self):
+        """It arrives as the task gives its final answer and a rail redacts all of it: nothing joined, so
+        there is nothing to answer. The task ends on the answer it gave: no further model call on a
+        history that ends with its own answer, no budget or tools given back for a message it never read."""
+        sent: dict = {}
+        child = Child()
+        answer = child.model
+
+        def model(messages: list[Message]) -> Message | str:
+            out = answer(messages)
+            if isinstance(out, str) and "receipt" not in sent:  # its final answer: the message lands now
+                sent["receipt"] = sent["store"].message_task(sent["task_id"], "one more thing")
+            return out
+
+        child.model = model
+        strip = guardrail(lambda text: "" if "one more thing" in text else True, stages=["input"], action="redact")
+        _, run_id, task_id = await _spawn(child, ["Started."], guardrails=[strip])
+        sent["store"], sent["task_id"] = store_for_run(run_id), task_id
+        child.gate.set()
+        snap = await _finish(run_id, task_id)
+        assert child.calls == 2, [[m.role for m in seen] for seen in child.seen]  # its step, its answer
+        assert _answer(snap) == "Did: research cats"
+        assert sent["receipt"].state == "undelivered" and snap["unread_messages"] == ["one more thing"]
+
+    @pytest.mark.asyncio
     async def test_a_poll_from_a_receipts_own_callback_finds_every_unread_message(self):
         """Receipts settle one by one as the task ends, and a receipt's callback may poll the task: that
         poll takes the notice's place, so it must already list all of them, its own included."""

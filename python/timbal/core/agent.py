@@ -3411,12 +3411,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 """Bring in what was posted for the running turn, screening user text like a prompt.
 
                 A blocked message is dropped for a notice; the turn and its work go on.
+
+                ``steered`` / ``steered_user``: something / something of the user's joined the turn's
+                memory. Not what was taken: a message a rail redacts down to nothing leaves nothing
+                to answer, and a step repeated for it would be a model call on a history that ends
+                with the answer just given, with the budget and the tools of a new request.
                 """
                 nonlocal steered, steered_user
                 messages = self._take_steering(run_context, current_span)
-                steered = bool(messages)
-                steered_user = False
-                brought_in = False  # into memory: the message itself, or the notice that stands for a blocked one
+                steered = steered_user = False
                 runner = self._guardrail_runner
                 screen = runner is not None and runner.has_stage(GuardrailStage.INPUT)
                 for message in messages:
@@ -3439,16 +3442,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     metadata={"source": "runtime", "kind": "steer_blocked"},
                                 )
                             )
-                            brought_in = True
+                            steered = True  # the notice that stands for it
                             continue
                         if outcome.replaced and outcome.text != text:
                             replace_message_text(message, outcome.text)
                     if await _append_memory(message):
-                        brought_in = True
-                    steered_user = steered_user or not message.is_runtime()
+                        steered = True
+                        steered_user = steered_user or not message.is_runtime()
                 if messages and current_span.parent_call_id is not None:
                     record = self._task_record(current_span)
-                    if record is not None and brought_in:
+                    if record is not None and steered:
                         # A background task's messages (they join as one): in its memory now.
                         read = record.mark_read(run_context.id)
                         current_span.metadata.setdefault("task_messages", []).extend(message.id for message in read)
@@ -4053,9 +4056,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # False when nothing is left of it (the rails redacted all it had said): not in
                         # memory, so there is nothing of it to take back below either.
                         kept = await _append_memory(partial)
-                    current_span.metadata.setdefault("steer_now", []).append(
-                        {"cut": "answer", "kept_chars": len(message_text(partial)) if kept else 0}
-                    )
+                    cut_record = {"cut": "answer", "kept_chars": len(message_text(partial)) if kept else 0}
+                    current_span.metadata.setdefault("steer_now", []).append(cut_record)
                     await asyncio.sleep(NOW_COALESCE_SECS)
                     async for steer_event in _steer():
                         yield steer_event
@@ -4063,6 +4065,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # Nothing came in after all: an assistant-final history would be a prefill.
                         current_span.memory.pop()
                         current_span._memory_dump.pop()
+                        cut_record["kept_chars"] = 0  # taken back: the record says what is in memory
                     if steered_user:
                         i, max_iter_handled = 0, False
                     else:

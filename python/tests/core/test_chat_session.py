@@ -285,6 +285,28 @@ class TestSteering:
             # The tool's result is kept: the work done before the steer is not thrown away.
             assert [m.role for m in memory][:3] == ["user", "assistant", "tool"]
 
+    async def test_a_steer_a_guardrail_empties_does_not_reopen_the_answer(self):
+        """A message that arrives as the turn answers and that a rail redacts down to nothing joins
+        nothing: the turn ends on its answer, with no model call on a history that ends with it."""
+        calls = []
+        sent = []
+
+        def model(messages):
+            calls.append([m.role for m in messages])
+            if not sent:  # the answer is on its way: the message lands now
+                sent.append(session.send("strip me", mode="steer"))
+            return "the answer"
+
+        strip = guardrail(lambda text: "" if "strip me" in text else True, stages=["input"], action="redact")
+        async with ChatSession(make_agent(Gate(), model=TestModel(handler=model), guardrails=[strip])) as session:
+            session.send("hello")
+            (finished,) = await records(session, "turn_finished", 1)
+            assert finished["status"]["code"] == "success"
+            assert calls == [["user"]]
+            (output,) = root_outputs(session)
+            assert output.output.collect_text() == "the answer"
+            assert [m.role for m in await stored_memory(output)] == ["user", "assistant"]
+
     async def test_a_steer_a_guardrail_rewrites_is_kept_rewritten(self):
         gate = Gate()
         rail = guardrail(
