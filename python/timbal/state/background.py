@@ -1045,6 +1045,7 @@ class BackgroundEventLog:
 
 
 UNREAD_REMOVED_BY_GUARDRAIL = "[message {id}: a guardrail removed all of its text, so it was not read; not shown]"
+UNREAD_FROM_USER = "[message {id} from the user: it was not read, and no guardrail screened it; not shown]"
 
 
 class BackgroundTask:
@@ -1163,16 +1164,26 @@ class BackgroundTask:
         """What the task ended without reading, as its completion notice and its summary list it.
 
         Both are read by the parent's model, and the notice is a runtime message its input guardrails
-        do not screen. A message a guardrail redacted down to nothing (:meth:`leave_unread`) is named
-        by its id, never quoted: the report would put back what the guardrail took out. The others
-        are quoted (nothing took their text out: the task ended before it read them).
+        do not screen. So a message is quoted only to a reader it is safe with:
+
+        - one a guardrail redacted down to nothing (:meth:`leave_unread`) is named by its id, never
+          quoted: the report would put back what the guardrail took out;
+        - one a user wrote is named by its id too. The task's input guardrail never finished with it
+          (the task ended before taking it, or was cancelled while screening it), so nothing cleared
+          its text, and a user's words reach a model through that model's input guardrails. Whoever
+          sent it has the receipt (``undelivered``) and can send it to the agent itself;
+        - the parent's own message (it wrote it) and the application's (trusted, like its events) are
+          quoted.
         """
-        return [
-            UNREAD_REMOVED_BY_GUARDRAIL.format(id=message.id)
-            if message.id in self._removed
-            else _truncate(message.text, _COMPLETION_SUMMARY_CHARS)
-            for message in self._unread
-        ]
+        texts = []
+        for message in self._unread:
+            if message.id in self._removed:
+                texts.append(UNREAD_REMOVED_BY_GUARDRAIL.format(id=message.id))
+            elif message.source == "user":
+                texts.append(UNREAD_FROM_USER.format(id=message.id))
+            else:
+                texts.append(_truncate(message.text, _COMPLETION_SUMMARY_CHARS))
+        return texts
 
     def clear_watchdogs(self) -> None:
         self.clear_timeout()
