@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import contextlib
 import contextvars
 import hashlib
 import inspect
@@ -986,6 +987,17 @@ class Runnable(ABC, BaseModel):
         from ..state.background import cancel_background_task as _cancel
 
         return _cancel(task_id)
+
+    def message_background_task(self, task_id: str, message: str) -> dict[str, Any]:
+        """Send a running background agent a message it reads after its current step."""
+        from ..state.background import message_background_task as _message
+
+        return _message(task_id, message, source="parent")
+
+    @property
+    def _takes_task_messages(self) -> bool:
+        """Whether this runnable, detached as a background task, reads messages sent to it (agents do)."""
+        return False
 
     def read_background_transcript(self, task_id: str, after: int = 0) -> dict[str, Any]:
         """Raw events for a background task from cursor ``after``."""
@@ -2017,6 +2029,7 @@ class Runnable(ABC, BaseModel):
                 if task is not None:
                     task.cancel()
             raise
+        record.steerable, record.call_id = self._takes_task_messages, span.call_id
         record_box.append(record)
         return {"task_id": record.task_id, "status": "running"}
 
@@ -2142,6 +2155,7 @@ class Runnable(ABC, BaseModel):
                 if task is not None:
                     task.cancel()
             raise
+        record.steerable, record.call_id = self._takes_task_messages, span.call_id
         record_box.append(record)
         return {"task_id": record.task_id, "status": "running"}, start, record
 
@@ -2889,36 +2903,50 @@ class Runnable(ABC, BaseModel):
                 )
             output_event._input_dump = span._input_dump
             output_event._output_dump = await dump(handoff_result) if handed_off else span._output_dump
-            if handoff_start is None:
-                # The end of the root run is stored before the caller goes on, even with background work still live.
-                await run_context._save_trace(barrier=span is run_context.root_span())
-                # The save counts on the span (a failure, the tracing counters) after the event copied its usage.
-                output_event.usage = dict(span.usage)
-            else:
-                # The continuation must not mutate the shared span until the
-                # foreground placeholder has been snapshotted for tracing.
-                try:
-                    await run_context._save_trace(barrier=True)
+            try:
+                if handoff_start is None:
+                    # The end of the root run is stored before the caller goes on, even with background work
+                    # still live.
+                    await run_context._save_trace(barrier=span is run_context.root_span())
+                    # The save counts on the span (a failure, the tracing counters) after the event copied
+                    # its usage.
                     output_event.usage = dict(span.usage)
-                finally:
-                    handoff_start.set()
-                    if handoff_control is not None and handoff_result is not None:
-                        if handoff_record is not None and (
-                            handoff_record.task.done() or handoff_record.task.cancelling()
-                        ):
-                            status = handoff_record.status_code()
-                            output_event.output = {**handoff_result, "status": status}
-                            output_event._output_dump = await dump(output_event.output)
-                            handoff_control.fail(
-                                RuntimeError(f"Foreground-to-background handoff ended before cutover: {status}.")
-                            )
-                            handoff_control.unregister(span.call_id)
-                        else:
-                            handoff_control.complete(span.call_id, handoff_result)
-            # After the save: a turn queued behind this one reads what it stored.
-            if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
-                scheduler, run_context._foreign_turn_of = run_context._foreign_turn_of, None
-                scheduler.foreign_finished(run_context.id, span.status)
+                else:
+                    # The continuation must not mutate the shared span until the
+                    # foreground placeholder has been snapshotted for tracing.
+                    try:
+                        await run_context._save_trace(barrier=True)
+                        output_event.usage = dict(span.usage)
+                    finally:
+                        handoff_start.set()
+                        if handoff_control is not None and handoff_result is not None:
+                            if handoff_record is not None and (
+                                handoff_record.task.done() or handoff_record.task.cancelling()
+                            ):
+                                status = handoff_record.status_code()
+                                output_event.output = {**handoff_result, "status": status}
+                                output_event._output_dump = await dump(output_event.output)
+                                handoff_control.fail(
+                                    RuntimeError(f"Foreground-to-background handoff ended before cutover: {status}.")
+                                )
+                                handoff_control.unregister(span.call_id)
+                            else:
+                                handoff_control.complete(span.call_id, handoff_result)
+            except BaseException:
+                if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
+                    # The save was cut (a turn interrupted as it ended). Once more before the session
+                    # lets the next turn in, which reads this run. Shielded: a second cut ends the
+                    # wait, not the save.
+                    with contextlib.suppress(BaseException):
+                        await asyncio.shield(run_context._save_trace(barrier=True))
+                raise
+            finally:
+                # After the save: a turn queued behind this one reads what it stored. Also when the save
+                # was cut: the session it was admitted to must not keep counting it as running, or no
+                # turn of that session would ever start again.
+                if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
+                    scheduler, run_context._foreign_turn_of = run_context._foreign_turn_of, None
+                    scheduler.foreign_finished(run_context.id, span.status)
             # Warn about resume values that didn't match any gate or suspend()
             # so callers find typos / stale IDs instead of silently dropping
             # them. Only check the IDs introduced by THIS call; nested children

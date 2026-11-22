@@ -1,4 +1,4 @@
-"""Platform saves from chat sessions: buffered by default (sync once the host takes deltas), optional gzip bodies."""
+"""Platform saves from chat sessions: buffered (an acting tool batch stored before it runs), optional gzip bodies."""
 
 import gzip
 import json
@@ -89,17 +89,167 @@ class TestChatTurnDurability:
         assert finished["status"]["code"] == "success"
         assert seen == ["buffered"]
 
-    async def test_platform_turns_are_sync_once_the_host_takes_deltas(self):
+    async def test_platform_turns_stay_buffered_when_the_host_takes_deltas(self):
         caps = PlatformTracingProvider._host_caps(CONFIG.host)
         caps.delta = True
         try:
             agent, seen = probe_agent(FakePlatform.configured(platform_config=CONFIG))
             await one_turn(agent)
-            caps.delta_rejected = True
-            await one_turn(agent)
         finally:
             PlatformTracingProvider._caps.pop(CONFIG.host, None)
-        assert seen == ["sync", "buffered"]
+        assert seen == ["buffered"]
+
+    async def test_an_acting_tool_batch_is_stored_before_it_runs(self):
+        """Buffered saves lag the run, but the call of a tool that acts is stored before the tool runs."""
+        order: list[str] = []
+        stored_before: list[list[str]] = []
+        provider = FakePlatform.configured(platform_config=CONFIG)
+        save_trace = RunContext._save_trace
+
+        async def spy(self, *, barrier=False):
+            root = self.root_span()
+            if barrier and root is not None and root.t1 is None:
+                order.append("barrier")
+            return await save_trace(self, barrier=barrier)
+
+        def act() -> str:
+            order.append("act")
+            run = FakePlatform.runs.get(get_run_context().id)
+            stored_before.append([s.path for s in run.as_records()] if run is not None else [])
+            return "done"
+
+        def look() -> str:
+            order.append("look")
+            return "seen"
+
+        calls = iter(["look", "act"])
+
+        def handler(_messages):
+            name = next(calls, None)
+            if name is None:
+                return "finished"
+            return Message(
+                role="assistant", content=[ToolUseContent(id=name, name=name, input={})], stop_reason="tool_use"
+            )
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="look", handler=look, read_only=True), Tool(name="act", handler=act)],
+            tracing_provider=provider,
+        )
+        with patch.object(RunContext, "_save_trace", spy):
+            finished = await one_turn(agent)
+        assert finished["status"]["code"] == "success"
+        assert order == ["look", "barrier", "act"]  # read-only tools run without waiting for a save
+        assert stored_before[0].count("agent.llm") == 2  # the call to `act` was stored before `act` ran
+
+    @pytest.mark.parametrize(
+        ("batches", "expected"),
+        [
+            ([["look"], ["act"]], ["look", "barrier", "act"]),  # a read-only target does not wait for a save
+            ([["look", "act"]], ["barrier", "look", "act"]),  # a batch with a target that acts does
+            ([["nope"], ["look"]], ["barrier", "look"]),  # a name that resolves to nothing counts as acting
+        ],
+    )
+    async def test_a_dispatched_batch_is_judged_by_the_tools_it_runs(self, batches, expected):
+        """``tool_search="dispatch"``: the model calls ``call_tool(name=...)``, and what decides whether the
+        trace is stored first is the tool that call runs, not the dispatcher."""
+        order: list[str] = []
+        provider = FakePlatform.configured(platform_config=CONFIG)
+        save_trace = RunContext._save_trace
+
+        async def spy(self, *, barrier=False):
+            root = self.root_span()
+            if barrier and root is not None and root.t1 is None:
+                order.append("barrier")
+            return await save_trace(self, barrier=barrier)
+
+        def act() -> str:
+            order.append("act")
+            return "done"
+
+        def look() -> str:
+            order.append("look")
+            return "seen"
+
+        steps = iter(batches)
+
+        def handler(_messages):
+            names = next(steps, None)
+            if names is None:
+                return "finished"
+            return Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id=f"{name}-{at}", name="call_tool", input={"name": name, "arguments": {}})
+                    for at, name in enumerate(names)
+                ],
+                stop_reason="tool_use",
+            )
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[
+                Tool(name="look", handler=look, read_only=True, defer_loading=True),
+                Tool(name="act", handler=act, defer_loading=True),
+            ],
+            tool_search="dispatch",
+            tracing_provider=provider,
+        )
+        with patch.object(RunContext, "_save_trace", spy):
+            finished = await one_turn(agent)
+        assert finished["status"]["code"] == "success"
+        assert sorted(order) == sorted(expected)
+        assert order.index("barrier") == expected.index("barrier")
+        if "act" in expected:
+            assert order.index("barrier") < order.index("act")
+
+    async def test_buffered_providers_outside_chat_sessions_do_not_wait_before_tools(self):
+        order: list[str] = []
+        save_trace = RunContext._save_trace
+
+        async def spy(self, *, barrier=False):
+            root = self.root_span()
+            if barrier and root is not None and root.t1 is None:
+                order.append("barrier")
+            return await save_trace(self, barrier=barrier)
+
+        agent, _ = probe_agent(FakePlatform.configured(durability="buffered"))
+        set_run_context(RunContext(tracing_provider=agent.tracing_provider))
+        with patch.object(RunContext, "_save_trace", spy):
+            out = await agent(prompt="go").collect()
+        assert out.status.code == "success" and order == []  # existing buffered behaviour is unchanged
+
+    async def test_the_default_adds_no_trace_counters_to_usage(self):
+        """The platform default is buffered already: the turn's provider only gains ``store_before_acting``.
+        Setting ``durability`` too would make the mode explicit, and with it the ``tracing:*`` usage keys."""
+        providers = []
+
+        def probe() -> str:
+            providers.append(get_run_context()._tracing_provider)
+            return "ok"
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            return Message(
+                role="assistant", content=[ToolUseContent(id="c1", name="probe", input={})], stop_reason="tool_use"
+            )
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="probe", handler=probe)],
+            tracing_provider=FakePlatform,
+        )
+        finished = await one_turn(agent)
+        (provider,) = providers
+        assert provider.store_before_acting is True and provider.durability is None
+        assert uploads.durability(provider) == "buffered" and not uploads.metrics_on(provider)
+        root = next(s for s in FakePlatform.runs[finished["run_id"]].as_records() if s.parent_call_id is None)
+        assert not [key for key in root.usage if key.startswith("tracing:")]
 
     async def test_explicit_durability_wins(self):
         agent, seen = probe_agent(FakePlatform)

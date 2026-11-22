@@ -509,6 +509,9 @@ class VoiceSession:
             can_interrupt=True,
             # Work posted between turns (report_progress, post_session_event) has no notify() to start the watcher.
             on_work=self._watch_for_event_turns,
+            # A chat open on the conversation lends it to the call while it is live, and answers what is typed.
+            borrows=True,
+            user_messages=False,
         )
         self._event_task: asyncio.Task[None] | None = None
         # The in-flight turn's run, from its first event until the turn ends.
@@ -2073,8 +2076,17 @@ class VoiceSession:
             store = self._unbound_store
         if store is None:
             ctx = self._turn_run_context or self._last_run_context or self._seed_run_context()
-            # The run this call continues may be where an owned session joined before it had a store.
-            joined = store_joined_from(ctx.parent_id) if ctx is not None and ctx.parent_id else None
+            # An owned session may have joined before it had a store: one that continues this call's
+            # last run (a chat opened on it), or, before the call's first turn, the one the call itself
+            # continues. Not the parent of a run the call has made: a session that continues that one
+            # is a run behind the call (a client that had not seen its last reply), and joining it
+            # would take the call back to its head.
+            joined = None
+            if ctx is not None:
+                joined = store_joined_from(ctx.id)
+                # `is None`, not truth: a store with no tasks is empty, not missing.
+                if joined is None and ctx.parent_id and not ctx._trace:
+                    joined = store_joined_from(ctx.parent_id)
             if joined is not None:
                 adopt_background_store(ctx, joined)
                 store = joined
@@ -2115,7 +2127,8 @@ class VoiceSession:
         self._scheduler.note_run(ctx.id)
         if ctx._bg_store is None:
             previous = self._last_run_context._bg_store if self._last_run_context is not None else None
-            store = previous or self._unbound_store
+            # `is None`, not truth: a store with no tasks is empty, not missing.
+            store = previous if previous is not None else self._unbound_store
             if store is not None:
                 adopt_background_store(ctx, store)
                 self._unbound_store = None
@@ -3082,12 +3095,15 @@ class VoiceSession:
                 self._active_turn_user_text = ""
                 self._turn_is_event = False
                 self._turn_asked_caller = False
-                self._turn_run_context = None
+                ran, self._turn_run_context = self._turn_run_context, None
                 if followup is not None:
                     # Cut before its run started (a barge-in right after the
                     # start): what it carried goes back for the caller's turn.
                     followup.release()
-                self._scheduler.turn_finished()
+                # With how the turn's run ended: a chat sharing the conversation holds what is typed
+                # while the call's question waits, and gets the session back knowing it does.
+                root = ran.root_span() if ran is not None else None
+                self._scheduler.turn_finished(is_parked(root.status) if root is not None else None)
                 self._watch_for_event_turns()
 
     # -- Internal: tool-call filler ------------------------------------------
