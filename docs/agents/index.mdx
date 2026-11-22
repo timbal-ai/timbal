@@ -409,9 +409,17 @@ Response content can contain thinking, text, tool, and other blocks in a provide
 By default the reply is the agent's final text. With `delivery="tool"` the agent gets a `send_message(text, end_turn=False)` tool, and only what it sends with that tool reaches the user. A turn can then say several things, give an update before a slow tool finishes, or say nothing.
 
 ```python
+from timbal import Agent
+from timbal.types.events import DeltaEvent
+
+def search_orders(order_id: str) -> str:
+    """Look up an order's status."""
+    return f"Order {order_id} ships tomorrow."
+
 agent = Agent(
     name="assistant",
-    model="anthropic/claude-haiku-4-5",
+    model="anthropic/claude-sonnet-4-6",
+    max_tokens=1024,
     tools=[search_orders],
     delivery="tool",
 )
@@ -420,7 +428,7 @@ async for event in agent(prompt="Where is my order?"):
     if isinstance(event, DeltaEvent) and event.item.type == "custom":
         data = event.item.data
         if data.get("kind") == "message":
-            show_to_user(data["text"])  # {"kind": "message", "text", "index", "end_turn"}
+            print(data["text"])  # {"kind": "message", "text", "index", "end_turn"}
 ```
 
 - **Messages.** Each one is delivered when its call runs, as a `Custom` delta of kind `"message"`. Show these events to the user, not the tool call's input: the text is checked by the agent's `model_output` [guardrails](/agents/guardrails) before the event goes out.

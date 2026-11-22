@@ -111,7 +111,12 @@ def system_prompt() -> dict[str, str]:
         "today": f"Today is {datetime.now():%A, %B %d, %Y}.",
     }
 
-agent = Agent(name="assistant", model="anthropic/claude-haiku-4-5", system_prompt=system_prompt)
+agent = Agent(
+    name="assistant",
+    model="anthropic/claude-sonnet-4-6",
+    max_tokens=1024,
+    system_prompt=system_prompt,
+)
 ```
 
 On the first turn the sections are pinned in the session's data, and that pinned prompt is sent on every later turn. When a section changes, appears, or goes away, the model is told once, in a runtime message placed before that turn's prompt. The run records it under `metadata.prompt_sections`.
