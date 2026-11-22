@@ -271,8 +271,6 @@
               "api-reference/orgs/create",
               "api-reference/orgs/get",
               "api-reference/orgs/update",
-              "api-reference/orgs/contacts/list",
-              "api-reference/orgs/embedding-models/list",
               {
                 "group": "Analytics",
                 "pages": [
@@ -289,8 +287,9 @@
                   "api-reference/orgs/billing/budgets/get",
                   "api-reference/orgs/billing/budgets/replace",
                   "api-reference/orgs/billing/budgets/patch",
+                  "api-reference/orgs/billing/budgets/users/get",
                   "api-reference/orgs/billing/compute/get",
-                  "api-reference/orgs/billing/compute/put"
+                  "api-reference/orgs/billing/compute/allocation"
                 ]
               },
               {
@@ -309,6 +308,20 @@
                 "pages": ["api-reference/orgs/credit-grants/list"]
               },
               {
+                "group": "Models",
+                "pages": [
+                  "api-reference/orgs/models/list",
+                  {
+                    "group": "Residency",
+                    "pages": [
+                      "api-reference/orgs/models/residency/get",
+                      "api-reference/orgs/models/residency/put",
+                      "api-reference/orgs/models/residency/preview"
+                    ]
+                  }
+                ]
+              },
+              {
                 "group": "Model Policies",
                 "pages": [
                   "api-reference/orgs/models/policies/list",
@@ -318,7 +331,28 @@
               },
               {
                 "group": "Templates",
-                "pages": ["api-reference/orgs/templates/list"]
+                "pages": [
+                  "api-reference/orgs/templates/list",
+                  "api-reference/orgs/templates/get"
+                ]
+              },
+              {
+                "group": "Tools",
+                "pages": [
+                  "api-reference/orgs/tools/list",
+                  "api-reference/orgs/tools/create",
+                  "api-reference/orgs/tools/get",
+                  "api-reference/orgs/tools/delete"
+                ]
+              },
+              {
+                "group": "Voices",
+                "pages": [
+                  "api-reference/orgs/voices/list",
+                  "api-reference/orgs/voices/models",
+                  "api-reference/orgs/voices/compatibility",
+                  "api-reference/orgs/voices/validate"
+                ]
               },
               {
                 "group": "Domains",
@@ -454,6 +488,43 @@
                 ]
               },
               {
+                "group": "Favorites",
+                "pages": [
+                  "api-reference/projects/fav/put",
+                  "api-reference/projects/fav/delete"
+                ]
+              },
+              {
+                "group": "Users",
+                "pages": [
+                  "api-reference/projects/users/list",
+                  "api-reference/projects/users/put",
+                  "api-reference/projects/users/delete"
+                ]
+              },
+              {
+                "group": "Sessions",
+                "pages": [
+                  "api-reference/projects/sessions/list",
+                  "api-reference/projects/sessions/get",
+                  "api-reference/projects/sessions/delete"
+                ]
+              },
+              {
+                "group": "Routines",
+                "pages": [
+                  "api-reference/projects/routines/list",
+                  "api-reference/projects/routines/create",
+                  "api-reference/projects/routines/get",
+                  "api-reference/projects/routines/update",
+                  "api-reference/projects/routines/delete",
+                  "api-reference/projects/routines/fires",
+                  "api-reference/projects/routines/pause",
+                  "api-reference/projects/routines/resume",
+                  "api-reference/projects/routines/run"
+                ]
+              },
+              {
                 "group": "Workforce",
                 "pages": [
                   "api-reference/projects/workforce/list",
@@ -463,7 +534,30 @@
                   "api-reference/projects/workforce/call-get",
                   "api-reference/projects/workforce/call-put",
                   "api-reference/projects/workforce/call-patch",
-                  "api-reference/projects/workforce/call-delete"
+                  "api-reference/projects/workforce/call-delete",
+                  {
+                    "group": "Phone Numbers",
+                    "pages": [
+                      "api-reference/projects/workforce/phone-numbers/put",
+                      "api-reference/projects/workforce/phone-numbers/delete"
+                    ]
+                  },
+                  {
+                    "group": "SIP Numbers",
+                    "pages": [
+                      "api-reference/projects/workforce/sip-numbers/put",
+                      "api-reference/projects/workforce/sip-numbers/delete"
+                    ]
+                  },
+                  {
+                    "group": "Voice",
+                    "pages": [
+                      "api-reference/projects/workforce/voice/calls/create",
+                      "api-reference/projects/workforce/voice/calls/get",
+                      "api-reference/projects/workforce/voice/calls/cancel",
+                      "api-reference/projects/workforce/voice/ticket"
+                    ]
+                  }
                 ]
               }
             ]
@@ -488,6 +582,7 @@
                   "api-reference/knowledge-bases/policies/update",
                   "api-reference/knowledge-bases/policies/delete",
                   "api-reference/knowledge-bases/policies/governance-mode",
+                  "api-reference/knowledge-bases/policies/preview",
                   {
                     "group": "Assignments",
                     "pages": [
@@ -518,6 +613,7 @@
                   "api-reference/knowledge-bases/files/create-dir",
                   "api-reference/knowledge-bases/files/get",
                   "api-reference/knowledge-bases/files/delete",
+                  "api-reference/knowledge-bases/files/parse",
                   {
                     "group": "Chunks",
                     "pages": [
@@ -560,20 +656,47 @@
             "group": "ACE",
             "tag": "Pro",
             "pages": [
-              "api-reference/ace/create-from-workforce",
-              "api-reference/ace/link",
-              "api-reference/ace/unlink",
-              "api-reference/ace/list-policies",
-              "api-reference/ace/list-context-vars",
-              "api-reference/ace/chat-completions",
+              "api-reference/ace/list",
+              "api-reference/ace/create",
+              "api-reference/ace/get",
+              "api-reference/ace/update",
+              "api-reference/ace/delete",
+              "api-reference/ace/compile",
+              "api-reference/ace/test",
+              "api-reference/ace/default",
+              "api-reference/ace/default-stats",
+              "api-reference/ace/schema",
+              "api-reference/ace/stats",
               {
-                "group": "Jobs",
+                "group": "Versions",
                 "pages": [
-                  "api-reference/ace/jobs/list",
-                  "api-reference/ace/jobs/create",
-                  "api-reference/ace/jobs/get",
-                  "api-reference/ace/jobs/cancel",
-                  "api-reference/ace/jobs/retry"
+                  "api-reference/ace/versions/list",
+                  "api-reference/ace/versions/create",
+                  "api-reference/ace/versions/get",
+                  "api-reference/ace/versions/activate"
+                ]
+              },
+              {
+                "group": "Shadow",
+                "pages": [
+                  "api-reference/ace/shadow/put",
+                  "api-reference/ace/shadow/delete"
+                ]
+              },
+              {
+                "group": "Cases",
+                "pages": [
+                  "api-reference/ace/cases/list",
+                  "api-reference/ace/cases/create",
+                  "api-reference/ace/cases/run",
+                  "api-reference/ace/cases/delete"
+                ]
+              },
+              {
+                "group": "Apps",
+                "pages": [
+                  "api-reference/ace/apps/link",
+                  "api-reference/ace/apps/unlink"
                 ]
               }
             ]
@@ -667,6 +790,38 @@
                       "api-reference/connectors/browse/filesystems/summary"
                     ]
                   }
+                ]
+              }
+            ]
+          },
+          {
+            "group": "Telephony",
+            "pages": [
+              "api-reference/telephony/phone-numbers/list",
+              {
+                "group": "SIP Trunks",
+                "pages": [
+                  "api-reference/telephony/sip-trunks/list",
+                  "api-reference/telephony/sip-trunks/create",
+                  "api-reference/telephony/sip-trunks/get",
+                  "api-reference/telephony/sip-trunks/update",
+                  "api-reference/telephony/sip-trunks/delete"
+                ]
+              },
+              {
+                "group": "SIP Numbers",
+                "pages": [
+                  "api-reference/telephony/sip-numbers/list",
+                  "api-reference/telephony/sip-numbers/create",
+                  "api-reference/telephony/sip-numbers/update",
+                  "api-reference/telephony/sip-numbers/delete"
+                ]
+              },
+              {
+                "group": "Dial Policy",
+                "pages": [
+                  "api-reference/telephony/dial-policy/get",
+                  "api-reference/telephony/dial-policy/put"
                 ]
               }
             ]
