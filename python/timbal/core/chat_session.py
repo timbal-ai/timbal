@@ -1366,7 +1366,13 @@ class ChatSession:
             # A recovery turn goes before anything queued: it is about the turn the user saw cut, and the turns
             # after it must find it settled. Other wakes wait for the user.
             recovering = bool(self._wakes) and self._wakes[0].kind == RECOVERY_KIND
-            if self._wakes and (recovering or scheduler.pending_turn() is None) and not scheduler.other_turn_first():
+            if self._wakes and (recovering or scheduler.pending_turn() is None):
+                if scheduler.other_turn_first():
+                    # Another client's turn of the session runs, or waits for one: the wake goes after it. Its
+                    # end is a change of the scheduler, not new work (_turn_due waits for work alone once
+                    # nothing pending asks for a turn of its own, and the wake would wait for the next message).
+                    await self._until_scheduler_or_work()
+                    continue
                 wake = self._wakes.pop(0)
                 scheduler.turn_started()
                 await self._run_turn(wake=wake)
@@ -1391,15 +1397,16 @@ class ChatSession:
         return work
 
     async def _until_scheduler_or_work(self) -> None:
-        loop = asyncio.get_running_loop()
-        changed = loop.create_task(self._scheduler._wait_change())
-        work = loop.create_task(self._work.wait())
+        # The scheduler's future is taken now, in the step that read its state: from a task of its own it was
+        # taken a step later, and a turn of another client ending in between (its notice going to no future)
+        # left the worker waiting for new work. Shared with other waiters: waited on, never cancelled.
+        changed = self._scheduler.changed()
+        work = asyncio.get_running_loop().create_task(self._work.wait())
         try:
             await asyncio.wait({changed, work}, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            for task in (changed, work):
-                if not task.done():
-                    task.cancel()
+            if not work.done():
+                work.cancel()
 
     async def _turn_due(self) -> bool:
         """True once the scheduler says a turn is due; False when other work arrived first (a wake, a resume)."""

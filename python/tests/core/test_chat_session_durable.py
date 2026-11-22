@@ -26,9 +26,10 @@ from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.events import ApprovalEvent, OutputEvent
 from timbal.types.message import Message
 
-# Runs one at a time in CI, after the parallel pass (pyproject.toml `serial`): under a fully loaded runner a
-# restored session's worker has sat idle with work queued (30-60 s); being investigated on its own.
-pytestmark = pytest.mark.serial
+# A test that times out because nothing in its process ran, or because something blocked the event loop, says
+# so, with the stacks (conftest.py `loop_watchdog`): on loaded CI runners a test process has stood still for
+# 70-260 s, and the sessions it was waiting for looked stuck.
+pytestmark = pytest.mark.usefixtures("loop_watchdog")
 
 
 @pytest.fixture(autouse=True)
@@ -181,6 +182,17 @@ def held_before_its_turn(session) -> asyncio.Event:
 
     session._admit = admit
     return go
+
+
+async def worker_stopped(session):
+    """Stop a session's worker while it waits (no turn running) and keep it stopped: what the session is sent
+    from then on is stored and stays queued, as in a process that dies before its worker gets to it."""
+    assert session._turn is None, "a turn is running"
+    session._hold_worker = True
+    worker = session._worker
+    if worker is not None:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
 
 
 def root_outputs(session):
@@ -1038,6 +1050,10 @@ class TestAParkedRunThatIsGone:
     async def _restored_without_its_traces(self, db, tmp_path, *, then):
         provider, store = db
         session, approval = await parked(provider, store, Charge(released=True))
+        # The process stores what it is sent and dies before its worker takes any of it. Left running, the
+        # worker would take a queued answer at once and, on a slow machine, have its charge started before
+        # the close: a different restart (a recovery turn), every time the test was slow.
+        await worker_stopped(session)
         then(session, approval)
         await session.flush()
         await session.close(keep=True)

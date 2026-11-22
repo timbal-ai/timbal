@@ -91,7 +91,7 @@ jobs:
       - name: Audit models.yaml (offline)
         run: uv run python scripts/audit_models.py --offline
 
-      # Everything in parallel, then the `serial` tests (the durable-session suites) one at a time. Both passes
+      # Everything in parallel, then the tests marked `serial` (none today) one at a time. Both passes
       # always run; either failing fails the step. One cell of the full lane measures coverage, over both.
       # - Workers: one per core minus one. With every core busy, the event loop, SQLite threads and background
       #   uploads starve, and that is when rare stalls showed up; a free core costs little.
@@ -109,7 +109,9 @@ jobs:
           retry="--reruns 1 --reruns-delay 1"
           rc=0
           uv run pytest -n "$workers" --dist worksteal -m "not integration and not serial" $retry $cov 2>&1 | tee pytest.log || rc=$?
-          uv run pytest -m "serial and not integration" $retry $cov ${cov:+--cov-append} 2>&1 | tee -a pytest.log || rc=$?
+          # Exit 5: no test is marked `serial` (none needs it today); the step does not fail for that.
+          uv run pytest -m "serial and not integration" $retry $cov ${cov:+--cov-append} 2>&1 | tee -a pytest.log \
+            || { s=$?; [ "$s" -eq 5 ] || rc=$s; }
           flaky=$(uv run python scripts/ci_flaky.py pytest.log)
           if [ -n "$flaky" ]; then
             echo "$flaky" >> "$GITHUB_STEP_SUMMARY"

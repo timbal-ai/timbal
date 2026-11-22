@@ -17,7 +17,8 @@ process would restore it, driven until it is idle, and checked:
   pending, and what it stores then matches what it holds.
 
 Further sweeps: the process dies a second time, during the recovery; it shuts down in order at that write
-instead of dying; it lives on while the session store, or the trace store, is away for a stretch of writes.
+instead of dying; it lives on while the session store, or the trace store, is away for a stretch of writes; it
+stops running for longer than its lease and then runs on (its session finds the lease gone and stops).
 
 The other crash tests in ``test_chat_session_durable.py`` kill a session after a last successful flush, which
 is one point of this space; these find the others.
@@ -39,9 +40,10 @@ from timbal.types.content import ToolUseContent
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
-# Runs one at a time in CI, after the parallel pass (pyproject.toml `serial`): under a fully loaded runner a
-# restored session's worker has sat idle with work queued (30-60 s); being investigated on its own.
-pytestmark = pytest.mark.serial
+# A test that times out because nothing in its process ran, or because something blocked the event loop, says
+# so, with the stacks (conftest.py `loop_watchdog`): on loaded CI runners a test process has stood still for
+# 70-260 s, and the sessions it was waiting for looked stuck.
+pytestmark = pytest.mark.usefixtures("loop_watchdog")
 
 SIDE_EFFECTS = ("work", "ship", "charge", "doit", "dig")
 RECOVERY = "cut off by a server restart"
@@ -73,6 +75,8 @@ class Fault:
     - ``"taken"``: another process takes the session over just before that write to the session store.
     - ``"stop"``: the user stops the session (``interrupt()``) just as that write is made, from inside it: a
       trace save is cut where it stands, which no amount of waiting in a scenario hits on purpose.
+    - ``"stall"``: the process stops running for longer than its lease (a paused VM, a starved runner) just
+      as that write is made: the clock jumps (:class:`Clock`), and the session finds its lease gone.
 
     ``then=(kind, after)``: an outage that the process does not outlive. It dies (``"die"``) or shuts down
     (``"close"``) ``after`` writes into it.
@@ -87,6 +91,7 @@ class Fault:
         self.taken: int | None = None  # the version the other process left the row at
         self.session = None
         self.stop = None  # what a "stop" fault calls: the client's stop()
+        self.stalled = False
 
     def write(self) -> bool:
         """Count a write. False: the process is dead (the caller stops with its task)."""
@@ -105,6 +110,9 @@ class Fault:
             if kind == "close":
                 self.gone.set()
                 self.closing = asyncio.ensure_future(self.session.close(keep=True))
+            if kind == "stall" and not self.stalled:
+                self.stalled = True
+                Clock.jump(STALL_S)
         return True
 
     def failing(self, kind) -> bool:
@@ -121,6 +129,30 @@ class Fault:
         for task in (session._worker, session._turn, session._lease_task, session._saver):
             if task is not None and not task.done():
                 task.cancel()
+
+
+class Clock:
+    """``time.monotonic`` as a stalled process sees it on waking: everything that measures time (the lease,
+    the event loop's timers) finds ``jump`` seconds gone at once. Installed by the tests that stall."""
+
+    shift = 0.0
+    real = None
+
+    @classmethod
+    def install(cls, monkeypatch):
+        import time
+
+        cls.shift, cls.real = 0.0, time.monotonic
+        monkeypatch.setattr(time, "monotonic", lambda: cls.real() + cls.shift)
+
+    @classmethod
+    def jump(cls, seconds):
+        assert cls.real is not None, "Clock.install() first"
+        cls.shift += seconds
+
+
+# Past the 30 s lease and its margin, inside the scenario's 60 s hang guard.
+STALL_S = 40.0
 
 
 class FaultySqlite(SqliteTracingProvider):
@@ -616,6 +648,17 @@ def texts(message):
 _RUNS = iter(range(10**9))
 
 
+async def stalled(fault, session) -> None:
+    """After a ``"stall"`` fault: back from it, the session finds its lease gone and stops, for another process
+    to restore (it may hold the session by now)."""
+    if not fault.stalled or fault.gone.is_set():
+        return
+    await asyncio.wait_for(session.wait_closed(), 10)
+    assert session.lost, f"a session stalled past its lease went on: {session.state()}"
+    fault.gone.set()
+    fault.closing = asyncio.ensure_future(session.wait_closed())
+
+
 async def run_once(tmp_path, scenario, durability, *faults):
     """Run ``scenario`` under the first fault; each time the process is gone, restore it under the next one
     (none left: nothing fails any more); settle; return what to check."""
@@ -630,6 +673,7 @@ async def run_once(tmp_path, scenario, durability, *faults):
     fault.session = session
     client = Client(session, fault, calls)
     await SCENARIOS[scenario](client)
+    await stalled(fault, session)
     writes = [fault.writes]
     while fault.gone.is_set():
         if fault.dead:
@@ -651,6 +695,7 @@ async def run_once(tmp_path, scenario, durability, *faults):
         client = Client(session, fault, calls)
         client.acked, client.acked_wakes, client.must_not_run = acked, acked_wakes, must_not_run
         await client.settle()
+        await stalled(fault, session)
         writes.append(fault.writes)
     fault.at = None  # the scenario is over: nothing fails any more
     return {
@@ -794,6 +839,18 @@ async def test_a_stop_at_any_write_holds_and_loses_nothing(tmp_path, scenario, d
     middle of a save (its last one, when it has just ended on a question), or one that is only starting."""
     failures, points = await sweep(tmp_path, scenario, durability, "stop")
     assert not failures, f"{len(failures)} of {points} stops:\n" + "\n".join(failures)
+
+
+@pytest.mark.parametrize("durability", ["sync", "end"])
+@pytest.mark.parametrize("scenario", sorted(SCENARIOS))
+async def test_a_stall_past_the_lease_at_any_write_loses_and_repeats_nothing(
+    tmp_path, scenario, durability, monkeypatch
+):
+    """The process stops running at a write for longer than its lease (seen on loaded CI runners: 70-260 s),
+    then runs on: the session finds its lease gone, stops without writing, and another process restores it."""
+    Clock.install(monkeypatch)
+    failures, points = await sweep(tmp_path, scenario, durability, "stall")
+    assert not failures, f"{len(failures)} of {points} stalls:\n" + "\n".join(failures)
 
 
 @pytest.mark.parametrize("end", ["die", "close"])
