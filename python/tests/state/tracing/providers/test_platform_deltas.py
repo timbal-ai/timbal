@@ -46,6 +46,9 @@ def clean():
     PlatformTracingProvider._recent.clear()
     PlatformTracingProvider._flights.clear()
     PlatformTracingProvider._unsaved.clear()
+    # Snapshots are numbered as in a new process, by the clock alone: a test here may leave the counter ahead
+    # of the clock (a platform that holds a newer snapshot), and no test may count on an earlier one's saves.
+    platform_module._last_snapshot = 0
     set_run_context(None)
     set_call_id(None)
     set_parent_call_id(None)
@@ -54,6 +57,7 @@ def clean():
     PlatformTracingProvider._delta_runs.clear()
     PlatformTracingProvider._recent.clear()
     PlatformTracingProvider._unsaved.clear()
+    platform_module._last_snapshot = 0
     for task in PlatformTracingProvider._retries.values():
         task.cancel()
     PlatformTracingProvider._retries.clear()
@@ -501,9 +505,9 @@ class TestSingleFlight:
         assert len(seen) > 2 and seen == sorted(set(seen))
 
     async def test_continues_above_the_snapshot_the_platform_holds(self):
-        from timbal.state.tracing.providers import platform as platform_module
-
-        ahead = platform_module._last_snapshot + 10**15  # another process' clock runs ahead
+        # Another process' clock runs ahead. Taken from the clock snapshots are numbered by, not from the last
+        # number given: there is none when this is the first test of its process to save.
+        ahead = platform_module._epoch_ns() + 10**15
         sent = []
 
         async def request(*_args, headers=None, **_):
