@@ -3627,9 +3627,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # interruptible tools in flight, then steer the message in (see _multiplex_tools).
         cut: asyncio.Event | None = run_context._cut if steering and current_span.parent_call_id is None else None
 
+        # Set by _steer: whether it added messages, and whether the user wrote one of them. Read without
+        # steering too (delivery's end_turn), so they exist either way.
+        steered = steered_user = False
         if steering:
-            # Set by _steer: whether it added messages, and whether the user wrote one of them.
-            steered = steered_user = False
 
             async def _steer() -> AsyncGenerator[BaseEvent, None]:
                 """Bring in what was posted for the running turn, screening user text like a prompt.
