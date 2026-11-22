@@ -103,9 +103,21 @@ class TestEndCall:
 
     async def test_partial_barge_in_during_goodbye_holds_hangup_until_commit_cancels_it(self) -> None:
         class FlushingTracker(FakePlaybackTracker):
+            """The goodbye plays from its first audio chunk until a barge-in flushes it. Playback follows
+            the audio, not the test's polling: set once the goodbye's text showed up, a slow runner could
+            already be past the hangup's 0.1 s poll + END_CALL_TAIL_SECS by then."""
+
+            armed = True
+
+            def on_audio_emitted(self, num_bytes: int) -> None:
+                super().on_audio_emitted(num_bytes)
+                if self.armed:
+                    self.playing = True
+
             def on_interrupted(self) -> None:
                 super().on_interrupted()
-                self.playing = False
+                if self.playing:  # the caller's own first commit interrupts too, before any audio
+                    self.playing = self.armed = False
 
         tracker = FlushingTracker()
         session, stt, _tts = _session(_hangs_up_with(GOODBYE, "Dime."), tools=[end_call], tracker=tracker)
@@ -114,7 +126,7 @@ class TestEndCall:
 
         await stt.inject(TranscriptEvent(type="committed", text="Vale, vamos a terminar."))
         await _until(lambda: GOODBYE in _texts(events))
-        tracker.playing = True
+        assert tracker.playing and not session.closed, "the goodbye must still be playing when the caller cuts in"
         # Partial barge-in interrupts immediately and flushes playback before the commit lands.
         await stt.inject(TranscriptEvent(type="partial", text="Espera, una cosa"))
         await _until(lambda: not tracker.playing)
