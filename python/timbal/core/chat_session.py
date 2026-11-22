@@ -2127,8 +2127,10 @@ class ChatSession:
     def _drop_stopped(self, events: list[dict[str, Any]], wake: dict[str, Any] | None, dead_run_id: str | None) -> None:
         """The input of a dead turn its user stopped, its messages or its wake: delivered to it (the messages'
         receipts settle), and named to the next turn in a silent notice, which rides with it (that turn answers
-        the stop)."""
+        the stop). Their ids join ``_shown_events``: a snapshot can list them as pending too (a turn cut before
+        it started hands its messages back), and from there they would be queued again."""
         for data in events:
+            self._shown_events.add(data.get("id"))
             held = self._kept_events.pop(data.get("id"), None)
             if held is not None:
                 held._settle("delivered", dead_run_id)

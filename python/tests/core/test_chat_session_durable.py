@@ -1071,7 +1071,8 @@ class TestAStoppedTurnThatDied:
         return provider, store, session, stop
 
     async def _restored(self, provider, store, session, charge):
-        await crash(session)
+        if not session.closed:
+            await crash(session)
         provider.crashed = False
         restored = await ChatSession.from_store(gated_agent(provider, charge), store, session.id)
         await records(restored, "turn_finished", 1, after=after_restore(restored))
@@ -1106,6 +1107,19 @@ class TestAStoppedTurnThatDied:
         session._persist()
         await session.flush()
         assert (await store.load(session.id)).in_flight["stopped"] is True
+        restored = await self._restored(provider, store, session, charge)
+        await self._the_stop_holds(restored, charge)
+        await restored.close()
+
+    async def test_its_messages_listed_as_pending_too_are_not_queued_again(self, db):
+        """A turn cut before it started hands its messages back, so a snapshot can list them both with the turn
+        and as pending. Dropped as stopped, they are not restored from the pending list either."""
+        charge = Charge(released=True)
+        provider, store, session, _ = await self._stopped_before_its_tool(db, charge)
+        await crash(session)
+        stored = await store.load(session.id)
+        stored.pending = [*stored.in_flight["events"], *stored.pending]
+        await store.save(stored, expect_version=stored.version, owner=process_owner())
         restored = await self._restored(provider, store, session, charge)
         await self._the_stop_holds(restored, charge)
         await restored.close()
