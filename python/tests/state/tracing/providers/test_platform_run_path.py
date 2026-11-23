@@ -1,10 +1,12 @@
 """PlatformTracingProvider runs stored somewhere other than ``apps/{app_id}/runs`` (issue #309).
 
 A subclass overrides ``_run_path`` (and its own ``_resolve_config``) and gets the whole save pipeline: span
-deltas, gzip, snapshot ordering, keep-alive saves, reads. What a host advertises is learned per family of
-run paths, not per host: two endpoints on one host need not accept the same formats, and a format one of
-them refused must not be turned off for the other. Strict reads (``get_strict``: restores, recoveries,
-approval claims) read the whole trace, never the ``select=resume`` projection.
+deltas, gzip, snapshot ordering, keep-alive saves, reads. What a host advertises is learned per endpoint, not
+per host: two endpoints on one host need not accept the same formats, and a format one of them refused must
+not be turned off for the other. The provider does not guess which paths share an endpoint: an app's runs
+share the host's (as before), a subclass's runs each keep their own destination's, and a subclass that knows
+its runs share one says so (``_run_path`` returns a ``RunPath`` with its ``family``). Strict reads (``get_strict``: restores, recoveries, a resume's
+tool policy) read the whole trace, never the ``select=resume`` projection.
 """
 
 import asyncio
@@ -21,7 +23,7 @@ from timbal.state import set_run_context
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.context import RunContext
 from timbal.state.tracing.providers import platform as platform_module
-from timbal.state.tracing.providers.platform import PlatformTracingProvider
+from timbal.state.tracing.providers.platform import PlatformTracingProvider, RunPath
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
 
@@ -41,7 +43,8 @@ NO_SUBJECT = PlatformConfig(host=HOST, auth=PlatformAuth(type=PlatformAuthType.B
 
 
 class ChatRuns(PlatformTracingProvider):
-    """Stores runs at another endpoint of the same host, with credentials of its own: only these two hooks.
+    """Stores runs at another endpoint of the same host, with credentials of its own, and says that its runs
+    share that endpoint (the ``RunPath`` it returns): the two hooks a subclass for another endpoint writes.
 
     Its config is not written onto the run: the run's own config serves the run's other platform calls."""
 
@@ -49,11 +52,17 @@ class ChatRuns(PlatformTracingProvider):
 
     @classmethod
     def _run_path(cls, platform_config, run_id):  # noqa: ARG003 - one org in these tests
-        return f"{CHAT_PREFIX}{run_id}"
+        return RunPath(f"{CHAT_PREFIX}{run_id}", family=CHAT_PREFIX)  # every run goes to the one chat endpoint
 
     @classmethod
     def _resolve_config(cls, run_context):  # noqa: ARG003
         return cls.config
+
+
+def chat_caps(provider=None, run_id="any-run"):
+    """What the chat endpoint advertised and refused, as any run of ``ChatRuns`` (or a copy) sees it."""
+    provider = provider or ChatRuns
+    return provider._family_caps(ORG_ONLY, provider._run_path(ORG_ONLY, run_id))
 
 
 class Endpoint(FakePlatform):
@@ -264,7 +273,7 @@ class TestWhatAHostAdvertises:
             await run(tool_loop(chat), chat, ORG_ONLY)
             await run(tool_loop(apps), apps, CONFIG)
         assert first.id in host.chat.runs
-        assert ChatRuns._family_caps(ORG_ONLY).delta_rejected
+        assert chat_caps().delta_rejected
         assert not PlatformTracingProvider._family_caps(CONFIG).delta_rejected
         assert "delta" in [p["kind"] for p in host.apps.patches]
 
@@ -291,20 +300,33 @@ class TestWhatAHostAdvertises:
         assert not ChatRuns.configured(config=ORG_ONLY).takes_deltas(ORG_ONLY)  # a configured copy: same endpoint
 
     async def test_takes_deltas_asks_the_providers_own_resolve_config(self):
-        """A subclass that finds its credentials in ``_resolve_config`` is asked the same way its saves are."""
-        host = Host(apps=Endpoint(deltas=False, advertise=False), chat=Endpoint())
+        """A provider that finds its credentials in ``_resolve_config`` is asked the same way its saves are."""
+        own = PlatformConfig(host="own.test", auth=CONFIG.auth, subject=CONFIG.subject)
+
+        class OwnCredentials(PlatformTracingProvider):
+            @classmethod
+            def _resolve_config(cls, run_context):  # noqa: ARG003
+                return own
+
+        host = Host(apps=Endpoint(), chat=Endpoint())
         with patch("timbal.platform.utils._request", host.request):
-            await run(tool_loop(ChatRuns), ChatRuns, None)
-        assert ChatRuns.takes_deltas() and ChatRuns.takes_deltas(CONFIG)
-        assert ChatRuns.configured(keepalive_s=1).takes_deltas()  # a configured copy: the same endpoint
-        assert not PlatformTracingProvider.takes_deltas(CONFIG)  # the app's runs on that host never answered
+            await run(tool_loop(OwnCredentials), OwnCredentials, CONFIG)
+        assert OwnCredentials.takes_deltas() and OwnCredentials.takes_deltas(CONFIG)  # own.test learned deltas
+        assert not PlatformTracingProvider.takes_deltas(CONFIG)  # the run's own host never answered
+
+    def test_takes_deltas_has_no_destination_for_another_run_path_without_a_run(self):
+        """Each run of another run path has its own destination (or its declared family): asked without a run,
+        only a forced setting answers."""
+        chat_caps().delta = True
+        assert not ChatRuns.takes_deltas()
+        assert ChatRuns.configured(deltas=True).takes_deltas()
 
     def test_configured_copies_share_their_endpoints_family(self):
         caps = PlatformTracingProvider._family_caps(CONFIG)
         assert PlatformTracingProvider.configured(platform_config=CONFIG)._family_caps(CONFIG) is caps
         assert PlatformTracingProvider._host_caps(HOST) is caps  # app runs: keyed by host, as before
-        assert ChatRuns._family_caps(ORG_ONLY) is not caps
-        assert ChatRuns.configured(keepalive_s=1)._family_caps(ORG_ONLY) is ChatRuns._family_caps(ORG_ONLY)
+        assert chat_caps() is not caps
+        assert chat_caps(ChatRuns.configured(keepalive_s=1)) is chat_caps()
 
     @pytest.mark.parametrize("made_by", ["a factory", "configured()", "one _run_path for both"])
     def test_two_endpoints_never_share_what_one_of_them_refused(self, made_by):
@@ -340,18 +362,23 @@ class TestWhatAHostAdvertises:
         else:
             pairs = [(Mixed, CONFIG), (Mixed, ORG_ONLY)]
         (first, first_config), (second, second_config) = pairs
+
+        def caps(provider, config, run_id="r"):
+            return provider._family_caps(config, provider._run_path(config, run_id))
+
         assert first._run_path(first_config, "r") != second._run_path(second_config, "r")
-        first._family_caps(first_config).delta_rejected = True
-        assert not second._family_caps(second_config).delta_rejected
+        caps(first, first_config).delta_rejected = True
+        assert not caps(second, second_config).delta_rejected
         assert not PlatformTracingProvider._family_caps(CONFIG).delta_rejected  # nor app runs
-        # And one endpoint is one family, run after run.
-        assert first._family_caps(first_config) is first._family_caps(first_config)
+        # And one destination keeps what it learned, save after save.
+        assert caps(first, first_config) is caps(first, first_config)
 
 
-class TestFamiliesOfRunPathsThatCheckTheRunId:
-    """A ``_run_path`` may check the run id it is given (``UUID(run_id)``). Telling endpoints apart must not
-    depend on its accepting an empty one: probed with an empty id, two ``configured()`` copies that keep their
-    prefix in a class attribute fell back to one family, the shared function's."""
+class TestFamilies:
+    """Which runs share what an endpoint advertised and refused. The provider does not guess it from paths: a
+    run of a subclass's ``_run_path`` keeps its own destination's (one endpoint, whatever routes there), and a
+    subclass that knows its runs share an endpoint declares it (``RunPath(family=...)``). Guessing a template from the
+    path took a version segment for a run id, merged factory-made classes, and missed other spellings of it."""
 
     class Prefixed(PlatformTracingProvider):
         prefix: str = CHAT_PREFIX
@@ -365,18 +392,150 @@ class TestFamiliesOfRunPathsThatCheckTheRunId:
         def _resolve_config(cls, run_context):  # noqa: ARG003
             return ORG_ONLY
 
-    def test_two_prefixes_are_two_endpoints(self):
+    @staticmethod
+    def caps(provider, run_id, config=ORG_ONLY):
+        return provider._family_caps(config, provider._run_path(config, run_id))
+
+    def test_each_destination_keeps_its_own(self):
         chat = self.Prefixed.configured(prefix=CHAT_PREFIX)
         threads = self.Prefixed.configured(prefix="orgs/1/threads/runs/")
-        chat._family_caps(ORG_ONLY).select_resume = True
-        chat._family_caps(ORG_ONLY).delta_rejected = True
-        assert not threads._family_caps(ORG_ONLY).select_resume
-        assert not threads._family_caps(ORG_ONLY).delta_rejected
+        run_id = RunContext(tracing_provider=None).id
+        self.caps(chat, run_id).select_resume = True
+        self.caps(chat, run_id).delta_rejected = True
+        assert self.caps(chat, run_id).select_resume and self.caps(chat, run_id).delta_rejected  # kept there
+        assert not self.caps(threads, run_id).select_resume and not self.caps(threads, run_id).delta_rejected
+        another = RunContext(tracing_provider=None).id
+        assert not self.caps(chat, another).select_resume  # another run, another destination: its own
 
-    def test_one_prefix_is_one_endpoint(self):
+    def test_one_destination_is_one_entry_whatever_class_stores_there(self):
+        run_id = RunContext(tracing_provider=None).id
         first = self.Prefixed.configured(prefix=CHAT_PREFIX)
         second = self.Prefixed.configured(prefix=CHAT_PREFIX)
-        assert first._family_caps(ORG_ONLY) is second._family_caps(ORG_ONLY)
+        assert self.caps(first, run_id) is self.caps(second, run_id)
+
+    def test_without_a_run_an_undeclared_subclass_has_no_endpoint_and_stores_nothing(self):
+        before = dict(PlatformTracingProvider._caps)
+        assert not self.Prefixed.takes_deltas(ORG_ONLY)
+        assert PlatformTracingProvider._caps == before
+
+    async def test_a_declared_family_learns_once_for_all_its_runs(self):
+        """A family declared (``RunPath``): the second run's first save already goes as the endpoint takes it."""
+        host = Host(apps=Endpoint(), chat=Endpoint())
+        with patch("timbal.platform.utils._request", host.request):
+            await run(tool_loop(ChatRuns, steps=1), ChatRuns, None)
+            before = len(host.chat.patches)
+            await run(tool_loop(ChatRuns, steps=1), ChatRuns, None)
+        assert host.chat.patches[before]["kind"] == "delta"
+        assert chat_caps().delta
+
+    async def test_undeclared_runs_each_learn_from_their_own_answers(self):
+        """Not declared: each run starts from nothing (its first save whole) and learns from its own answers."""
+        undeclared = self.Prefixed.configured(prefix=CHAT_PREFIX)
+        endpoint = Endpoint()
+
+        async def request(method, path, **kwargs):
+            return await endpoint.request(method, path, **kwargs)
+
+        with patch("timbal.platform.utils._request", request):
+            first = await run(tool_loop(undeclared, steps=2), undeclared, None)
+            second = await run(tool_loop(undeclared, steps=2), undeclared, None)
+        for ctx in (first, second):
+            kinds = [
+                p["kind"]
+                for p, c in zip(endpoint.patches, [c for c in endpoint.calls if c["method"] == "PATCH"], strict=True)
+                if c["run"] == ctx.id
+            ]
+            assert kinds[0] == "full" and set(kinds[1:]) == {"delta"}, kinds
+
+    @pytest.mark.parametrize("made_by", ["configured(_run_path=...)", "a subclass", "multiple inheritance"])
+    async def test_a_declared_family_is_not_inherited_by_a_class_that_moves_its_runs(self, made_by):
+        """The declaration describes the ``_run_path`` it was written with. A copy or subclass that sends its
+        runs elsewhere must not share it: the other endpoint refusing deltas would turn them off here."""
+        threads_prefix = "orgs/1/threads/runs/"
+        if made_by == "a subclass":
+
+            class Moved(ChatRuns):
+                @classmethod
+                def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                    return f"{threads_prefix}{run_id}"
+
+        elif made_by == "multiple inheritance":
+
+            class ThreadsPath:
+                @classmethod
+                def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                    return f"{threads_prefix}{run_id}"
+
+            class Moved(ThreadsPath, ChatRuns):  # its runs go to threads: ThreadsPath comes first
+                pass
+
+        else:
+            Moved = ChatRuns.configured(_run_path=lambda _cfg, run_id: f"{threads_prefix}{run_id}")
+        assert self.caps(Moved, "r1") is not chat_caps()
+        assert chat_caps(ChatRuns.configured(keepalive_s=1)) is chat_caps()
+        chat, threads = Endpoint(), Endpoint(deltas=False)  # threads refuses deltas
+
+        async def request(method, path, **kwargs):
+            return await (chat if path.startswith(CHAT_PREFIX) else threads).request(method, path, **kwargs)
+
+        with patch("timbal.platform.utils._request", request):
+            await run(tool_loop(ChatRuns, steps=1), ChatRuns, None)  # learns: chat takes deltas
+            threads.deltas = True  # advertises at first...
+            await run(tool_loop(Moved, steps=1), Moved, None)
+            threads.deltas = False  # ...then refuses
+            await run(tool_loop(Moved, steps=2), Moved, None)
+            before = len(chat.patches)
+            await run(tool_loop(ChatRuns, steps=2), ChatRuns, None)
+        assert {p["kind"] for p in chat.patches[before:]} == {"delta"}
+
+    @pytest.mark.parametrize("family", ["", None, True, 1])
+    def test_a_family_is_a_non_empty_string(self, family):
+        """An empty one would be the app runs' entry; a non-string ``True`` would be every endpoint's."""
+        with pytest.raises(TypeError):
+            RunPath(f"{CHAT_PREFIX}r1", family=family)
+
+    def test_a_family_names_a_prefix_of_its_path(self):
+        """Tied to the route it declares: copies that keep their prefix in an attribute and declare one fixed
+        name would otherwise share it across endpoints; a family that is not a prefix of the path is refused."""
+
+        class Prefixed(PlatformTracingProvider):
+            prefix: str = CHAT_PREFIX
+
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return RunPath(f"{cls.prefix}{run_id}", family="prefixed-runs")
+
+        with pytest.raises(ValueError, match="prefix"):
+            Prefixed.configured(prefix="orgs/1/threads/runs/")._run_path(ORG_ONLY, "r1")
+        with pytest.raises(TypeError):
+            RunPath(None, family="f")
+
+    def test_a_run_path_copies_and_pickles_with_its_family(self):
+        import copy
+        import pickle
+
+        path = RunPath(f"{CHAT_PREFIX}r1", family=CHAT_PREFIX)
+        for again in (copy.copy(path), copy.deepcopy(path), pickle.loads(pickle.dumps(path))):
+            assert again == path and isinstance(again, RunPath) and again.family == CHAT_PREFIX
+
+    def test_a_declared_family_never_meets_a_destination_or_the_app_runs(self):
+        """Keys apart: ``""`` the app runs', ``=`` a declared family, ``@`` a run's own destination. A family
+        named like a destination is still a family."""
+
+        class Plain(PlatformTracingProvider):
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{CHAT_PREFIX}{run_id}"
+
+        class Declared(PlatformTracingProvider):
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return RunPath(f"{CHAT_PREFIX}{run_id}", family=f"{CHAT_PREFIX}r")  # also run "r"'s destination
+
+        destination = self.caps(Plain, "r")
+        assert self.caps(Declared, "r1") is not destination
+        assert destination is not PlatformTracingProvider._family_caps(CONFIG)
+        assert self.caps(Declared, "r1") is not PlatformTracingProvider._family_caps(CONFIG)
 
     async def test_reads_ask_for_the_projection_only_where_it_was_advertised(self):
         threads_prefix = "orgs/1/threads/runs/"
@@ -396,26 +555,6 @@ class TestFamiliesOfRunPathsThatCheckTheRunId:
         assert {s.call_id for s in stored.as_records()} == set(threads_run._trace.keys())
         assert [c["params"] for c in threads_endpoint.calls if c["method"] == "GET"] == [None]
 
-    def test_a_run_path_that_refuses_the_probe_is_told_apart_by_the_runs_it_stores(self):
-        """A class that routes run ids from a registry, some to an app's runs and some to the chat endpoint:
-        the probe id is in neither, so the family comes from the path each run is really stored at."""
-        routes = {"run-a1": APP_PREFIX, "run-a2": APP_PREFIX, "run-c1": CHAT_PREFIX}
-
-        class Registry(PlatformTracingProvider):
-            @classmethod
-            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
-                return f"{routes[run_id]}{run_id}"  # KeyError for any other id, the probe's too
-
-        def caps(run_id):
-            return Registry._family_caps(ORG_ONLY, Registry._run_path(ORG_ONLY, run_id), run_id)
-
-        assert caps("run-a1") is caps("run-a2")  # one endpoint, one family
-        caps("run-a1").select_resume = True
-        assert not caps("run-c1").select_resume
-        before = dict(PlatformTracingProvider._caps)
-        assert not Registry.takes_deltas(ORG_ONLY)  # asked without a run: nothing to tell its endpoint by...
-        assert PlatformTracingProvider._caps == before  # ...and nothing stored for it
-
     async def test_one_class_two_routes_reads_ask_for_the_projection_only_where_it_was_advertised(self):
         routes = {"run-app": APP_PREFIX, "run-chat": CHAT_PREFIX}
 
@@ -434,36 +573,9 @@ class TestFamiliesOfRunPathsThatCheckTheRunId:
         assert [c["params"] for c in host.apps.calls] == [None, {"select": "resume"}]
         assert [c["params"] for c in host.chat.calls] == [None]
 
-    def test_a_short_run_id_is_taken_out_of_its_own_place_only(self):
-        """Custom run ids can be short: ``"r"`` is in ``orgs`` and ``runs`` too. The run's own place is the last."""
-
-        class Chat(PlatformTracingProvider):
-            @classmethod
-            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
-                return f"{CHAT_PREFIX}{run_id}"
-
-        assert Chat._caps_family(ORG_ONLY, Chat._run_path(ORG_ONLY, "r"), "r") == f"{CHAT_PREFIX}{{run_id}}"
-        assert Chat._family_caps(ORG_ONLY, Chat._run_path(ORG_ONLY, "r"), "r") is Chat._family_caps(ORG_ONLY)
-
-    def test_a_run_path_that_spells_the_run_id_as_a_uuid_is_one_family(self):
-        class Dashed(PlatformTracingProvider):
-            @classmethod
-            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
-                return f"{CHAT_PREFIX}{UUID(run_id)}"  # 0000...-7000-8000-...: the run id, written another way
-
-        one, other = RunContext(tracing_provider=None).id, RunContext(tracing_provider=None).id
-
-        def caps(run_id):
-            return Dashed._family_caps(ORG_ONLY, Dashed._run_path(ORG_ONLY, run_id), run_id)
-
-        assert caps(one) is caps(other) is Dashed._family_caps(ORG_ONLY)  # and what takes_deltas() asks about
-        caps(one).delta_rejected = True
-        assert caps(other).delta_rejected  # a refusal is learned once for the endpoint, not once per run
-
-    def test_a_run_path_the_run_id_cannot_be_found_in_keeps_only_what_it_refused(self):
-        """Hashed, say: the endpoint cannot be told from the path. What it advertises is not kept (it could be
-        another endpoint's); what it refused is, once for the class (a refusal kept too widely only sends plain
-        saves). Not a family per run: each run would pay a refused save again and fill the cache."""
+    def test_an_opaque_destination_keeps_its_own(self):
+        """Hashed, say: everything is kept for the concrete destination, which is one endpoint whatever routes
+        there: what it advertised and what it refused."""
 
         class Hashed(PlatformTracingProvider):
             @classmethod
@@ -471,34 +583,29 @@ class TestFamiliesOfRunPathsThatCheckTheRunId:
                 return f"{CHAT_PREFIX}{sum(map(ord, run_id)) % 97}"
 
         def caps(run_id):
-            return Hashed._family_caps(ORG_ONLY, Hashed._run_path(ORG_ONLY, run_id), run_id)
+            return Hashed._family_caps(ORG_ONLY, Hashed._run_path(ORG_ONLY, run_id))
 
-        advertised = {
-            "Accept-Patch": f"application/json, {platform_module.DELTA_MEDIA_TYPE}",
-            "Accept-Encoding": "gzip",
-            "X-Timbal-Select": "resume",
-        }
-        caps("run-1").learn(advertised)
-        assert not (caps("run-2").delta or caps("run-2").gzip or caps("run-2").select_resume)
+        assert Hashed._run_path(ORG_ONLY, "run-1") != Hashed._run_path(ORG_ONLY, "run-2")
+        caps("run-1").learn({"Accept-Patch": f"application/json, {platform_module.DELTA_MEDIA_TYPE}"})
         caps("run-1").gzip_rejected = True
-        assert caps("run-2").gzip_rejected and caps("run-3") is caps("run-1")  # one entry for the class
-        assert not [key for key in PlatformTracingProvider._caps if "{run_id}" in key]
+        assert caps("run-1").delta and caps("run-1").gzip_rejected  # kept for that destination
+        assert not (caps("run-2").delta or caps("run-2").gzip_rejected)  # another destination learns its own
         assert not Hashed.takes_deltas(ORG_ONLY)
 
     @pytest.mark.parametrize("forced", ["compress", "deltas"])
-    async def test_a_forced_format_the_endpoint_refuses_is_refused_once_not_on_every_save(self, forced):
-        """What an endpoint advertises is not shared when it cannot be told; what it refused is: a format
-        forced on (``compress=True``, ``deltas=True``, ``TIMBAL_TRACE_GZIP``) and turned down would otherwise go
-        out on every save, be refused, and be sent again."""
+    async def test_a_forced_format_a_destination_refuses_is_refused_once_there(self, forced):
+        """A format forced on (``compress=True``, ``deltas=True``, ``TIMBAL_TRACE_GZIP``) and turned down: once
+        per destination, not on every save. Two runs, two opaque destinations (in the order they come)."""
+        destinations: dict[str, int] = {}
 
-        class Hashed(PlatformTracingProvider):
+        class Opaque(PlatformTracingProvider):
             trace_platform_config = ORG_ONLY
 
             @classmethod
             def _run_path(cls, platform_config, run_id):  # noqa: ARG003
-                return f"{CHAT_PREFIX}{sum(map(ord, run_id)) % 97}"
+                return f"{CHAT_PREFIX}slot-{destinations.setdefault(run_id, len(destinations))}"
 
-        provider = Hashed.configured(**{forced: True})
+        provider = Opaque.configured(**{forced: True})
         endpoint = Endpoint(deltas=False, gzip_ok=False, advertise=False)
 
         async def request(method, path, **kwargs):
@@ -508,7 +615,90 @@ class TestFamiliesOfRunPathsThatCheckTheRunId:
             for _ in range(2):
                 await run(tool_loop(provider, steps=3), provider, None)
         saves = [call for call in endpoint.calls if call["method"] == "PATCH"]
-        assert len(saves) == len(endpoint.patches) + 1  # one refused, the rest whole and plain
+        assert {call["run"] for call in saves} == {"slot-0", "slot-1"}
+        assert len(saves) == len(endpoint.patches) + 2  # one refused per destination
+
+    async def test_a_registry_with_versioned_routes_keeps_them_apart(self):
+        """A registry that maps run ``1`` to ``v1/runs/99`` and run ``2`` to ``v2/runs/99``: two destinations,
+        each with its own, so a projection one advertised is not sent to the other, which refuses it."""
+        first, second = "1", "2"
+        routes = {first: f"{CHAT_PREFIX}v1/runs/99", second: f"{CHAT_PREFIX}v2/runs/99"}
+
+        class Registry(PlatformTracingProvider):
+            trace_platform_config = ORG_ONLY
+
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return routes[run_id]
+
+        assert Registry._family_caps(ORG_ONLY, routes[first]) is not Registry._family_caps(ORG_ONLY, routes[second])
+        v1, v2 = Endpoint(select=True), Endpoint()  # v2 refuses `select`
+
+        async def request(method, path, **kwargs):
+            return await (v1 if "/v1/" in path else v2).request(method, path, **kwargs)
+
+        with patch("timbal.platform.utils._request", request):
+            for _ in range(2):  # the first read learns that v1 takes the projection
+                await read_back(Registry, first, None)
+            await read_back(Registry, second, None)
+        assert [c["params"] for c in v1.calls] == [None, {"select": "resume"}]
+        assert [c["params"] for c in v2.calls] == [None]
+
+    async def test_factory_made_classes_on_two_destinations_keep_their_refusals_apart(self):
+        """Two classes from one factory (same module and qualname), opaque keys, two endpoints on one host:
+        the second refusing deltas must not turn them off for the first."""
+
+        def factory(prefix):
+            class Runs(PlatformTracingProvider):
+                trace_platform_config = ORG_ONLY
+                deltas = True
+
+                @classmethod
+                def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                    return f"{prefix}{sum(map(ord, run_id)) % 7}"
+
+            return Runs
+
+        takes, refuses = factory(CHAT_PREFIX), factory("orgs/1/threads/runs/")
+        chat, threads = Endpoint(), Endpoint(deltas=False)
+
+        async def request(method, path, **kwargs):
+            return await (chat if path.startswith(CHAT_PREFIX) else threads).request(method, path, **kwargs)
+
+        with patch("timbal.platform.utils._request", request):
+            await run(tool_loop(refuses, steps=2), refuses, None)
+            before = len(chat.patches)
+            await run(tool_loop(takes, steps=2), takes, None)
+        assert threads.patches and all(p["kind"] == "full" for p in threads.patches)
+        assert {p["kind"] for p in chat.patches[before:]} == {"delta"}
+
+    async def test_a_run_learns_from_its_own_answers_however_its_path_spells_the_id(self):
+        """The run id given dashed, the path written with ``UUID(run_id).hex``: one destination for the run, so
+        what its answers advertise is used on its next saves."""
+
+        class Compact(PlatformTracingProvider):
+            trace_platform_config = ORG_ONLY
+
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{CHAT_PREFIX}{UUID(run_id).hex}"
+
+        one = str(UUID(int=1, version=4))
+        endpoint = Endpoint()
+
+        async def request(method, path, **kwargs):
+            return await endpoint.request(method, path, **kwargs)
+
+        with patch("timbal.platform.utils._request", request):
+            ctx = RunContext(id=one, tracing_provider=Compact)
+            set_run_context(ctx)
+            try:
+                out = await tool_loop(Compact, steps=3)(prompt="go").collect()
+            finally:
+                set_run_context(None)
+        assert out.status.code == "success", out.error
+        kinds = [patch_["kind"] for patch_ in endpoint.patches]
+        assert kinds[0] == "full" and "delta" in kinds[1:], kinds
 
     async def test_a_run_path_that_cannot_place_a_run_reads_it_as_not_stored(self):
         """``_run_path`` raises ``RunNotStored`` (a registry that does not know the run): no such run here, as a
@@ -565,7 +755,13 @@ class TestTheCapabilityCache:
     class PerOrg(PlatformTracingProvider):
         @classmethod
         def _run_path(cls, platform_config, run_id):
-            return f"orgs/{platform_config.subject.org_id}/chat/runs/{run_id}"
+            org = platform_config.subject.org_id
+            return RunPath(f"orgs/{org}/chat/runs/{run_id}", family=f"orgs/{org}/chat/runs")  # declared per org
+
+    @classmethod
+    def per_org(cls, number: int):
+        config = cls.org(number)
+        return cls.PerOrg._family_caps(config, cls.PerOrg._run_path(config, "any-run"))
 
     @staticmethod
     def org(number: int) -> PlatformConfig:
@@ -575,11 +771,60 @@ class TestTheCapabilityCache:
         PlatformTracingProvider._family_caps(CONFIG).delta = True  # app runs on this host
         bound = platform_module._CAPS_FAMILIES_MAX
         for number in range(bound + 500):
-            self.PerOrg._family_caps(self.org(number)).delta = True
-        families = [key for key in PlatformTracingProvider._caps if " " in key]
-        assert len(families) == bound
-        assert self.PerOrg._family_caps(self.org(bound + 499)).delta  # the latest are kept
+            self.per_org(number).delta = True
+        assert len([key for key in PlatformTracingProvider._caps if " =" in key]) == bound
+        assert self.per_org(bound + 499).delta  # the latest are kept
         assert PlatformTracingProvider._family_caps(CONFIG).delta  # app runs are keyed by host: never evicted
+
+    def test_runs_of_undeclared_destinations_do_not_push_out_a_declared_family(self):
+        """Undeclared runs each keep an entry of their own; a busy worker makes thousands. They are bounded on
+        their own: a declared family (or an org's) is what saves of every run lean on."""
+
+        class Undeclared(PlatformTracingProvider):
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{CHAT_PREFIX}{run_id}"
+
+        chat_caps().delta = True
+        bound = platform_module._CAPS_FAMILIES_MAX
+        for number in range(bound + 200):
+            run_id = f"run-{number}"
+            Undeclared._family_caps(ORG_ONLY, Undeclared._run_path(ORG_ONLY, run_id))
+        assert chat_caps().delta
+        assert len([key for key in PlatformTracingProvider._caps if " @" in key]) == bound
+
+    def test_a_family_named_with_a_space_and_an_at_sign_is_kept_as_a_family(self):
+        """An entry's kind is where it sits in the key, not a substring of the name: ``chat @v2`` is declared."""
+
+        class Odd(PlatformTracingProvider):
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return RunPath(f"chat @v2/runs/{run_id}", family="chat @v2")
+
+        class Undeclared(PlatformTracingProvider):
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{CHAT_PREFIX}{run_id}"
+
+        Odd._family_caps(ORG_ONLY, Odd._run_path(ORG_ONLY, "r")).delta = True
+        for number in range(platform_module._CAPS_FAMILIES_MAX + 50):
+            run_id = f"run-{number}"
+            Undeclared._family_caps(ORG_ONLY, Undeclared._run_path(ORG_ONLY, run_id))
+        assert Odd._family_caps(ORG_ONLY, Odd._run_path(ORG_ONLY, "r")).delta
+
+    def test_declared_families_filling_their_bound_leave_room_for_runs(self):
+        """The reverse: a worker serving more orgs than the bound still keeps what each run learns."""
+
+        class Undeclared(PlatformTracingProvider):
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{CHAT_PREFIX}{run_id}"
+
+        for number in range(platform_module._CAPS_FAMILIES_MAX + 50):
+            self.per_org(number)
+        own = Undeclared._family_caps(ORG_ONLY, Undeclared._run_path(ORG_ONLY, "run-1"))
+        own.delta = True
+        assert Undeclared._family_caps(ORG_ONLY, Undeclared._run_path(ORG_ONLY, "run-1")) is own
 
     def test_threads_filling_it_past_its_bound_do_not_break_it(self):
         """Saves run on event loops in more than one thread (a worker per thread, a flush at exit): inserting,
@@ -594,8 +839,8 @@ class TestTheCapabilityCache:
             start.wait()
             try:
                 for number in range(bound * 2):
-                    self.PerOrg._family_caps(self.org(offset * bound * 2 + number)).delta = True
-                    self.PerOrg._family_caps(self.org(number % 50))  # refreshes, while others evict
+                    self.per_org(offset * bound * 2 + number).delta = True
+                    self.per_org(number % 50)  # refreshes, while others evict
             except BaseException as error:  # noqa: BLE001 - any of them is the failure
                 errors.append(error)
 
@@ -731,7 +976,7 @@ class TestCredentials:
         class Chat(PlatformTracingProvider):
             @classmethod
             def _run_path(cls, platform_config, run_id):  # noqa: ARG003
-                return f"{CHAT_PREFIX}{run_id}"
+                return RunPath(f"{CHAT_PREFIX}{run_id}", family=CHAT_PREFIX)
 
         provider = (Chat if subclass else PlatformTracingProvider).configured(trace_platform_config=trace)
         ctx = RunContext(tracing_provider=provider)  # as a run starts: its config resolved from the environment
@@ -748,11 +993,14 @@ class TestCredentials:
         assert seen and {(path.split("/runs/")[0].split("/", 1)[0], auth) for path, auth in seen} == {
             ("trace.test", "Bearer t2_trace")
         }
-        # Answers for the trace endpoint, which advertised deltas, not for the run's host, which never answered:
-        # with the run's config passed too, as a save of that run would go (the trace config first).
-        assert provider.takes_deltas() is True
-        assert provider.takes_deltas(ctx.platform_config) is True
+        # App runs: answers for the trace endpoint, which advertised deltas, not for the run's host, which never
+        # answered; with the run's config passed too, as a save of that run would go (the trace config first).
+        # Another run path has no destination without a run (each run, or its declared family, has its own).
+        assert provider.takes_deltas() is (not subclass)
+        assert provider.takes_deltas(ctx.platform_config) is (not subclass)
         assert PlatformTracingProvider.takes_deltas(ctx.platform_config) is False
+        if subclass:
+            assert provider._family_caps(trace, provider._run_path(trace, "any-run")).delta
 
 
 class TestStrictReads:
@@ -796,8 +1044,10 @@ class TestStrictReads:
             ctx = RunContext(tracing_provider=provider)
             ctx.platform_config = CONFIG
             set_run_context(ctx)
-            out = await agent(prompt="pay").collect()
-            set_run_context(None)
+            try:
+                out = await agent(prompt="pay").collect()
+            finally:
+                set_run_context(None)
             assert out.status.reason == "approval_required"
             # Another process: nothing of this run in memory, and the host has advertised the projection.
             await read_back(provider, out.run_id, CONFIG)

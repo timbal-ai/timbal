@@ -13,7 +13,6 @@ import math
 import os
 import threading
 import time
-import uuid
 from collections import OrderedDict, deque
 from time import perf_counter_ns, time_ns
 from types import SimpleNamespace
@@ -262,12 +261,9 @@ def _flush_at_exit() -> None:
 
 DELTA_MEDIA_TYPE = "application/vnd.timbal.trace-delta+json"
 _DELTA_RUNS_MAX = 2048
-# Endpoint families kept in the capability cache besides the hosts of app runs (``_host_caps``): a route with
-# an org, user or session id in it makes one family per id, and a long-lived worker must not keep them all.
+# Entries of each kind kept in the capability cache besides the hosts of app runs (``_host_caps``): declared
+# families (one per org, say) and runs' own destinations (one per run), each bounded on its own.
 _CAPS_FAMILIES_MAX = 1024
-# The run id ``_caps_family`` asks a ``_run_path`` about: shaped like a real one (``RunContext.id``, a UUID7 in
-# hex), so a ``_run_path`` that checks its run id still answers.
-_PROBE_RUN_ID = "00000000000070008000000000000000"
 # Saves and reads run on event loops in more than one thread (a worker per thread, the flush at exit): the
 # capability cache is read, filled, refreshed and evicted under this lock.
 _CAPS_LOCK = threading.Lock()
@@ -309,6 +305,36 @@ class _HostCaps:
             _observe_snapshot(int(stored))
 
 
+class RunPath(str):
+    """A run path that says which runs share its endpoint: what ``_run_path`` returns when it knows.
+
+    ``family`` names the endpoint and is a prefix of the path, so a declaration is tied to the route it
+    declares, e.g. ``RunPath(f"orgs/{org}/chat/runs/{run_id}", family=f"orgs/{org}/chat/runs")``. What that
+    endpoint advertised (gzip, span deltas, ``select=resume``) and refused is then learned once for all its
+    runs. A plain string declares nothing: that run's destination keeps its own, which is always right (one
+    destination is one endpoint) and costs relearning per run, including one refused save per run for a format
+    the endpoint advertises (or is forced) and then refuses. Whoever computes the path declares it: a subclass
+    or ``configured()`` copy that returns another path declares again or keeps the default. A family shared
+    by routes that are not one endpoint (one too short a prefix) is the author's declaration, and trusted.
+    """
+
+    family: str
+
+    def __new__(cls, path: str, family: str) -> RunPath:
+        if not isinstance(path, str):
+            raise TypeError("RunPath's path is a string")
+        if not isinstance(family, str) or not family:
+            raise TypeError("RunPath(family=...) is a non-empty string: the name every run of its endpoint shares")
+        if not path.startswith(family):
+            raise ValueError(f"RunPath family {family!r} is not a prefix of its path {path!r}")
+        run_path = super().__new__(cls, path)
+        run_path.family = family
+        return run_path
+
+    def __getnewargs__(self) -> tuple[str, str]:
+        return str(self), self.family  # copy and pickle rebuild it with its family
+
+
 class RunNotStored(LookupError):
     """Raised by a ``_run_path`` for a run this provider does not store (a registry that does not know it).
 
@@ -316,19 +342,6 @@ class RunNotStored(LookupError):
     one ``_run_path`` raises, a ``KeyError`` included, is a bug or a misconfiguration and goes to the caller (read
     as "not stored", an HTTP resume would run without the tool policy of the run it resumes).
     """
-
-
-class _RefusalsOnly(_HostCaps):
-    """What is kept for runs whose endpoint cannot be told from their path: what it refused, not what it
-    advertised. An advertisement kept for the wrong endpoint sends it a format it does not take; a refusal kept
-    too widely only sends plain saves, and one not kept is paid again on every save (a forced format)."""
-
-    __slots__ = ()
-
-    def learn(self, headers) -> None:
-        stored = _header_items(headers).get(SNAPSHOT_HEADER, "").strip()
-        if stored.isdigit():
-            _observe_snapshot(int(stored))
 
 
 def _header_items(headers) -> dict[str, str]:
@@ -507,14 +520,15 @@ class PlatformTracingProvider(TracingProvider):
 
     compress: bool | None = None
     """Gzip each PATCH body (``Content-Encoding: gzip``). ``None``: when ``TIMBAL_TRACE_GZIP`` is set, or
-    once the host advertised it (``Accept-Encoding: gzip`` on a response, RFC 7694)."""
+    once the endpoint advertised it (``Accept-Encoding: gzip`` on a response, RFC 7694; for an app's runs, the
+    host)."""
 
     deltas: bool | None = None
     """Send span deltas instead of whole traces (``Content-Type: application/vnd.timbal.trace-delta+json``):
     a save carries the finished spans the platform has not acknowledged and a root header; the run's end
-    carries the full root. ``None``: once the host advertised it (``Accept-Patch``, RFC 5789). A host that
-    rejects either format (400/415/422) while it takes the same save without it falls back to whole
-    uncompressed traces for good, forced or not."""
+    carries the full root. ``None``: once the endpoint advertised it (``Accept-Patch``, RFC 5789). An endpoint
+    that rejects either format (400/415/422) while it takes the same save without it falls back to whole
+    uncompressed traces for good, forced or not (per endpoint: the host, for an app's runs; see ``_family``)."""
 
     keepalive_s: float | None = None
     """While a run is in flight and has not saved for this long (a long tool call, a slow model), it saves
@@ -573,8 +587,9 @@ class PlatformTracingProvider(TracingProvider):
         A subclass that stores runs somewhere else on the platform (runs that belong to no app) overrides this,
         and ``_resolve_config`` for its credentials, and gets the whole save pipeline as it is: span deltas,
         gzip, snapshot ordering, keep-alive saves, single flight, retries, reads. Every request and every
-        per-run key of this provider comes from it. What a host advertises is learned for the endpoint that
-        answered, not for the whole host (:meth:`_caps_family`). A run it cannot place (a registry that does
+        per-run key of this provider comes from it. What a host advertises is learned per host for an app's
+        runs (as before), and for any other run per destination, unless the path it returns is a
+        :class:`RunPath` that declares the family its runs share (:meth:`_family`). A run it cannot place (a registry that does
         not know it) raises :class:`RunNotStored`: reads answer it as not stored (``None``, as a 404), saves
         fail. Anything else it raises is a bug or a configuration error and goes to the caller.
         """
@@ -650,87 +665,73 @@ class PlatformTracingProvider(TracingProvider):
         return Trace(stored["trace"], parent_id=stored.get("parent_id"))
 
     @staticmethod
-    def _host_caps(host: str, family: str = "", *, create: bool = True, refusals_only: bool = False) -> _HostCaps:
-        """What ``host`` advertised for the runs of ``family`` (:meth:`_caps_family`; ``""``: an app's runs).
+    def _host_caps(host: str, family: str = "", *, create: bool = True) -> _HostCaps:
+        """What ``host`` advertised for the runs of ``family`` (:meth:`_family`; ``""``: an app's runs).
 
         ``create=False``: a family not seen yet is answered with nothing learned and not stored. App runs keep
-        one entry per host; other families are the least recently used ``_CAPS_FAMILIES_MAX`` (one evicted
-        learns again what its endpoint takes, and may have one save refused again).
+        one entry per host. Declared families (``=``) and runs' own destinations (``@``) are each the least
+        recently used ``_CAPS_FAMILIES_MAX``, bounded apart, so thousands of runs never push out the endpoint
+        every one of them leans on, nor the reverse (one evicted learns again what its endpoint takes, and may
+        have one save refused again).
         """
         caps_by_key = PlatformTracingProvider._caps
         key = f"{host} {family}" if family else host
         with _CAPS_LOCK:
             caps = caps_by_key.get(key)
             if caps is None:
-                caps = _RefusalsOnly() if refusals_only else _HostCaps()
+                caps = _HostCaps()
                 if not create:
                     return caps
                 caps_by_key[key] = caps
                 if family and len(caps_by_key) > _CAPS_FAMILIES_MAX:
-                    families = [known for known in caps_by_key if " " in known]
-                    for oldest in families[: max(0, len(families) - _CAPS_FAMILIES_MAX)]:
+                    # "=" declared, "@" a run's own destination: the character after the host (hosts have no
+                    # space), not a substring of the name, which may contain anything.
+                    same = [known for known in caps_by_key if known.partition(" ")[2][:1] == family[0]]
+                    for oldest in same[: max(0, len(same) - _CAPS_FAMILIES_MAX)]:
                         del caps_by_key[oldest]
             elif family:
                 caps_by_key.move_to_end(key)
         return caps
 
     @classmethod
-    def _caps_family(
-        cls, platform_config: PlatformConfig, run_path: str | None = None, run_id: str | None = None
-    ) -> str | None:
-        """Which runs share what a host advertised and refused: those stored at the same endpoint.
+    def _family(cls, run_path: str | None) -> str | None:
+        """The key a run's capabilities are kept under besides its host.
 
-        One endpoint of a host may take deltas, gzip or the ``select=resume`` projection while another does not
-        yet, and a format one endpoint refused (off for good, see ``_HostCaps``) must not be turned off for the
-        other. ``""`` for an app's runs with the default ``_run_path``: keyed by host alone, as before, for every
-        ``configured()`` copy. Any other ``_run_path``: the path the run is stored at (``run_path``, the run's
-        ``run_id``) with the run id taken out (as given, or written as a dashed UUID), so endpoints are told
-        apart by where each run really goes, whatever class, factory, function or registry routes it. Asked
-        without a run (``takes_deltas``), it asks ``_run_path`` about ``_PROBE_RUN_ID``, shaped like a real
-        run id. ``None`` when the endpoint cannot be told: the run id is not found in the path (hashed, say),
-        or ``_run_path`` refuses the probe. Then what the endpoint advertises is not shared (only what it
-        refused is kept, per class: :meth:`_family_caps`); a family per run would pay a refused save on every
-        run and fill the cache with one entry each. A path with per-org (or
-        per-user) parts gets a family per org: each learns on its own, within the cache's bound. Override
-        this to share one family across them.
+        What a host advertised and refused is kept per endpoint (one may take deltas, gzip or the
+        ``select=resume`` projection while another does not yet, and a refusal is for good, see ``_HostCaps``),
+        and the provider does not guess which paths share one:
+
+        - ``""`` for an app's runs (the default ``_run_path``): their host's entry, as before;
+        - ``"=" + family`` for a :class:`RunPath` that declares it: every run of that endpoint shares it;
+        - ``"@" + run_path`` otherwise: the run's own destination, one endpoint whatever routes there. Each run
+          then learns on its own: its first save goes whole, a format the endpoint advertises (or is forced)
+          and then refuses costs one refused save per run, a parent read in another process rarely gets the
+          projection (bytes, never a wrong format; the cache's bound keeps the memory flat). So does a
+          subclass whose ``_run_path`` only wraps ``super()._run_path``: it is not the default one;
+        - ``None`` without a run (``takes_deltas``) for any run path but the default: no destination.
         """
         if getattr(cls._run_path, "__func__", None) is _DEFAULT_RUN_PATH:
             return ""
         if run_path is None:
-            try:
-                run_path, run_id = cls._run_path(platform_config, _PROBE_RUN_ID), _PROBE_RUN_ID
-            except Exception:
-                return None
-        for spelling in _run_id_spellings(run_id):
-            # The run's own place is the last: a short custom id may also be part of an earlier segment.
-            head, found, tail = run_path.rpartition(spelling)
-            if found:
-                return f"{head}{{run_id}}{tail}"
-        return None
+            return None
+        family = getattr(run_path, "family", None)
+        return f"={family}" if family else f"@{run_path}"
 
     @classmethod
-    def _family_log(cls, platform_config: PlatformConfig, run_path: str, run_id: str) -> dict[str, str]:
+    def _family_log(cls, run_path: str) -> dict[str, str]:
         """The family a log line names: none for an app's runs, whose lines stay as they were."""
-        family = cls._caps_family(platform_config, run_path, run_id)
+        family = cls._family(run_path)
         return {"family": family} if family else {}
 
     @classmethod
     def _family_caps(
-        cls,
-        platform_config: PlatformConfig,
-        run_path: str | None = None,
-        run_id: str | None = None,
-        *,
-        create: bool = True,
+        cls, platform_config: PlatformConfig, run_path: str | None = None, *, create: bool = True
     ) -> _HostCaps:
-        """What the endpoint of ``run_path`` (this provider's, without a run) on ``platform_config``'s host
-        advertised, and what it turned down. When the endpoint cannot be told, only what it turned down, kept
-        for the class that routes it (:class:`_RefusalsOnly`)."""
-        family = cls._caps_family(platform_config, run_path, run_id)
+        """What the endpoint of ``run_path`` on ``platform_config``'s host advertised, and what it turned down
+        (:meth:`_family`). Nothing learned, and nothing stored, without a run for a non-default ``_run_path``."""
+        family = cls._family(run_path)
         if family is None:
-            owner = next(klass for klass in cls.__mro__ if "_run_path" in vars(klass))
-            refusals = f"?{owner.__module__}.{owner.__qualname__}"
-            return cls._host_caps(platform_config.host, refusals, create=create, refusals_only=True)
+            return _HostCaps()
         return cls._host_caps(platform_config.host, family, create=create)
 
     @classmethod
@@ -757,7 +758,8 @@ class PlatformTracingProvider(TracingProvider):
         is asked with a stand-in run holding only that (so ``trace_platform_config`` comes first, then
         ``platform_config``, then the class's, then the environment's, and a subclass's own
         ``_resolve_config`` is followed; one that needs more of the run than its config answers False). False
-        when it finds none. Asking stores nothing.
+        when it finds none. Asking stores nothing. For a ``_run_path`` other than the default there is no
+        destination without a run: only a forced ``deltas=True`` answers True, whatever an endpoint refused.
         """
         try:
             cfg = cls._resolve_config(SimpleNamespace(platform_config=platform_config))
@@ -865,7 +867,7 @@ class PlatformTracingProvider(TracingProvider):
         recalled = cls._recall(key)
         if recalled is not None:
             return recalled
-        caps = cls._family_caps(platform_config, run_path, run_context.parent_id)
+        caps = cls._family_caps(platform_config, run_path)
         with _pooled(), _as_run(run_context):
             res = await _request(
                 method="GET",
@@ -1142,7 +1144,7 @@ class PlatformTracingProvider(TracingProvider):
         platform_config, run_path, key = cls._target(run_context)
         # A run stored somewhere other than an app's runs (a subclass's _run_path) may have no subject.
         rev = platform_config.subject.rev if platform_config.subject is not None else None
-        caps = cls._family_caps(platform_config, run_path, run_context.id)
+        caps = cls._family_caps(platform_config, run_path)
         # A run the platform refused as too large goes whole with long strings cut, so its end still lands.
         shrink = key in PlatformTracingProvider._oversized
         delta = not plain and not shrink and cls._sending_deltas(caps)
@@ -1201,7 +1203,7 @@ class PlatformTracingProvider(TracingProvider):
                 raise
             # Today's server answers a gzip body with 400 (its JSON extractor cannot parse it), a server
             # with the layer with 415. The same save whole and uncompressed tells a rejected format from
-            # a bad save: only when that one lands is the format off for this host, starting now.
+            # a bad save: only when that one lands is the format off for this endpoint, starting now.
             await cls._save(run_context, plain=True, resend=resend)
             caps.delta_rejected = caps.delta_rejected or delta
             caps.gzip_rejected = caps.gzip_rejected or compressed
@@ -1211,7 +1213,7 @@ class PlatformTracingProvider(TracingProvider):
                 status=e.status_code,
                 deltas=delta,
                 gzip=compressed,
-                **cls._family_log(platform_config, run_path, run_context.id),
+                **cls._family_log(run_path),
             )
             return
         except BaseException:
@@ -1231,7 +1233,7 @@ class PlatformTracingProvider(TracingProvider):
             logger.warning(
                 "platform_trace_delta_unconfirmed",
                 host=platform_config.host,
-                **cls._family_log(platform_config, run_path, run_context.id),
+                **cls._family_log(run_path),
             )
             return
         if (
@@ -1363,20 +1365,8 @@ def _shrink(trace: list) -> list:
 
 
 # The default run path (an app's runs): a provider whose ``_run_path`` is this one shares what a host
-# advertised by host alone (``_caps_family``).
+# advertised by host alone (``_family``).
 _DEFAULT_RUN_PATH = PlatformTracingProvider._run_path.__func__
-
-
-def _run_id_spellings(run_id: str | None) -> list[str]:
-    """How a run id may appear in a run path: as given (``RunContext.id``, hex) and as a dashed UUID."""
-    if not run_id:
-        return []
-    spellings = [run_id]
-    with contextlib.suppress(ValueError, AttributeError, TypeError):
-        dashed = str(uuid.UUID(run_id))
-        if dashed != run_id:
-            spellings.append(dashed)
-    return spellings
 
 
 def _new_locks_after_fork() -> None:
