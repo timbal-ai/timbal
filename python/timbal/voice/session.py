@@ -34,7 +34,7 @@ from urllib.parse import urlsplit
 import structlog
 from uuid_extensions import uuid7
 
-from ..core.agent import Agent
+from ..core.agent import Agent, _render_sections
 from ..core.session_scheduler import Followup, OnBusy, SessionScheduler, is_parked
 from ..guardrails.types import GuardrailContext, GuardrailStage
 from ..state import get_run_context, set_run_context
@@ -2479,6 +2479,11 @@ class VoiceSession:
             agent_kwargs: dict[str, Any] = {"prompt": msg}
             if self.model:
                 agent_kwargs["model"] = self.model
+            if getattr(self.agent, "delivery", "text") != "text":
+                # A call reads the reply aloud as it streams. With delivery="tool" that text is a
+                # private draft and the reply is a tool call's argument, so here the agent answers
+                # in text, whatever it does on other channels.
+                agent_kwargs["delivery"] = "text"
             # Another channel's turn ran on this conversation since the call's
             # last one (or before its first): continue from it, not from the
             # call's own last run or the parent it was started with.
@@ -3982,7 +3987,12 @@ class VoiceSession:
         across connections — a per-call greeting must not mutate it.
         """
         try:
-            return await self.agent._resolve_system_prompt()
+            prompt = await self.agent._resolve_system_prompt()
+            if isinstance(prompt, dict):
+                # Named sections: as plain text, the way a subagent gets them. Callers join it
+                # with their own lines, or pass it as a turn's ``system_prompt`` override.
+                prompt = _render_sections(prompt)
+            return prompt
         except Exception as e:
             logger.debug("greeting_system_prompt_unavailable", error=str(e))
             return None

@@ -292,6 +292,8 @@ agent = Agent(
 
 **`keep_offloaded`** (default `True`) — results already [offloaded at production time](#tool-result-offloading) are kept intact: they are small placeholders whose handle keeps the full payload reachable. Set `False` to compact them like any other result.
 
+**Messages sent with `delivery="tool"`** — what the agent told the user through [`send_message`](/agents#replying-through-a-tool) is conversation, not tool output. In both modes, those calls and their results are kept as they are, so the agent still knows what it told the user and can tell it from its own drafts. A send that failed is compacted like any tool call.
+
 ```python
 # Drop all tool results
 compact_tool_results()

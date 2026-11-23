@@ -1425,6 +1425,8 @@ class Runnable(ABC, BaseModel):
                 prompt=prompt,
                 description=verdict.reason,
                 kind="guardrail_escalation",
+                # (A runnable whose approvals cannot be remembered keeps that when a guardrail asks for one.)
+                grantable=self.approval_grantable,
                 metadata={"guardrail": rail.name},
             )
             return validated_input, events, forced, False

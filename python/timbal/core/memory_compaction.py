@@ -459,6 +459,10 @@ def compact_tool_results(
             small placeholders whose handle keeps the full payload reachable. Set
             False to compact them like any other result.
 
+    Messages an agent sent the user with ``delivery="tool"`` (results marked
+    ``ToolResultContent.delivered``) are always kept, call and result: they are the
+    conversation, not tool output.
+
     Returns:
         A compactor function.
     """
@@ -501,6 +505,20 @@ def compact_tool_results(
                 for c in msg.content
                 if isinstance(c, ToolResultContent) and c.offload_handle
             }
+
+        # Messages the user was shown through a tool (delivery="tool") are the conversation, not tool
+        # output: in either mode the call and its result stay as they are. As a call, not as assistant
+        # text: the model's own text in those turns is a draft the user never read, and once both are
+        # text nothing tells what was said from what was not (keeping the draft shows it as said;
+        # dropping the text next to a send loses an earlier message that a second pass finds folded
+        # into the same assistant message).
+        kept_ids |= {
+            c.id
+            for msg in memory
+            if msg.role == "tool"
+            for c in msg.content
+            if isinstance(c, ToolResultContent) and c.delivered is not None  # ("": only files were)
+        }
 
         drop_mode = replacement is None
 
