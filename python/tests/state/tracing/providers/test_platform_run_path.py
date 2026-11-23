@@ -1,0 +1,435 @@
+"""PlatformTracingProvider runs stored somewhere other than ``apps/{app_id}/runs`` (issue #309).
+
+A subclass overrides ``_run_path`` (and its own ``_resolve_config``) and gets the whole save pipeline: span
+deltas, gzip, snapshot ordering, keep-alive saves, reads. What a host advertises is learned per family of
+run paths, not per host: two endpoints on one host need not accept the same formats, and a format one of
+them refused must not be turned off for the other. Strict reads (``get_strict``: restores, recoveries,
+approval claims) read the whole trace, never the ``select=resume`` projection.
+"""
+
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+from timbal import Agent, Tool
+from timbal.core.test_model import TestModel
+from timbal.errors import PlatformError
+from timbal.state import set_run_context
+from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+from timbal.state.context import RunContext
+from timbal.state.tracing.providers.platform import PlatformTracingProvider
+from timbal.types.content import ToolUseContent
+from timbal.types.message import Message
+
+from .test_platform_deltas import CONFIG, FakePlatform, awaited_saves, clean  # noqa: F401
+
+HOST = CONFIG.host  # one host, two endpoints
+APP_PREFIX = f"orgs/{CONFIG.subject.org_id}/apps/{CONFIG.subject.app_id}/runs/"
+CHAT_PREFIX = "orgs/1/chat/runs/"
+
+# The other endpoint's runs belong to no app: an org-only subject, or none at all.
+ORG_ONLY = PlatformConfig(
+    host=HOST,
+    auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t2_chat"),
+    subject=PlatformSubject(org_id="1"),
+)
+NO_SUBJECT = PlatformConfig(host=HOST, auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t2_chat"))
+
+
+class ChatRuns(PlatformTracingProvider):
+    """Stores runs at another endpoint of the same host, with credentials of its own: only these two hooks.
+
+    Its config is not written onto the run: the run's own config serves the run's other platform calls."""
+
+    config: PlatformConfig = ORG_ONLY
+
+    @classmethod
+    def _run_path(cls, platform_config, run_id):  # noqa: ARG003 - one org in these tests
+        return f"{CHAT_PREFIX}{run_id}"
+
+    @classmethod
+    def _resolve_config(cls, run_context):  # noqa: ARG003
+        return cls.config
+
+
+class Endpoint(FakePlatform):
+    """One route family of the fake host. ``select``: it implements (and advertises) the resume projection,
+    the root and every span with a ``memory`` key. A route that does not know the parameter refuses it."""
+
+    def __init__(self, *, select=False, **kwargs):
+        super().__init__(**kwargs)
+        self.select = select
+        self.calls: list[dict] = []  # every request: method, run id, params, snapshot, content type
+
+    def _headers(self):
+        headers = super()._headers()
+        if self.advertise and self.select:
+            headers = {**headers, "X-Timbal-Select": "resume"}
+        return headers
+
+    async def request(self, method, path, headers=None, content=None, params=None, **kwargs):
+        headers = headers or {}
+        self.calls.append(
+            {
+                "method": method,
+                "run": path.rsplit("/", 1)[-1],
+                "params": params,
+                "snapshot": headers.get("X-Timbal-Snapshot"),
+                "type": headers.get("Content-Type"),
+            }
+        )
+        if params and not self.select:
+            raise PlatformError(f"unknown query parameters: {sorted(params)}", status_code=400)
+        res = await super().request(method, path, headers=headers, content=content, **kwargs)
+        if method != "GET" or not params:
+            return res
+        body = res.json()
+        trace = [span for span in body.get("trace") or [] if span["parent_call_id"] is None or "memory" in span]
+        projected = {**body, "trace": trace}
+        return SimpleNamespace(raise_for_status=lambda: None, headers=res.headers, json=lambda: projected)
+
+
+class Host:
+    """The fake host: routes each request to its endpoint by path."""
+
+    def __init__(self, apps: Endpoint, chat: Endpoint):
+        self.apps, self.chat = apps, chat
+        self.unrouted: list[str] = []
+
+    async def request(self, method, path, **kwargs):
+        if path.startswith(APP_PREFIX):
+            return await self.apps.request(method, path, **kwargs)
+        if path.startswith(CHAT_PREFIX):
+            return await self.chat.request(method, path, **kwargs)
+        self.unrouted.append(path)
+        raise PlatformError(f"no route for {path}", status_code=404)
+
+
+def tool_loop(provider, steps=3, step=None):
+    def handler(messages):
+        done = sum(1 for m in messages if m.role == "tool")
+        if done >= steps:
+            return "done"
+        return Message(
+            role="assistant", content=[ToolUseContent(id=f"c{done}", name="step", input={})], stop_reason="tool_use"
+        )
+
+    async def default_step() -> str:
+        return "out " * 100
+
+    return Agent(
+        name="agent",
+        model=TestModel(handler=handler),
+        tools=[Tool(name="step", handler=step or default_step)],
+        tracing_provider=provider,
+        max_iter=steps + 5,
+    )
+
+
+async def run(agent, provider, config):
+    ctx = RunContext(tracing_provider=provider)
+    ctx.platform_config = config
+    set_run_context(ctx)
+    try:
+        out = await agent(prompt="go").collect()
+    finally:
+        set_run_context(None)
+    assert out.status.code == "success", out.error
+    return ctx
+
+
+async def read_back(provider, run_id, config, *, strict=False):
+    PlatformTracingProvider._recent.clear()  # from the platform, not this process's cache
+    reader = RunContext(parent_id=run_id, tracing_provider=provider)
+    reader.platform_config = config
+    return await (provider.get_strict(reader) if strict else provider.get(reader))
+
+
+def app_provider():
+    return PlatformTracingProvider.configured(platform_config=CONFIG)
+
+
+class TestAnotherEndpoint:
+    """The issue's "done when": a subclass that overrides only ``_run_path`` and ``_resolve_config``."""
+
+    @pytest.mark.parametrize("config", [ORG_ONLY, NO_SUBJECT], ids=["org-only subject", "no subject"])
+    async def test_stores_and_reads_its_runs_there_with_deltas_gzip_and_ordering(self, config):
+        host = Host(apps=Endpoint(), chat=Endpoint())
+        provider = ChatRuns.configured(config=config)
+        with patch("timbal.platform.utils._request", host.request):
+            ctx = await run(tool_loop(provider, steps=4), provider, config)
+            stored = await read_back(provider, ctx.id, config)
+        assert not host.unrouted and not host.apps.calls  # nothing went to an app's runs
+        kinds = [patch_["kind"] for patch_ in host.chat.patches]
+        assert kinds[0] == "full" and set(kinds[1:]) == {"delta"}  # learned from this endpoint's answers
+        assert all(patch_["gzip"] for patch_ in host.chat.patches[1:])
+        sent = [int(call["snapshot"]) for call in host.chat.calls if call["method"] == "PATCH"]
+        assert sent == sorted(sent) and len(set(sent)) == len(sent)  # numbered in the order taken
+        assert {span.call_id for span in stored.as_records()} == set(ctx._trace.keys())
+        assert all("rev" not in patch_["body"] for patch_ in host.chat.patches)  # no subject, no rev
+
+    async def test_keeps_a_long_run_alive_there(self):
+        host = Host(apps=Endpoint(), chat=Endpoint())
+        provider = ChatRuns.configured(keepalive_s=0.05)
+        gate = asyncio.Event()
+
+        async def slow_step() -> str:
+            await gate.wait()
+            return "out"
+
+        agent = tool_loop(provider, steps=1, step=slow_step)
+        with patch("timbal.platform.utils._request", host.request):
+            ctx = RunContext(tracing_provider=provider)
+            ctx.platform_config = ORG_ONLY
+            set_run_context(ctx)
+            running = asyncio.create_task(agent(prompt="go").collect())
+            set_run_context(None)
+
+            def headers_only():
+                return [
+                    p
+                    for p in host.chat.patches
+                    if p["kind"] == "delta"
+                    and not p["body"]["spans"]
+                    and set(p["body"]["root"])
+                    == {
+                        "call_id",
+                        "path",
+                        "parent_call_id",
+                        "t0",
+                    }
+                ]
+
+            async def until_kept_alive():
+                while not headers_only():
+                    await asyncio.sleep(0.01)
+
+            try:
+                await asyncio.wait_for(until_kept_alive(), 10)
+            finally:
+                gate.set()
+                out = await asyncio.wait_for(running, 10)
+        assert out.status.code == "success"
+        assert not host.apps.calls and not host.unrouted
+
+    async def test_app_runs_keep_their_path_and_their_errors(self):
+        host = Host(apps=Endpoint(), chat=Endpoint())
+        provider = app_provider()
+        with patch("timbal.platform.utils._request", host.request):
+            ctx = await run(tool_loop(provider), provider, CONFIG)
+        assert host.apps.patches and not host.chat.calls and not host.unrouted
+        assert PlatformTracingProvider._run_path(CONFIG, "r1") == f"{APP_PREFIX}r1"
+        no_app = PlatformConfig(host=HOST, auth=CONFIG.auth, subject=PlatformSubject(org_id="1"))
+        for config, error in ((no_app, ValueError), (NO_SUBJECT, RuntimeError)):
+            reader = RunContext(parent_id=ctx.id, tracing_provider=provider)
+            reader.platform_config = config
+            with pytest.raises(error):
+                await PlatformTracingProvider.get(reader)
+            writer = RunContext(tracing_provider=provider)
+            writer.platform_config = config
+            with pytest.raises(error):
+                await PlatformTracingProvider._store(writer)
+
+
+class TestWhatAHostAdvertises:
+    """Learned per family of run paths: the endpoint that answered, not every endpoint of its host."""
+
+    async def test_an_endpoint_does_not_take_the_formats_another_one_advertised(self):
+        host = Host(apps=Endpoint(), chat=Endpoint(deltas=False, gzip_ok=False, advertise=False))
+        apps, chat = app_provider(), ChatRuns
+        with patch("timbal.platform.utils._request", host.request):
+            await run(tool_loop(apps), apps, CONFIG)  # learns deltas and gzip from the app endpoint
+            await run(tool_loop(chat), chat, ORG_ONLY)
+            before = len(host.apps.patches)
+            later = await run(tool_loop(apps), apps, CONFIG)
+        # The chat endpoint was never sent a format it did not advertise, so nothing was refused...
+        attempts = [call["type"] for call in host.chat.calls if call["method"] == "PATCH"]
+        assert host.chat.patches and attempts == ["application/json"] * len(host.chat.patches)
+        assert not any(patch_["gzip"] for patch_ in host.chat.patches)
+        # ...and the app endpoint keeps the formats it advertised.
+        assert "delta" in [p["kind"] for p in host.apps.patches[before:]]
+        assert later.id in host.apps.runs
+
+    async def test_a_format_one_endpoint_refused_stays_on_for_the_other(self):
+        host = Host(apps=Endpoint(), chat=Endpoint(deltas=False))
+        host.chat.deltas = True  # advertises deltas at first, then refuses them (a proxy in between)
+        apps, chat = app_provider(), ChatRuns
+        with patch("timbal.platform.utils._request", host.request):
+            first = await run(tool_loop(chat, steps=1), chat, ORG_ONLY)
+            host.chat.deltas = False
+            await run(tool_loop(chat), chat, ORG_ONLY)
+            await run(tool_loop(apps), apps, CONFIG)
+        assert first.id in host.chat.runs
+        assert ChatRuns._family_caps(ORG_ONLY).delta_rejected
+        assert not PlatformTracingProvider._family_caps(CONFIG).delta_rejected
+        assert "delta" in [p["kind"] for p in host.apps.patches]
+
+    async def test_a_read_asks_for_the_projection_only_where_it_was_advertised(self):
+        host = Host(apps=Endpoint(select=True), chat=Endpoint())
+        apps, chat = app_provider(), ChatRuns
+        with patch("timbal.platform.utils._request", host.request):
+            app_run = await run(tool_loop(apps), apps, CONFIG)
+            chat_run = await run(tool_loop(chat), chat, ORG_ONLY)
+            await read_back(apps, app_run.id, CONFIG)
+            stored = await read_back(chat, chat_run.id, ORG_ONLY)  # the chat endpoint refuses `select`
+        assert stored is not None and {s.call_id for s in stored.as_records()} == set(chat_run._trace.keys())
+        assert [call["params"] for call in host.apps.calls if call["method"] == "GET"] == [{"select": "resume"}]
+        assert [call["params"] for call in host.chat.calls if call["method"] == "GET"] == [None]
+
+    async def test_takes_deltas_answers_for_the_providers_own_endpoint(self):
+        host = Host(apps=Endpoint(), chat=Endpoint(deltas=False, advertise=False))
+        apps = app_provider()
+        with patch("timbal.platform.utils._request", host.request):
+            await run(tool_loop(apps), apps, CONFIG)
+        assert apps.takes_deltas() and PlatformTracingProvider.takes_deltas(CONFIG)
+        assert not ChatRuns.takes_deltas(ORG_ONLY)
+        assert not ChatRuns.configured(config=ORG_ONLY).takes_deltas(ORG_ONLY)  # a configured copy: same endpoint
+
+    def test_configured_copies_share_their_endpoints_family(self):
+        caps = PlatformTracingProvider._family_caps(CONFIG)
+        assert PlatformTracingProvider.configured(platform_config=CONFIG)._family_caps(CONFIG) is caps
+        assert PlatformTracingProvider._host_caps(HOST) is caps  # app runs: keyed by host, as before
+        assert ChatRuns._family_caps(ORG_ONLY) is not caps
+        assert ChatRuns.configured(keepalive_s=1)._family_caps(ORG_ONLY) is ChatRuns._family_caps(ORG_ONLY)
+
+    @pytest.mark.parametrize("made_by", ["a factory", "configured()", "one _run_path for both"])
+    def test_two_endpoints_never_share_what_one_of_them_refused(self, made_by):
+        """However the classes are made: a refusal is for good, so sharing it would turn a format off for an
+        endpoint that takes it. Telling them apart by class name merged classes a factory made, and every
+        ``configured(_run_path=...)`` copy."""
+        other = "orgs/1/threads/runs/"
+
+        def factory(prefix):
+            class Runs(PlatformTracingProvider):
+                @classmethod
+                def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                    return f"{prefix}{run_id}"
+
+            return Runs
+
+        class Mixed(PlatformTracingProvider):
+            """App subjects to the app's runs, the rest to the chat endpoint."""
+
+            @classmethod
+            def _run_path(cls, platform_config, run_id):
+                if platform_config.subject is not None and platform_config.subject.app_id:
+                    return super()._run_path(platform_config, run_id)
+                return f"{CHAT_PREFIX}{run_id}"
+
+        if made_by == "a factory":
+            pairs = [(factory(CHAT_PREFIX), ORG_ONLY), (factory(other), ORG_ONLY)]
+        elif made_by == "configured()":
+            pairs = [
+                (PlatformTracingProvider.configured(_run_path=lambda _cfg, run_id: f"{CHAT_PREFIX}{run_id}"), ORG_ONLY),
+                (PlatformTracingProvider.configured(_run_path=lambda _cfg, run_id: f"{other}{run_id}"), ORG_ONLY),
+            ]
+        else:
+            pairs = [(Mixed, CONFIG), (Mixed, ORG_ONLY)]
+        (first, first_config), (second, second_config) = pairs
+        assert first._run_path(first_config, "r") != second._run_path(second_config, "r")
+        first._family_caps(first_config).delta_rejected = True
+        assert not second._family_caps(second_config).delta_rejected
+        assert not PlatformTracingProvider._family_caps(CONFIG).delta_rejected  # nor app runs
+        # And one endpoint is one family, run after run.
+        assert first._family_caps(first_config) is first._family_caps(first_config)
+
+
+class TestCredentials:
+    """Requests of a subclass with credentials of its own carry them; the run keeps its own config for its other
+    platform calls (the model router, tools, files). Through the real request helper, on a mock transport."""
+
+    async def test_each_endpoint_gets_its_own_credentials_and_the_run_keeps_its_config(self, monkeypatch):
+        import httpx
+
+        original = httpx.AsyncClient
+        seen: list[tuple[str, str, str]] = []
+
+        async def handle(request):
+            seen.append((request.method, request.url.host + request.url.path, request.headers.get("authorization")))
+            return httpx.Response(200, json={})
+
+        monkeypatch.setattr(
+            httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs)
+        )
+        chat = ChatRuns.configured(
+            config=PlatformConfig(host="chat.test", auth=ORG_ONLY.auth, subject=ORG_ONLY.subject)
+        )
+        ctx = await run(tool_loop(chat, steps=1), chat, CONFIG)
+        assert ctx.platform_config is CONFIG  # not replaced by the trace endpoint's
+        chat_saves = [entry for entry in seen if entry[1].startswith(f"chat.test/{CHAT_PREFIX}")]
+        assert chat_saves and len(chat_saves) == len(seen)
+        assert {auth for _, _, auth in chat_saves} == {"Bearer t2_chat"}
+        seen.clear()
+        apps = app_provider()
+        await run(tool_loop(apps, steps=1), apps, CONFIG)
+        assert seen and {(path.split("/runs/")[0], auth) for _, path, auth in seen} == {
+            (f"{HOST}/orgs/1/apps/2", "Bearer t2_test")
+        }
+
+
+class TestStrictReads:
+    """``get`` (the next turn's memory) may read the projection; ``get_strict`` reads what restores, recoveries
+    and approval claims need, which lives on tool spans too: the full trace."""
+
+    async def test_get_strict_never_asks_for_the_projection(self):
+        host = Host(apps=Endpoint(select=True), chat=Endpoint())
+        apps = app_provider()
+        with patch("timbal.platform.utils._request", host.request):
+            ctx = await run(tool_loop(apps), apps, CONFIG)
+            projected = await read_back(apps, ctx.id, CONFIG)
+            whole = await read_back(apps, ctx.id, CONFIG, strict=True)
+        assert [call["params"] for call in host.apps.calls if call["method"] == "GET"] == [{"select": "resume"}, None]
+        assert {s.path for s in projected.as_records()} == {"agent"}
+        assert {s.call_id for s in whole.as_records()} == set(ctx._trace.keys())
+
+    async def test_a_session_restored_elsewhere_sees_the_approval_its_run_waits_for(self):
+        """A run parked on a tool's approval, read back by another process: the pending approval lives on the
+        tool's span, which the projection drops. The restored session must list it, and a stop must abandon it."""
+        from timbal.core.chat_session import ChatSession
+
+        host = Host(apps=Endpoint(select=True), chat=Endpoint())
+        provider = app_provider()
+        charged = []
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            return Message(
+                role="assistant", content=[ToolUseContent(id="pay", name="charge", input={})], stop_reason="tool_use"
+            )
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: charged.append(1) or "charged", requires_approval=True)],
+            tracing_provider=provider,
+        )
+        with patch("timbal.platform.utils._request", host.request):
+            ctx = RunContext(tracing_provider=provider)
+            ctx.platform_config = CONFIG
+            set_run_context(ctx)
+            out = await agent(prompt="pay").collect()
+            set_run_context(None)
+            assert out.status.reason == "approval_required"
+            # Another process: nothing of this run in memory, and the host has advertised the projection.
+            await read_back(provider, out.run_id, CONFIG)
+            assert PlatformTracingProvider._family_caps(CONFIG).select_resume
+            PlatformTracingProvider._recent.clear()
+            session = ChatSession(agent, parent_id=out.run_id)
+            try:
+                await asyncio.wait_for(session.restore(), 10)
+                assert session.parked
+                (approval,) = session.state()["pending_approvals"]
+                assert approval["path"] == "agent.charge"
+                assert session.interrupt()
+                finished = None
+                async with asyncio.timeout(10):
+                    async for item in session.events():
+                        if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                            finished = item
+                            break
+            finally:
+                await session.close()
+        assert finished["status"]["code"] == "cancelled" and not session.parked
+        assert charged == []
