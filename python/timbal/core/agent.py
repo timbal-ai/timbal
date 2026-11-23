@@ -3717,8 +3717,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 command_at, command_call = len(current_span.memory), current_span._memory_dump[-1]
                                 command_paused = command_lost = None
                                 # No model call in this step, so nothing of one to salvage if the command pauses
-                                # or is cut. (A command steered into a turn comes after a model step: salvaged,
-                                # that step's output would be appended a second time, and its calls run again.)
+                                # or is cut. (False here only after a 'now' cut took a partial answer back: salvaged
+                                # after a command that pauses, it would follow the command's stored call, and the
+                                # resume would not find the call to run the command again.)
                                 _llm_memory_saved = True
                                 if run_context._before_tool_dispatch is not None:
                                     await run_context._before_tool_dispatch(

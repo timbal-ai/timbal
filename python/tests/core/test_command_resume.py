@@ -39,6 +39,8 @@ from timbal.types.content import ToolUseContent
 from timbal.types.events import ApprovalEvent, InteractionEvent, OutputEvent
 from timbal.types.message import Message
 
+from ..guardrails.conftest import StreamingTestModel, text_stream
+
 # A hang guard, not a timing check: these runs take milliseconds.
 DEADLINE_S = 30
 
@@ -888,4 +890,52 @@ class TestChatSession:
 
         assert ran == ["work", "charge 5"], "the approved command runs once, and nothing before it runs again"
         assert model.call_count == asked_the_model, "a command is not answered by the model"
+        assert answered["status"]["code"] == "success"
+
+    async def test_a_command_after_an_answer_taken_back_is_resumed_as_a_command(self):
+        """A ``now`` message cuts the model's answer and brings nothing into the turn: the partial answer is
+        taken back out of memory, to be salvaged if the turn ends before the model answers again. The next
+        step runs a command instead (its tool source offers it from then on), and the command pauses. The
+        partial answer must not be salvaged after the command's stored call: the resume would not find the
+        call, and the model would answer instead of the command."""
+        charges = _Charges()
+
+        class Tools(ToolSet):
+            async def resolve(self) -> list:
+                # The command exists once the model has been asked once.
+                return [charges.tool(command="charge")] if model.call_count else []
+
+        class CutOnce(StreamingTestModel):
+            """Calls ``cut()`` before the third chunk of its first answer."""
+
+            __test__ = False
+            cut = None
+
+            async def stream(self, messages: list, **kwargs):
+                first, sent = self.call_count == 0, 0
+                async for chunk in super().stream(messages, **kwargs):
+                    if first and sent == 2 and self.cut is not None:
+                        cut, self.cut = self.cut, None
+                        cut()
+                    yield chunk
+                    sent += 1
+
+        model = CutOnce([text_stream("Charging requires a command, one moment.")])
+        agent = Agent(name="agent", model=model, tools=[Tools()], tracing_provider=InMemoryTracingProvider)
+
+        async with ChatSession(agent) as session:
+
+            def now_then_nothing() -> None:
+                session.withdraw(session.send("wait", mode="now").id)
+
+            model.cut = now_then_nothing
+            session.send("/charge 5")
+            (parked,) = await _records(session, "turn_finished", 1)
+            assert parked["parked"] and charges.made == []
+
+            session.resume({_card(session).approval_id: True})
+            _, answered = await _records(session, "turn_finished", 2)
+
+        assert charges.made == ["5"], "the approved command runs once"
+        assert model.call_count == 1, "a command is not answered by the model"
         assert answered["status"]["code"] == "success"
