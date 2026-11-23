@@ -184,6 +184,17 @@ def _settle(flight: _Flight, joined: asyncio.Future[None], covers: int, save: as
             future.set_result(None)
 
 
+def _overtaken(joined: asyncio.Future[None] | None) -> bool:
+    """A newer round of the run landed while this round's PATCH was on the wire, and settled it (``_settle``).
+
+    Whatever the platform answers that PATCH, it is not sent again: a resend takes a new snapshot number, and
+    with a trace redactor it carries the same copy of the trace as before, an older state the platform would
+    then take for the newest. Without one a resend carries the live trace, and the round that landed, or the
+    saves that follow it, already hold that.
+    """
+    return joined is not None and joined.done()
+
+
 def _flush_timeout() -> float:
     raw = os.environ.get("TIMBAL_TRACE_FLUSH_TIMEOUT_SECS")
     try:
@@ -521,7 +532,9 @@ class PlatformTracingProvider(TracingProvider):
     overlapping_saves = True
     """``_store`` keeps a run's saves in order itself: one PATCH on the wire per run, the saves asked for
     meanwhile folded into the next, each numbered (``X-Timbal-Snapshot``) so the host drops one that is not
-    newer than the last it applied. Queued one behind the other they would each be a round trip."""
+    newer than the last it applied. Queued one behind the other they would each be a round trip. The one
+    PATCH that overlaps another is the run's end going past a stalled one: the stalled one is never sent
+    again once the end has landed (``_overtaken``), since a resend is numbered anew."""
 
     compress: bool | None = None
     """Gzip each PATCH body (``Content-Encoding: gzip``). ``None``: when ``TIMBAL_TRACE_GZIP`` is set, or
@@ -996,7 +1009,7 @@ class PlatformTracingProvider(TracingProvider):
                 if wait == 0:
                     joined, flight.next = flight.next, None
                     flight.sent.append(joined)
-                    save = loop.create_task(cls._save(flight.context))
+                    save = loop.create_task(cls._save(flight.context, joined=joined))
                     flight.on_wire[save] = loop.time()
                     save.add_done_callback(functools.partial(_settle, flight, joined, flight.joins))
                     continue
@@ -1140,9 +1153,17 @@ class PlatformTracingProvider(TracingProvider):
         return platform_config, run_path, cls._recent_key(platform_config, run_path)
 
     @classmethod
-    async def _save(cls, run_context: RunContext, *, plain: bool = False, resend: bool = True) -> None:
+    async def _save(
+        cls,
+        run_context: RunContext,
+        *,
+        plain: bool = False,
+        resend: bool = True,
+        joined: asyncio.Future[None] | None = None,
+    ) -> None:
         """One PATCH. ``plain``: whole and uncompressed whatever the host advertised. ``resend``: send it
-        again, numbered above, if the platform kept a newer snapshot this process did not write."""
+        again, numbered above, if the platform kept a newer snapshot this process did not write. ``joined``:
+        the round it is sent for; once a newer round has landed it is never sent again (``_overtaken``)."""
         from ....errors import PlatformError
         from ....platform.utils import _request
 
@@ -1202,14 +1223,18 @@ class PlatformTracingProvider(TracingProvider):
                 while len(oversized) > _DELTA_RUNS_MAX:
                     oversized.popitem(last=False)
                 logger.warning("platform_trace_too_large", run_id=run_context.id, bytes=len(body))
-                await cls._save(run_context, plain=plain, resend=resend)
+                if _overtaken(joined):
+                    raise
+                await cls._save(run_context, plain=plain, resend=resend, joined=joined)
                 return
             if not (delta or compressed) or getattr(e, "status_code", None) not in (400, 415, 422):
                 raise
+            if _overtaken(joined):
+                raise  # not sent again, so nothing tells a rejected format from a bad save: the next save does
             # Today's server answers a gzip body with 400 (its JSON extractor cannot parse it), a server
             # with the layer with 415. The same save whole and uncompressed tells a rejected format from
             # a bad save: only when that one lands is the format off for this endpoint, starting now.
-            await cls._save(run_context, plain=True, resend=resend)
+            await cls._save(run_context, plain=True, resend=resend, joined=joined)
             caps.delta_rejected = caps.delta_rejected or delta
             caps.gzip_rejected = caps.gzip_rejected or compressed
             logger.warning(
@@ -1233,7 +1258,9 @@ class PlatformTracingProvider(TracingProvider):
             # not understood: today's API reads a delta as a PATCH with no `trace` and answers 204, so the
             # spans did not land. Same handling as a rejected format.
             cls._remember(key, snapshot, None)
-            await cls._save(run_context, plain=True, resend=resend)
+            if _overtaken(joined):
+                return
+            await cls._save(run_context, plain=True, resend=resend, joined=joined)
             caps.delta_rejected = True
             logger.warning(
                 "platform_trace_delta_unconfirmed",
@@ -1254,8 +1281,10 @@ class PlatformTracingProvider(TracingProvider):
                 # Still behind after numbering above it: another process is writing this run right now.
                 logger.warning("platform_trace_save_superseded", run_id=run_context.id, stored=int(stored))
                 return
+            if _overtaken(joined):
+                return
             logger.info("platform_trace_save_stale", run_id=run_context.id, sent=snapshot, stored=int(stored))
-            await cls._save(run_context, plain=plain, resend=False)
+            await cls._save(run_context, plain=plain, resend=False, joined=joined)
             return
         if sent:
             cls._delta_run(key).acked.update(sent)

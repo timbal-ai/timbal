@@ -702,6 +702,59 @@ class TestSingleFlight:
         assert errors == []  # the stalled PATCH finishing late raises nothing in its done callback
         assert len(sent) == 2 and not PlatformTracingProvider._retries  # and nothing is resent
 
+    @pytest.mark.parametrize("answer", ["too_large", "format_rejected", "stale", "delta_unconfirmed"])
+    async def test_a_patch_overtaken_by_the_runs_end_is_not_sent_again(self, monkeypatch, answer):
+        """With a trace redactor every put carries its own copy of the trace as it was then. A mid-run PATCH that
+        the platform answers with "send it again" (too large, a format it does not take, stale, a delta it did not
+        confirm) after the run's end has gone past it and landed must not go out again: the same older copy
+        under a newer snapshot number would be taken for the newer state, and the stored run would have no end."""
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)  # the end does not wait for the PATCH on the wire
+        server = FakePlatform()
+        first_sent, answer_it = asyncio.Event(), asyncio.Event()
+        patches = []
+        if answer in ("format_rejected", "delta_unconfirmed"):
+            PlatformTracingProvider._host_caps(CONFIG.host).delta = True  # the first PATCH goes out as a delta
+
+        async def request(method, path, headers=None, **kwargs):
+            if method != "PATCH":
+                return await server.request(method, path, headers=headers, **kwargs)
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) > 1:
+                PlatformTracingProvider._host_caps(CONFIG.host).delta = False  # what follows goes whole
+                return await server.request(method, path, headers=headers, **kwargs)
+            first_sent.set()
+            await answer_it.wait()
+            if answer == "too_large":
+                raise PlatformError("payload too large", status_code=413)
+            if answer == "format_rejected":
+                raise PlatformError("unsupported media type", status_code=415)
+            if answer == "stale":  # another process holds something newer than this PATCH
+                stored = {"X-Timbal-Snapshot": str(patches[0] + 10**12), "X-Timbal-Snapshot-Applied": "false"}
+                return SimpleNamespace(raise_for_status=lambda: None, headers=stored, json=lambda: {})
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})  # no echo of a delta
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        _, _, key = PlatformTracingProvider._target(ctx)
+
+        async def off_the_wire():
+            while key in PlatformTracingProvider._flights:
+                await asyncio.sleep(0)
+
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(provider.put(ctx))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            await asyncio.wait_for(provider.put(ctx), 5)  # the end goes past the PATCH on the wire, and lands
+            assert server.runs[ctx.id]["trace"][0]["t1"] == 5
+            answer_it.set()
+            await asyncio.wait_for(mid_run, 5)
+            await asyncio.wait_for(off_the_wire(), 5)
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 5
+        assert len(patches) == 2
+
     async def test_never_more_than_two_patches_on_the_wire(self, monkeypatch):
         monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
         on_wire, most, release = [0], [0], asyncio.Event()
