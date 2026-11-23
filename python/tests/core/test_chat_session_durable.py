@@ -367,6 +367,113 @@ class TestRootRunId:
         await restored.close()
 
 
+# What a snapshot held before root_run_id (timbal 54473c37, the version the platform's chat pins).
+FIELDS_BEFORE_ROOT_RUN_ID = (
+    "session_id",
+    "agent",
+    "config",
+    "head",
+    "turns",
+    "last_status",
+    "parked",
+    "last_prompt",
+    "last_options",
+    "in_flight",
+    "pending",
+    "wakes",
+    "resume",
+    "log_cursor",
+    "closed",
+    "version",
+)
+
+
+class TestThePlatformChatsPath:
+    """The platform's own chat (monolith ``services/chat``, pinned to timbal 54473c37) hosts a session exactly so
+    (``SessionHost._bring_in``): ``from_store``, else ``ChatSession(agent, session_id=<the platform's id>,
+    session_store=...)`` with no ``parent_id``, stored before its first turn; let go with ``close(keep=True)``
+    and brought back with ``from_store``. Its store keeps the snapshot as a JSON object and hands it back to
+    ``SessionSnapshot.from_json``; its trace provider is buffered and stores before acting.
+
+    Nothing it relied on changes, whether the snapshot it restores was written before this field or after: the
+    session's id is the platform's, the first turn runs under a run id of its own with no parent (the platform
+    files it under the session's reserved root run), and the next turn continues it."""
+
+    PLATFORM_ID = "06b04a1f3c2d7e5f8000a1b2c3d4e5f6"
+
+    @staticmethod
+    def _agent(provider):
+        return Agent(
+            name="chat",
+            model=TestModel(handler=handler),
+            system_prompt="You are a helpful assistant.",
+            tracing_provider=provider,
+        )
+
+    @staticmethod
+    async def _bring_in(agent, store, session_id):
+        try:
+            return await ChatSession.from_store(agent, store, session_id)
+        except LookupError:
+            pass
+        session = ChatSession(agent, session_id=session_id, session_store=store)
+        await session.restore()
+        session.persist()
+        await session.flush()
+        return session
+
+    @staticmethod
+    def _as_written_before_root_run_id(store, session_id):
+        """The stored snapshot as 54473c37 wrote it: its JSON object without ``root_run_id``."""
+        import json
+
+        stored, holder, until = store._rows[session_id]
+        runtime = json.loads(stored.to_json())
+        runtime.pop("version")
+        assert set(runtime) - {"root_run_id"} == set(FIELDS_BEFORE_ROOT_RUN_ID) - {"version"}
+        del runtime["root_run_id"]
+        older = SessionSnapshot.from_json(json.dumps(runtime))
+        older.version = stored.version
+        store._rows[session_id] = (older, holder, until)
+
+    @staticmethod
+    async def _memory(provider, run_id):
+        trace = await provider.get(RunContext(parent_id=run_id, tracing_provider=provider))
+        return [
+            block["text"]
+            for message in trace.get_path("chat")[0].memory
+            for block in message["content"]
+            if block.get("type") == "text"
+        ]
+
+    @pytest.mark.parametrize("written", ["before root_run_id", "with root_run_id"])
+    async def test_open_a_turn_let_go_restore_a_turn(self, tmp_path, written):
+        provider = CrashableSqlite.configured(
+            _path=tmp_path / "timbal.db", crashed=False, durability="buffered", store_before_acting=True
+        )
+        store = InMemoryChatSessionStore()
+        session = await self._bring_in(self._agent(provider), store, self.PLATFORM_ID)
+        assert session.id == self.PLATFORM_ID and session.head is None
+        assert (await store.load(self.PLATFORM_ID)).head is None  # stored before its first turn
+        first = await one_turn(session, "one")
+        assert first != self.PLATFORM_ID and session._last_context.parent_id is None
+        assert session._last_context._session_id == self.PLATFORM_ID  # the hint: the platform's thread
+        await session.close(keep=True)
+        if written == "before root_run_id":
+            self._as_written_before_root_run_id(store, self.PLATFORM_ID)
+
+        restored = await self._bring_in(self._agent(provider), store, self.PLATFORM_ID)
+        assert restored.id == self.PLATFORM_ID and restored.head == first and restored.turns == 1
+        second = await one_turn(restored, "two")
+        assert second not in (first, self.PLATFORM_ID) and restored._last_context.parent_id == first
+        assert await self._memory(provider, second) == ["one", "echo: one", "two", "echo: two"]
+        # Before this field nothing was sent; restored from such a snapshot, still nothing (the root is unknown).
+        hint = None if written == "before root_run_id" else self.PLATFORM_ID
+        assert restored._last_context._session_id == hint
+        await restored.close(keep=True)
+        assert (await store.load(self.PLATFORM_ID)).head == second
+
+
 class TestEdges:
     async def test_a_queued_message_waits_for_the_recovery_turn(self, db):
         provider, store = db
