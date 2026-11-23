@@ -817,6 +817,62 @@ class TestSingleFlight:
         _, _, key = PlatformTracingProvider._target(ctx)
         assert key in PlatformTracingProvider._retries  # the ended run is resent from its latest state
 
+    @pytest.mark.parametrize("answer", ["too_large", "format_rejected", "stale", "delta_unconfirmed"])
+    async def test_a_patch_the_runs_end_overtook_is_not_sent_again_after_the_end_failed(self, monkeypatch, answer):
+        """The end went past the stalled PATCH and failed before the stalled one was answered: a timeout after the
+        host had stored it. The stalled save must not take that failure for "nothing newer was sent": its resend
+        would be numbered above the stored end and carry the older copy. It reports the end's failure instead,
+        and the end's own background resend of the live run is what follows."""
+        import httpx
+
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))  # the resend itself is not this test
+        server = FakePlatform()
+        first_sent, answer_it, answered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        patches = []
+        if answer in ("format_rejected", "delta_unconfirmed"):
+            PlatformTracingProvider._host_caps(CONFIG.host).delta = True  # the first PATCH goes out as a delta
+
+        async def request(method, path, headers=None, **kwargs):
+            if method != "PATCH":
+                return await server.request(method, path, headers=headers, **kwargs)
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) > 1:
+                PlatformTracingProvider._host_caps(CONFIG.host).delta = False
+                await server.request(method, path, headers=headers, **kwargs)  # stored by the host
+                raise httpx.ReadTimeout("the answer never came")
+            first_sent.set()
+            await answer_it.wait()
+            answered.set()
+            if answer == "too_large":
+                raise PlatformError("payload too large", status_code=413)
+            if answer == "format_rejected":
+                raise PlatformError("unsupported media type", status_code=415)
+            if answer == "stale":
+                stored = {"X-Timbal-Snapshot": str(patches[0] + 10**12), "X-Timbal-Snapshot-Applied": "false"}
+                return SimpleNamespace(raise_for_status=lambda: None, headers=stored, json=lambda: {})
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False  # the end: stored, unanswered
+            assert server.runs[ctx.id]["trace"][0]["t1"] == 5
+            answer_it.set()
+            await asyncio.wait_for(answered.wait(), 5)
+            stored_mid_run = await asyncio.wait_for(mid_run, 5)
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 5
+        assert len(patches) == 2  # the older copy was never sent again
+        assert stored_mid_run is False  # it reports the failure of the round that carried its state
+        assert ctx._trace_unsaved
+        _, _, key = PlatformTracingProvider._target(ctx)
+        assert key in PlatformTracingProvider._retries  # the ended run is resent from its latest state
+
     async def test_never_more_than_two_patches_on_the_wire(self, monkeypatch):
         monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
         on_wire, most, release = [0], [0], asyncio.Event()

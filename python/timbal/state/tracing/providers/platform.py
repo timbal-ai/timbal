@@ -92,6 +92,8 @@ class _Flight:
         "next",
         "on_wire",
         "provider",
+        "round_of",
+        "rounds",
         "sent",
     )
 
@@ -104,6 +106,10 @@ class _Flight:
         self.next: asyncio.Future[None] | None = None
         self.sent: list[asyncio.Future[None]] = []
         self.on_wire: dict[asyncio.Task, float] = {}  # save -> loop time it went out
+        # Every round sent, in order, from the oldest whose save is still on the wire: a round that finished
+        # (landed or failed) is kept while an earlier one is still out, which needs its outcome (_carried).
+        self.rounds: list[asyncio.Future[None]] = []
+        self.round_of: dict[asyncio.Task, asyncio.Future[None]] = {}  # save on the wire -> its round
         self.driver: asyncio.Task | None = None
         self.arrival: asyncio.Future[None] | None = None  # wakes the driver when a save joins
         self.joins = 0
@@ -157,6 +163,10 @@ def _settle(flight: _Flight, joined: asyncio.Future[None], covers: int, save: as
     """A round's save finished. Success also settles earlier rounds still on the wire (a stalled
     PATCH): this one carried their state and newer."""
     flight.on_wire.pop(save, None)
+    flight.round_of.pop(save, None)
+    out = set(flight.round_of.values())
+    while flight.rounds and flight.rounds[0] not in out:
+        del flight.rounds[0]  # no save sent before it is still out: nothing needs its outcome any more
     if joined not in flight.sent:
         # A newer round landed while this (stalled) one was still on the wire, and settled it: it carried this
         # state and newer, so how this one ended changes nothing.
@@ -187,28 +197,29 @@ def _settle(flight: _Flight, joined: asyncio.Future[None], covers: int, save: as
 async def _carried(key: str, joined: asyncio.Future[None] | None) -> bool:
     """Whether a newer round of the run carries this round's state, so its PATCH must not be sent again.
 
-    True once a round sent after this one has landed (it settled this one, ``_settle``). While such a round is
-    still on the wire, or stored by the host with its answer on the way, this waits for it: True when it lands,
-    its error when it fails. False when no round was sent after this one: a resend then takes a number below
-    every later round's, which the host orders it by.
-
     A resend takes a new snapshot number. Sent once a newer round has gone out, it would be numbered above that
     round, and with a trace redactor it carries the same copy of the trace as this PATCH, an older state the
-    host would take for the newest (the stored run loses its end). Without a redactor it carries the live
-    trace, which the newer round holds, or the saves after it.
+    host would take for the newest (the stored run loses its end). So once any round was sent after this one,
+    this one is never sent again, and takes the newest such round's outcome: True when it landed (waited for
+    while it is still out), its error when it failed. A failed round may have been stored all the same (a
+    timeout after the host committed it), and its own failure handling resends the run's latest state. False
+    when no round was sent after this one: a resend then takes a number below every later round's.
     """
     if joined is None:
         return False
-    if joined.done():
-        return True
     flight = PlatformTracingProvider._flights.get(key)
-    if flight is None or joined not in flight.sent:
-        return False
-    newer = flight.sent[flight.sent.index(joined) + 1 :]
-    if not newer:
-        return False
-    await asyncio.shield(newer[-1])
-    return True
+    if flight is None or joined not in flight.rounds:
+        return joined.done()  # settled by a newer round that landed
+    while flight.rounds[-1] is not joined:
+        newest = flight.rounds[-1]
+        try:
+            await asyncio.shield(newest)
+            return True
+        except Exception:
+            if flight.rounds[-1] is newest:
+                raise
+            # An even newer round went out meanwhile: its outcome is the one that counts.
+    return False
 
 
 def _flush_timeout() -> float:
@@ -1027,6 +1038,8 @@ class PlatformTracingProvider(TracingProvider):
                     flight.sent.append(joined)
                     save = loop.create_task(cls._save(flight.context, joined=joined))
                     flight.on_wire[save] = loop.time()
+                    flight.rounds.append(joined)
+                    flight.round_of[save] = joined
                     save.add_done_callback(functools.partial(_settle, flight, joined, flight.joins))
                     continue
                 flight.arrival = loop.create_future()
