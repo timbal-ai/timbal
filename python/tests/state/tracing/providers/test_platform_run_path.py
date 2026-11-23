@@ -286,7 +286,17 @@ class TestWhatAHostAdvertises:
             await run(tool_loop(apps), apps, CONFIG)
         assert apps.takes_deltas() and PlatformTracingProvider.takes_deltas(CONFIG)
         assert not ChatRuns.takes_deltas(ORG_ONLY)
+        assert not ChatRuns.takes_deltas(CONFIG)  # its own credentials win, as on its saves
         assert not ChatRuns.configured(config=ORG_ONLY).takes_deltas(ORG_ONLY)  # a configured copy: same endpoint
+
+    async def test_takes_deltas_asks_the_providers_own_resolve_config(self):
+        """A subclass that finds its credentials in ``_resolve_config`` is asked the same way its saves are."""
+        host = Host(apps=Endpoint(deltas=False, advertise=False), chat=Endpoint())
+        with patch("timbal.platform.utils._request", host.request):
+            await run(tool_loop(ChatRuns), ChatRuns, None)
+        assert ChatRuns.takes_deltas() and ChatRuns.takes_deltas(CONFIG)
+        assert ChatRuns.configured(keepalive_s=1).takes_deltas()  # a configured copy: the same endpoint
+        assert not PlatformTracingProvider.takes_deltas(CONFIG)  # the app's runs on that host never answered
 
     def test_configured_copies_share_their_endpoints_family(self):
         caps = PlatformTracingProvider._family_caps(CONFIG)
@@ -385,20 +395,75 @@ class TestFamiliesOfRunPathsThatCheckTheRunId:
         assert {s.call_id for s in stored.as_records()} == set(threads_run._trace.keys())
         assert [c["params"] for c in threads_endpoint.calls if c["method"] == "GET"] == [None]
 
-    def test_a_run_path_that_refuses_any_probe_gets_a_family_per_class(self):
+    def test_a_run_path_that_refuses_the_probe_is_told_apart_by_the_runs_it_stores(self):
+        """A class that routes run ids from a registry, some to an app's runs and some to the chat endpoint:
+        the probe id is in neither, so the family comes from the path each run is really stored at."""
+        routes = {"run-a1": APP_PREFIX, "run-a2": APP_PREFIX, "run-c1": CHAT_PREFIX}
+
         class Registry(PlatformTracingProvider):
-            prefix: str = CHAT_PREFIX
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{routes[run_id]}{run_id}"  # KeyError for any other id, the probe's too
+
+        def caps(run_id):
+            return Registry._family_caps(ORG_ONLY, Registry._run_path(ORG_ONLY, run_id), run_id)
+
+        assert caps("run-a1") is caps("run-a2")  # one endpoint, one family
+        caps("run-a1").select_resume = True
+        assert not caps("run-c1").select_resume
+        before = dict(PlatformTracingProvider._caps)
+        assert not Registry.takes_deltas(ORG_ONLY)  # asked without a run: nothing to tell its endpoint by...
+        assert PlatformTracingProvider._caps == before  # ...and nothing stored for it
+
+    async def test_one_class_two_routes_reads_ask_for_the_projection_only_where_it_was_advertised(self):
+        routes = {"run-app": APP_PREFIX, "run-chat": CHAT_PREFIX}
+
+        class Registry(PlatformTracingProvider):
+            trace_platform_config = ORG_ONLY
 
             @classmethod
             def _run_path(cls, platform_config, run_id):  # noqa: ARG003
-                if run_id not in {"known"}:
-                    raise LookupError(run_id)
-                return f"{cls.prefix}{run_id}"
+                return f"{routes[run_id]}{run_id}"
 
-        first = Registry.configured(prefix=CHAT_PREFIX)
-        second = Registry.configured(prefix="orgs/1/threads/runs/")
-        first._family_caps(ORG_ONLY).delta_rejected = True
-        assert not second._family_caps(ORG_ONLY).delta_rejected  # split, never merged
+        host = Host(apps=Endpoint(select=True), chat=Endpoint())  # the chat endpoint refuses `select`
+        with patch("timbal.platform.utils._request", host.request):
+            for _ in range(2):  # the first read learns that the app's runs take the projection
+                await read_back(Registry, "run-app", None)
+            await read_back(Registry, "run-chat", None)
+        assert [c["params"] for c in host.apps.calls] == [None, {"select": "resume"}]
+        assert [c["params"] for c in host.chat.calls] == [None]
+
+    def test_a_run_path_that_spells_the_run_id_as_a_uuid_is_one_family(self):
+        class Dashed(PlatformTracingProvider):
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{CHAT_PREFIX}{UUID(run_id)}"  # 0000...-7000-8000-...: the run id, written another way
+
+        one, other = RunContext(tracing_provider=None).id, RunContext(tracing_provider=None).id
+
+        def caps(run_id):
+            return Dashed._family_caps(ORG_ONLY, Dashed._run_path(ORG_ONLY, run_id), run_id)
+
+        assert caps(one) is caps(other) is Dashed._family_caps(ORG_ONLY)  # and what takes_deltas() asks about
+        caps(one).delta_rejected = True
+        assert caps(other).delta_rejected  # a refusal is learned once for the endpoint, not once per run
+
+    def test_a_run_path_the_run_id_cannot_be_found_in_stores_nothing(self):
+        """Hashed, say: the endpoint cannot be told from the path, so nothing is shared, and nothing stored. Not
+        a family per run: each run would pay a refused save again, and fill the cache with one entry per run."""
+
+        class Hashed(PlatformTracingProvider):
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{CHAT_PREFIX}{sum(map(ord, run_id)) % 97}"
+
+        before = dict(PlatformTracingProvider._caps)
+        for run_id in ("run-1", "run-2", "run-3"):
+            caps = Hashed._family_caps(ORG_ONLY, Hashed._run_path(ORG_ONLY, run_id), run_id)
+            caps.delta = True  # learned from an answer: kept nowhere
+        assert PlatformTracingProvider._caps == before
+        assert not Hashed._family_caps(ORG_ONLY, Hashed._run_path(ORG_ONLY, "run-1"), "run-1").delta
+        assert not Hashed.takes_deltas(ORG_ONLY)
 
 
 class TestTheCapabilityCache:
@@ -449,26 +514,49 @@ class TestTheCapabilityCache:
         assert not errors, errors[:1]
         assert len([key for key in PlatformTracingProvider._caps if " " in key]) <= bound
 
-    def test_a_class_dropped_and_another_made_never_share_a_family(self):
-        """A ``_run_path`` that refuses even the probe id is told apart by class. Not by ``id()``: a class that is
-        gone leaves its id free for the next one, which would then take the old one's refusals."""
-        import gc
+    def test_a_child_forked_while_a_thread_holds_its_locks_can_take_them(self):
+        """A worker forked while another thread holds the capability cache's lock (or the snapshot counter's)
+        inherits it held, with no thread left to let it go: its first save or read would block its loop."""
+        import os
+        import subprocess
+        import sys
+        import textwrap
 
-        def make():
-            class Refusing(PlatformTracingProvider):
-                @classmethod
-                def _run_path(cls, platform_config, run_id):  # noqa: ARG003
-                    raise LookupError(run_id)
+        import timbal
 
-            return Refusing
+        if sys.platform == "win32":
+            pytest.skip("os.fork is POSIX only")
+        script = textwrap.dedent(
+            """
+            import os, sys, threading, warnings
+            from timbal.state.tracing.providers import platform
 
-        families = set()
-        for _ in range(50):
-            provider = make()
-            families.add(provider._caps_family(ORG_ONLY))
-            del provider
-            gc.collect()
-        assert len(families) == 50
+            warnings.simplefilter("ignore", DeprecationWarning)  # fork() with threads, on purpose
+
+            held, release = threading.Event(), threading.Event()
+
+            def hold():
+                with platform._CAPS_LOCK, platform._snapshot_lock:
+                    held.set()
+                    release.wait()
+
+            threading.Thread(target=hold, daemon=True).start()
+            if not held.wait(10):
+                sys.exit("the locks were never taken")
+            pid = os.fork()
+            if pid == 0:
+                ok = platform._CAPS_LOCK.acquire(timeout=5) and platform._snapshot_lock.acquire(timeout=5)
+                os._exit(0 if ok else 1)
+            release.set()
+            _, status = os.waitpid(pid, 0)
+            sys.exit(os.waitstatus_to_exitcode(status))
+            """
+        )
+        # The same timbal as this test's, whatever the interpreter has installed.
+        source = os.path.dirname(os.path.dirname(timbal.__file__))
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join([source, os.environ.get("PYTHONPATH", "")])}
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60, env=env)
+        assert out.returncode == 0, out.stderr[-2000:] or "the child could not take a lock it inherited held"
 
     def test_asking_about_deltas_stores_nothing(self):
         before = dict(PlatformTracingProvider._caps)
@@ -566,8 +654,10 @@ class TestCredentials:
         assert seen and {(path.split("/runs/")[0].split("/", 1)[0], auth) for path, auth in seen} == {
             ("trace.test", "Bearer t2_trace")
         }
-        # Answers for the trace endpoint, which advertised deltas, not for the run's host, which never answered.
+        # Answers for the trace endpoint, which advertised deltas, not for the run's host, which never answered:
+        # with the run's config passed too, as a save of that run would go (the trace config first).
         assert provider.takes_deltas() is True
+        assert provider.takes_deltas(ctx.platform_config) is True
         assert PlatformTracingProvider.takes_deltas(ctx.platform_config) is False
 
 
