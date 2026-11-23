@@ -883,7 +883,9 @@ class ChatSession:
         if trigger:
             reserved = [name for name in _RESERVED_TRIGGER_KEYS if name in trigger]
             if reserved:
-                raise ValueError(f"A wake's trigger cannot set what the runtime says of the turn: {', '.join(reserved)}.")
+                raise ValueError(
+                    f"A wake's trigger cannot set what the runtime says of the turn: {', '.join(reserved)}."
+                )
             kind = trigger.get("kind", WAKE_KIND)
             if not isinstance(kind, str) or not _TRIGGER_KIND.fullmatch(kind) or kind in ATTENDED_TRIGGER_KINDS:
                 # An approval reviewer reads it (Runnable._review_gate), and shows it to a model reviewer: a short
