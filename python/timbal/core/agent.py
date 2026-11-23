@@ -4434,15 +4434,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 content = event.output
             tool_name = event.path.rsplit(".", 1)[-1]
             # A message sent to the user, or a moment marked worth remembering, is not a call that went
-            # through: the streak stands, and neither enters the window.
-            aside = (delivering and tool_name == send_name) or (
-                salience_name is not None and tool_name == salience_name
-            )
+            # through: the streak stands, and neither enters the window. (Looked at only when it matters.)
             if denied:
                 consecutive_denials += 1
-            elif consecutive_denials and not aside:
+            elif consecutive_denials and not (
+                (delivering and tool_name == send_name) or (salience_name is not None and tool_name == salience_name)
+            ):
                 consecutive_denials = 0
-            if self.max_denials_window is not None and (denied or not aside):
+            if self.max_denials_window is not None and (
+                denied
+                or not (
+                    (delivering and tool_name == send_name)
+                    or (salience_name is not None and tool_name == salience_name)
+                )
+            ):
                 window = await _denial_window()
                 window.append(1 if denied else 0)
                 del window[: -self.max_denials_window[1]]
@@ -4567,6 +4572,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         may_defer = self.tool_search != "off" and any(
             isinstance(t, ToolSet) or getattr(t, "defer_loading", False) for t in self.tools
         )
+        # Fixed for the turn; checked on every step.
+        offer_salience = self.salience_tool and current_span.parent_call_id is None
         # Fixed for the turn; checked after every tool batch.
         denial_window_on = self.max_denials_window is not None
         denial_limit = self.max_consecutive_denials
@@ -4722,7 +4729,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     tools, send_name, system_prompt = self._with_send_tool(
                         tools, tool_names, send_name, system_prompt, send_offered
                     )
-                if self.salience_tool and current_span.parent_call_id is None:
+                if offer_salience:
                     tools, salience_name = self._with_salience_tool(
                         tools, tool_names, salience_name, not withheld and i < self.max_iter
                     )
