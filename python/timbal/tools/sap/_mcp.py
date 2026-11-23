@@ -6,8 +6,16 @@ from mcp import types
 from pydantic import BaseModel, Field, model_validator
 
 from ...core.mcp import MCPServer, MCPTool
-from ._access import Ref, SAPAccess
+from ._access import Ref, Route, SAPAccess
 from ._http import https_endpoint
+
+_ROUTES: dict[str, Route] = {
+    "hana-ai": "hana_toolkit",
+    "gateway": "sap_mcp_gateway",
+    "third-party-hana": "third_party_hana",
+    "third-party-api": "third_party_api",
+    "third-party-cds": "third_party_cds",
+}
 
 
 class SAPMCPBinding(BaseModel, frozen=True):
@@ -40,8 +48,6 @@ class SAPMCPServer(MCPServer):
                 k.lower() == "authorization" and v.strip() for k, v in self.headers.items()
             ):
                 raise ValueError("Configure authentication for the SAP MCP server.")
-        if self.kind in ("hana-ai", "third-party-hana") and not self.access.scope_reference:
-            raise ValueError("SAP HANA MCP tools require a written HANA scope.")
         if self.kind in ("hana-ai", "third-party-hana", "third-party-cds") and any(
             not op.read_only for op in self.manifest.values()
         ):
@@ -74,26 +80,21 @@ class SAPMCPServer(MCPServer):
                 call.account_input(payload)
                 return await dispatch(**payload)
 
-            route = {
-                "hana-ai": "A(i)(b)",
-                "gateway": "A(iv)",
-                "third-party-hana": "B(i)(a)",
-                "third-party-api": "B(ii)",
-                "third-party-cds": "B(iii)",
-            }[self.kind]
             return await self.access.invoke(
                 tool.name,
                 mcp_tool.name,
                 run,
-                route=route,
-                hana=self.kind in ("hana-ai", "third-party-hana"),
-                document_types=binding.document_types,
+                route=_ROUTES[self.kind],
+                document_types=None if binding.read_only else binding.document_types,
             )
 
         changes = {"handler": invoke, "read_only": binding.read_only}
         if binding.input_model is not None:
             changes["input_schema"] = binding.input_model.model_json_schema()
-        return tool.model_copy(update=changes)
+        bound = tool.model_copy(update=changes)
+        # SAP inputs and results stay out of the host's event logs.
+        bound._log_events = set()
+        return bound
 
     async def resolve(self):
         tools = await super().resolve()

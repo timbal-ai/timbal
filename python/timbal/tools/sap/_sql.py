@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, SecretStr, model_validator
 
 from ...platform.integrations import Integration
-from ._access import Ref, SAPCall, SAPTool, Scalar, json_size
+from ._access import Ref, SAPCall, SAPTool, Scalar, json_size, parse_host
 
 _QUOTED = re.compile(r"""'(?:''|[^'])*'|"(?:""|[^"])*" """, re.VERBOSE)
 _MUTATIONS = re.compile(
@@ -83,22 +83,38 @@ def _page(call: SAPCall, cursor: Any, size: int, offset: int | None, *, hana: bo
 
 
 class _HANATool(SAPTool):
-    host: Ref
+    # Optional with a bound connection, which names the host; when both are set they must match.
+    host: Ref | None = None
+    # Without a bound connection: the dedicated user, else SAP_HANA_USER / SAP_HANA_PASSWORD.
     user: str | None = Field(default=None, exclude=True)
     password: SecretStr | None = Field(default=None, exclude=True)
+    # A ``sap_hana`` connection holding host, user and password.
     integration: Annotated[str, Integration("sap_hana")] | None = None
+
+    @model_validator(mode="after")
+    def _check_credential_source(self):
+        if self.integration is not None and (self.user or self.password):
+            raise ValueError("The bound sap_hana connection supplies the HANA user and password; do not set them.")
+        if self.integration is None and not self.host:
+            raise ValueError("Configure the HANA host, or bind a sap_hana connection.")
+        return self
 
     async def _sql(
         self, call: SAPCall, sql: str, params: list, *, read: bool, size: int = 0, offset: int | None = None
     ) -> dict:
         call.account_input([sql, params])
-        creds = await self.integration.resolve() if self.integration and not (self.user and self.password) else {}
-        user = self.user or creds.get("user") or os.getenv("SAP_HANA_USER")
-        password = self.password or creds.get("password") or os.getenv("SAP_HANA_PASSWORD")
+        if self.integration is not None:
+            creds = await self.integration.resolve()
+            host, _ = parse_host(creds.get("host"))
+            user, password = creds.get("user"), creds.get("password")
+            if self.host and self.host.lower() != host:
+                raise PermissionError("The configured HANA host differs from the connection's host.")
+        else:
+            host = self.host
+            user = self.user or os.getenv("SAP_HANA_USER")
+            password = self.password.get_secret_value() if self.password else os.getenv("SAP_HANA_PASSWORD")
         if not user or not password:
             raise ValueError("Configure the dedicated SAP HANA user and password.")
-        if isinstance(password, SecretStr):
-            password = password.get_secret_value()
 
         def run():
             try:
@@ -109,7 +125,7 @@ class _HANATool(SAPTool):
             timeout_ms = self.access.timeout_seconds * 1_000
             with closing(
                 dbapi.connect(
-                    address=self.host,
+                    address=host,
                     port=443,
                     user=user,
                     password=password,
@@ -121,9 +137,8 @@ class _HANATool(SAPTool):
                 )
             ) as conn:
                 conn.setautocommit(False)
-                conn.setclientinfo("APPLICATION", call.consumer)
-                if call.user:
-                    conn.setclientinfo("APPLICATIONUSER", call.user)
+                # No APPLICATIONUSER: the platform does not yet supply a user SAP may trust.
+                conn.setclientinfo("APPLICATION", call.application)
                 with closing(conn.cursor()) as cursor:
                     if read:
                         cursor.execute("SET TRANSACTION READ ONLY")
@@ -178,7 +193,7 @@ class SAPHANARead(_HANATool):
             sql += f" ORDER BY {', '.join(map(_ident, self.order_by))} LIMIT ? OFFSET ?"
             return await self._sql(call, sql, [*params, size + 1, offset], read=True, size=size, offset=offset)
 
-        return await self.access.invoke(self.name, target, run, route="A(i)(a)", agent_route="B(i)(a)", hana=True)
+        return await self.access.invoke(self.name, target, run, route="hana_view")
 
 
 class SAPHANAQuery(_HANATool):
@@ -192,9 +207,7 @@ class SAPHANAQuery(_HANATool):
                 call, _statement(query, read=True), bindings or [], read=True, size=self.access.max_rows
             )
 
-        return await self.access.invoke(
-            self.name, self.access.scope_reference or self.host, run, route="B(i)(b)", hana=True
-        )
+        return await self.access.invoke(self.name, self.host or "sql", run, route="hana_sql")
 
 
 class SAPHANAWrite(_HANATool):
@@ -208,7 +221,7 @@ class SAPHANAWrite(_HANATool):
         async def run(call):
             return await self._sql(call, _statement(self.statement, read=False), bindings, read=False)
 
-        return await self.access.invoke(self.name, self.object_name, run, route="B(i)(c)", hana=True)
+        return await self.access.invoke(self.name, self.object_name, run, route="hana_write", document_types=())
 
 
 class SAPCDSRead(SAPTool):
@@ -239,4 +252,4 @@ class SAPCDSRead(SAPTool):
 
             return await call.blocking(query)
 
-        return await self.access.invoke(self.name, self.view, run, route="A(iii)", agent_route="B(iii)")
+        return await self.access.invoke(self.name, self.view, run, route="cds_view")

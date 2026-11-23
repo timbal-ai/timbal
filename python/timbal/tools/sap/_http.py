@@ -1,8 +1,13 @@
 """Published SAP OData/CDS and SOAP operations and inbound SAP Agent Gateway A2A."""
 
+import asyncio
+import hashlib
 import json
+import re
+import time
+import weakref
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 from xml.etree import ElementTree as ET
@@ -11,11 +16,21 @@ import httpx
 from pydantic import BaseModel, Field, JsonValue, SecretStr, StringConstraints, field_validator, model_validator
 
 from ...platform.integrations import Integration
-from ._access import Ref, SAPCall, SAPCustomizing, SAPHTTPError, SAPTool, Scalar
+from ._access import Ref, SAPCall, SAPCustomizing, SAPHTTPError, SAPTool, Scalar, parse_host
 
 Property = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
 TokenProvider = Callable[[], Awaitable[str]]
 _SOAP = {"1.1": "http://schemas.xmlsoap.org/soap/envelope/", "1.2": "http://www.w3.org/2003/05/soap-envelope"}
+_SAP_CLIENT = re.compile(r"^\d{3}$")
+#: Seconds before expiry at which a cached token is renewed (half the lifetime, if shorter).
+_TOKEN_MARGIN = 120
+_TOKEN_TIMEOUT = 15
+_clock = time.monotonic
+# (token URL, client ID, hash of the secret) -> (access token, renew at)
+_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
+# One grant at a time per client. Per event loop, since an asyncio.Lock must not be shared
+# across loops; weak keys so a closed loop takes its locks along.
+_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
 
 
 def https_endpoint(value: str) -> str:
@@ -23,6 +38,80 @@ def https_endpoint(value: str) -> str:
     if url.scheme != "https" or not url.host or url.userinfo or url.fragment:
         raise ValueError("Configure an HTTPS SAP endpoint without embedded credentials or a fragment.")
     return value
+
+
+def _lock(key: str) -> asyncio.Lock:
+    locks = _LOCKS.setdefault(asyncio.get_running_loop(), {})
+    lock = locks.get(key)
+    if lock is None:
+        lock = locks[key] = asyncio.Lock()
+    return lock
+
+
+def _token_key(token_url: str, client_id: str, client_secret: str) -> str:
+    secret = hashlib.sha256(client_secret.encode()).hexdigest()
+    return hashlib.sha256("\x00".join((token_url, client_id, secret)).encode()).hexdigest()
+
+
+async def client_credentials_token(token_url: str, client_id: str, client_secret: str) -> tuple[str, str]:
+    """An access token from the OAuth 2.0 client-credentials grant, and its cache key.
+
+    Cached in this process until shortly before it expires. Errors never carry the secret or a token.
+    """
+    try:
+        https_endpoint(token_url)
+    except (ValueError, httpx.InvalidURL):
+        raise ValueError("The SAP connection's token_url must be an HTTPS URL without credentials.") from None
+    key = _token_key(token_url, client_id, client_secret)
+    async with _lock(key):
+        cached = _TOKEN_CACHE.get(key)
+        if cached and _clock() < cached[1]:
+            return cached[0], key
+        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT, follow_redirects=False) as client:
+            response = await client.post(
+                token_url,
+                auth=(client_id, client_secret),
+                data={"grant_type": "client_credentials"},
+                headers={"Accept": "application/json"},
+            )
+        if 300 <= response.status_code < 400:
+            raise RuntimeError("SAP's token endpoint answered with a redirect, which is not followed.")
+        if not response.is_success:
+            raise SAPHTTPError("token endpoint", response.status_code)
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        token = body.get("access_token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("SAP's token endpoint did not issue an access token.")
+        token_type = body.get("token_type")
+        if not isinstance(token_type, str) or token_type.lower() != "bearer":
+            raise RuntimeError("SAP's token endpoint issued a token that is not a bearer token.")
+        lifetime = body.get("expires_in")
+        try:
+            lifetime = float(lifetime)
+        except (TypeError, ValueError):
+            lifetime = 0
+        if lifetime > 0:
+            _TOKEN_CACHE[key] = (token, _clock() + lifetime - min(_TOKEN_MARGIN, lifetime / 2))
+        return token, key
+
+
+def _sap_connection(creds: dict[str, Any]) -> dict[str, Any]:
+    """host, port and SAP client of a ``sap`` connection."""
+    host, url_port = parse_host(creds.get("host"))
+    port = creds.get("port")
+    try:
+        port = int(port) if port not in (None, "") else (url_port or 443)
+    except (TypeError, ValueError):
+        raise ValueError("The SAP connection's port must be a number.") from None
+    if not 1 <= port <= 65535 or (url_port and url_port != port):
+        raise ValueError("The SAP connection's host and port disagree, or the port is out of range.")
+    sap_client = creds.get("sap_client") or None
+    if sap_client is not None and not _SAP_CLIENT.match(str(sap_client)):
+        raise ValueError("The SAP connection's sap_client must be three digits.")
+    return {"host": host, "port": port, "sap_client": sap_client and str(sap_client)}
 
 
 class SAPTokenExchange(BaseModel):
@@ -65,17 +154,28 @@ class SAPTokenExchange(BaseModel):
 class _HTTPTool(SAPTool):
     endpoint: Ref
     object_name: Ref
+    # Supplies the bearer token instead of the connection's OAuth client (e.g. SAPTokenExchange).
     token_provider: TokenProvider | None = Field(default=None, exclude=True)
+    # A ``sap`` connection: host, port, sap_client and the OAuth client (token_url, client_id,
+    # client_secret) the tool obtains short-lived tokens from.
     integration: Annotated[str, Integration("sap")] | None = None
 
     _check_endpoint = field_validator("endpoint")(https_endpoint)
 
-    async def _client(self) -> httpx.AsyncClient:
+    async def _client(self, call: SAPCall) -> httpx.AsyncClient:
+        creds = await self.integration.resolve() if self.integration else None
+        if creds is not None:
+            call.connection = _sap_connection(creds)
+            self._pinned(call, self.endpoint)
         if self.token_provider:
             token = await self.token_provider()
-        elif self.integration:
-            creds = await self.integration.resolve()
-            token = creds.get("access_token")
+        elif creds is not None:
+            token_url, client_id, secret = (creds.get(k) for k in ("token_url", "client_id", "client_secret"))
+            if not (token_url and client_id and secret):
+                raise ValueError(
+                    "The SAP connection needs token_url, client_id and client_secret, or configure a token_provider."
+                )
+            token, call.token_key = await client_credentials_token(str(token_url), str(client_id), str(secret))
         else:
             token = None
         if not token:
@@ -84,11 +184,39 @@ class _HTTPTool(SAPTool):
             headers={"Authorization": f"Bearer {token}"}, follow_redirects=False, timeout=self.access.timeout_seconds
         )
 
+    @staticmethod
+    def _pinned(call: SAPCall, url: str) -> str:
+        """Refuse a URL off the connection's host and port; add the connection's SAP client when absent."""
+        if call.connection is None:
+            return url
+        target = httpx.URL(url)
+        if (target.scheme, target.host.lower(), target.port or 443) != (
+            "https",
+            call.connection["host"],
+            call.connection["port"],
+        ):
+            # Whatever the token's source, it goes only to the host the connection names.
+            raise PermissionError("The SAP endpoint is not on the connection's host and port.")
+        sap_client = call.connection["sap_client"]
+        if sap_client and not any(key.lower() == "sap-client" for key in target.params.keys()):
+            target = target.copy_add_param("sap-client", sap_client)
+        return str(target)
+
     async def _send(
-        self, client: httpx.AsyncClient, method: str, url: str, *, headers_only: bool = False, **kwargs
+        self,
+        call: SAPCall,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        *,
+        headers_only: bool = False,
+        **kwargs,
     ) -> tuple[bytes, httpx.Headers]:
-        async with client.stream(method, url, **kwargs) as response:
+        async with client.stream(method, self._pinned(call, url), **kwargs) as response:
             if not response.is_success:
+                if response.status_code == 401 and call.token_key:
+                    # SAP refused the cached token (revoked or rotated): the next call gets a new one.
+                    _TOKEN_CACHE.pop(call.token_key, None)
                 # The URL/query and SAP error body can contain customer data.
                 raise SAPHTTPError(self.object_name, response.status_code)
             if headers_only:
@@ -136,8 +264,9 @@ class SAPODataRead(_HTTPTool):
                 query["$skiptoken"] = skiptoken
             elif offset:
                 query["$skip"] = str(offset)
-            async with await self._client() as client:
+            async with await self._client(call) as client:
                 body, _ = await self._send(
+                    call,
                     client,
                     "GET",
                     str(httpx.URL(self.endpoint).copy_merge_params(query)),
@@ -164,11 +293,7 @@ class SAPODataRead(_HTTPTool):
             return page
 
         return await self.access.invoke(
-            self.name,
-            self.object_name,
-            run,
-            route="A(iii)" if self.cds else "A(ii)",
-            agent_route="B(iii)" if self.cds else "B(ii)",
+            self.name, self.object_name, run, route="cds_view" if self.cds else "published_api"
         )
 
 
@@ -235,9 +360,10 @@ class SAPODataWrite(_PayloadTool):
             headers = {"Accept": "application/json"}
             if self.etag:
                 headers["If-Match"] = self.etag
-            async with await self._client() as client:
+            async with await self._client(call) as client:
                 if self.csrf_endpoint:
                     _, fetched = await self._send(
+                        call,
                         client,
                         "GET",
                         self._target(self.csrf_endpoint),
@@ -249,15 +375,14 @@ class SAPODataWrite(_PayloadTool):
                     headers["X-CSRF-Token"] = token
                     self.access._charge(call.consumer, start=False)
                 kwargs = {"json": data} if self.method != "DELETE" else {}
-                body, _ = await self._send(client, self.method, str(target), headers=headers, **kwargs)
+                body, _ = await self._send(call, client, self.method, str(target), headers=headers, **kwargs)
             return json.loads(body) if body else None
 
         return await self.access.invoke(
             self.name,
             self.object_name,
             run,
-            route="A(ii)",
-            agent_route="B(ii)",
+            route="published_api",
             document_types=self.document_types,
             customizing=self.customizing,
         )
@@ -291,8 +416,9 @@ class SAPSOAPOperation(_PayloadTool):
                 if self.version == "1.1"
                 else {"Content-Type": f"application/soap+xml; charset=utf-8; action={action}"}
             )
-            async with await self._client() as client:
+            async with await self._client(call) as client:
                 body, _ = await self._send(
+                    call,
                     client,
                     "POST",
                     self._target(self.endpoint),
@@ -311,8 +437,7 @@ class SAPSOAPOperation(_PayloadTool):
             self.name,
             self.object_name,
             run,
-            route="A(ii)",
-            agent_route="B(ii)",
+            route="published_api",
             document_types=self.document_types,
             customizing=self.customizing,
         )
@@ -359,12 +484,12 @@ class SAPAgentSend(_AgentGateway):
                     callback["token"] = self.callback_token.get_secret_value()
                 request["configuration"] = {"pushNotification": callback}
             call.account_input(request)
-            async with await self._client() as client:
-                body, _ = await self._send(client, "POST", self.endpoint, json=request)
+            async with await self._client(call) as client:
+                body, _ = await self._send(call, client, "POST", self.endpoint, json=request)
             return json.loads(body)
 
         return await self.access.invoke(
-            self.name, self.object_name, run, route="A(iv)", document_types=self.document_types
+            self.name, self.object_name, run, route="sap_agent", document_types=self.document_types
         )
 
 
@@ -380,8 +505,8 @@ class SAPAgentGetTask(_AgentGateway):
                 raise ValueError("Invalid SAP Agent Gateway task ID.")
             url = httpx.URL(self.endpoint)
             url = url.copy_with(path=url.path.rstrip("/") + "/" + quote(task_id, safe=""))
-            async with await self._client() as client:
-                body, _ = await self._send(client, "GET", str(url))
+            async with await self._client(call) as client:
+                body, _ = await self._send(call, client, "GET", str(url))
             return json.loads(body)
 
-        return await self.access.invoke(self.name, self.object_name, run, route="A(iv)")
+        return await self.access.invoke(self.name, self.object_name, run, route="sap_agent")

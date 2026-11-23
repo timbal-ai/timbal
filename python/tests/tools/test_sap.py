@@ -1,8 +1,11 @@
 import asyncio
+import base64
 import json
 import sys
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import parse_qs
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -12,7 +15,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from timbal import Agent, Tool, Workflow
 from timbal.core.mcp import MCPServer
 from timbal.core.test_model import TestModel
-from timbal.state import set_run_context
+from timbal.platform.integrations import Integration
+from timbal.state import get_run_context, set_run_context
 from timbal.tools import (
     SAPBAPI,
     SAPAccess,
@@ -31,9 +35,14 @@ from timbal.tools import (
     SAPSOAPOperation,
     SAPTokenExchange,
 )
+from timbal.tools.sap import _http as sap_http
+from timbal.tools.sap._access import SAPHTTPError
 from timbal.tools.sap._native import _gui_worker
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
+
+SECRET = "s3cret-client-secret"
+TOKEN_URL = "https://auth.example/oauth/token"
 
 
 class Item(BaseModel):
@@ -41,9 +50,47 @@ class Item(BaseModel):
     id: str
 
 
+@pytest.fixture(autouse=True)
+def _isolated(monkeypatch):
+    monkeypatch.delenv("SAP_HANA_USER", raising=False)
+    monkeypatch.delenv("SAP_HANA_PASSWORD", raising=False)
+    sap_http._TOKEN_CACHE.clear()
+    set_run_context(None)
+    yield
+    set_run_context(None)
+    sap_http._TOKEN_CACHE.clear()
+
+
 @pytest.fixture
 def access():
-    return SAPAccess(catalog_id="catalog@1", scope_reference="accepted-scope")
+    return SAPAccess()
+
+
+def sap_creds(**overrides):
+    creds = {
+        "type": "credentials",
+        "host": "sap.example",
+        "port": 443,
+        "token_url": TOKEN_URL,
+        "client_id": "client",
+        "client_secret": SECRET,
+        "sap_client": "100",
+    }
+    creds.update(overrides)
+    return creds
+
+
+def bound(creds):
+    integration = MagicMock(spec=Integration)
+    integration.resolve = AsyncMock(return_value=creds)
+    return integration
+
+
+def token_response(token="tok-1", expires_in=3600, token_type="bearer"):
+    body = {"access_token": token, "token_type": token_type}
+    if expires_in is not None:
+        body["expires_in"] = expires_in
+    return httpx.Response(200, json=body)
 
 
 @pytest.fixture
@@ -58,7 +105,9 @@ def hana(monkeypatch):
 
 
 def hana_tool(access, cls=SAPHANARead, **kwargs):
-    config = {"host": "hana.example", "user": "tech", "password": "test", "access": access}
+    config = {"access": access}
+    if "integration" not in kwargs:
+        config.update(host="hana.example", user="tech", password="test")
     if cls is SAPHANARead:
         config.update(schema_name="REPORTING", view="OPEN_ORDERS", columns=["ID"], order_by=["ID"])
     return cls(**config, **kwargs)
@@ -70,24 +119,24 @@ async def test_hana_framework_entrypoint_pagination(access, hana):
     r = await tool(limit=2, filters={"ID": "x' OR 1=1"}, offset=3).collect()
     assert r.output == {"columns": ["ID"], "rows": [[1], [2]], "truncated": True, "next_offset": 5}
     options = connect.call_args.kwargs
+    assert (options["address"], options["user"], options["password"]) == ("hana.example", "tech", "test")
     assert (options["port"], options["encrypt"], options["sslValidateCertificate"]) == (443, True, True)
     assert options["sslMinProtocolVersion"] == "TLS12"
+    # APPLICATION names the tool; no end user is invented for APPLICATIONUSER.
+    assert [c.args for c in connection.setclientinfo.call_args_list] == [("APPLICATION", "sap_hana_read")]
     assert cursor.execute.call_args_list[0].args == ("SET TRANSACTION READ ONLY",)
     assert cursor.execute.call_args.args == (
         'SELECT "ID" FROM "REPORTING"."OPEN_ORDERS" WHERE "ID" = ? ORDER BY "ID" LIMIT ? OFFSET ?',
         ("x' OR 1=1", 3, 3),
     )
     assert set(tool.params_model_schema["properties"]) == {"filters", "limit", "offset"}
+    assert r.metadata["sap"] == {"selected_by": "workflow", "route": "hana_view", "object": '"REPORTING"."OPEN_ORDERS"'}
     cursor.close.assert_called_once()
     connection.close.assert_called_once()
 
 
-async def test_hana_scope_and_filter_guards(access, hana):
+async def test_hana_filter_guards(access, hana):
     tool = hana_tool(access)
-    access.scope_reference = None
-    with pytest.raises(PermissionError, match="scope"):
-        await tool.handler()
-    access.scope_reference = "ref"
     for bad in ({"filters": {"SECRET": 1}}, {"limit": 1001}, {"offset": -1}):
         with pytest.raises(ValueError):
             await tool.handler(**bad)
@@ -104,11 +153,8 @@ async def test_hana_scope_and_filter_guards(access, hana):
         "SELECT * FROM t FOR UPDATE",
     ],
 )
-async def test_hana_freeform_gate_and_read_transaction(access, hana, sql):
+async def test_hana_freeform_statement_and_read_transaction(access, hana, sql):
     tool = hana_tool(access, SAPHANAQuery)
-    with pytest.raises(PermissionError, match="B"):
-        await tool.handler(query="SELECT 1")
-    access.authorizations["B(i)(b)"] = "ref"
     with pytest.raises(ValueError):
         await tool.handler(query=sql)
     hana[0].assert_not_called()
@@ -118,9 +164,6 @@ async def test_hana_freeform_gate_and_read_transaction(access, hana, sql):
 
 async def test_hana_write_is_preconfigured_and_transactional(access, hana):
     tool = hana_tool(access, SAPHANAWrite, statement='INSERT INTO "S"."T" VALUES (?)', object_name="S.T")
-    with pytest.raises(PermissionError):
-        await tool.handler(bindings=[1])
-    access.authorizations["B(i)(c)"] = "ref"
     hana[2].rowcount = 1
     assert await tool.handler(bindings=[1]) == {"affected_rows": 1}
     hana[1].commit.assert_called_once()
@@ -129,6 +172,36 @@ async def test_hana_write_is_preconfigured_and_transactional(access, hana):
         await tool.handler(bindings=[1])
     hana[1].commit.assert_called_once()
     assert hana[1].close.call_count == 2
+
+
+async def test_hana_credentials_from_the_integration_or_the_environment(access, hana, monkeypatch):
+    connect, _, cursor = hana
+    view = dict(schema_name="R", view="V", columns=["ID"], order_by=["ID"])
+    monkeypatch.setenv("SAP_HANA_USER", "env-user")
+    monkeypatch.setenv("SAP_HANA_PASSWORD", "env-secret")
+    await SAPHANARead(access=access, host="hana.example", **view).handler()
+    assert (connect.call_args.kwargs["user"], connect.call_args.kwargs["password"]) == ("env-user", "env-secret")
+
+    creds = {"type": "credentials", "host": "HANA.example", "user": "vended-user", "password": "vended-secret"}
+    cursor.fetchone.side_effect = [(1,), None]
+    await SAPHANARead(access=access, integration=bound(creds), **view).handler()
+    options = connect.call_args.kwargs
+    assert (options["address"], options["user"], options["password"]) == (
+        "hana.example",
+        "vended-user",
+        "vended-secret",
+    )
+    # A bound integration never falls back to the environment.
+    with pytest.raises(ValueError, match="user and password"):
+        await SAPHANARead(access=access, integration=bound({**creds, "password": ""}), **view).handler()
+    elsewhere = SAPHANARead(access=access, integration=bound(creds), host="other.example", **view)
+    with pytest.raises(PermissionError, match="host"):
+        await elsewhere.handler()
+    assert connect.call_count == 2
+    with pytest.raises(ValidationError, match="supplies the HANA user"):
+        SAPHANARead(access=access, integration=bound(creds), user="tech", password="x", **view)
+    with pytest.raises(ValidationError, match="host"):
+        SAPHANARead(access=access, **view)
 
 
 async def test_byte_limited_page_continues_at_first_unreturned_row(access, hana):
@@ -166,14 +239,13 @@ def http(monkeypatch):
     return requests, responses
 
 
-def http_tool(cls, access, **kwargs):
-    return cls(
-        access=access,
-        endpoint="https://sap.example/service/Orders",
-        object_name="Orders",
-        token_provider=AsyncMock(return_value="exchanged"),
-        **kwargs,
-    )
+def http_tool(cls, access, endpoint="https://sap.example/service/Orders", **kwargs):
+    kwargs.setdefault("token_provider", AsyncMock(return_value="exchanged"))
+    return cls(access=access, endpoint=endpoint, object_name="Orders", **kwargs)
+
+
+def odata_read(access, **kwargs):
+    return http_tool(SAPODataRead, access, properties=["ID"], order_by=["ID"], **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -196,7 +268,130 @@ async def test_odata_read_v2_v4_pinned_target(access, http, data):
     assert requests[1].headers["Authorization"] == "Bearer exchanged"
 
 
-async def test_odata_write_schema_document_gate_csrf_cookie_no_replay(access, http):
+async def test_client_credentials_grant_shape_and_cache(access, http):
+    requests, responses = http
+    tool = odata_read(access, token_provider=None, integration=bound(sap_creds()))
+    responses.extend(
+        [token_response(), httpx.Response(200, json={"value": []}), httpx.Response(200, json={"value": []})]
+    )
+    await tool.handler()
+    grant, read = requests
+    assert (grant.method, str(grant.url)) == ("POST", TOKEN_URL)
+    assert grant.headers["Authorization"] == "Basic " + base64.b64encode(f"client:{SECRET}".encode()).decode()
+    assert grant.headers["Content-Type"] == "application/x-www-form-urlencoded"
+    assert parse_qs(grant.content.decode()) == {"grant_type": ["client_credentials"]}
+    assert (read.url.host, read.headers["Authorization"]) == ("sap.example", "Bearer tok-1")
+    await tool.handler()
+    assert [r.url.host for r in requests] == ["auth.example", "sap.example", "sap.example"]
+    # A rotated secret is a different cache entry.
+    rotated = odata_read(access, token_provider=None, integration=bound(sap_creds(client_secret="rotated")))
+    responses.extend([token_response("tok-2"), httpx.Response(200, json={"value": []})])
+    await rotated.handler()
+    assert requests[-1].headers["Authorization"] == "Bearer tok-2"
+
+
+@pytest.mark.parametrize(("expires_in", "renew_at"), [(3600, 3480), (100, 50)])
+async def test_token_is_renewed_before_it_expires(access, http, monkeypatch, expires_in, renew_at):
+    requests, responses = http
+    now = [1000.0]
+    monkeypatch.setattr(sap_http, "_clock", lambda: now[0])
+    tool = odata_read(access, token_provider=None, integration=bound(sap_creds()))
+    responses.extend([token_response("tok-1", expires_in), httpx.Response(200, json={"value": []})])
+    await tool.handler()
+    now[0] = 1000 + renew_at - 1
+    responses.append(httpx.Response(200, json={"value": []}))
+    await tool.handler()
+    now[0] = 1000 + renew_at + 1
+    responses.extend([token_response("tok-2", expires_in), httpx.Response(200, json={"value": []})])
+    await tool.handler()
+    grants = [r for r in requests if r.url.host == "auth.example"]
+    assert len(grants) == 2
+    assert requests[-1].headers["Authorization"] == "Bearer tok-2"
+
+
+async def test_token_grant_refusals_never_reveal_the_secret(access, http):
+    requests, responses = http
+    access.failure_threshold = 100  # Each refusal counts as an upstream failure.
+    tool = odata_read(access, token_provider=None, integration=bound(sap_creds()))
+    refusals = [
+        (token_response(token_type="mac"), RuntimeError, "bearer"),
+        (token_response(token_type=None), RuntimeError, "bearer"),
+        (httpx.Response(302, headers={"Location": "https://evil.example/token"}), RuntimeError, "redirect"),
+        (httpx.Response(401, json={"error": "invalid_client", "secret": SECRET}), SAPHTTPError, "HTTP 401"),
+        (httpx.Response(200, text="not json"), RuntimeError, "access token"),
+    ]
+    for response, error, message in refusals:
+        responses.append(response)
+        with pytest.raises(error, match=message) as caught:
+            await tool.handler()
+        assert SECRET not in str(caught.value) and "tok-1" not in str(caught.value)
+    # Nothing was cached, no redirect was followed and SAP was never called.
+    assert [r.url.host for r in requests] == ["auth.example"] * len(refusals)
+    assert not sap_http._TOKEN_CACHE
+    insecure = odata_read(access, token_provider=None, integration=bound(sap_creds(token_url="http://auth.example/t")))
+    with pytest.raises(ValueError, match="HTTPS"):
+        await insecure.handler()
+    incomplete = odata_read(access, token_provider=None, integration=bound(sap_creds(client_secret="")))
+    with pytest.raises(ValueError, match="token_url, client_id and client_secret"):
+        await incomplete.handler()
+    assert len(requests) == len(refusals)
+
+
+async def test_rejected_token_is_not_reused_and_never_traced(access, http):
+    requests, responses = http
+    tool = odata_read(access, token_provider=None, integration=bound(sap_creds()))
+    responses.extend([token_response("tok-1"), httpx.Response(401)])
+    failed = await tool().collect()
+    assert "401" in str(failed.error)
+    responses.extend([token_response("tok-2"), httpx.Response(200, json={"value": [{"ID": "1"}]})])
+    ok = await tool().collect()
+    assert ok.output == {"rows": [{"ID": "1"}]}
+    assert requests[-1].headers["Authorization"] == "Bearer tok-2"
+    traced = json.dumps([failed.model_dump(), ok.model_dump()], default=str)
+    assert SECRET not in traced and "tok-1" not in traced and "tok-2" not in traced
+    assert SECRET not in tool.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "creds", [sap_creds(host="other.example"), sap_creds(port=8443)], ids=["other-host", "other-port"]
+)
+async def test_requests_stay_on_the_connection_host(access, http, creds):
+    requests, responses = http
+    # Neither a granted token nor one from the deployment's provider leaves the connection's host.
+    for token_provider in (None, AsyncMock(return_value="exchanged")):
+        tool = odata_read(access, token_provider=token_provider, integration=bound(creds))
+        with pytest.raises(PermissionError, match="connection's host"):
+            await tool.handler()
+    assert not requests
+    on_host = odata_read(
+        access,
+        endpoint="https://SAP.example:8443/service/Orders",
+        integration=bound(sap_creds(host="https://sap.example:8443", port=None)),
+    )
+    responses.append(httpx.Response(200, json={"value": []}))
+    await on_host.handler()
+    assert (requests[0].url.host, requests[0].url.port) == ("sap.example", 8443)
+    with pytest.raises(ValueError, match="disagree"):
+        await odata_read(access, integration=bound(sap_creds(host="sap.example:8443", port=443))).handler()
+
+
+async def test_sap_client_is_added_when_absent(access, http):
+    requests, responses = http
+    responses.extend([httpx.Response(200, json={"value": []}) for _ in range(3)])
+    await odata_read(access, integration=bound(sap_creds())).handler()
+    assert requests[0].url.params.get_list("sap-client") == ["100"]
+    explicit = odata_read(
+        access, endpoint="https://sap.example/service/Orders?sap-client=200", integration=bound(sap_creds())
+    )
+    await explicit.handler()
+    assert requests[1].url.params.get_list("sap-client") == ["200"]
+    await odata_read(access, integration=bound(sap_creds(sap_client=""))).handler()
+    assert "sap-client" not in requests[2].url.params
+    with pytest.raises(ValueError, match="three digits"):
+        await odata_read(access, integration=bound(sap_creds(sap_client="1000"))).handler()
+
+
+async def test_odata_write_schema_csrf_cookie_no_replay(access, http):
     requests, responses = http
     tool = http_tool(
         SAPODataWrite,
@@ -206,10 +401,6 @@ async def test_odata_write_schema_document_gate_csrf_cookie_no_replay(access, ht
         document_types=["order"],
         csrf_endpoint="https://sap.example/service/",
     )
-    with pytest.raises(PermissionError, match="B\\(iv\\)"):
-        await tool.handler(payload={"id": "42"})
-    assert not requests
-    access.document_authorizations["order"] = "accepted-order-scope"
     responses.extend(
         [
             httpx.Response(200, headers={"X-CSRF-Token": "csrf", "Set-Cookie": "sid=test; Path=/"}),
@@ -218,6 +409,12 @@ async def test_odata_write_schema_document_gate_csrf_cookie_no_replay(access, ht
     )
     output = await tool(payload={"id": "42"}).collect()
     assert output.output == {"ID": "42"}
+    assert output.metadata["sap"] == {
+        "selected_by": "workflow",
+        "route": "published_api",
+        "object": "Orders",
+        "document_types": ["order"],
+    }
     assert [r.method for r in requests] == ["GET", "POST"]
     assert requests[0].headers["X-CSRF-Token"] == "Fetch"
     assert (requests[1].headers["X-CSRF-Token"], requests[1].headers["cookie"]) == ("csrf", "sid=test")
@@ -297,9 +494,6 @@ async def test_bapi_return_and_commit(access):
         document_types=["material"],
         input_model=Item,
     )
-    with pytest.raises(PermissionError):
-        await tool.handler(payload={"id": "1"})
-    access.document_authorizations["material"] = "reference"
     conn.call.side_effect = [{"RETURN": [{"TYPE": "E"}]}, {"RETURN": {"TYPE": "S"}}, {"RETURN": {}}]
     with pytest.raises(RuntimeError, match="application error"):
         await tool.handler(payload={"id": "1"})
@@ -318,9 +512,6 @@ async def test_agent_gateway_http_json(access, http):
         request_metadata={"scenario": "orders"},
         callback_url="https://worker.example/completion",
     )
-    with pytest.raises(PermissionError):
-        await send.handler(text="create")
-    access.document_authorizations["order"] = "ref"
     responses.extend([httpx.Response(200, json={"task": {"id": "123"}}), httpx.Response(200, json={"id": "123"})])
     result = await send.handler(text="create", context_id="ctx")
     assert result["task"]["id"] == "123"
@@ -382,8 +573,6 @@ async def test_local_hana_mcp_requires_read_only_manifest(access):
 
 
 async def test_native_worker_retains_slot_after_timeout(access):
-    import threading
-
     access.timeout_seconds = 1
     access.concurrency = 1
     started, release = threading.Event(), threading.Event()
@@ -395,13 +584,13 @@ async def test_native_worker_retains_slot_after_timeout(access):
     async def run(call):
         return await call.blocking(worker)
 
-    pending = asyncio.create_task(access.invoke("read", "v", run, route="A(ii)"))
+    pending = asyncio.create_task(access.invoke("read", "v", run, route="published_api"))
     try:
         assert await asyncio.to_thread(started.wait, 2)
         with pytest.raises(TimeoutError):
             await pending
         with pytest.raises(RuntimeError, match="concurrency"):
-            await access.invoke("read", "v", run, route="A(ii)")
+            await access.invoke("read", "v", run, route="published_api")
     finally:
         release.set()
     async with asyncio.timeout(2):
@@ -409,7 +598,7 @@ async def test_native_worker_retains_slot_after_timeout(access):
             await asyncio.sleep(0.01)
 
 
-async def test_managed_mcp_allowlist_and_document_gate(access, monkeypatch):
+async def test_managed_mcp_allowlist_and_read_only(access, monkeypatch):
     allowed = types.Tool(name="lookup", inputSchema={"type": "object"})
     create = types.Tool(name="create", inputSchema={"type": "object"})
     other = types.Tool(name="other", inputSchema={"type": "object"})
@@ -425,42 +614,53 @@ async def test_managed_mcp_allowlist_and_document_gate(access, monkeypatch):
             "create": SAPMCPBinding(read_only=False, document_types=["order"]),
         },
     )
-    request = AsyncMock(
-        side_effect=[
-            types.ListToolsResult(tools=[allowed, create, other]),
-            types.CallToolResult(content=[types.TextContent(type="text", text="ok")]),
-        ]
-    )
+    result = types.CallToolResult(content=[types.TextContent(type="text", text="ok")])
+    request = AsyncMock(side_effect=[types.ListToolsResult(tools=[allowed, create, other]), result, result])
     monkeypatch.setattr(MCPServer, "_request", request)
     create_tool, lookup = await server.resolve()
     assert (create_tool.name, lookup.name) == ("sap__create", "sap__lookup")
-    with pytest.raises(PermissionError):
-        await create_tool.handler()
+    assert (create_tool.read_only, lookup.read_only) == (False, True)
+    assert lookup._log_events == set() and create_tool._log_events == set()
+    assert await create_tool.handler() == "ok"
     assert await lookup.handler() == "ok"
-    assert request.await_count == 2
+    assert request.await_count == 3
     await server.close()
 
 
-async def test_gui_requires_deterministic_nonproduction_scope(access):
-    change = SAPCustomizing(nonproduction_system="QAS", client="100", transport_request="QASK0001", authorization="ref")
+async def test_gui_scripts_run_only_in_deterministic_workflows(access):
+    change = SAPCustomizing(nonproduction_system="QAS", client="100", transport_request="QASK0001")
+    script = MagicMock(return_value="ok")
     config = dict(
         access=access,
         nonproduction_system="QAS",
         user="TECH",
         customizing=change,
-        script=lambda *_: "ok",
+        script=script,
         document_types=[],
         input_model=Item,
     )
     with pytest.raises(ValidationError):
         SAPGUIScript(client="200", **config)
     tool = SAPGUIScript(client="100", **config)
-    with pytest.raises(PermissionError, match=r"B\(v\)"):
-        await tool.handler(payload={"id": "1"})
-    access.authorizations["B(v)"] = "ref"
+    if sys.platform != "win32":
+        with pytest.raises(RuntimeError, match="Windows"):
+            await tool.handler(payload={"id": "1"})
     access.agent_selected = True
     with pytest.raises(PermissionError, match="deterministic"):
         await tool.handler(payload={"id": "1"})
+    access.agent_selected = False
+
+    first = Message(
+        role="assistant",
+        content=[ToolUseContent(id="c", name=tool.name, input={"payload": {"id": "1"}})],
+        stop_reason="tool_use",
+    )
+    agent = Agent(name="test", model=TestModel(responses=[first, "done"]), tools=[tool], max_iter=3)
+    await agent(prompt="run").collect()
+    [span] = [s for s in get_run_context()._trace.values() if s.metadata.get("sap")]
+    assert span.metadata["sap"]["selected_by"] == "agent"
+    assert "deterministic" in str(span.error)
+    script.assert_not_called()
 
 
 def test_gui_worker_matches_session_and_transport(monkeypatch):
@@ -480,28 +680,53 @@ def test_gui_worker_matches_session_and_transport(monkeypatch):
     assert pipe.send_bytes.call_args.args == (b'S{"ok":true}',)
 
 
-@pytest.mark.parametrize("nested", [False, True])
-async def test_agent_route_through_normal_dispatch(access, http, nested):
-    requests, responses = http
-    tool = http_tool(SAPODataRead, access, properties=["ID"], order_by=["ID"])
+async def test_agent_selection_is_recorded_on_the_span(access, http):
+    _, responses = http
+    tool = odata_read(access)
+    first = Message(
+        role="assistant", content=[ToolUseContent(id="c", name=tool.name, input={})], stop_reason="tool_use"
+    )
+    agent = Agent(name="reader", model=TestModel(responses=[first, "done"]), tools=[tool], max_iter=3)
+    responses.append(httpx.Response(200, json={"value": [{"ID": "42"}]}))
+    await agent(prompt="read").collect()
+    [span] = [s for s in get_run_context()._trace.values() if s.metadata.get("sap")]
+    assert span.metadata["sap"] == {
+        "selected_by": "agent",
+        "route": "published_api",
+        "object": "Orders",
+        "agent": "reader",
+    }
+    set_run_context(None)
+    workflow = Workflow(name="lookup")
+    workflow.step(tool)
+    responses.append(httpx.Response(200, json={"value": []}))
+    await workflow().collect()
+    [span] = [s for s in get_run_context()._trace.values() if s.metadata.get("sap")]
+    assert span.metadata["sap"]["selected_by"] == "workflow"
+
+
+async def test_agent_selection_is_detected_through_workflows(access, http, monkeypatch):
+    from timbal.tools.sap import _access
+
+    _, responses = http
+    recorded = []
+    original = _access._record
+    monkeypatch.setattr(_access, "_record", lambda details: (recorded.append(details), original(details)))
+    tool = odata_read(access)
     workflow = Workflow(name="lookup")
     workflow.step(tool)
 
     async def wrapper():
         return (await workflow().collect()).output
 
-    offered = Tool(name="wrapper", handler=wrapper) if nested else tool
+    offered = Tool(name="wrapper", handler=wrapper)
     first = Message(
         role="assistant", content=[ToolUseContent(id="c", name=offered.name, input={})], stop_reason="tool_use"
     )
-    agent = Agent(name="test", model=TestModel(responses=[first, "done"]), tools=[offered], max_iter=3)
+    agent = Agent(name="reader", model=TestModel(responses=[first, "done"]), tools=[offered], max_iter=3)
+    responses.append(httpx.Response(200, json={"value": []}))
     await agent(prompt="read").collect()
-    assert not requests
-    set_run_context(None)  # A new conversation must replay the test model's first tool call.
-    access.authorizations["B(ii)"] = "written"
-    responses.append(httpx.Response(200, json={"value": [{"ID": "42"}]}))
-    await agent(prompt="read").collect()
-    assert len(requests) == 1
+    assert [(d["selected_by"], d["agent"]) for d in recorded] == [("agent", "reader")]
 
 
 async def test_quota_concurrency_circuit_and_size(access, http):
@@ -534,10 +759,10 @@ async def test_concurrent_calls_share_quota_and_release_on_cancel(access):
         started.set()
         await asyncio.Future()
 
-    pending = asyncio.create_task(access.invoke("one", "v", block, route="A(ii)"))
+    pending = asyncio.create_task(access.invoke("one", "v", block, route="published_api"))
     await started.wait()
     with pytest.raises(RuntimeError, match="concurrency"):
-        await access.invoke("two", "v", block, route="A(ii)")
+        await access.invoke("two", "v", block, route="published_api")
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pending
@@ -558,26 +783,26 @@ async def test_hana_lob_is_bounded_and_closed(access, hana):
 
 async def test_customizing_pins_client_transport_and_origin(access, http):
     requests, responses = http
-    change = SAPCustomizing(
-        nonproduction_system="https://sap.example",
-        client="100",
-        transport_request="TR17",
-        authorization="accepted-change",
-    )
+    change = SAPCustomizing(nonproduction_system="https://sap.example", client="100", transport_request="TR17")
     config = dict(
         method="POST", input_model=Item, document_types=[], customizing=change, transport_query_parameter="transport"
     )
-    tool = http_tool(SAPODataWrite, access, **config)
+    tool = http_tool(SAPODataWrite, access, integration=bound(sap_creds(sap_client="200")), **config)
     responses.append(httpx.Response(204))
-    await tool.handler(payload={"id": "1"})
+    output = await tool(payload={"id": "1"}).collect()
     assert dict(requests[0].url.params) == {"sap-client": "100", "transport": "TR17"}
+    assert output.metadata["sap"]["customizing"] == {
+        "nonproduction_system": "https://sap.example",
+        "client": "100",
+        "transport_request": "TR17",
+    }
     with pytest.raises(ValidationError, match="origin"):
         SAPODataWrite(access=access, endpoint="https://other.example/changes", object_name="Change", **config)
 
 
 async def test_native_bapi_customizing_checks_actual_destination(access):
     connection = MagicMock()
-    change = SAPCustomizing(nonproduction_system="QAS", client="100", transport_request="TR17", authorization="ref")
+    change = SAPCustomizing(nonproduction_system="QAS", client="100", transport_request="TR17")
     connection.get_connection_attributes.return_value = {"sysId": "PRD", "client": "100"}
     connection.call.return_value = {"RETURN": {"TYPE": "S"}}
     tool = SAPBAPI(
@@ -598,10 +823,8 @@ async def test_native_bapi_customizing_checks_actual_destination(access):
     connection.call.assert_called_once_with("BAPI_CUSTOMIZING", id="123", TRANSPORT="TR17")
 
 
-@pytest.mark.parametrize(
-    ("kind", "route"), [("third-party-hana", "B(i)(a)"), ("third-party-api", "B(ii)"), ("third-party-cds", "B(iii)")]
-)
-async def test_third_party_mcp_requires_route_and_validates_local_schema(access, monkeypatch, kind, route):
+@pytest.mark.parametrize("kind", ["third-party-hana", "third-party-api", "third-party-cds"])
+async def test_third_party_mcp_validates_local_schema(access, monkeypatch, kind):
     config = dict(
         kind=kind,
         access=access,
@@ -618,9 +841,7 @@ async def test_third_party_mcp_requires_route_and_validates_local_schema(access,
     monkeypatch.setattr(MCPServer, "_request", request)
     tool = server._make_tool(types.Tool(name="read", inputSchema={"type": "object"}))
     assert tool.params_model_schema["required"] == ["id"]
-    with pytest.raises(PermissionError):
-        await tool.handler(id="1")
-    access.authorizations[route] = "scope"
+    assert tool.read_only
     with pytest.raises(ValidationError):
         await tool.handler(id="1", unknown="x")
     request.assert_not_awaited()
@@ -642,3 +863,55 @@ async def test_odata_update_binds_keys_to_the_configured_collection(access, http
     assert requests[0].url.raw_path == b"/service/Orders(id=%27a%2Fb%27%27c%27)"
     assert requests[0].headers["if-match"] == '"v1"'
     assert json.loads(requests[0].content) == {"quantity": 2}
+
+
+def test_read_only_is_declared_on_every_tool(access):
+    def build(_payload):
+        return ET.Element("{urn:example}Op")
+
+    soap = dict(
+        operation_tag="{urn:example}Op", action="urn:op", input_model=Item, document_types=[], build_element=build
+    )
+    bapi = dict(function="BAPI_X", connect=MagicMock(), document_types=[], input_model=Item)
+    tools = [
+        (odata_read(access), True),
+        (http_tool(SAPODataWrite, access, method="POST", input_model=Item, document_types=[]), False),
+        (http_tool(SAPSOAPOperation, access, read_only=True, **soap), True),
+        (http_tool(SAPSOAPOperation, access, read_only=False, **soap), False),
+        (http_tool(SAPAgentSend, access, document_types=[]), False),
+        (http_tool(SAPAgentGetTask, access), True),
+        (hana_tool(access), True),
+        (hana_tool(access, SAPHANAQuery), True),
+        (hana_tool(access, SAPHANAWrite, statement="DELETE FROM T WHERE ID = ?", object_name="T"), False),
+        (SAPCDSRead(access=access, view="V", statement="SELECT 1 FROM V", connect=MagicMock()), True),
+        (SAPBAPI(access=access, read_only=True, **bapi), True),
+        (SAPBAPI(access=access, read_only=False, **bapi), False),
+        (
+            SAPGUIScript(
+                access=access,
+                nonproduction_system="QAS",
+                client="100",
+                user="TECH",
+                script=MagicMock(),
+                document_types=[],
+                input_model=Item,
+            ),
+            False,
+        ),
+    ]
+    for tool, read_only in tools:
+        assert tool.read_only is read_only, tool.name
+        # A read-only tool policy offers exactly the readers.
+        assert Agent._tool_allowed(tool, "read_only") is read_only, tool.name
+    with pytest.raises(ValidationError):
+        hana_tool(access, SAPHANAWrite, statement="DELETE FROM T", object_name="T", read_only=True)
+    with pytest.raises(ValidationError):
+        odata_read(access, read_only=False)
+    with pytest.raises(ValidationError):
+        http_tool(SAPSOAPOperation, access, read_only=True, **{**soap, "document_types": ["order"]})
+
+
+def test_sap_tools_keep_payloads_out_of_event_logs(access):
+    assert odata_read(access)._log_events == set()
+    assert hana_tool(access)._log_events == set()
+    assert Tool(name="plain", handler=lambda: None)._log_events

@@ -1,4 +1,4 @@
-"""SAP framework tools. All targets, operation manifests and grants are deployment configuration."""
+"""SAP framework tools. Targets, operation manifests and limits are deployment configuration."""
 
 from ._access import SAPAccess, SAPCustomizing
 from ._http import SAPAgentGetTask, SAPAgentSend, SAPODataRead, SAPODataWrite, SAPSOAPOperation, SAPTokenExchange

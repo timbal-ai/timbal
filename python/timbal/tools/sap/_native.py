@@ -6,7 +6,7 @@ import sys
 import threading
 from collections.abc import Callable
 from contextlib import closing
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 from pydantic_core import to_json
@@ -82,8 +82,7 @@ class SAPBAPI(_NativeOperation):
             self.name,
             self.function,
             run,
-            route="A(ii)",
-            agent_route="B(ii)",
+            route="published_api",
             document_types=self.document_types,
             customizing=self.customizing,
         )
@@ -130,6 +129,7 @@ class SAPGUIScript(_NativeOperation):
 
     name: str = "sap_gui_script"
     description: str = "Run a preconfigured SAP GUI script in its designated non-production client."
+    read_only: Literal[False] = False
     nonproduction_system: Ref
     client: Annotated[str, StringConstraints(pattern=r"^\d{3}$")]
     user: Ref = Field(exclude=True)
@@ -188,7 +188,7 @@ class SAPGUIScript(_NativeOperation):
             self.name,
             f"{self.nonproduction_system}/{self.client}",
             run,
-            route="B(v)",
+            route="gui_script",
             document_types=self.document_types,
             customizing=self.customizing,
         )
