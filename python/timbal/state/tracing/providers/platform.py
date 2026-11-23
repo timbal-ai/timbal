@@ -13,6 +13,7 @@ import math
 import os
 import threading
 import time
+import weakref
 from collections import OrderedDict, deque
 from time import perf_counter_ns, time_ns
 from typing import TYPE_CHECKING, ClassVar
@@ -260,6 +261,19 @@ def _flush_at_exit() -> None:
 
 DELTA_MEDIA_TYPE = "application/vnd.timbal.trace-delta+json"
 _DELTA_RUNS_MAX = 2048
+# Endpoint families kept in the capability cache besides the hosts of app runs (``_host_caps``): a route with
+# an org, user or session id in it makes one family per id, and a long-lived worker must not keep them all.
+_CAPS_FAMILIES_MAX = 1024
+# The run id ``_caps_family`` asks a ``_run_path`` about: shaped like a real one (``RunContext.id``, a UUID7 in
+# hex), so a ``_run_path`` that checks its run id still answers.
+_PROBE_RUN_ID = "00000000000070008000000000000000"
+# Saves and reads run on event loops in more than one thread (a worker per thread, the flush at exit): the
+# capability cache is read, filled, refreshed and evicted under this lock.
+_CAPS_LOCK = threading.Lock()
+# A family per class, for a _run_path that refuses even the probe id: a number of its own for each class, never
+# reused (an id() is, once its class is gone, and the next class would take the old one's refusals).
+_CLASS_FAMILIES: weakref.WeakKeyDictionary[type, int] = weakref.WeakKeyDictionary()
+_CLASS_FAMILY_NUMBERS = itertools.count(1)
 _GZIP_INLINE_MAX = 256 * 1024
 
 
@@ -458,6 +472,14 @@ class PlatformTracingProvider(TracingProvider):
     """
 
     platform_config: PlatformConfig | None = None
+    """The platform config of runs that use this provider, and of their traces: a run started without one
+    takes it (``RunContext``), and its model router, tools and files use it too."""
+
+    trace_platform_config: PlatformConfig | None = None
+    """Credentials for the traces alone (``configured(trace_platform_config=...)``): every request of this
+    provider uses it, and it never becomes a run's config, which stays what the run resolved for itself
+    (passed, ``platform_config`` above, or the environment). For a provider that stores runs somewhere other
+    than an app's runs (:meth:`_run_path`), or with a token of its own."""
 
     default_durability = "buffered"
     """A save is a PATCH round trip: awaiting one per finished span adds seconds to a long turn. Saves while
@@ -484,7 +506,8 @@ class PlatformTracingProvider(TracingProvider):
     saved for itself in ``TIMBAL_TRACE_KEEPALIVE_MAX_SECS`` (default 4 h; a hung tool) stops, and reads
     ``timeout`` again."""
 
-    _caps: ClassVar[dict[str, _HostCaps]] = {}
+    # host (app runs) or "host family" -> what it advertised and refused. Families are bounded (_CAPS_FAMILIES_MAX).
+    _caps: ClassVar[OrderedDict[str, _HostCaps]] = OrderedDict()
     _delta_runs: ClassVar[OrderedDict[str, _DeltaRun]] = OrderedDict()
     # run key -> its keep-alive timer, while the run is in flight and has saved at least once.
     _keepalives: ClassVar[OrderedDict[str, _KeepAlive]] = OrderedDict()
@@ -606,12 +629,28 @@ class PlatformTracingProvider(TracingProvider):
         return Trace(stored["trace"], parent_id=stored.get("parent_id"))
 
     @staticmethod
-    def _host_caps(host: str, family: str = "") -> _HostCaps:
-        """What ``host`` advertised for the runs of ``family`` (:meth:`_caps_family`; ``""``: an app's runs)."""
+    def _host_caps(host: str, family: str = "", *, create: bool = True) -> _HostCaps:
+        """What ``host`` advertised for the runs of ``family`` (:meth:`_caps_family`; ``""``: an app's runs).
+
+        ``create=False``: a family not seen yet is answered with nothing learned and not stored. App runs keep
+        one entry per host; other families are the least recently used ``_CAPS_FAMILIES_MAX`` (one evicted
+        learns again what its endpoint takes, and may have one save refused again).
+        """
+        caps_by_key = PlatformTracingProvider._caps
         key = f"{host} {family}" if family else host
-        caps = PlatformTracingProvider._caps.get(key)
-        if caps is None:
-            caps = PlatformTracingProvider._caps[key] = _HostCaps()
+        with _CAPS_LOCK:
+            caps = caps_by_key.get(key)
+            if caps is None:
+                caps = _HostCaps()
+                if not create:
+                    return caps
+                caps_by_key[key] = caps
+                if family and len(caps_by_key) > _CAPS_FAMILIES_MAX:
+                    families = [known for known in caps_by_key if " " in known]
+                    for oldest in families[: max(0, len(families) - _CAPS_FAMILIES_MAX)]:
+                        del caps_by_key[oldest]
+            elif family:
+                caps_by_key.move_to_end(key)
         return caps
 
     @classmethod
@@ -621,25 +660,29 @@ class PlatformTracingProvider(TracingProvider):
         One endpoint of a host may take deltas, gzip or the ``select=resume`` projection while another does not
         yet, and a format one endpoint refused (off for good, see ``_HostCaps``) must not be turned off for the
         other. ``""`` for an app's runs with the default ``_run_path``: keyed by host alone, as before, for every
-        ``configured()`` copy. Any other ``_run_path``: the endpoint it gives without a run id,
-        ``_run_path(platform_config, "")``, so endpoints are told apart by where they are, whatever class,
-        factory or function stores there; a ``_run_path`` that refuses an empty run id gets a family per
-        function. A path with per-org (or per-user) parts gets a family per org: each learns on its own.
-        Override this to share one family across them.
+        ``configured()`` copy. Any other ``_run_path``: the endpoint it gives for a run, with the run id taken
+        out (asked about ``_PROBE_RUN_ID``, shaped like a real run id), so endpoints are told apart by where
+        they are, whatever class, factory or function stores there. A ``_run_path`` that refuses even that id
+        gets a family per class. A path with per-org (or per-user) parts gets a family per org: each learns on
+        its own, within the cache's bound. Override this to share one family across them.
         """
-        run_path = cls._run_path
-        if getattr(run_path, "__func__", None) is _DEFAULT_RUN_PATH:
+        if getattr(cls._run_path, "__func__", None) is _DEFAULT_RUN_PATH:
             return ""
         try:
-            return cls._run_path(platform_config, "")
+            return cls._run_path(platform_config, _PROBE_RUN_ID).replace(_PROBE_RUN_ID, "{run_id}")
         except Exception:
-            function = getattr(run_path, "__func__", run_path)
-            return f"{getattr(function, '__qualname__', function)!s}#{id(function)}"
+            # Not to be told apart by where it stores: by the class, so two classes are never one family
+            # (configured() copies of it learn on their own).
+            with _CAPS_LOCK:
+                number = _CLASS_FAMILIES.get(cls)
+                if number is None:
+                    number = _CLASS_FAMILIES[cls] = next(_CLASS_FAMILY_NUMBERS)
+            return f"{cls.__module__}.{cls.__qualname__}#{number}"
 
     @classmethod
-    def _family_caps(cls, platform_config: PlatformConfig) -> _HostCaps:
+    def _family_caps(cls, platform_config: PlatformConfig, *, create: bool = True) -> _HostCaps:
         """What this provider's endpoint on ``platform_config``'s host advertised, and what it turned down."""
-        return cls._host_caps(platform_config.host, cls._caps_family(platform_config))
+        return cls._host_caps(platform_config.host, cls._caps_family(platform_config), create=create)
 
     @classmethod
     def _compressing(cls, caps: _HostCaps) -> bool:
@@ -661,15 +704,16 @@ class PlatformTracingProvider(TracingProvider):
     def takes_deltas(cls, platform_config: PlatformConfig | None = None) -> bool:
         """Whether saves to this provider's endpoint go out as span deltas right now (each save is then small).
 
-        Without ``platform_config``: ``platform_config`` set with ``configured()``, else the environment's. A
-        subclass whose ``_resolve_config`` finds credentials of its own needs them passed.
+        Without ``platform_config``: ``trace_platform_config`` or ``platform_config`` set with ``configured()``,
+        else the environment's. A subclass whose ``_resolve_config`` finds credentials of its own needs them
+        passed. Asking stores nothing.
         """
-        cfg = platform_config or cls.platform_config
+        cfg = platform_config or cls.trace_platform_config or cls.platform_config
         if cfg is None:
             from ....state.config_loader import resolve_platform_config
 
             cfg = resolve_platform_config(None)
-        return cfg is not None and cls._sending_deltas(cls._family_caps(cfg))
+        return cfg is not None and cls._sending_deltas(cls._family_caps(cfg, create=False))
 
     @staticmethod
     def _delta_run(key: str) -> _DeltaRun:
@@ -687,16 +731,20 @@ class PlatformTracingProvider(TracingProvider):
     def _resolve_config(cls, run_context: RunContext):
         """Return platform_config, with the following priority:
 
+        0. cls.trace_platform_config    — the traces' own credentials; returned as is, never written back
         1. run_context.platform_config  — set by auto-detection or a previous call
         2. cls.platform_config          — set explicitly via configured()
         3. env vars / config file       — resolved lazily, written back to run_context
 
         The resolved config is written back to run_context, so the run's other
         platform calls find it too. This provider's own requests carry the config
-        this returns. A subclass that stores runs with credentials of its own
-        (see :meth:`_run_path`) returns them and does not write them onto the
-        run: the run keeps its config for its model router, tools and files.
+        this returns. Credentials for the traces alone go in
+        ``trace_platform_config`` (or a subclass returns its own here, without
+        writing them onto the run): the run keeps its config for its model
+        router, tools and files.
         """
+        if cls.trace_platform_config is not None:
+            return cls.trace_platform_config  # for the traces alone: never written onto the run
         cfg = run_context.platform_config or cls.platform_config
         if cfg is None:
             from ....state.config_loader import resolve_platform_config

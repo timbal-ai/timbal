@@ -10,6 +10,7 @@ approval claims) read the whole trace, never the ``select=resume`` projection.
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 from timbal import Agent, Tool
@@ -18,6 +19,7 @@ from timbal.errors import PlatformError
 from timbal.state import set_run_context
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.context import RunContext
+from timbal.state.tracing.providers import platform as platform_module
 from timbal.state.tracing.providers.platform import PlatformTracingProvider
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
@@ -335,6 +337,146 @@ class TestWhatAHostAdvertises:
         assert first._family_caps(first_config) is first._family_caps(first_config)
 
 
+class TestFamiliesOfRunPathsThatCheckTheRunId:
+    """A ``_run_path`` may check the run id it is given (``UUID(run_id)``). Telling endpoints apart must not
+    depend on its accepting an empty one: probed with an empty id, two ``configured()`` copies that keep their
+    prefix in a class attribute fell back to one family, the shared function's."""
+
+    class Prefixed(PlatformTracingProvider):
+        prefix: str = CHAT_PREFIX
+
+        @classmethod
+        def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+            UUID(run_id)  # a run id, nothing else
+            return f"{cls.prefix}{run_id}"
+
+        @classmethod
+        def _resolve_config(cls, run_context):  # noqa: ARG003
+            return ORG_ONLY
+
+    def test_two_prefixes_are_two_endpoints(self):
+        chat = self.Prefixed.configured(prefix=CHAT_PREFIX)
+        threads = self.Prefixed.configured(prefix="orgs/1/threads/runs/")
+        chat._family_caps(ORG_ONLY).select_resume = True
+        chat._family_caps(ORG_ONLY).delta_rejected = True
+        assert not threads._family_caps(ORG_ONLY).select_resume
+        assert not threads._family_caps(ORG_ONLY).delta_rejected
+
+    def test_one_prefix_is_one_endpoint(self):
+        first = self.Prefixed.configured(prefix=CHAT_PREFIX)
+        second = self.Prefixed.configured(prefix=CHAT_PREFIX)
+        assert first._family_caps(ORG_ONLY) is second._family_caps(ORG_ONLY)
+
+    async def test_reads_ask_for_the_projection_only_where_it_was_advertised(self):
+        threads_prefix = "orgs/1/threads/runs/"
+        chat = self.Prefixed.configured(prefix=CHAT_PREFIX)
+        threads = self.Prefixed.configured(prefix=threads_prefix)
+        chat_endpoint, threads_endpoint = Endpoint(select=True), Endpoint()
+
+        async def request(method, path, **kwargs):
+            endpoint = chat_endpoint if path.startswith(CHAT_PREFIX) else threads_endpoint
+            return await endpoint.request(method, path, **kwargs)
+
+        with patch("timbal.platform.utils._request", request):
+            chat_run = await run(tool_loop(chat), chat, None)
+            threads_run = await run(tool_loop(threads), threads, None)
+            await read_back(chat, chat_run.id, None)
+            stored = await read_back(threads, threads_run.id, None)  # that endpoint refuses `select`
+        assert {s.call_id for s in stored.as_records()} == set(threads_run._trace.keys())
+        assert [c["params"] for c in threads_endpoint.calls if c["method"] == "GET"] == [None]
+
+    def test_a_run_path_that_refuses_any_probe_gets_a_family_per_class(self):
+        class Registry(PlatformTracingProvider):
+            prefix: str = CHAT_PREFIX
+
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                if run_id not in {"known"}:
+                    raise LookupError(run_id)
+                return f"{cls.prefix}{run_id}"
+
+        first = Registry.configured(prefix=CHAT_PREFIX)
+        second = Registry.configured(prefix="orgs/1/threads/runs/")
+        first._family_caps(ORG_ONLY).delta_rejected = True
+        assert not second._family_caps(ORG_ONLY).delta_rejected  # split, never merged
+
+
+class TestTheCapabilityCache:
+    """Process-wide: a route with an org, user or session id in it must not grow it without bound."""
+
+    class PerOrg(PlatformTracingProvider):
+        @classmethod
+        def _run_path(cls, platform_config, run_id):
+            return f"orgs/{platform_config.subject.org_id}/chat/runs/{run_id}"
+
+    @staticmethod
+    def org(number: int) -> PlatformConfig:
+        return PlatformConfig(host=HOST, auth=ORG_ONLY.auth, subject=PlatformSubject(org_id=str(number)))
+
+    def test_it_stays_bounded_and_keeps_app_runs(self):
+        PlatformTracingProvider._family_caps(CONFIG).delta = True  # app runs on this host
+        bound = platform_module._CAPS_FAMILIES_MAX
+        for number in range(bound + 500):
+            self.PerOrg._family_caps(self.org(number)).delta = True
+        families = [key for key in PlatformTracingProvider._caps if " " in key]
+        assert len(families) == bound
+        assert self.PerOrg._family_caps(self.org(bound + 499)).delta  # the latest are kept
+        assert PlatformTracingProvider._family_caps(CONFIG).delta  # app runs are keyed by host: never evicted
+
+    def test_threads_filling_it_past_its_bound_do_not_break_it(self):
+        """Saves run on event loops in more than one thread (a worker per thread, a flush at exit): inserting,
+        evicting and refreshing families at once must neither raise nor lose the bound."""
+        import threading
+
+        bound = platform_module._CAPS_FAMILIES_MAX
+        errors: list[BaseException] = []
+        start = threading.Barrier(4)
+
+        def fill(offset: int) -> None:
+            start.wait()
+            try:
+                for number in range(bound * 2):
+                    self.PerOrg._family_caps(self.org(offset * bound * 2 + number)).delta = True
+                    self.PerOrg._family_caps(self.org(number % 50))  # refreshes, while others evict
+            except BaseException as error:  # noqa: BLE001 - any of them is the failure
+                errors.append(error)
+
+        threads = [threading.Thread(target=fill, args=(offset,)) for offset in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+        assert not errors, errors[:1]
+        assert len([key for key in PlatformTracingProvider._caps if " " in key]) <= bound
+
+    def test_a_class_dropped_and_another_made_never_share_a_family(self):
+        """A ``_run_path`` that refuses even the probe id is told apart by class. Not by ``id()``: a class that is
+        gone leaves its id free for the next one, which would then take the old one's refusals."""
+        import gc
+
+        def make():
+            class Refusing(PlatformTracingProvider):
+                @classmethod
+                def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                    raise LookupError(run_id)
+
+            return Refusing
+
+        families = set()
+        for _ in range(50):
+            provider = make()
+            families.add(provider._caps_family(ORG_ONLY))
+            del provider
+            gc.collect()
+        assert len(families) == 50
+
+    def test_asking_about_deltas_stores_nothing(self):
+        before = dict(PlatformTracingProvider._caps)
+        for number in range(100):
+            assert not self.PerOrg.takes_deltas(self.org(number))
+        assert PlatformTracingProvider._caps == before
+
+
 class TestCredentials:
     """Requests of a subclass with credentials of its own carry them; the run keeps its own config for its other
     platform calls (the model router, tools, files). Through the real request helper, on a mock transport."""
@@ -366,6 +508,67 @@ class TestCredentials:
         assert seen and {(path.split("/runs/")[0], auth) for _, path, auth in seen} == {
             (f"{HOST}/orgs/1/apps/2", "Bearer t2_test")
         }
+
+    @pytest.mark.parametrize("subclass", [False, True], ids=["app runs", "another endpoint"])
+    async def test_a_trace_only_config_never_becomes_the_runs(self, monkeypatch, subclass):
+        """The run gets its config as it always does (here from the environment); the provider stores its
+        traces with credentials of its own, given as ``trace_platform_config``. ``platform_config`` on a
+        provider is also the run's (a run without one takes it), so it cannot be trace-only."""
+        import httpx
+
+        for name, value in {
+            "TIMBAL_API_HOST": "router.test",
+            "TIMBAL_API_KEY": "t2_router",
+            "TIMBAL_ORG_ID": "1",
+            "TIMBAL_APP_ID": "2",
+        }.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setattr("timbal.state.config_loader._cached_default_config", None)
+        monkeypatch.setattr("timbal.state.config_loader._default_config_resolved", False)
+        monkeypatch.setattr("timbal.state.config_loader._file_config_cache", {})
+        original = httpx.AsyncClient
+        seen: list[tuple[str, str]] = []
+
+        async def handle(request):
+            seen.append((request.url.host + request.url.path, request.headers.get("authorization")))
+            # The trace endpoint takes deltas (and echoes the snapshot, as a server that takes them does).
+            headers = {"Accept-Patch": f"application/json, {platform_module.DELTA_MEDIA_TYPE}"}
+            if "x-timbal-snapshot" in request.headers:
+                headers["X-Timbal-Snapshot"] = request.headers["x-timbal-snapshot"]
+            return httpx.Response(200, json={}, headers=headers)
+
+        monkeypatch.setattr(
+            httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs)
+        )
+        trace = PlatformConfig(
+            host="trace.test",
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t2_trace"),
+            subject=PlatformSubject(org_id="1", app_id="2") if not subclass else PlatformSubject(org_id="1"),
+        )
+
+        class Chat(PlatformTracingProvider):
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{CHAT_PREFIX}{run_id}"
+
+        provider = (Chat if subclass else PlatformTracingProvider).configured(trace_platform_config=trace)
+        ctx = RunContext(tracing_provider=provider)  # as a run starts: its config resolved from the environment
+        assert ctx.platform_config.host == "router.test"
+        set_run_context(ctx)
+        try:
+            out = await tool_loop(provider, steps=1)(prompt="go").collect()
+        finally:
+            set_run_context(None)
+        assert out.status.code == "success", out.error
+        assert ctx.platform_config.host == "router.test" and ctx.platform_config.auth.token.get_secret_value() == (
+            "t2_router"
+        )
+        assert seen and {(path.split("/runs/")[0].split("/", 1)[0], auth) for path, auth in seen} == {
+            ("trace.test", "Bearer t2_trace")
+        }
+        # Answers for the trace endpoint, which advertised deltas, not for the run's host, which never answered.
+        assert provider.takes_deltas() is True
+        assert PlatformTracingProvider.takes_deltas(ctx.platform_config) is False
 
 
 class TestStrictReads:
