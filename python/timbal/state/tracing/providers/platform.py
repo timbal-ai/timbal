@@ -499,7 +499,7 @@ class _Patches:
 _patches: dict[str, _Patches] = {}
 
 
-def _next_snapshot(key: str | None = None) -> int:
+def _next_snapshot(key: str | None = None, *, after: int | None = None) -> int | None:
     """Strictly increasing within the process and, by the clock, across processes (ns since the epoch).
 
     The platform ignores a save whose snapshot is not newer than the last it applied to the run, and a
@@ -508,9 +508,17 @@ def _next_snapshot(key: str | None = None) -> int:
 
     ``key``: the number is for a PATCH of that run, counted out until ``_patch_done(key)``, in the same step
     as it is taken, so no PATCH of the run can see a newer number taken and not yet recorded.
+
+    ``after``: the number is for a resend of the PATCH numbered ``after``. None, and nothing taken, when a
+    newer number was taken for the run since: checked in the same step, since another event loop's save can
+    take one at any moment, and the resend would be numbered above it (see ``_carried``).
     """
     global _last_snapshot
     with _snapshot_lock:
+        if after is not None:
+            entry = _patches.get(key)
+            if entry is not None and entry.newest > after:
+                return None
         _last_snapshot = max(_last_snapshot + 1, _epoch_ns())
         if key is not None:
             entry = _patches.get(key)
@@ -1236,11 +1244,13 @@ class PlatformTracingProvider(TracingProvider):
         resend: bool = True,
         joined: asyncio.Future[None] | None = None,
         flight: _Flight | None = None,
+        after: int | None = None,
     ) -> None:
         """One PATCH. ``plain``: whole and uncompressed whatever the host advertised. ``resend``: send it
         again, numbered above, if the platform kept a newer snapshot this process did not write. ``joined``,
         ``flight``: the round it is sent for and the flight that sent it; once a newer save of the run has gone
-        out it is never sent again (``_carried``)."""
+        out it is never sent again (``_carried``). ``after``: this is a resend of the PATCH numbered ``after``,
+        sent only if no newer number was taken for the run meanwhile (``_next_snapshot``)."""
         from ....errors import PlatformError
         from ....platform.utils import _request
 
@@ -1253,7 +1263,12 @@ class PlatformTracingProvider(TracingProvider):
         delta = not plain and not shrink and cls._sending_deltas(caps)
         # Taken with no await before model_dump(), so numbers follow snapshot order. Counted as out for the run
         # until this PATCH is over (_patch_done), resends included: _carried compares against it.
-        snapshot = _next_snapshot(key)
+        snapshot = _next_snapshot(key, after=after)
+        if snapshot is None:
+            # A resend, and a newer save of the run went out since the check that allowed it (another event loop):
+            # not sent. That save's outcome, or SaveSuperseded.
+            await _carried(flight, joined, key, after)
+            return
         try:
             # Serialized before the await: model_dump() shares the agent's live memory list, which keeps growing
             # while the PATCH is in flight. Same encoding httpx applies to json=.
@@ -1304,7 +1319,9 @@ class PlatformTracingProvider(TracingProvider):
                     logger.warning("platform_trace_too_large", run_id=run_context.id, bytes=len(body))
                     if await _carried(flight, joined, key, snapshot):
                         return
-                    await cls._save(run_context, plain=plain, resend=resend, joined=joined, flight=flight)
+                    await cls._save(
+                        run_context, plain=plain, resend=resend, joined=joined, flight=flight, after=snapshot
+                    )
                     return
                 if not (delta or compressed) or getattr(e, "status_code", None) not in (400, 415, 422):
                     raise
@@ -1313,7 +1330,7 @@ class PlatformTracingProvider(TracingProvider):
                 # Today's server answers a gzip body with 400 (its JSON extractor cannot parse it), a server
                 # with the layer with 415. The same save whole and uncompressed tells a rejected format from
                 # a bad save: only when that one lands is the format off for this endpoint, starting now.
-                await cls._save(run_context, plain=True, resend=resend, joined=joined, flight=flight)
+                await cls._save(run_context, plain=True, resend=resend, joined=joined, flight=flight, after=snapshot)
                 caps.delta_rejected = caps.delta_rejected or delta
                 caps.gzip_rejected = caps.gzip_rejected or compressed
                 logger.warning(
@@ -1339,7 +1356,7 @@ class PlatformTracingProvider(TracingProvider):
                 cls._remember(key, snapshot, None)
                 if await _carried(flight, joined, key, snapshot):
                     return
-                await cls._save(run_context, plain=True, resend=resend, joined=joined, flight=flight)
+                await cls._save(run_context, plain=True, resend=resend, joined=joined, flight=flight, after=snapshot)
                 caps.delta_rejected = True
                 logger.warning(
                     "platform_trace_delta_unconfirmed",
@@ -1363,7 +1380,7 @@ class PlatformTracingProvider(TracingProvider):
                 if await _carried(flight, joined, key, snapshot):
                     return
                 logger.info("platform_trace_save_stale", run_id=run_context.id, sent=snapshot, stored=int(stored))
-                await cls._save(run_context, plain=plain, resend=False, joined=joined, flight=flight)
+                await cls._save(run_context, plain=plain, resend=False, joined=joined, flight=flight, after=snapshot)
                 return
             if sent:
                 cls._delta_run(key).acked.update(sent)

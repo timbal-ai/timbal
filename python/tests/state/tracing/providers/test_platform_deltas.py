@@ -156,6 +156,12 @@ class FakePlatform:
         return self._ok(stored=sent)
 
 
+async def until_joined(key):
+    """The run's flight has a round queued: a save joined it behind the one on the wire."""
+    while (flight := PlatformTracingProvider._flights.get(key)) is None or flight.next is None:
+        await asyncio.sleep(0)
+
+
 def tool_loop(steps, probe=None):
     def handler(messages):
         done = sum(1 for m in messages if m.role == "tool")
@@ -921,6 +927,67 @@ class TestSingleFlight:
             stored_mid_run = await asyncio.wait_for(mid_run, 5)
         assert server.runs[ctx.id]["trace"][0]["t1"] == 5
         assert len(patches) == 3  # the older copy was never sent again
+        assert stored_mid_run is False
+
+    async def test_a_save_from_another_loop_between_the_check_and_the_resend_stops_the_resend(self, monkeypatch):
+        """The check that no newer save went out and the resend taking its number are not one step: another event
+        loop can send the ended run in between (a shutdown flush). The resend must still not go out numbered above
+        it with the older copy."""
+        import threading
+
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 3600.0)  # the end waits behind the stalled PATCH
+        server = FakePlatform()
+        first_sent, answer_it = asyncio.Event(), asyncio.Event()
+        patches, ends = [], []  # ends: the stored root's t1 after each PATCH the host took
+
+        async def request(method, path, headers=None, **kwargs):
+            if method != "PATCH":
+                return await server.request(method, path, headers=headers, **kwargs)
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) == 1:
+                first_sent.set()
+                await answer_it.wait()
+                raise PlatformError("payload too large", status_code=413)
+            response = await server.request(method, path, headers=headers, **kwargs)
+            ends.append(server.runs[ctx.id]["trace"][0]["t1"])
+            return response
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
+        real_carried, flushed = platform_module._carried, []
+
+        async def carried_then_a_flush_elsewhere(*args):
+            found = await real_carried(*args)
+            if not found and not flushed:
+                # In the gap, with no await on this loop: another loop sends the run's latest state, and it lands.
+                other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
+                other_loop.start()
+                other_loop.join(10)
+                assert flushed == [[]] and server.runs[ctx.id]["trace"][0]["t1"] == 5
+            return found
+
+        monkeypatch.setattr(platform_module, "_carried", carried_then_a_flush_elsewhere)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        _, _, key = PlatformTracingProvider._target(ctx)
+
+        async def off_the_wire():
+            while key in PlatformTracingProvider._flights or key in platform_module._patches:
+                await asyncio.sleep(0)
+
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            ending = asyncio.create_task(ctx._save_trace(barrier=True))  # waits behind the stalled PATCH
+            await asyncio.wait_for(until_joined(key), 5)
+            answer_it.set()
+            stored_mid_run = await asyncio.wait_for(mid_run, 10)
+            await asyncio.wait_for(ending, 5)
+            await asyncio.wait_for(off_the_wire(), 5)
+        assert flushed == [[]]
+        assert ends == [5, 5]  # the other loop's save and this loop's end: the host never went back
+        assert len(patches) == 3  # the stalled one and those two: the older copy was not sent again
         assert stored_mid_run is False
 
     async def test_a_stalled_patch_keeps_a_bounded_number_of_later_outcomes(self, monkeypatch):
