@@ -113,3 +113,136 @@ class TestTriggers:
         assert trigger["kind"] == "routine" and trigger["routine_id"] == "r1" and trigger["fire_id"] == "f7"
         assert trigger["wake_id"] and trigger["tool_policy"] == "read_only"  # the wake's own fields stay
         await asyncio.sleep(0)
+
+
+def llm_tools() -> list[list[str]]:
+    """The names of the tools each model call of the run that just ended was offered."""
+    from timbal.state import get_run_context
+
+    return [
+        [tool["name"] if isinstance(tool, dict) else tool.name for tool in span.input.get("tools") or []]
+        for span in get_run_context()._trace.values()
+        if span.path.endswith(".llm")
+    ]
+
+
+def calls(*items: tuple[str, dict]) -> Message:
+    return Message(
+        role="assistant",
+        content=[ToolUseContent(id=f"c{i}-{name}", name=name, input=input) for i, (name, input) in enumerate(items)],
+        stop_reason="tool_use",
+    )
+
+
+class TestTheSalienceTool:
+    async def test_a_tool_set_that_has_the_name(self):
+        """An MCP server's own ``mark_salient`` is known only once resolved: two tools of one name is a 400."""
+        from timbal.core.tool_set import ToolSet
+
+        class Notes(ToolSet):
+            async def resolve(self):
+                return [
+                    Tool(name="mark_salient", handler=lambda note: f"noted {note}"),
+                    Tool(name="mark_memorable", handler=lambda note: f"kept {note}"),
+                ]
+
+        fresh()
+        model = TestModel(
+            responses=[
+                calls(("mark_salient", {"note": "theirs"}), ("mark_salient_2", {"why": "User is vegetarian."})),
+                "ok",
+            ]
+        )
+        agent = Agent(
+            name="bot", model=model, tools=[Notes()], salience_tool=True, tracing_provider=InMemoryTracingProvider
+        )
+        out = await agent(prompt="I don't eat meat.").collect()
+        assert out.status.code == "success", out.error
+        assert llm_tools() == [["mark_salient", "mark_memorable", "mark_salient_2"]] * 2
+        trace = await trace_of(out)
+        root = next(s for s in trace.values() if s.parent_call_id is None)
+        assert root.metadata["memory"]["salient"] == ["User is vegetarian."]
+        assert next(s for s in trace.values() if s.path == "bot.mark_salient").output == "noted theirs"
+
+    async def test_a_mark_does_not_reset_the_denial_count(self):
+        """Marking a refusal as worth remembering is not a call that went through."""
+        from timbal.guardrails import Verdict, guardrail
+
+        refused = guardrail(lambda _args: Verdict.block("no"), stages=["tool_args"])
+
+        def agent(**limits):
+            model = TestModel(
+                responses=[
+                    calls(("act", {})),  # refused once
+                    calls(("mark_salient", {"why": "The user will not let me act."})),
+                    calls(("act", {})),  # refused twice: nothing went through in between
+                    "I could not do that.",
+                    "must not be requested",
+                ]
+            )
+            tools = [Tool(name="act", handler=lambda: "acted", guardrails=[refused])]
+            return Agent(
+                name="bot",
+                model=model,
+                tools=tools,
+                salience_tool=True,
+                tracing_provider=InMemoryTracingProvider,
+                **limits,
+            )
+
+        for limits, record in (
+            ({"max_consecutive_denials": 2}, {"denials": 2}),
+            ({"max_consecutive_denials": None, "max_denials_window": (2, 2)}, {"denials": 2, "window": 2}),
+        ):
+            fresh()
+            out = await agent(**limits)(prompt="act").collect()
+            assert out.metadata.get("denial_limit") == [record], limits
+            offered = ["act", "mark_salient"]
+            assert llm_tools() == [offered, offered, offered, []], limits
+
+    async def test_the_agents_rails_screen_a_mark(self):
+        """Built at run time, the tool gets the agent's rails like its own tools: a mark is a call."""
+        from timbal.guardrails import Verdict, guardrail
+
+        secret = guardrail(lambda text: Verdict.block("no secrets") if "4242" in text else True, stages=["tool_args"])
+        fresh()
+        agent = Agent(
+            name="bot",
+            model=TestModel(responses=[calls(("mark_salient", {"why": "Card 4242 is the user's."})), "ok"]),
+            salience_tool=True,
+            guardrails=[secret],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out = await agent(prompt="my card is 4242").collect()
+        trace = await trace_of(out)
+        root = next(s for s in trace.values() if s.parent_call_id is None)
+        assert "memory" not in root.metadata
+        mark = next(s for s in trace.values() if s.path == "bot.mark_salient")
+        assert mark.status.code == "blocked"
+
+
+class TestDurableTriggers:
+    async def test_a_durable_session_refuses_a_trigger_it_cannot_store(self):
+        """A wake is stored with its trigger: one JSON cannot carry would fail every save after it."""
+        import datetime
+
+        import pytest
+        from timbal.core.chat_session import ChatSession
+        from timbal.state.chat_store import InMemoryChatSessionStore
+
+        fresh()
+        agent = Agent(name="bot", model=TestModel(responses=["NO_REPLY"]), tracing_provider=InMemoryTracingProvider)
+        session = ChatSession(agent, session_store=InMemoryChatSessionStore())
+        try:
+            for trigger in ({"at": datetime.datetime.now()}, {"ratio": float("nan")}, {"ids": (1, 2)}, {1: "a"}):
+                with pytest.raises(TypeError, match="trigger"):
+                    session.wake("Daily check", trigger=trigger)
+            assert session.state()["wakes"] == []
+        finally:
+            await session.close()
+        # Without a store nothing is written: a trigger is the application's own metadata, as it is.
+        plain = ChatSession(agent)
+        try:
+            plain.wake("Daily check", trigger={"at": datetime.datetime.now()})
+        finally:
+            await plain.close()

@@ -656,6 +656,21 @@ def test_an_answer_json_cannot_carry_is_a_400_and_the_question_stays_open(client
     assert not state["parked"] and state["last_status"]["code"] == "success"
 
 
+def test_a_wake_trigger_json_cannot_carry_is_a_400(client):
+    """The body parser lets ``NaN`` through, and a snapshot cannot hold it: refused to its sender, not a 500,
+    and not queued (every save after it would fail)."""
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    refused = client.post(
+        f"/chat/sessions/{session_id}/wake",
+        content='{"text": "heartbeat", "trigger": {"kind": "routine", "ratio": NaN}}',
+        headers={"content-type": "application/json"},
+    )
+    assert refused.status_code == 400 and "cannot be stored" in refused.json()["detail"]
+    assert client.get(f"/chat/sessions/{session_id}").json()["wakes"] == []
+    woke = client.post(f"/chat/sessions/{session_id}/wake", json={"text": "heartbeat", "trigger": {"kind": "routine"}})
+    assert woke.status_code == 202
+
+
 def test_a_wake_key_that_is_not_text_is_a_400(client):
     session_id = client.post("/chat/sessions", json={}).json()["session_id"]
     for key in (5, ["a"], {"k": 1}):

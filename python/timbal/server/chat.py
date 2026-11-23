@@ -709,7 +709,8 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
             silent_ok=bool(body.get("silent_ok", True)),
             trigger=trigger,
         )
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
+        # TypeError: a trigger a durable session cannot store (the body parser lets NaN through).
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e

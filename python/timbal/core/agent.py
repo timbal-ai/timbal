@@ -170,6 +170,8 @@ DEFAULT_DELIVERY_NOTE = (
 )
 """Appended to a root agent's system prompt with ``delivery="tool"``."""
 MARK_SALIENT_NAME = "mark_salient"
+# Used when one of the agent's tools already has the name (an MCP server's own ``mark_salient``).
+_MARK_SALIENT_FALLBACKS = ("mark_memorable",)
 # Session key: a root agent's pinned prompt sections, per agent path.
 _SECTIONS_KEY = "__prompt_sections"
 PROMPT_UPDATE_KIND = "prompt_update"
@@ -1231,6 +1233,8 @@ class Agent(Runnable):
             )
         # Plain instance attributes (not PrivateAttr) — read on every agent turn.
         self._send_tools: dict[str, Tool] = {}
+        # salience_tool=True: the mark_salient tool, by name (built once per agent and name).
+        self._salience_tools: dict[str, Tool] = {}
         # Batches that hold two sends or more, by the call id of the agent span running them.
         self._send_orders: dict[str, _SendOrder] = {}
         self._system_prompt_fn: Callable | None = None
@@ -3197,9 +3201,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         self._send_tools[name] = tool
         return tool
 
-    def _mark_salient_tool(self) -> Tool:
-        """The ``mark_salient`` tool of ``salience_tool=True``: marks the agent's turn for memory consolidation."""
-        tool = self._send_tools.get(MARK_SALIENT_NAME)
+    def _mark_salient_tool(self, name: str = MARK_SALIENT_NAME) -> Tool:
+        """The ``mark_salient`` tool of ``salience_tool=True``: marks the agent's turn for memory consolidation.
+
+        Built once per agent and name, and wired to the agent's rails like its own tools: a mark is a call,
+        and what it writes (the reason, on the turn's span) is what those rails screen.
+        """
+        tool = self._salience_tools.get(name)
         if tool is not None:
             return tool
 
@@ -3216,8 +3224,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 raise ValueError("Nothing was marked: give a reason.")
             return "Marked."
 
-        taken = {t.name for t in self.tools if not isinstance(t, ToolSet)}
-        name = MARK_SALIENT_NAME if MARK_SALIENT_NAME not in taken else "mark_memorable"
         tool = Tool(
             name=name,
             description=(
@@ -3228,8 +3234,31 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             read_only=True,
         )
         tool.nest(self._path)
-        self._send_tools[MARK_SALIENT_NAME] = tool
+        self._wire_tool_guardrails(tool)
+        self._salience_tools[name] = tool
         return tool
+
+    def _with_salience_tool(
+        self, tools: list[Tool], names: Collection[str], name: str | None, offered: bool
+    ) -> tuple[list[Tool], str | None]:
+        """A step's tools with the ``mark_salient`` tool (``salience_tool=True``), and the tool's name.
+
+        As for the delivery tool (:meth:`_with_send_tool`): the name is picked at the first step that offers
+        it, among every name the agent has there (``names``: those of its tool sets, and those a tool policy
+        hides), and fixed for the turn. ``offered``: whether this step may call tools at all (not with the
+        tools withheld, nor past the budget).
+        """
+        if not offered:
+            return tools, name
+        if name is None:
+            name = _unused_name(MARK_SALIENT_NAME, _MARK_SALIENT_FALLBACKS, set(names))
+        elif name in names:
+            # A tool set that changed its catalog inside the turn: the name is the mark's.
+            logger.warning(
+                "A tool took the name of the salience tool mid-turn; it is not offered.", path=self._path, tool=name
+            )
+            tools = [tool for tool in tools if tool.name != name]
+        return [*tools, self._mark_salient_tool(name)], name
 
     def _delivered(self, current_span: Any, before: int = 0, rest: Sequence = ()) -> OutputEvent | None:
         """The turn's output with ``delivery="tool"``: what it sent, as one assistant message (None if nothing).
@@ -4265,6 +4294,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # delivery="tool". The tool's name, fixed at the turn's first step (the system prompt says it): it
         # depends on the names of the step's tools, a tool set's included.
         send_name: str | None = None
+        # salience_tool=True. The mark_salient tool's name, fixed at the first step that offers it.
+        salience_name: str | None = None
         # Whether the current step offers the tool: text from a step that could not send is not a draft.
         send_offered = False
         # The publishing order of a batch that holds two sends or more (None for any other batch).
@@ -4402,12 +4433,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             else:
                 content = event.output
             tool_name = event.path.rsplit(".", 1)[-1]
+            # A message sent to the user, or a moment marked worth remembering, is not a call that went
+            # through: the streak stands, and neither enters the window.
+            aside = (delivering and tool_name == send_name) or (
+                salience_name is not None and tool_name == salience_name
+            )
             if denied:
                 consecutive_denials += 1
-            elif consecutive_denials and not (delivering and tool_name == send_name):
-                # (A message sent to the user is not a call that went through: the streak stands.)
+            elif consecutive_denials and not aside:
                 consecutive_denials = 0
-            if self.max_denials_window is not None and (denied or not (delivering and tool_name == send_name)):
+            if self.max_denials_window is not None and (denied or not aside):
                 window = await _denial_window()
                 window.append(1 if denied else 0)
                 del window[: -self.max_denials_window[1]]
@@ -4687,8 +4722,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     tools, send_name, system_prompt = self._with_send_tool(
                         tools, tool_names, send_name, system_prompt, send_offered
                     )
-                if self.salience_tool and current_span.parent_call_id is None and not withheld and i < self.max_iter:
-                    tools = [*tools, self._mark_salient_tool()]
+                if self.salience_tool and current_span.parent_call_id is None:
+                    tools, salience_name = self._with_salience_tool(
+                        tools, tool_names, salience_name, not withheld and i < self.max_iter
+                    )
                 # `tools` stays what the model may call: a deferred tool called by name runs (and loads).
                 if not may_defer or not _has_deferred(tools):
                     llm_tools, deferred_tools, unloaded_tools = tools, None, _NO_NAMES

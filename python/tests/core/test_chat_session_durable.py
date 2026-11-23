@@ -303,7 +303,7 @@ class TestRootRunId:
         session = ChatSession(make_agent(provider, Gate(released=True)), session_id="conv-7", session_store=store)
         root = await one_turn(session, "one")
         await session.close(keep=True)
-        restored = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, "conv-7")
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, "conv-7")
         assert restored.root_run_id == root
         await one_turn(restored, "two")
         assert restored._last_context._session_id == root
@@ -312,7 +312,7 @@ class TestRootRunId:
         snapshot = await store.load("conv-7")
         snapshot.root_run_id = None  # written before snapshots recorded the root
         await store.save(snapshot, expect_version=snapshot.version)
-        older = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, "conv-7")
+        older = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, "conv-7")
         assert older.root_run_id is None
         await one_turn(older, "three")
         assert older._last_context._session_id is None

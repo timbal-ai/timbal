@@ -255,6 +255,11 @@ def _stored_answer(value: Any) -> Any:
         # Its fields as they are, checked like any other answer below. Not pydantic's JSON mode: that writes
         # NaN and Infinity as null (an input override silently changed) and a set as a list.
         value = value.model_dump()
+    return _unchanged_by_json(value)
+
+
+def _unchanged_by_json(value: Any) -> Any:
+    """``value``, if JSON carries it and gives it back unchanged. TypeError otherwise."""
     try:
         # allow_nan=False: NaN and Infinity are not JSON (Python writes and reads them all the same).
         carried = json.loads(json.dumps(value, allow_nan=False))
@@ -849,6 +854,15 @@ class ChatSession:
         key = (key or "").strip() or None
         if trigger is not None and not isinstance(trigger, dict):
             raise TypeError("trigger must be a dict")
+        if trigger and self._session_store is not None:
+            # Stored with the wake: one a snapshot cannot hold would fail every save from now on. Refused here,
+            # to its caller, with nothing queued (as for resume()).
+            try:
+                _unchanged_by_json(trigger)
+            except TypeError as error:
+                raise TypeError(
+                    f"The wake's trigger cannot be stored ({error}): a durable session takes what JSON can carry."
+                ) from None
         replaced = [wake for wake in self._wakes if wake.key == key] if key is not None else []
         for old in replaced:
             self._wakes.remove(old)
