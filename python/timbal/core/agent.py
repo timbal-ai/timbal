@@ -3143,6 +3143,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         a partial result via the collector snapshot in Runnable.__call__, so we
         look it up in the trace and append it to memory.
 
+        Only while a model call of this handler has output that is not in memory
+        (``_llm_memory_saved`` is False from the call's start until the step has
+        dealt with its output, and again if a cut answer is taken back): the span
+        looked up is the latest one of this agent in the run. Between two steps
+        that is the previous step's, already in memory; before the first step of
+        a call it is another call's.
+
+        Two limits, as before: with two calls of one agent in flight in the same
+        run the latest span may be the other call's, and an answer that output
+        guardrails were still judging is appended as the model gave it.
+
         To the memory's dump as well: that is what a serializing provider stores
         (not ``span.memory``), so the next turn and the stored trace would
         otherwise miss what the user was shown. A message's dump does not suspend
@@ -3594,7 +3605,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         i = 0
         need_retry = False
-        _llm_memory_saved = False
+        # False only while a model call has output that is not in memory: in flight, or cut by a 'now' message
+        # and taken back. That is what the finally below salvages if the handler is left then. Between two
+        # steps, and before the first one, there is none: the latest model output in the run is one this turn
+        # already has in memory (or another call's).
+        _llm_memory_saved = True
         max_iter_handled = False  # on_max_iter applied once per turn
         # Guardrail "retry" verdicts consumed this turn (bounded by max_guardrail_retries).
         guardrail_retry_count = 0
@@ -3614,7 +3629,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         try:
             while True:
                 need_retry = False
-                _llm_memory_saved = False
                 # ? We could resolve the system prompt at each iteration
                 tools, commands, tool_names = await self._resolve_step_tools(i, tool_policy)
                 # A retry of this same call (guardrail, validation, empty answer) keeps it tool-less.
@@ -3636,8 +3650,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     logger.warning(
                         "Agent reached max_iter.", path=self._path, max_iter=self.max_iter, behavior=behavior
                     )
-                    # The last LLM output is already in memory — nothing to salvage if we leave here.
-                    _llm_memory_saved = True
                     reply = await self._resolve_max_iter(current_span.memory)
                     if reply is not None:
                         await _append_memory(reply)
@@ -3646,7 +3658,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 "max_iter", RunStatus(code="success", reason="max_iter"), output=reply
                             )
                             break
-                    _llm_memory_saved = False  # a final tool-less LLM call follows
                 pinned_tool_names = {t.name for t in tools if getattr(t, "pin_result", False)}
                 tool_result_limits = {}
                 tool_guardrail_runners = {}
@@ -3777,7 +3788,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # tool_results.
                 pending_tool_uses = self._find_pending_tool_uses(current_span.memory)
                 if pending_tool_uses:
-                    _llm_memory_saved = True  # nothing to salvage; we never called the LLM
                     if not denials_resumed:
                         denials_resumed = True
                         consecutive_denials = await self._resumed_denials(run_context)
@@ -3895,6 +3905,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     active_events = _CuttableModelEvents(active_events, cut)
                 llm_call_id: str | None = None
                 answer_cut = False
+                # A model call is in flight from here. Until the step has dealt with its output (appended it, or
+                # dropped it for a retry), a turn that is left keeps what the model had said (the finally below).
+                _llm_memory_saved = False
                 async for event in active_events:
                     if llm_call_id is None and event.type == "START":
                         llm_call_id = event.call_id
@@ -4188,6 +4201,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         current_span.memory.pop()
                         current_span._memory_dump.pop()
                         cut_record["kept_chars"] = 0  # taken back: the record says what is in memory
+                        # Not in memory, though the user was shown it: if the turn is left before the model
+                        # has answered again, the finally below keeps it.
+                        _llm_memory_saved = False
                     if steered_user:
                         i, max_iter_handled = 0, False
                     else:
