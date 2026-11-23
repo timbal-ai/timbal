@@ -285,6 +285,37 @@ class TestModelReviewer:
         assert not request.attended and request.trigger["kind"] == "wake"
         assert "No person started this turn (wake)" in request.to_prompt(None)
 
+    @pytest.mark.parametrize("metadata", [{}, {"trigger": "nightly-bot"}], ids=["plain", "own trigger metadata"])
+    async def test_a_sessions_turns_are_reviewed_by_what_started_them(self, metadata):
+        """The trigger is on the turn's run context and root from the start: a person's message is attended, a
+        routine's wake is not, and the reviewer gets the turn's own trigger, also from an agent whose own static
+        ``metadata`` has a ``trigger`` key (what started the run wins over it, as the session's stamp did)."""
+        seen = []
+
+        def reviewer(request):
+            seen.append(request)
+            return "deny"
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            return call("charge", amount=5)
+
+        charges = Charges()
+        async with ChatSession(make_agent(reviewer, charges, handler=handler, metadata=metadata)) as session:
+            session.send("charge me 5 euros")
+            session.wake("Collect the monthly fee.", tool_policy=None, trigger={"kind": "routine", "routine_id": "r1"})
+            finished = 0
+            async for item in session.events():
+                if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                    finished += 1
+                    if finished == 2:
+                        break
+        person, routine = seen
+        assert person.attended and person.trigger["kind"] == "user_message"
+        assert not routine.attended and routine.trigger["kind"] == "routine" and routine.trigger["routine_id"] == "r1"
+        assert charges.made == []
+
 
 class TestScope:
     async def test_guardrail_escalations_go_to_a_person_unless_listed(self):

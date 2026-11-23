@@ -43,7 +43,7 @@ from ..types.approval import ApprovalResolution, Cancel
 from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.message import RUNTIME_SOURCE, Message
-from .runnable import ATTENDED_TRIGGER_KINDS
+from .runnable import ATTENDED_TRIGGER_KINDS, _own_copy
 from .session_scheduler import Followup, SessionScheduler, is_parked, pending_user_batch
 from .tool_policy import ReadOnlyWithin, read_only_within, restore_tool_policy
 from .tool_policy import ToolPaths as _ToolPaths  # noqa: F401 — re-exported for callers and tests
@@ -1892,6 +1892,11 @@ class ChatSession:
                     context = RunContext(tracing_provider=self._agent.tracing_provider)
             else:
                 context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
+            # What started the turn is the run's from its start: stamped on the root span as it is made (before
+            # any save), read by a tool as ``ctx.trigger`` and by an approval reviewer from the root. Its own copy:
+            # the session stores ``trigger`` (in_flight, the log), and a tool's write to it must change neither (deep
+            # where it can be: a session without a store takes any trigger).
+            context.trigger = _own_copy(trigger)
             context._tracing_provider = self._turn_provider(context._tracing_provider)
             context._steering = options.steer
             # The session hint: the thread's root run, or this turn when it starts the thread and the session
@@ -2075,11 +2080,7 @@ class ChatSession:
                         self._in_flight = in_flight
                         self._record("turn_started", run_id=context.id, parent_id=context.parent_id, trigger=trigger)
                         if followup is not None:
-                            followup.started(context)
-                        elif (root := context.root_span()) is not None:
-                            # Wakes, recovery turns and resumes too: who started the turn is in its trace
-                            # (an approval reviewer reads it: nobody is there to ask on a wake).
-                            root.metadata["trigger"] = trigger
+                            followup.started(context)  # (the trigger is on the root already: context.trigger)
                     self.log.put_nowait(event)
                     if isinstance(event, OutputEvent) and event.run_id == context.id and event.parent_call_id is None:
                         output = event

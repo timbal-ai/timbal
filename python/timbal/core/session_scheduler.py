@@ -10,6 +10,7 @@ of the owner's turns is in flight, otherwise let through.
 
 import asyncio
 import contextlib
+import copy
 import inspect
 import weakref
 from collections.abc import Awaitable, Callable, Iterator
@@ -92,9 +93,16 @@ class Followup:
     def started(self, run_context: "RunContext") -> None:
         """The receiving run exists: stamp it, and settle the events as delivered."""
         self.is_started = True
+        trigger = self.trigger
+        if getattr(run_context, "trigger", None) is None:  # (a caller may hand in any object with a root span)
+            # A channel that does not build the run's context (a continuation, a voice event turn): what
+            # started the run is its context's from here, before any of its tools runs. (ChatSession sets it
+            # as it builds the context, so the root is stamped as it is made.) Its own copy: a tool's write to
+            # it does not change the root's.
+            run_context.trigger = copy.deepcopy(trigger)
         root = run_context.root_span()
         if root is not None:
-            root.metadata["trigger"] = self.trigger
+            root.metadata["trigger"] = trigger
         record_delivery(run_context, root, self.events)
 
     def release(self) -> None:

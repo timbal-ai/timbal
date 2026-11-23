@@ -298,3 +298,182 @@ class TestDurableTriggers:
             plain.wake("Daily check", trigger={"at": datetime.datetime.now()})
         finally:
             await plain.close()
+
+
+class TestTheTurnsTrigger:
+    """What started a turn is on its run context (``ctx.trigger``) from the run's start, and stamped on its
+    root span as the root is made: a tool reads it there, and so does the approval reviewer, from the root."""
+
+    @staticmethod
+    def _agent(seen):
+        from timbal.state import get_run_context
+
+        def look() -> str:
+            ctx = get_run_context()
+            seen.append((ctx.trigger, ctx.root_span().metadata.get("trigger")))
+            return "seen"
+
+        def model(messages):
+            if messages[-1].role == "tool":
+                return "NO_REPLY"
+            return call("look")
+
+        return Agent(
+            name="bot",
+            model=TestModel(handler=model),
+            tools=[Tool(name="look", handler=look, read_only=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+
+    @staticmethod
+    async def _turns(session, count):
+        finished = []
+        async for item in session.events():
+            if isinstance(item, dict) and item.get("kind") == "turn_started":
+                finished.append(item["trigger"])
+            if isinstance(item, dict) and item.get("kind") == "turn_finished" and len(finished) >= count:
+                return finished
+
+    async def test_a_chat_sessions_turns(self, monkeypatch):
+        from timbal.core import session_scheduler
+        from timbal.core.chat_session import ChatSession
+
+        at_start = []  # what the root carried when the run was first seen, before anything stamped it
+        started = session_scheduler.Followup.started
+
+        def recording(self, run_context):
+            at_start.append(run_context.root_span().metadata.get("trigger"))
+            return started(self, run_context)
+
+        monkeypatch.setattr(session_scheduler.Followup, "started", recording)
+        fresh()
+        seen = []
+        async with ChatSession(self._agent(seen)) as session:
+            session.send("look")
+            first = await self._turns(session, 1)
+            session.wake("Daily check", trigger={"kind": "routine", "routine_id": "r1"})
+            both = await self._turns(session, 2)
+        triggers = [first[0], both[-1]]
+        assert triggers[0]["kind"] == "user_message" and triggers[1]["kind"] == "routine"
+        assert seen == [(triggers[0], triggers[0]), (triggers[1], triggers[1])]
+        assert at_start == [triggers[0]]  # the user's turn: on the root from its creation
+
+    async def test_a_continuation_turn(self):
+        from contextlib import aclosing
+
+        from timbal.state import post_session_event
+        from timbal.types.events import OutputEvent
+
+        release = asyncio.Event()
+
+        async def work() -> str:
+            await release.wait()
+            return "done"
+
+        seen = []
+
+        def look() -> str:
+            from timbal.state import get_run_context
+
+            seen.append(get_run_context().trigger)
+            return "seen"
+
+        def model(messages):
+            last_user = max(i for i, m in enumerate(messages) if m.role == "user")
+            text = messages[last_user].collect_text()
+            answered = any(m.role == "tool" for m in messages[last_user:])
+            if "Report ready" in text:
+                return "Read." if answered else call("look")
+            return "Working." if answered else call("work")
+
+        fresh()
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=model),
+            tools=[Tool(name="work", handler=work, background_mode="always"), Tool(name="look", handler=look)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        stream = agent.stream_until_idle(prompt="start", max_continuations=1)
+        outputs = []
+
+        async def consume():
+            async with aclosing(stream):
+                async for item in stream:
+                    if isinstance(item, OutputEvent) and item.parent_call_id is None:
+                        outputs.append(item)
+
+        consumer = asyncio.create_task(consume())
+        while not outputs or stream._waiter is None:
+            await asyncio.sleep(0)
+        event = post_session_event(outputs[0].run_id, "Report ready.")
+        await asyncio.wait_for(consumer, 5)
+        release.set()
+        assert outputs[1].metadata["trigger"]["event_ids"] == [event.id]
+        assert seen == [outputs[1].metadata["trigger"]]
+
+    async def test_a_tool_that_writes_to_the_trigger_changes_nothing_stored(self):
+        """``ctx.trigger`` is the run's own copy: the session stores the turn's trigger (its snapshot, its log)
+        and the root carries it, so a tool's write to it, even of a value JSON cannot carry, changes none of
+        them and does not stop the session."""
+        import datetime
+
+        from timbal.core.chat_session import ChatSession
+        from timbal.state import get_run_context
+        from timbal.state.chat_store import InMemoryChatSessionStore
+
+        roots = []
+
+        def note() -> str:
+            ctx = get_run_context()
+            ctx.trigger["seen_at"] = datetime.datetime(2026, 11, 23)
+            ctx.trigger.setdefault("notes", []).append("x")
+            roots.append(ctx.root_span().metadata["trigger"])
+            return "noted"
+
+        def model(messages):
+            done = [m for m in messages if m.role == "tool"]
+            return "NO_REPLY" if len(done) >= 2 else call("note")
+
+        fresh()
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=model),
+            tools=[Tool(name="note", handler=note, read_only=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        session = ChatSession(agent, session_store=InMemoryChatSessionStore())
+        try:
+            session.wake("Daily check", trigger={"kind": "routine", "routine_id": "r1"})
+            (started,) = await asyncio.wait_for(self._turns(session, 1), 10)
+            await session.flush()  # every save went through
+            assert "seen_at" not in started and "notes" not in started
+            assert all("seen_at" not in root and "notes" not in root for root in roots) and len(roots) == 2
+        finally:
+            await session.close()
+
+    async def test_a_trigger_that_cannot_be_copied_still_runs_its_wake(self):
+        """A session without a store takes the application's trigger as it is: one holding what cannot be
+        deep-copied (a lock, a client) still starts its turn, with a shallow copy on the context."""
+        import threading
+
+        from timbal.core.chat_session import ChatSession
+
+        from timbal.state import get_run_context
+
+        fresh()
+        seen = []
+        lock = threading.Lock()
+
+        def look() -> str:
+            ctx = get_run_context()
+            seen.append(ctx.trigger)
+            ctx.trigger["ids"].append("written by a tool")  # inside a nested list: still the run's own copy
+            return "seen"
+
+        agent = self._agent([])
+        agent.tools[0].handler = look
+        async with ChatSession(agent) as session:
+            session.wake("Daily check", trigger={"kind": "routine", "lock": lock, "ids": ["r1"]})
+            (started,) = await asyncio.wait_for(self._turns(session, 1), 10)
+        assert started["kind"] == "routine" and seen and seen[0]["lock"] is lock
+        assert started["ids"] == ["r1"]  # the session's record of the turn

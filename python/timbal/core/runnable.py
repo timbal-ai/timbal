@@ -2,6 +2,7 @@ import ast
 import asyncio
 import contextlib
 import contextvars
+import copy
 import hashlib
 import inspect
 import json
@@ -298,6 +299,21 @@ def _approval_id_for(path: str, input_dump: Any) -> str:
     """
     payload = {"path": path, "input": input_dump}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:32]
+
+
+def _own_copy(value: Any) -> Any:
+    """A deep copy of a trigger. Where it holds what cannot be copied (a caller's lock, a client), its dicts and
+    lists are still copied one by one, and only those objects are shared."""
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        if isinstance(value, dict):
+            return {key: _own_copy(item) for key, item in value.items()}
+        if type(value) is list:
+            return [_own_copy(item) for item in value]
+        if type(value) is tuple:
+            return tuple(_own_copy(item) for item in value)
+        return value
 
 
 ATTENDED_TRIGGER_KINDS = ("user_message", "resume")
@@ -2349,8 +2365,10 @@ class Runnable(ABC, BaseModel):
             if run_context._tool_policy is not None:
                 # What a run resuming this one restores when it does not say (see server/http.py).
                 metadata["tool_policy"] = describe_tool_policy(run_context._tool_policy)
-            if isinstance(run_context.trigger, dict) and "trigger" not in metadata:
-                metadata["trigger"] = dict(run_context.trigger)
+            if isinstance(run_context.trigger, dict):
+                # What started the run, over the runnable's own static metadata (an approval reviewer reads it). A
+                # copy: a tool's write to ``ctx.trigger`` changes nothing stored.
+                metadata["trigger"] = _own_copy(run_context.trigger)
         span = Span(
             path=self._path,
             call_id=_new_call_id,

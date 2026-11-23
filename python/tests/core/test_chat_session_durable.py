@@ -403,6 +403,7 @@ class TestRootRunId:
         session = ChatSession(agent, session_store=store)
         session.send("first")
         await asyncio.wait_for(model.thinking.wait(), 30)
+        await session.flush()  # (the snapshot of its start may still be on its way)
         assert (await store.load(session.id)).root_run_id == session.id  # stored as it started
         await crash(session)
         provider.crashed = False
@@ -448,6 +449,49 @@ def test_a_snapshot_built_by_position_keeps_its_fields():
         True,
     )
     assert snapshot.root_run_id is None
+
+
+class TriggerRecordingSqlite(CrashableSqlite):
+    """Records, for every save it is asked for, the run and the trigger its root carries then."""
+
+    saves: list = []
+
+    @classmethod
+    async def _store(cls, run_context):
+        root = run_context.root_span()
+        if root is not None:
+            cls.saves.append((run_context.id, root.metadata.get("trigger")))
+        await super()._store(run_context)
+
+
+class TestEveryStoredTurnSaysWhatStartedIt:
+    @pytest.mark.parametrize("durability", ["sync", "buffered"])
+    async def test_every_save_of_every_turn_carries_its_trigger(self, tmp_path, durability):
+        """From a turn's first save to its last, recovery turns included: the trigger is on the root as it is
+        made, from the turn's run context (a store-before-acting provider saves before a tool batch)."""
+        provider = TriggerRecordingSqlite.configured(
+            _path=tmp_path / "timbal.db", crashed=False, saves=[], durability=durability, store_before_acting=True
+        )
+        store = SqliteChatSessionStore(tmp_path / "timbal.db")
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_id="conv-t", session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 30)
+        await crash(session)
+        provider.crashed = False
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, "conv-t")
+        await records(restored, "turn_finished", 1, after=after_restore(restored))  # the recovery turn
+        await one_turn(restored, "after")
+        started = {
+            r["run_id"]: r["trigger"]
+            for r in restored.log.peek(after_restore(restored))[0]
+            if isinstance(r, dict) and r.get("kind") == "turn_started"
+        }
+        await restored.close()
+        assert [t["kind"] for t in started.values()] == ["recovery", "user_message"]
+        saves = [(run_id, trigger) for run_id, trigger in provider.saves if run_id in started]
+        assert {run_id for run_id, _ in saves} == set(started)
+        assert all(trigger == started[run_id] for run_id, trigger in saves), saves
 
 
 class TestThePlatformChatsPath:

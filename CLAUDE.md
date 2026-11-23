@@ -639,7 +639,15 @@ ctx.trigger               # dict | None: stamped as the root span's metadata.tri
                           # reviewer reads as a person's turn (ATTENDED_TRIGGER_KINDS: user_message, resume); ValueError,
                           # HTTP 400. A durable session refuses (TypeError, HTTP 400) a trigger JSON does not give back
                           # unchanged, or that is not UTF-8 (a lone surrogate): it is stored with the wake. On a context,
-                          # a trigger that is not an object is kept as given and not used, as before the field existed
+                          # a trigger that is not an object is kept as given and not used, as before the field existed.
+                          # A ChatSession turn's context carries the turn's trigger from the start (set as the session
+                          # builds it: the root is stamped as it is made); a continuation's or a voice call's follow-up
+                          # turn gets it as its run starts (Followup.started), before any tool runs. A run started
+                          # inside a call is its own run and does not inherit it (the approval reviewer reads the
+                          # top run's root through RunContext._invoker). An object trigger is stamped over the
+                          # runnable's own static metadata["trigger"], as a copy; ctx.trigger is the run's own copy
+                          # too (deep; what cannot be copied, a lock, is the one thing shared): a tool's write to it
+                          # changes nothing stored or logged
 ctx.platform_config       # PlatformConfig | None
 ctx._trace                # Trace — all spans for this run
 ```
