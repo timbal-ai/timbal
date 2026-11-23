@@ -20,6 +20,23 @@ if TYPE_CHECKING:
     from ...context import RunContext
 
 
+class _Writes:
+    """The writes of one run that are on their way to a file, in the order their snapshots were taken.
+
+    Kept from the first of them until the last is over (committed, failed, found older than what is stored,
+    or dropped before a worker took it), also once its caller has been cancelled: while one of them can still
+    commit, a later save of the run has to be able to tell which of the two is newer. With none left there is
+    nothing to order, and the run's next save starts another.
+    """
+
+    __slots__ = ("pending", "snapshots", "committed")
+
+    def __init__(self) -> None:
+        self.pending = 0  # not over yet
+        self.snapshots = 0  # the number of the latest one taken
+        self.committed = 0  # the newest one stored
+
+
 class _Database:
     """One connection per database file, shared by every configured provider on it.
 
@@ -37,10 +54,17 @@ class _Database:
         # Which file this is a connection to: the path can come to name another one (see alive()).
         self._file = self._file_at_path()
         # Per run: which spans are finished and committed to this file (not rewritten until the root ends),
-        # the order spans were first seen, and how many snapshots its saves took and which is the newest
-        # committed. Kept per connection: a file recreated after being deleted holds none of them. Bounded:
-        # a run whose process died never ends.
+        # and the order spans were first seen. Kept per connection: a file recreated after being deleted
+        # holds none of them. Bounded: a run whose process died never ends.
         self.runs: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        # Per run with a write on its way: what orders them (_Writes). Not in ``runs``: that cache lets go
+        # of a run however many of its writes are still out, and one parked on its worker meanwhile would
+        # then be compared with nothing. Bounded by the writes in flight. The lock is held for a few
+        # statements, on the event loop too: never while the connection is in use. Re-entrant: a save left
+        # suspended when its loop was closed is closed by the garbage collector, which runs its cleanup
+        # (it asks for this lock) on whatever thread is allocating, one that holds the lock included.
+        self.writing: dict[str, _Writes] = {}
+        self.writing_lock = threading.RLock()
 
     def _file_at_path(self) -> tuple[int, int] | None:
         try:
@@ -60,7 +84,7 @@ class _Database:
     def run_state(self, run_id: str) -> dict[str, Any]:
         state = self.runs.get(run_id)
         if state is None:
-            state = self.runs[run_id] = {"stored": set(), "seq": {}, "snapshots": 0, "committed": 0}
+            state = self.runs[run_id] = {"stored": set(), "seq": {}}
             while len(self.runs) > _RUN_STATE_MAX:
                 self.runs.popitem(last=False)
         else:
@@ -325,10 +349,6 @@ class SqliteTracingProvider(TracingProvider):
         ended = root is not None and root.t1 is not None
 
         state = db.run_state(run_id)
-        # Snapshots are taken in order, here on the event loop. Commits are not: each write is on a worker
-        # thread of its own, whichever takes the connection first goes first, and the write of a save whose
-        # caller was cancelled still happens. The number tells an older snapshot from a newer one then.
-        snapshot = state["snapshots"] = state["snapshots"] + 1
         order: dict[str, int] = state["seq"]
         rows = []
         finished = []
@@ -344,29 +364,66 @@ class SqliteTracingProvider(TracingProvider):
         # keeps readers of that column working. While it runs, only its span rows are current.
         blob = "[" + ",".join(row[3] for row in rows) + "]" if ended else ""
 
-        def _write() -> None:
-            with db.lock:
-                if state["committed"] > snapshot:
-                    # A newer snapshot of this run is stored. It holds everything this one does (each span
-                    # as it was then or later; a span this one has and that one left out was finished and
-                    # stored before), so this one would only take the run back: the root's end over the
-                    # late output of background work, or a run still going over one that ended.
-                    return
-                with db.conn:  # one transaction: committed whole, or rolled back on any error
-                    db.conn.execute(
-                        """
-                        INSERT INTO runs (run_id, parent_id, spans, stored_at) VALUES (?, ?, ?, ?)
-                        ON CONFLICT (run_id) DO UPDATE SET parent_id = excluded.parent_id, spans = excluded.spans,
-                            stored_at = excluded.stored_at
-                        """,
-                        (run_id, parent_id, blob, stored_at),
-                    )
-                    db.conn.executemany(
-                        "INSERT OR REPLACE INTO spans (run_id, call_id, seq, span) VALUES (?, ?, ?, ?)", rows
-                    )
-                state["committed"] = snapshot
+        # Snapshots are taken in order, here on the event loop. Commits are not: each write is on a worker
+        # thread of its own, whichever takes the connection first goes first, and the write of a save whose
+        # caller was cancelled still happens. The number tells an older snapshot from a newer one then.
+        with db.writing_lock:
+            writes = db.writing.get(run_id)
+            if writes is None:
+                writes = db.writing[run_id] = _Writes()
+            writes.pending += 1
+            snapshot = writes.snapshots = writes.snapshots + 1
+        began = dropped = False
 
-        await asyncio.to_thread(_write)
+        def over() -> None:
+            """This write can no longer commit. Called with ``db.writing_lock`` held."""
+            writes.pending -= 1
+            if not writes.pending and db.writing.get(run_id) is writes:
+                del db.writing[run_id]
+
+        def _write() -> None:
+            nonlocal began
+            with db.writing_lock:
+                if dropped:
+                    return
+                began = True
+            try:
+                with db.lock:
+                    if writes.committed > snapshot:
+                        # A newer snapshot of this run is stored. It holds everything this one does (each
+                        # span as it was then or later; a span this one has and that one left out was
+                        # finished and stored before), so this one would only take the run back: the root's
+                        # end over the late output of background work, or a run still going over one that
+                        # ended.
+                        return
+                    with db.conn:  # one transaction: committed whole, or rolled back on any error
+                        db.conn.execute(
+                            """
+                            INSERT INTO runs (run_id, parent_id, spans, stored_at) VALUES (?, ?, ?, ?)
+                            ON CONFLICT (run_id) DO UPDATE SET parent_id = excluded.parent_id,
+                                spans = excluded.spans, stored_at = excluded.stored_at
+                            """,
+                            (run_id, parent_id, blob, stored_at),
+                        )
+                        db.conn.executemany(
+                            "INSERT OR REPLACE INTO spans (run_id, call_id, seq, span) VALUES (?, ?, ?, ?)", rows
+                        )
+                    writes.committed = snapshot
+            finally:
+                with db.writing_lock:
+                    over()
+
+        try:
+            await asyncio.to_thread(_write)
+        except BaseException:
+            # The caller was cancelled, or the write never reached a worker. One a worker has begun goes on
+            # and stays counted until it is over. One it has not begun is dropped here: what orders the run's
+            # writes is kept until each is over, and nothing says when a worker would get to this one.
+            with db.writing_lock:
+                if not began:
+                    dropped = True
+                    over()
+            raise
         # Only once committed: a save that failed leaves them for the next one to write.
         if ended:
             # Later saves (background work outliving the root) rewrite everything again.

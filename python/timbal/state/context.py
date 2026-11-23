@@ -584,7 +584,7 @@ class RunContext(BaseModel):
                 return True
         t0 = time.monotonic()
         try:
-            await uploads.write_through(self, self._tracing_provider.put)
+            wrote = await uploads.write_through(self, self._tracing_provider.put)
         except Exception as e:
             _get_logger().error(
                 "Trace save failed. The run continues, but this snapshot was not stored...",
@@ -597,7 +597,8 @@ class RunContext(BaseModel):
             return False
         finally:
             uploads.count(self, "tracing:wait_ms", round((time.monotonic() - t0) * 1000))
-        uploads.count(self, "tracing:saves")
+        # Stored either way. A save another one's write held (overlapping saves of a sync provider) is not a write.
+        uploads.count(self, "tracing:saves_coalesced" if wrote is False else "tracing:saves")
         self.__dict__["_trace_unsaved"] = False
         return True
 

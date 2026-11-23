@@ -12,7 +12,9 @@ threads, drops a snapshot older than the one it has committed.
 """
 
 import asyncio
+import gc
 import json
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -80,6 +82,36 @@ class WriteGate:
         finally:
             if ahead:
                 self.overtaken.set()
+
+
+class HeldLock:
+    """Stands in for a database's connection lock: the first worker to ask for it once ``armed`` waits for ``go``
+    before it takes the real one. A write stopped there is on its worker and has begun: only the order of the
+    run's snapshots can still keep it out."""
+
+    def __init__(self, db, monkeypatch):
+        self.lock = db.lock
+        self.armed = False
+        self.parked, self.go, self.left = threading.Event(), threading.Event(), threading.Event()
+        self._arming = threading.Lock()
+        self._worker = None
+        monkeypatch.setattr(db, "lock", self)
+
+    def __enter__(self):
+        with self._arming:
+            mine, self.armed = self.armed, False
+        if mine:
+            self._worker = threading.get_ident()
+            self.parked.set()
+            self.go.wait(DEADLINE)
+        return self.lock.__enter__()
+
+    def __exit__(self, *error):
+        try:
+            return self.lock.__exit__(*error)
+        finally:
+            if threading.get_ident() == self._worker:
+                self.left.set()
 
 
 def gated(monkeypatch, stale):
@@ -257,31 +289,15 @@ class TestTheRootsEndAndBackgroundWorksEnd:
 
 
 class TestACancelledSave:
+    """A save whose caller is cancelled while its write is on a worker thread: the thread goes on."""
+
     async def test_its_write_does_not_land_over_the_runs_end(self, tmp_path, monkeypatch):
-        """A turn cancelled while a save is on its worker thread: the thread goes on, the run's end is saved
-        meanwhile, and the abandoned write then finds a newer snapshot stored. Written all the same, it would
-        leave the run stored as one that never ended."""
+        """The run's end is saved meanwhile, and the abandoned write then finds a newer snapshot stored. Written
+        all the same, it would leave the run stored as one that never ended."""
         provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
-        parked, go, written = threading.Event(), threading.Event(), threading.Event()
-        held = False
-
-        async def to_thread(fn, *args):
-            nonlocal held
-            if fn.__name__ != "_write" or held:
-                return await asyncio.to_thread(fn, *args)
-            held = True  # the first save of the run: the model call's end, the root still running
-
-            def late():
-                parked.set()
-                go.wait(DEADLINE)
-                try:
-                    fn(*args)
-                finally:
-                    written.set()
-
-            return await asyncio.to_thread(late)
-
-        monkeypatch.setattr(sqlite_module, "asyncio", SimpleNamespace(to_thread=to_thread))
+        db = sqlite_module.database(tmp_path / "t.db")
+        lock = HeldLock(db, monkeypatch)
+        lock.armed = True  # the first save of the run: the model call's end, the root still running
         agent = Agent(name="agent", model=TestModel(responses=["hello"]), tracing_provider=provider)
         context = RunContext(tracing_provider=provider)
 
@@ -291,18 +307,171 @@ class TestACancelledSave:
 
         running = asyncio.create_task(cut_turn())
         try:
-            assert await asyncio.to_thread(parked.wait, DEADLINE)
+            assert await asyncio.to_thread(lock.parked.wait, DEADLINE)
             running.cancel()
             await asyncio.wait([running], timeout=DEADLINE)
             assert running.done()
             ended = await stored_trace(provider, context.id)
             assert ended[context.root_span().call_id].t1 is not None  # the run's end is stored
         finally:
-            go.set()  # whatever happened above, the parked thread is let go
-        assert await asyncio.to_thread(written.wait, DEADLINE)
+            lock.go.set()  # whatever happened above, the parked thread is let go
+        assert await asyncio.to_thread(lock.left.wait, DEADLINE)
         root = (await stored_trace(provider, context.id))[context.root_span().call_id]
         assert root.t1 is not None
         assert root.status["code"] == "cancelled"
+        await asyncio.wait_for(until(lambda: not db.writing), DEADLINE)  # nothing kept once its writes are over
+
+    async def test_nor_after_its_runs_cached_state_was_dropped(self, tmp_path, monkeypatch):
+        """The file keeps per-run state in a bounded cache. What orders a run's writes must not go with it: a
+        write parked on its worker while other runs push this one out of the cache is still an older snapshot
+        when the run's end has been stored."""
+        monkeypatch.setattr(sqlite_module, "_RUN_STATE_MAX", 1)
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        db = sqlite_module.database(tmp_path / "t.db")
+        lock = HeldLock(db, monkeypatch)
+        working, finish = asyncio.Event(), asyncio.Event()
+
+        async def work() -> str:
+            working.set()
+            await finish.wait()
+            return "ok"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(responses=[calls("work"), "done"]),
+            tools=[Tool(name="work", handler=work)],
+            tracing_provider=provider,
+        )
+        context = RunContext(tracing_provider=provider)
+        running = asyncio.create_task(turn(agent, context))
+        try:
+            await asyncio.wait_for(working.wait(), DEADLINE)
+            lock.armed = True
+            mid_run = asyncio.create_task(provider.put(context))  # the run as it is now: its root still going
+            assert await asyncio.to_thread(lock.parked.wait, DEADLINE)
+            mid_run.cancel()
+            await asyncio.wait([mid_run], timeout=DEADLINE)
+            assert mid_run.cancelled()
+            for _ in range(2):
+                other = Agent(name="other", model=TestModel(responses=["hi"]), tracing_provider=provider)
+                await asyncio.wait_for(turn(other, RunContext(tracing_provider=provider)), DEADLINE)
+            assert context.id not in db.runs  # pushed out of the cache
+            finish.set()
+            await asyncio.wait_for(running, DEADLINE)
+        finally:
+            lock.go.set()
+        assert await asyncio.to_thread(lock.left.wait, DEADLINE)
+        root = (await stored_trace(provider, context.id))[context.root_span().call_id]
+        assert root.t1 is not None
+        assert root.status["code"] == "success"
+        await asyncio.wait_for(until(lambda: not db.writing), DEADLINE)
+
+    async def test_one_whose_worker_had_not_begun_is_never_written(self, tmp_path, monkeypatch):
+        """Nothing has to order it against the saves that follow: it is dropped, and it keeps nothing of the
+        run's state alive."""
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        db = sqlite_module.database(tmp_path / "t.db")
+        context = RunContext(tracing_provider=provider)
+        agent = Agent(name="agent", model=TestModel(responses=["hello"]), tracing_provider=provider)
+        await asyncio.wait_for(turn(agent, context), DEADLINE)
+        parked, go, returned = threading.Event(), threading.Event(), threading.Event()
+
+        async def to_thread(fn, *args):
+            if fn.__name__ != "_write":
+                return await asyncio.to_thread(fn, *args)
+
+            def late():  # the worker is busy: it gets to the write after its caller has gone
+                parked.set()
+                go.wait(DEADLINE)
+                try:
+                    fn(*args)
+                finally:
+                    returned.set()
+
+            return await asyncio.to_thread(late)
+
+        monkeypatch.setattr(sqlite_module, "asyncio", SimpleNamespace(to_thread=to_thread))
+        root = context.root_span()
+        root.metadata["note"] = "never stored"
+        save = asyncio.create_task(provider.put(context))
+        try:
+            assert await asyncio.to_thread(parked.wait, DEADLINE)
+            save.cancel()
+            await asyncio.wait([save], timeout=DEADLINE)
+            assert save.cancelled()
+        finally:
+            go.set()
+        assert await asyncio.to_thread(returned.wait, DEADLINE)
+        stored = (await stored_trace(provider, context.id))[root.call_id]
+        assert "note" not in stored.metadata
+        assert not db.writing
+
+
+class TestASaveLeftBehind:
+    def test_collected_while_another_save_registers_it_does_not_wait_for_itself(self, tmp_path, monkeypatch):
+        """A save left suspended when its loop was closed is closed by the garbage collector, on whatever
+        thread a collection happens to run: also on one that is registering another save, with the lock both
+        of them need in its hands."""
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        db = sqlite_module.database(tmp_path / "t.db")
+        agent = Agent(name="agent", model=TestModel(responses=["hello"]), tracing_provider=provider)
+        left, next_one = RunContext(tracing_provider=provider), RunContext(tracing_provider=provider)
+        for context in (left, next_one):
+            asyncio.run(asyncio.wait_for(turn(agent, context), DEADLINE))
+
+        class Counted:
+            """The lock itself, counting who asks for it."""
+
+            def __init__(self, lock):
+                self.lock, self.asked = lock, 0
+
+            def __enter__(self):
+                self.asked += 1
+                return self.lock.__enter__()
+
+            def __exit__(self, *error):
+                return self.lock.__exit__(*error)
+
+        asked_meanwhile = []
+
+        class Collecting(sqlite_module._Writes):
+            """A collection that lands on this allocation, which is made with the lock held."""
+
+            __slots__ = ()
+
+            def __init__(self):
+                before = lock.asked
+                left_behind.clear()  # the last reference to it goes here
+                gc.collect()
+                asked_meanwhile.append(lock.asked - before)
+                super().__init__()
+
+        async def no_worker(_fn, *_args):
+            await asyncio.get_running_loop().create_future()  # the write never reaches a worker
+
+        gc.collect()
+        gc.disable()  # nothing is collected below but where the test says
+        try:
+            monkeypatch.setattr(sqlite_module, "asyncio", SimpleNamespace(to_thread=no_worker))
+            loop = asyncio.new_event_loop()
+            left_behind = [loop.create_task(provider.put(left))]
+            # To where the save waits for its worker: counted, and nothing will say it is over.
+            loop.run_until_complete(asyncio.wait_for(until(lambda: left.id in db.writing), DEADLINE))
+            loop.close()
+            del loop
+            lock = Counted(db.writing_lock)
+            monkeypatch.setattr(db, "writing_lock", lock)
+            monkeypatch.setattr(sqlite_module, "_Writes", Collecting)
+            monkeypatch.setattr(sqlite_module, "asyncio", asyncio)
+            monkeypatch.setattr(sys, "unraisablehook", lambda _info: None)  # "Task was destroyed but it is pending"
+            saving = threading.Thread(target=lambda: asyncio.run(provider.put(next_one)), daemon=True)
+            saving.start()
+            saving.join(DEADLINE)
+        finally:
+            gc.enable()
+        assert asked_meanwhile == [1]  # the save left behind was closed inside that allocation, and asked
+        assert not saving.is_alive()
+        assert not db.writing  # and is no longer counted
 
 
 class TestANewerWriteThatFails:
@@ -368,6 +537,7 @@ class TestANewerWriteThatFails:
 
         stored = (await stored_trace(provider, context.id))[root.call_id]
         assert stored.metadata["note"] == "older"
+        assert not db.writing  # a write that failed is over too
 
 
 class Remote(TracingProvider):
@@ -420,7 +590,7 @@ class Saves:
     def ask(self, put):
         async def save():
             self.asked += 1
-            await uploads.write_through(self.context, put)
+            return await uploads.write_through(self.context, put)
 
         return asyncio.create_task(save())
 
@@ -468,8 +638,50 @@ class TestAnyProvider:
         await saves.all_asked(4)
         assert provider.log == [("sent", 1)]  # the others wait: none has taken its snapshot
         first_lands.set()
-        await asyncio.wait_for(asyncio.gather(*tasks), DEADLINE)
+        wrote = await asyncio.wait_for(asyncio.gather(*tasks), DEADLINE)
         assert provider.log == [("sent", 1), ("stored", 1), ("sent", 2), ("stored", 2)]
+        assert wrote == [True, True, False, False]  # the last two were stored by the second one's write
+
+    async def test_a_save_another_write_stored_counts_as_coalesced(self, monkeypatch):
+        """``tracing:saves`` counts writes: four saves asked for at once are two of them, and two coalesced."""
+        monkeypatch.setenv(uploads.METRICS_ENV, "1")
+        provider = Remote.fresh()
+        working, finish = asyncio.Event(), asyncio.Event()
+
+        async def work() -> str:
+            working.set()
+            await finish.wait()
+            return "ok"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(responses=[calls("work"), "done"]),
+            tools=[Tool(name="work", handler=work)],
+            tracing_provider=provider,
+        )
+        context = RunContext(tracing_provider=provider)
+        running = asyncio.create_task(turn(agent, context))
+        await asyncio.wait_for(working.wait(), DEADLINE)
+        usage = context.root_span().usage
+        before = {key: usage.get(key, 0) for key in ("tracing:saves", "tracing:saves_coalesced")}
+        sent = sum(1 for kind, _ in provider.log if kind == "sent")
+        first_lands = provider.hold(sent + 1)
+        asked = 0
+
+        async def save():
+            nonlocal asked
+            asked += 1
+            await context._save_trace()
+
+        tasks = [asyncio.create_task(save()) for _ in range(4)]
+        await asyncio.wait_for(until(lambda: asked == 4), DEADLINE)
+        first_lands.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), DEADLINE)
+        assert sum(1 for kind, _ in provider.log if kind == "sent") == sent + 2
+        assert usage.get("tracing:saves", 0) - before["tracing:saves"] == 2
+        assert usage.get("tracing:saves_coalesced", 0) - before["tracing:saves_coalesced"] == 2
+        finish.set()
+        await asyncio.wait_for(running, DEADLINE)
 
     async def test_a_save_asked_for_once_that_next_write_began_gets_one_of_its_own(self):
         provider = Remote.fresh()

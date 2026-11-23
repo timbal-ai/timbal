@@ -195,7 +195,7 @@ def tracked(run_context: RunContext) -> bool:
     return _key(run_context) in _RUNS
 
 
-async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[None]]) -> None:
+async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[None]]) -> bool:
     """Store the run's latest state now, as its next write (a barrier).
 
     It waits for an upload in flight or another barrier's write (the root's end and a background task's end
@@ -207,6 +207,9 @@ async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[
     flight is only marked (``RunContext._save_turn``), and the save that finds the mark makes the lock the
     run's saves queue on from then on. ``put`` must not save the same run itself: that save would wait for
     the one it is part of.
+
+    Returns False when this call wrote nothing because a write that began after it was asked for has stored
+    its state (a ``sync`` save that waited): stored all the same, and not a write to count.
     """
     key = _key(run_context)
     run = _RUNS.get(key)
@@ -215,7 +218,7 @@ async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[
         if durability(provider) == "sync":
             if provider.overlapping_saves:
                 await put(run_context)
-                return
+                return True
             state = run_context.__dict__
             turn = state.get("_save_turn")
             if turn is None:
@@ -228,7 +231,7 @@ async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[
                         state["_save_turn"] = None
                     else:
                         turn.lock.release()
-                return
+                return True
             if turn is True:
                 # A write of this run is in flight and holds no lock: take one in its name, which it lets go
                 # of when it ends. A lock nobody holds is taken without waiting, so that write cannot end first.
@@ -237,11 +240,11 @@ async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[
             covering = turn.started + 1
             async with turn.lock:
                 if turn.landed >= covering:
-                    return  # a write that began after this save was asked for has landed
+                    return False  # a write that began after this save was asked for has landed
                 turn.started = mine = turn.started + 1
                 await put(run_context)
                 turn.landed = mine
-            return
+            return True
         run = _RUNS[key] = _RunUploads(run_context, provider)
     run.writers += 1
     try:
@@ -253,6 +256,7 @@ async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[
     finally:
         run.writers -= 1
         _release(run)
+    return True
 
 
 def _release(run: _RunUploads, *, draining: bool = False) -> None:
