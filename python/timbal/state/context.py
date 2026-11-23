@@ -3,7 +3,7 @@ import os
 import time
 import weakref
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -733,6 +733,23 @@ class RunContext(BaseModel):
         if not span:
             raise RuntimeError(f"Could not resolve current span for call ID {call_id}")
         return span
+
+    def call_stack(self) -> Iterator[tuple["RunContext", Span]]:
+        """Yield (context, span) pairs from the current call through its local invokers."""
+        context = self
+        span = context.current_span()
+        while True:
+            yield context, span
+            if span.parent_call_id is not None:
+                parent = context.parent_of(span)
+            elif invoker := context.__dict__.get("_invoker"):
+                context, call_id = invoker
+                parent = context._trace.get(call_id) if context is not None else None
+            else:
+                return
+            if parent is None:
+                raise RuntimeError("Could not resolve an ancestor of the current call.")
+            span = parent
 
     def parent_span(self) -> Span:
         """Get the span for the parent call."""

@@ -1,0 +1,99 @@
+---
+title: "SAP framework tools"
+description: "Bind Timbal workflows and agents to scoped SAP operations."
+---
+
+Import SAP tools from `timbal.tools`. Each instance represents one deployment-configured SAP operation, view, agent, or script. The caller supplies business inputs. The application supplies the endpoint, credentials, object scope, permitted document types, and authorization references.
+
+## Read a HANA Cloud view
+
+Install SAP's `hdbcli` Python package in the worker that connects to HANA Cloud. Bind the dedicated database user to the approved views. This example uses a fictional reporting view and reads one page in a deterministic workflow.
+
+```python
+from timbal import Workflow
+from timbal.tools import SAPAccess, SAPHANARead
+
+access = SAPAccess(
+    catalog_id="open-orders/v1",
+    scope_reference="customer-scope-17",
+    consumer="order-report",
+)
+orders = SAPHANARead(
+    name="read_open_orders",
+    access=access,
+    host="tenant.hana.example",
+    schema_name="REPORTING",
+    view="OPEN_ORDERS",
+    columns=("ORDER_ID", "STATUS"),
+    order_by=("ORDER_ID",),
+)
+report = Workflow(name="order_report")
+report.step(orders, filters={"STATUS": "OPEN"}, limit=100)
+```
+
+Provide `SAP_HANA_USER` and `SAP_HANA_PASSWORD` from your secret manager, pass the tool's `user` and `password`, or configure a `sap_hana` integration. The tool quotes configured identifiers and binds filter values. Choose an ordering that uniquely identifies each row. Pass `next_offset` from the result to request another page. The connection uses port 443, certificate validation, and a read-only transaction. [SAP HANA client reference](https://help.sap.com/doc/b01bb8ddc72e41f795034092b9bf541d/2.30/en-US/SAP_HANA_Client_Interface_Programming_Reference_en.pdf)
+
+A workflow uses A(i)(a). When a Timbal agent selects this operation, the binding requires a B(i)(a) reference. This check also applies when the agent invokes a workflow containing the operation. Set `agent_selected=True` on `SAPAccess` if an external model selects operations before entering Timbal.
+
+`SAPHANAQuery` accepts a single SELECT or WITH statement plus bindings under B(i)(b). Its database identity must have read access only to the authorized objects, including access inherited through roles. `SAPHANAWrite` binds values to a single deployment-supplied DML statement under B(i)(c). Use a separate, restricted write identity. Source replication into HANA Cloud belongs to the customer's SAP data pipeline.
+
+## Published APIs and CDS
+
+- **OData.** Use `SAPODataRead` with a fixed entity-set URL, selected properties, and a stable order. It supports V2 and V4 collection responses, equality filters, and a single page per call. Mark released or customer-developed analytical CDS services with `cds=True`. Use `SAPODataWrite` with a fixed operation URL and method, a Pydantic input model and, where required, the service's `csrf_endpoint`. For updates and deletes on an entity set, declare the OData key names in `key_fields`. The tool encodes the validated key values into the resource URL and sends the remaining fields as the payload. The token fetch and write share the same cookie session. [SAP OData token handling](https://help.sap.com/docs/SAPUI5/b2f662dd9d7a4ec680056733050b4d34/9613f1f2d88747cab21896f7216afdac.html)
+- **SOAP.** Configure `SAPSOAPOperation` from the published WSDL. Supply `version`, `action`, `operation_tag` in ElementTree expanded-name form, and `build_element(payload)` to map a validated model to that operation's XML. The binding creates the envelope and detects SOAP faults.
+- **BAPIs.** Use the SOAP binding when the BAPI is published as a web service. For a published native RFC binding, `SAPBAPI` accepts a fixed function name, typed input model and a per-call `connect()` factory. It expects an authenticated, stateful RFC SDK connection exposing `call()` and `close()`. Configure the destination, protected channel, driver timeout and customer identity in that factory. Set `commit=True` only for BAPIs that require an explicit transaction commit. The tool checks BAPI return messages before committing.
+- **ABAP SQL service.** `SAPCDSRead` executes a deployment-supplied parameterized query against a released CDS view. Supply a fresh DB-API connection from SAP's ODBC driver for ABAP, for example through `pyodbc.connect` with an authenticated TLS-enabled DSN. Restrict the service binding to the published views. [SAP SQL service](https://help.sap.com/docs/abap-cloud/abap-integration-connectivity/inbound-data-integration-using-sql)
+
+Published API operations use A(ii) in deterministic workflows and B(ii) when model-selected. CDS reads use A(iii) and B(iii) respectively. Set `document_types` explicitly on each operation capable of writing. An empty tuple declares that the operation cannot create an SAP application document. Every listed type requires a matching B(iv) reference in `document_authorizations`, including for deterministic workflows and managed agents.
+
+```python
+from pydantic import BaseModel, ConfigDict, Field
+from timbal.tools import SAPAccess, SAPODataWrite
+
+class OrderInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    SalesOrderType: str = Field(max_length=4)
+    SoldToParty: str = Field(max_length=10)
+
+create_order = SAPODataWrite(
+    name="create_sales_order",
+    access=SAPAccess(
+        catalog_id="create-sales-order/v1",
+        authorizations={"B(ii)": "customer-agent-scope-21"},
+        document_authorizations={"sales_order": "customer-document-scope-21"},
+    ),
+    integration="customer-sap-connection",
+    object_name="A_SalesOrder",
+    endpoint="https://tenant.example/sap/opu/odata/sap/API_SALES_ORDER_SRV/A_SalesOrder",
+    csrf_endpoint="https://tenant.example/sap/opu/odata/sap/API_SALES_ORDER_SRV/",
+    method="POST",
+    document_types=("sales_order",),
+    input_model=OrderInput,
+)
+```
+
+Adapt the payload model to the required fields of the customer's service. The SAP HTTP tools resolve an SAP-audience token from the configured integration or from an async `token_provider()` supplied by the deployment.
+
+## MCP servers and SAP-managed agents
+
+`SAPMCPServer` uses Timbal's MCP client. Configure `kind="hana-ai"` for SAP's local toolkit under A(i)(b), or `kind="gateway"` for a customer-enabled SAP-managed MCP endpoint under A(iv). Bind each permitted remote name in `manifest` to a `SAPMCPBinding(read_only=..., document_types=...)`. The local HANA toolkit requires a written HANA scope, read-only tools and a read-only HANA identity. Pin the deployed toolkit version and review tool definitions when it changes. [SAP HANA AI Toolkit architecture](https://architecture.learning.sap.com/docs/ref-arch/2ecb7e)
+
+For a third-party HTTPS MCP server, select `third-party-hana` for bounded HANA reads, `third-party-api` for published application APIs, or `third-party-cds` for scoped CDS reads. Each tool in its manifest needs a deployment-owned `input_model`. Timbal exposes that schema to the agent, validates the arguments locally and checks B(i)(a), B(ii) or B(iii) respectively. Apply the underlying SAP quotas at the server as well, especially if one tool invocation issues several SAP requests. [SAP third-party MCP architecture](https://architecture.learning.sap.com/docs/ref-arch/137800)
+
+Use stdio for a locally installed HANA toolkit or authenticated HTTPS for a remote server. Give each authenticated principal its own server instance. Supply SAP-scoped credentials through the transport configuration, and close the server when its session ends. A gateway operation that can create documents also needs the B(iv) authorizations for its declared document types.
+
+`SAPAgentSend` and `SAPAgentGetTask` implement inbound A2A 0.3 HTTP+JSON under A(iv). Bind the exact send URL and task collection URL from the tenant's agent interface. Configure capability or scenario metadata from the agent interface using `request_metadata`. For asynchronous runs, supply a deployment-owned HTTPS `callback_url` and optional `callback_token`. Use the returned task ID to read state where the gateway exposes GetTask. Provide an async token provider that obtains a gateway-audience token for the current authenticated user. `SAPTokenExchange` can perform the SAP Cloud Identity Services OAuth token exchange for tenants configured for that flow. Registration, trust, application dependencies and named-user authorizations are configured in SAP. [SAP inbound A2A architecture](https://architecture.learning.sap.com/docs/ref-arch/fe0d1d) · [A2A HTTP binding](https://a2a-protocol.org/v0.3.0/specification/) · [SAP token exchange](https://help.sap.com/docs/cloud-identity-services/cloud-identity-services/configure-client-to-call-identity-authentication-token-exchange)
+
+## Deterministic GUI scripts and customizing
+
+`SAPGUIScript` runs under B(v) on a Windows worker with SAP GUI Scripting and `pywin32`. Register the designated non-production system ID, three-digit client, technical user, typed input model and installed `script(session, payload, transport_request)` function. The function and input model must be importable in a spawned Windows process. The worker selects exactly one matching authenticated session. Concurrent scripts on the worker are rejected, and the worker stops the script process on timeout. Actions already accepted by SAP may have taken effect.
+
+A customizing proposal can be produced as an ordinary workflow artifact for customer review. For execution, bind the published operation or GUI script to the designated non-production system. Supply `SAPCustomizing` with the written execution reference, designated client and transport request. The GUI script receives the transport number. For HTTP, use the designated HTTPS origin as `nonproduction_system`. The tool checks the endpoint against it and sets the SAP client. Set `transport_query_parameter` when the service accepts the transport in a query parameter, or bind it in the documented operation payload. Native BAPIs check the destination system ID and client and set the configured `transport_parameter`. The audit event includes the transport reference. The customer owns transport release, testing and production import.
+
+## Limits, audit and deployment
+
+Share one `SAPAccess` instance across tools covered by the same customer scope and integration quota in a worker. The defaults are 1,000 rows per SQL or OData page, 5,000,000 bytes per result, 60 calls per minute, four concurrent calls and a 60-second deadline. Integration and per-consumer limits are configurable. Failed upstream calls can open a circuit for a cooldown period. Native drivers need their own connection and operation timeouts. A timeout after a write has been sent can leave its outcome unknown. Reconcile it in SAP before retrying.
+
+The `timbal.sap` logger emits the catalog ID, route, operation, SAP object, pseudonymous consumer and user, outcome, volume and latency. Set `sap_user_id` in the trusted `RunContext` when a user identity is available. HANA receives those pseudonyms in its session context. Configure a shared secret `audit_key` when consumers and users must correlate across worker restarts. Set retention for ordinary Timbal traces, agent messages, event logs and tool results separately from these audit events. Apply a gateway quota or divide the budget across workers when multiple processes share an SAP quota.
+
+Before enabling a customer binding, record the interface and documentation version, target and privileges, purpose, model involvement, operations and document types, written scope, configured limits and applicable controls in its versioned integration record. Record customer licensing verification and SAP confirmation status there. Use the approved record reference as `catalog_id`. The deployment owns secret rotation, cross-worker quotas, and alert rules for authentication failures, error spikes and latency. The framework uses the supplied references when admitting a call.
