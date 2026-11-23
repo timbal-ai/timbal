@@ -1073,6 +1073,67 @@ class TestSingleFlight:
             await asyncio.wait_for(asyncio.gather(second, replacing), 5)
         assert server.runs[old.id]["trace"][0]["output"] == "replacement"
 
+    @pytest.mark.parametrize("fresh_lands", [True, False], ids=["the fresh run lands", "the fresh run fails"])
+    async def test_a_save_of_an_older_context_of_a_reused_run_id_is_not_sent(self, monkeypatch, fresh_lands):
+        """A finished run id used again by a fresh context, while a flush on another loop is already sending the old
+        context (its end failed, so it was owed). The old context's PATCH must not be numbered above the fresh one's,
+        and must not settle the fresh one when it is the fresh one that is owed."""
+        import threading
+
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))
+        server = FakePlatform(deltas=False)  # whole traces only: each PATCH says which context it sends
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
+        old = self.redacting_context(provider, t1=1, output="previous")
+        fresh = RunContext(id=old.id, tracing_provider=provider)
+        fresh.platform_config = CONFIG
+        fresh._trace["r"] = {
+            "call_id": "r",
+            "path": "a",
+            "t0": 0,
+            "t1": 1,
+            "parent_call_id": None,
+            "output": "replacement",
+        }
+        _, _, key = PlatformTracingProvider._target(old)
+        main, paused, go = threading.get_ident(), threading.Event(), threading.Event()
+        outputs, refused = [], []  # outputs: the stored output after each PATCH the host took
+        real_arm = PlatformTracingProvider.__dict__["_arm_keepalive"].__func__
+
+        def arm(cls, *args):
+            if threading.get_ident() != main and not go.is_set():
+                paused.set()  # the flush is inside _store with the old context
+                go.wait(10)
+            return real_arm(cls, *args)
+
+        async def request(method, path, headers=None, content=None, **kwargs):
+            if method == "PATCH":
+                raw = gzip.decompress(content) if (headers or {}).get("Content-Encoding") == "gzip" else content
+                sending = json.loads(raw)["trace"][0]["output"]
+                if not refused or (sending == "replacement" and not fresh_lands):
+                    refused.append(sending)
+                    raise PlatformError("upstream", status_code=503)
+                response = await server.request(method, path, headers=headers, content=content, **kwargs)
+                outputs.append(server.runs[old.id]["trace"][0]["output"])
+                return response
+            return await server.request(method, path, headers=headers, content=content, **kwargs)
+
+        monkeypatch.setattr(PlatformTracingProvider, "_arm_keepalive", classmethod(arm))
+        flushed = []
+        with patch("timbal.platform.utils._request", request):
+            assert await asyncio.wait_for(old._save_trace(barrier=True), 5) is False  # the old run's end: owed
+            other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
+            other_loop.start()
+            assert await asyncio.to_thread(paused.wait, 10)
+            assert await asyncio.wait_for(fresh._save_trace(barrier=True), 5) is fresh_lands  # the id, used again
+            go.set()
+            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
+        assert "previous" not in outputs  # the old context was never stored over the fresh one
+        if fresh_lands:
+            assert outputs == ["replacement"] and flushed == [[]]
+        else:
+            assert outputs == [] and flushed == [[old.id]]  # the fresh run is still owed, and reported
+            assert PlatformTracingProvider._unsaved.get(key) is fresh
+
     async def test_an_older_save_landing_on_another_loop_leaves_a_newer_failed_one_unsaved(self, monkeypatch):
         """Another loop's save stores the run as it was before its end, and its answer is held. Meanwhile this loop's
         save of the end fails. That older save's success must not take the run off the list of runs still owed:

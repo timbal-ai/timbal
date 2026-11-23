@@ -13,6 +13,7 @@ import math
 import os
 import threading
 import time
+import weakref
 from collections import OrderedDict, deque
 from time import perf_counter_ns, time_ns
 from types import SimpleNamespace
@@ -189,8 +190,9 @@ def _settle(flight: _Flight, joined: asyncio.Future[None], save: asyncio.Task) -
 
 
 class SaveSuperseded(RuntimeError):
-    """A resend that was not sent: a newer save of the run went out from another event loop after the PATCH it
-    resends, whose outcome this one cannot wait for. Sent, it would be numbered above that save."""
+    """A save that was not sent: a newer save of the run went out from another event loop after the PATCH it
+    resends, whose outcome this one cannot wait for, or a newer run context was stored under the same run id.
+    Sent, it would be numbered above that save and the host would keep the older state."""
 
 
 async def _carried(flight: _Flight | None, joined: asyncio.Future[None] | None, key: str, snapshot: int) -> bool:
@@ -483,6 +485,46 @@ def _epoch_ns() -> int:
     return _epoch_offset_ns + perf_counter_ns()
 
 
+class _RunContexts:
+    """The run contexts this process has stored under one run key, and the newest of them. A run id can be used
+    again by a fresh context once its run finished (the HTTP job store allows it), while a flush, a background
+    resend or a keep-alive still holds the old one: only the newest context stored is ever sent. Each context
+    holds this record and the registry only refers to it weakly, so it lives exactly as long as an older context
+    could still be sent."""
+
+    __slots__ = ("__weakref__", "newest")
+
+    def __init__(self) -> None:
+        self.newest = 0
+
+
+# run key -> _RunContexts, guarded by _snapshot_lock.
+_contexts: weakref.WeakValueDictionary[str, _RunContexts] = weakref.WeakValueDictionary()
+# A context's place in the order contexts were first stored (any run key): its generation.
+_GENERATIONS = itertools.count(1)
+
+
+def _generation(key: str, run_context: RunContext) -> tuple[_RunContexts, int]:
+    """The record of the contexts stored under ``key``, and ``run_context``'s generation, both made the first time
+    the context is stored. Called with ``_snapshot_lock`` held."""
+    own = run_context.__dict__
+    generation = own.get("_platform_generation")
+    if generation is None:
+        generation = own["_platform_generation"] = next(_GENERATIONS)
+    held = own.get("_platform_contexts")
+    if held is None:
+        held = own["_platform_contexts"] = {}
+    contexts = held.get(key)
+    if contexts is None:
+        contexts = _contexts.get(key)
+        if contexts is None:
+            contexts = _contexts[key] = _RunContexts()
+        held[key] = contexts
+    if generation > contexts.newest:
+        contexts.newest = generation
+    return contexts, generation
+
+
 class _Patches:
     """A run's PATCHes out in this process, from every event loop, and the newest snapshot number taken for it
     while any of them is out (see ``_carried``). Kept only while one is out: what it orders is in flight."""
@@ -498,7 +540,9 @@ class _Patches:
 _patches: dict[str, _Patches] = {}
 
 
-def _next_snapshot(key: str | None = None, *, after: int | None = None) -> int | None:
+def _next_snapshot(
+    key: str | None = None, *, after: int | None = None, context: RunContext | None = None
+) -> int | None:
     """Strictly increasing within the process and, by the clock, across processes (ns since the epoch).
 
     The platform ignores a save whose snapshot is not newer than the last it applied to the run, and a
@@ -512,6 +556,9 @@ def _next_snapshot(key: str | None = None, *, after: int | None = None) -> int |
     newer number was taken for the run since: checked in the same step, since another event loop's save can
     take one at any moment, and the resend would be numbered above it (see ``_carried``).
 
+    ``context``: the run context the PATCH sends. None, and nothing taken, when a newer context was stored under
+    the same run key (a run id used again, ``_RunContexts``); checked in the same step, for the same reason.
+
     The lock is re-entrant: a collection on this thread can finish a save left suspended in a closed event loop,
     and that save's cleanup (``_patch_done``) asks for the lock. What a cleanup changes in between is put back.
     """
@@ -520,6 +567,10 @@ def _next_snapshot(key: str | None = None, *, after: int | None = None) -> int |
         if after is not None:
             entry = _patches.get(key)
             if entry is not None and entry.newest > after:
+                return None
+        if context is not None and key is not None:
+            contexts, generation = _generation(key, context)
+            if contexts.newest > generation:
                 return None
         _last_snapshot = max(_last_snapshot + 1, _epoch_ns())
         if key is not None:
@@ -546,14 +597,18 @@ def _owe(key: str, run_context: RunContext) -> None:
             logger.error("platform_trace_unsaved_evicted", run_id=dropped.id, max_runs=_UNSAVED_MAX)
 
 
-def _landed(key: str, snapshot: int) -> None:
-    """The PATCH numbered ``snapshot`` was stored: the run is no longer owed if that PATCH was sent after the run
-    was last asked to be stored. A save of the run as it was earlier (another event loop's, answered late) does
-    not settle a newer request whose own save failed."""
+def _landed(key: str, snapshot: int, run_context: RunContext) -> None:
+    """The PATCH numbered ``snapshot``, sending ``run_context``, was stored: the run is no longer owed if that PATCH
+    was sent after the run was last asked to be stored, and sent that context or a newer one. A save of the run as
+    it was earlier (another event loop's, answered late) does not settle a newer request whose own save failed."""
     unsaved = PlatformTracingProvider._unsaved
     with _snapshot_lock:
         owed = unsaved.get(key)
-        if owed is not None and owed.__dict__.get("_platform_asked", -1) < snapshot:
+        if (
+            owed is not None
+            and owed.__dict__.get("_platform_asked", -1) < snapshot
+            and owed.__dict__.get("_platform_generation", 0) <= run_context.__dict__.get("_platform_generation", 0)
+        ):
             del unsaved[key]
 
 
@@ -1039,6 +1094,13 @@ class PlatformTracingProvider(TracingProvider):
         for ``_stall_s``). The caller waits for the round carrying its state; cancelling it does not
         cancel the save."""
         _, _, key = cls._target(run_context)
+        with _snapshot_lock:  # checked and noted as owed in one step: a newer context cannot slip in between
+            contexts, generation = _generation(key, run_context)
+            if contexts.newest > generation:
+                # A run id used again: a newer context was stored under it. This older one (a flush, a background
+                # resend or a keep-alive held it) is never sent; it does not touch what the newer one owes either.
+                raise SaveSuperseded("a newer run with this run id has been stored: this one's saves are not sent")
+            _owe(key, run_context)
         loop = asyncio.get_running_loop()
         cls._arm_keepalive(key, run_context, loop)
         flights = PlatformTracingProvider._flights
@@ -1047,7 +1109,6 @@ class PlatformTracingProvider(TracingProvider):
             flight = flights[key] = _Flight(key, loop)
         flight.context = run_context
         flight.provider = cls
-        _owe(key, run_context)
         if not PlatformTracingProvider._exit_hook:
             PlatformTracingProvider._exit_hook = True
             atexit.register(_flush_at_exit)
@@ -1306,11 +1367,11 @@ class PlatformTracingProvider(TracingProvider):
         delta = not plain and not shrink and cls._sending_deltas(caps)
         # Taken with no await before model_dump(), so numbers follow snapshot order. Counted as out for the run
         # until this PATCH is over (_patch_done), resends included: _carried compares against it.
-        snapshot = _next_snapshot(key, after=after)
+        snapshot = _next_snapshot(key, after=after, context=run_context)
         if snapshot is None:
-            # A resend, and a newer save of the run went out since the check that allowed it (another event loop).
-            # Not sent: that save's outcome. The run stays in _unsaved: that save may still be out and fail (only a
-            # save that lands takes a run out of it, _landed).
+            # A resend, and a newer save of the run went out since the check that allowed it (another event loop),
+            # or a newer context was stored under this run id. Not sent: that save's outcome. The run stays in
+            # _unsaved: that save may still be out and fail (only a save that lands takes a run out of it, _landed).
             await _newer_outcome(flight, joined)
             return
         try:
@@ -1425,7 +1486,7 @@ class PlatformTracingProvider(TracingProvider):
                 if not resend:
                     # Still behind after numbering above it: another process is writing this run right now.
                     logger.warning("platform_trace_save_superseded", run_id=run_context.id, stored=int(stored))
-                    _landed(key, snapshot)  # that process holds it now: nothing this one owes it is left to send
+                    _landed(key, snapshot, run_context)  # that process holds it now: nothing owed is left to send
                     return
                 if await _carried(flight, joined, key, snapshot):
                     return
@@ -1440,7 +1501,7 @@ class PlatformTracingProvider(TracingProvider):
                 # A whole trace replaces the platform's span rows: what they acknowledged is gone.
                 PlatformTracingProvider._delta_runs[key].acked.clear()
             cls._remember(key, snapshot, cache_body)
-            _landed(key, snapshot)
+            _landed(key, snapshot, run_context)
         finally:
             _patch_done(key)
 
