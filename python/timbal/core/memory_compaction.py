@@ -517,7 +517,7 @@ def compact_tool_results(
             for msg in memory
             if msg.role == "tool"
             for c in msg.content
-            if isinstance(c, ToolResultContent) and c.delivered
+            if isinstance(c, ToolResultContent) and c.delivered is not None  # ("": only files were)
         }
 
         drop_mode = replacement is None

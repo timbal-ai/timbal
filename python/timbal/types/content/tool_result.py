@@ -25,9 +25,10 @@ class ToolResultContent(BaseContent):
     placeholder + handle (see ``timbal.core.tool_result_offload``). Compaction treats these
     results as already compacted. Internal hint only: never serialized to providers."""
     delivered: str | None = None
-    """The text this call showed the user (``Agent(delivery="tool")``'s ``send_message``). It is the
+    """The text this call showed the user (``Agent(delivery="tool")``'s ``send_message``, or a slash
+    command's answer: the start of it, and empty when the user received only its files). It is the
     conversation, not tool output: compaction keeps the call and this result instead of dropping
-    them. Internal hint only: never serialized to providers."""
+    them. None: nothing was delivered. Internal hint only: never serialized to providers."""
 
     @override
     def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any]:

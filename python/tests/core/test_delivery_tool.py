@@ -1250,7 +1250,12 @@ class TestAStepWithoutTheTool:
             lambda text: text.replace("draft", "summary"), stages=["tool_result"], action="redact", name="rewrite"
         )
         for number, (command, rails, text) in enumerate(
-            (("/chart plain", [], "Here."), ("/chart", [], None), ("/chart secret", [rewrite], "The summary."))
+            (
+                ("/chart plain", [], "Here."),
+                ("/chart", [], None),
+                ("/chart secret", [rewrite], "The summary."),
+                ("/chart", [rewrite], None),  # a rail that rewrites text has none to rewrite: the file stays as it is
+            )
         ):
             for stored in (False, True):
                 out, messages, history = await chart_then_a_turn(tmp_path / f"{number}{stored}", command, rails, stored)
@@ -1258,6 +1263,8 @@ class TestAStepWithoutTheTool:
                 assert len(files_of(out.output.content)) == 1
                 # In a tool result: an assistant message cannot carry a file to the providers.
                 assert files_in(history) == ["tool result"], (command, stored)
+                (result,) = [c for m in history if m.role == "tool" for c in m.content]
+                assert len(result.content) == (2 if text else 1)  # no empty text put next to the file
                 assert "draft" not in repr(history)
                 if not stored and text:
                     assert [m.collect_text() for m in history if m.role == "assistant" and m.collect_text()] == [text]
@@ -1276,6 +1283,76 @@ class TestAStepWithoutTheTool:
             assert [m["text"] for m in messages] == ["That result cannot be shown."]
             assert files_of(out.output.content) == [] and files_in(history) == [], stored
             assert "draft" not in repr(history)
+
+    async def test_a_guardrail_reads_a_slash_command_s_file_without_a_caption(self, tmp_path):
+        """A rail that looks at the result itself (``ctx.payload``) decides on its attachments. A result
+        that is only a file has no text to check, and is still the rail's to refuse."""
+        from timbal.types.content import FileContent
+
+        def no_files(_text: str, ctx):
+            held = any(isinstance(item, FileContent) for item in ctx.payload.content)
+            return Verdict.block("an attachment") if held else True
+
+        for command in ("/chart plain", "/chart"):
+            for stored in (False, True):
+                rail = guardrail(
+                    no_files, stages=["tool_result"], name="no_files", blocked_message="That file cannot be shown."
+                )
+                out, messages, history = await chart_then_a_turn(
+                    tmp_path / f"{command[-1]}{stored}", command, [rail], stored
+                )
+                assert [m["text"] for m in messages] == ["That file cannot be shown."], (command, stored)
+                assert files_of(out.output.content) == [] and files_in(history) == [], (command, stored)
+
+    async def test_a_slash_command_s_file_survives_compaction_without_a_caption(self, tmp_path, monkeypatch):
+        """The user received the file: dropping old tool results must not take it, with or without a text
+        next to it."""
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
+        from timbal.types.content import FileContent, TextContent
+        from timbal.types.file import File
+
+        path = tmp_path / "chart.txt"
+        path.write_text("1,2,3")
+
+        def chart(caption: str = "") -> Message:
+            content = [TextContent(text=caption)] if caption else []
+            return Message(role="assistant", content=[*content, FileContent(file=File.validate(str(path)))])
+
+        number = 0
+        for command in ("/chart Here.", "/chart"):
+            for stored in (False, True):
+                number += 1
+                provider = InMemoryTracingProvider
+                if stored:
+                    provider = JsonlTracingProvider.configured(_path=tmp_path / f"traces{number}.jsonl")
+                read = []
+
+                def model(messages, read=read):
+                    read.append(list(messages))
+                    return "an answer long enough to fill the small window " * 6
+
+                monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 1_000_000)
+                fresh()
+                set_run_context(RunContext(tracing_provider=provider))
+                agent = Agent(
+                    name="bot",
+                    model=TestModel(handler=model),
+                    tools=[Tool(handler=chart, command="chart"), work],
+                    delivery="tool",
+                    memory_compaction=compact_tool_results(),
+                    memory_compaction_ratio=0.5,
+                    tracing_provider=provider,
+                )
+                out, _ = await run(agent, command)
+                assert len(files_of(out.output.content)) == 1
+                set_run_context(RunContext(parent_id=out.run_id, tracing_provider=provider))
+                out, _ = await run(agent, "thanks", delivery="text")
+                monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 200)
+                set_run_context(RunContext(parent_id=out.run_id, tracing_provider=provider))
+                out, _ = await run(agent, "what was in the file?", delivery="text")
+                assert out.metadata["compaction"]["triggered"] is True
+                assert files_in(read[-1]) == ["tool result"], (command, stored)
 
     async def test_a_slash_command_that_returns_a_file(self, tmp_path):
         """A message event carries text. The result's files are in the run's output, as in text mode."""

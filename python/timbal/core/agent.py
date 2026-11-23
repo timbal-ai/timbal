@@ -3190,13 +3190,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         ``command.answer``: the content of the command's result as its guardrails left it (None: no
         result); ``output``: the command's own.
 
-        With a text, the result is marked ``delivered`` like a message sent, so that a compaction keeps
-        the call and the result: a store that keeps the history as calls hands the next turn these two.
-        The mark is the start of the text (``_COMMAND_MARK_CHARS``), not all of it: the result holds
+        What the user receives is the answer's text and its files. With either, the result is marked
+        ``delivered`` like a message sent, so that a compaction keeps the call and the result: a store
+        that keeps the history as calls hands the next turn these two. The mark is the start of the text
+        (``_COMMAND_MARK_CHARS``; empty for an answer that is only files), not all of it: the result holds
         the text, or what a result limit left of it, and a mark as long would store it a second time.
 
-        Without one (no result: denied, failed, timed out; or no text in it: a guardrail removed it all,
-        only files, no output) the user was told nothing, so no assistant message stands for the
+        Without a text (no result: denied, failed, timed out; or no text in it: a guardrail removed it
+        all, only files, no output) the user was told nothing, so no assistant message stands for the
         command. The turn's memory gets the call and the result, as a store that keeps calls has them:
         the next turn's model reads what became of the command.
 
@@ -3218,8 +3219,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if files or not told:
             # (The command's call is the last thing stored: the result follows it.)
             current_span.memory.extend([Message.validate(current_span._memory_dump[-1]), tool_result])
-        if not told:
-            return
+        if not told and not files:
+            return  # nothing was delivered
         for c in tool_result.content:
             if isinstance(c, ToolResultContent):
                 c.delivered = told[:_COMMAND_MARK_CHARS]
@@ -4099,7 +4100,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if not isinstance(c, ToolResultContent):
                         continue
                     text = tool_result_text(c)
-                    if not text:
+                    if not text and not (
+                        not append_to_messages
+                        and delivering
+                        and any(not isinstance(item, TextContent) for item in c.content)
+                    ):
+                        # Nothing to check. A delivered command's files are something, also without a
+                        # text next to them: a rail that reads the result itself (``ctx.payload``)
+                        # decides on what the user is about to receive.
                         continue
                     ctx = GuardrailContext(
                         stage=GuardrailStage.TOOL_RESULT,
@@ -4131,7 +4139,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 # Nor does the history keep any of it: the result's files were refused
                                 # with its text, and the stored result would hand them to the next turn.
                                 c.content = [item for item in c.content if isinstance(item, TextContent)]
-                    elif outcome.replaced:
+                    elif outcome.replaced and (text or outcome.text):
+                        # (Not for a result without text that a rail leaves without text: only its files.)
                         replace_tool_result_text(c, outcome.text)
             if not append_to_messages and command_run.answer is None and status_code == "success":
                 # A slash command's own result is the turn's answer. Taken here: as the guardrails above
