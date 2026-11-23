@@ -2957,7 +2957,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         new key, which voids all of it.
         """
         key = state["key"]
-        told = dict(state["digests"])
+        # What the pin itself says is the text it renders, not the text it was written with: where the
+        # prompt shows the store's copy of a section (``_pin_as_written``), that copy is what the model
+        # reads once no note speaks of the section any more (a compaction took it).
+        told: dict[str, str] = {name: _section_digest(text) for name, text in state["pinned"].items()}
         unsure: set[str] = set()  # sections whose last note no longer has the text it was written with
         for message in memory:
             if message.role == "assistant":
@@ -3195,17 +3198,27 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         Without one (no result: denied, failed, timed out; or no text in it: a guardrail removed it all,
         only files, no output) the user was told nothing, so no assistant message stands for the
         command. The turn's memory gets the call and the result, as a store that keeps calls has them:
-        the next turn's model reads what became of the command, and its files.
+        the next turn's model reads what became of the command.
+
+        It gets them too when the answer has files, before the assistant message of its text: the files
+        are part of what the user received, and a tool result is where a tool's files are kept for a model
+        (a store that keeps calls has them there already). An assistant message cannot carry one: no
+        provider takes an image or a document in an assistant turn. A tool result is not taken everywhere
+        either: Anthropic and the Responses API take an image there, a Chat Completions tool message does
+        not (OpenAI drops it, Gemini refuses the request), as for any tool that returns one.
         """
         told = None
+        files = False
         if command.answer is not None:
             told = ""
             if output is not None:
                 told = "".join(item.text for item in command.answer if isinstance(item, TextContent)).strip()
+            files = any(not isinstance(item, TextContent) for item in command.answer)
         command.told = told
-        if not told:
+        if files or not told:
             # (The command's call is the last thing stored: the result follows it.)
             current_span.memory.extend([Message.validate(current_span._memory_dump[-1]), tool_result])
+        if not told:
             return
         for c in tool_result.content:
             if isinstance(c, ToolResultContent):
@@ -4114,6 +4127,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     or outcome.rail.blocked_message_for(GuardrailStage.TOOL_RESULT)
                                 )
                             ]
+                            if delivering:
+                                # Nor does the history keep any of it: the result's files were refused
+                                # with its text, and the stored result would hand them to the next turn.
+                                c.content = [item for item in c.content if isinstance(item, TextContent)]
                     elif outcome.replaced:
                         replace_tool_result_text(c, outcome.text)
             if not append_to_messages and command_run.answer is None and status_code == "success":

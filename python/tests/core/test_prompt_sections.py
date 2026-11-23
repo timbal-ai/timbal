@@ -635,6 +635,53 @@ class TestTheModelIsToldWhateverHappensToTheHistory:
             assert len({key_of(prompt) for prompt in prompts}) == 1
             assert len(set(prompts[1:])) == 1  # moved once, when the section first changed
 
+    async def test_a_trace_redactor_and_a_compaction_inside_the_turn_that_takes_the_note(self, tmp_path, monkeypatch):
+        """The section came back to its pinned text, so its digest is the pinned one, and the prompt still
+        shows the store's redacted copy next to the note that says it. A compaction inside the turn takes
+        the note: what decides is the text the pin renders, and the next call must get the real one."""
+        from timbal import Tool
+        from timbal.core.memory_compaction import keep_last_n_messages
+        from timbal.guardrails import trace_redactor
+        from timbal.state.tracing.providers import JsonlTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 1_000)
+        fresh()
+        provider = JsonlTracingProvider.configured(
+            _path=tmp_path / "traces.jsonl", _trace_redactor=trace_redactor("pii:redact")
+        )
+        calls_made = []
+
+        def handler(messages):
+            asked = [m for m in messages if m.role == "user" and not m.is_runtime()]
+            if messages[-1].role != "tool" and asked[-1].collect_text() == "three":
+                return Message(
+                    role="assistant", content=[ToolUseContent(id="f1", name="fetch", input={})], stop_reason="tool_use"
+                )
+            return "ok"
+
+        sections = Sections(role="You are a bot.", contact="Write to the user at ann@example.com.")
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=handler),
+            system_prompt=sections,
+            tools=[Tool(name="fetch", handler=lambda: "payload: " + "x" * 4_000)],
+            memory_compaction=keep_last_n_messages(1),
+            memory_compaction_ratio=0.75,
+            tracing_provider=provider,
+        )
+        out = None
+        for prompt, address in (("one", "ann"), ("two", "bob"), ("three", "ann")):
+            sections.sections["contact"] = f"Write to the user at {address}@example.com."
+            out = await agent(prompt=prompt, parent_id=out.run_id if out else None).collect()
+            assert out.status.code == "success", out.error
+            spans = [s for s in get_run_context()._trace.values() if s.path == "bot.llm"]
+            calls_made = [(s.input["system_prompt"], list(s.input["messages"])) for s in spans]
+            root = next(s for s in get_run_context()._trace.values() if s.parent_call_id is None)
+        assert len(calls_made) == 2 and root.metadata["compaction"]["triggered"] is True
+        assert notes(calls_made[0][1]) and not notes(calls_made[1][1])  # the note went with the compaction
+        for prompt, messages in calls_made:
+            assert told(messages, prompt, "contact", "Write to the user at ann@example.com.")
+
     def test_what_a_note_counts_for(self):
         """``_sections_untold`` over one pin: what to say, or None when the sections must be pinned again."""
         import json

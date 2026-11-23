@@ -732,6 +732,65 @@ class TestWhatCountsAsSent:
         assert out.output.collect_text() == "The code is [code]."
 
 
+def files_of(content) -> list:
+    from timbal.types.content import FileContent
+
+    return [c for c in content if isinstance(c, FileContent)]
+
+
+def files_in(history) -> list[str]:
+    """Where each file of a history is: the role of its message, and whether a tool result holds it."""
+    from timbal.types.content import ToolResultContent
+
+    found = []
+    for message in history:
+        found += [message.role for _ in files_of(message.content)]
+        for c in message.content:
+            if isinstance(c, ToolResultContent):
+                found += [f"{message.role} result" for _ in files_of(c.content)]
+    return found
+
+
+async def chart_then_a_turn(folder, command: str, rails: list, stored: bool):
+    """Run a slash command that answers with a caption and a file (``delivery="tool"``), then one more
+    turn. Returns the command's output, the messages it sent, and the history the next turn's model read."""
+    from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
+    from timbal.types.content import FileContent, TextContent
+    from timbal.types.file import File
+
+    folder.mkdir()
+    path = folder / "chart.txt"
+    path.write_text("1,2,3")
+
+    def chart(kind: str = "") -> Message:
+        caption = {"plain": "Here.", "secret": "The draft."}.get(kind)  # (the prompt does not hold the caption)
+        content = [TextContent(text=caption)] if caption else []
+        return Message(role="assistant", content=[*content, FileContent(file=File.validate(str(path)))])
+
+    provider = JsonlTracingProvider.configured(_path=folder / "traces.jsonl") if stored else InMemoryTracingProvider
+    read = []
+
+    def model(messages):
+        read.append(list(messages))
+        return "ok"
+
+    fresh()
+    set_run_context(RunContext(tracing_provider=provider))
+    agent = Agent(
+        name="bot",
+        model=TestModel(handler=model),
+        tools=[Tool(handler=chart, command="chart")],
+        delivery="tool",
+        guardrails=rails,
+        tracing_provider=provider,
+    )
+    out, messages = await run(agent, command)
+    set_run_context(RunContext(parent_id=out.run_id, tracing_provider=provider))
+    await run(agent, "what is in it?", delivery="text")
+    (history,) = read
+    return out, messages, history
+
+
 class TestAStepWithoutTheTool:
     """A step with no tools cannot send: its text is the reply, also after messages the turn sent."""
 
@@ -1183,6 +1242,40 @@ class TestAStepWithoutTheTool:
         told = [c for m in read[-1] for c in m.content if isinstance(c, ToolResultContent)]
         assert [c.delivered for c in told] == ["Order 4411 ships on Friday."]
         assert "Order 4411 ships on Friday." in repr(read[-1])
+
+    async def test_a_slash_command_s_attachment_is_in_the_next_turn_s_history(self, tmp_path):
+        """A command's file is part of its answer: the next turn's model can look at what the user received,
+        whichever store the history comes back from."""
+        rewrite = guardrail(
+            lambda text: text.replace("draft", "summary"), stages=["tool_result"], action="redact", name="rewrite"
+        )
+        for number, (command, rails, text) in enumerate(
+            (("/chart plain", [], "Here."), ("/chart", [], None), ("/chart secret", [rewrite], "The summary."))
+        ):
+            for stored in (False, True):
+                out, messages, history = await chart_then_a_turn(tmp_path / f"{number}{stored}", command, rails, stored)
+                assert [m["text"] for m in messages] == ([text] if text else [])
+                assert len(files_of(out.output.content)) == 1
+                # In a tool result: an assistant message cannot carry a file to the providers.
+                assert files_in(history) == ["tool result"], (command, stored)
+                assert "draft" not in repr(history)
+                if not stored and text:
+                    assert [m.collect_text() for m in history if m.role == "assistant" and m.collect_text()] == [text]
+
+    async def test_a_blocked_slash_command_result_leaves_no_attachment(self, tmp_path):
+        """The user got the refusal and nothing of what the result held. Neither does the next turn's model:
+        not the text, and not the file that came with it."""
+        block = guardrail(
+            lambda text: Verdict.block("not for users") if "draft" in text else True,
+            stages=["tool_result"],
+            name="private",
+            blocked_message="That result cannot be shown.",
+        )
+        for stored in (False, True):
+            out, messages, history = await chart_then_a_turn(tmp_path / str(stored), "/chart secret", [block], stored)
+            assert [m["text"] for m in messages] == ["That result cannot be shown."]
+            assert files_of(out.output.content) == [] and files_in(history) == [], stored
+            assert "draft" not in repr(history)
 
     async def test_a_slash_command_that_returns_a_file(self, tmp_path):
         """A message event carries text. The result's files are in the run's output, as in text mode."""
