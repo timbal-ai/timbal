@@ -873,6 +873,90 @@ class TestSingleFlight:
         _, _, key = PlatformTracingProvider._target(ctx)
         assert key in PlatformTracingProvider._retries  # the ended run is resent from its latest state
 
+    async def test_a_patch_superseded_from_another_event_loop_is_not_sent_again(self, monkeypatch):
+        """A shutdown flush on another event loop sends the ended run again while an older PATCH is still out on
+        this one. That flush replaces the run's flight; the older PATCH, answered "too large" afterwards, must
+        still see that a newer save went out, and not resend its older copy numbered above it."""
+        import threading
+
+        import httpx
+
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))  # the resend itself is not this test
+        server = FakePlatform()
+        first_sent, answer_it, answered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        patches = []
+
+        async def request(method, path, headers=None, **kwargs):
+            if method != "PATCH":
+                return await server.request(method, path, headers=headers, **kwargs)
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) == 1:
+                first_sent.set()
+                await answer_it.wait()
+                answered.set()
+                raise PlatformError("payload too large", status_code=413)
+            response = await server.request(method, path, headers=headers, **kwargs)  # stored by the host
+            if len(patches) == 2:
+                raise httpx.ReadTimeout("the answer never came")  # the end, on this loop
+            return response  # the flush, on the other loop
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        flushed = []
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False  # the end: stored, unanswered
+            other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
+            other_loop.start()
+            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
+            assert flushed == [[]]  # the flush sent the ended run, and it landed
+            assert server.runs[ctx.id]["trace"][0]["t1"] == 5
+            answer_it.set()
+            await asyncio.wait_for(answered.wait(), 5)
+            stored_mid_run = await asyncio.wait_for(mid_run, 5)
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 5
+        assert len(patches) == 3  # the older copy was never sent again
+        assert stored_mid_run is False
+
+    async def test_a_stalled_patch_keeps_a_bounded_number_of_later_outcomes(self, monkeypatch):
+        """While one PATCH is out, the run's end goes past it again and again and fails each time. What the stalled
+        PATCH may need is the newest of those outcomes, not all of them: each failure holds the body it sent."""
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        first_sent, release = asyncio.Event(), asyncio.Event()
+        patches = []
+
+        async def request(method, headers=None, **_):
+            assert method == "PATCH"
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) == 1:
+                first_sent.set()
+                await release.wait()
+                return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+            raise PlatformError("forbidden", status_code=403)
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        _, _, key = PlatformTracingProvider._target(ctx)
+        with patch("timbal.platform.utils._request", request):
+            first = asyncio.create_task(provider.put(ctx))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            for _ in range(32):
+                with pytest.raises(PlatformError):
+                    await asyncio.wait_for(provider.put(ctx), 5)
+            flight = PlatformTracingProvider._flights[key]
+            assert len(patches) == 33
+            assert len(flight.rounds) <= 2  # the stalled one, and the newest that went past it
+            release.set()
+            await asyncio.wait_for(first, 5)
+
     async def test_never_more_than_two_patches_on_the_wire(self, monkeypatch):
         monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
         on_wire, most, release = [0], [0], asyncio.Event()
