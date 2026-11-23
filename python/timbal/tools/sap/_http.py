@@ -84,11 +84,15 @@ class _HTTPTool(SAPTool):
             headers={"Authorization": f"Bearer {token}"}, follow_redirects=False, timeout=self.access.timeout_seconds
         )
 
-    async def _send(self, client: httpx.AsyncClient, method: str, url: str, **kwargs) -> tuple[bytes, httpx.Headers]:
+    async def _send(
+        self, client: httpx.AsyncClient, method: str, url: str, *, headers_only: bool = False, **kwargs
+    ) -> tuple[bytes, httpx.Headers]:
         async with client.stream(method, url, **kwargs) as response:
             if not response.is_success:
                 # The URL/query and SAP error body can contain customer data.
                 raise SAPHTTPError(self.object_name, response.status_code)
+            if headers_only:
+                return b"", response.headers
             content = bytearray()
             async for chunk in response.aiter_bytes(chunk_size=min(65536, self.access.max_bytes + 1)):
                 if len(content) + len(chunk) > self.access.max_bytes:
@@ -234,7 +238,11 @@ class SAPODataWrite(_PayloadTool):
             async with await self._client() as client:
                 if self.csrf_endpoint:
                     _, fetched = await self._send(
-                        client, "GET", self._target(self.csrf_endpoint), headers={"X-CSRF-Token": "Fetch"}
+                        client,
+                        "GET",
+                        self._target(self.csrf_endpoint),
+                        headers={"X-CSRF-Token": "Fetch"},
+                        headers_only=True,
                     )
                     if not (token := fetched.get("X-CSRF-Token")):
                         raise RuntimeError("SAP did not issue a CSRF token.")

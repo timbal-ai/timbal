@@ -235,6 +235,27 @@ async def test_odata_write_schema_document_gate_csrf_cookie_no_replay(access, ht
         )
 
 
+async def test_odata_csrf_fetch_skips_service_document(access, http):
+    requests, responses = http
+    access.max_bytes = 32
+
+    async def service_document():
+        yield b"x" * 1024
+
+    fetch = httpx.Response(
+        200, headers={"X-CSRF-Token": "csrf", "Set-Cookie": "session=abc; Path=/"}, content=service_document()
+    )
+    responses.extend([fetch, httpx.Response(201, json={"id": "42"})])
+    tool = http_tool(
+        SAPODataWrite, access, input_model=Item, method="POST", document_types=[], csrf_endpoint="https://sap.example/"
+    )
+
+    assert await tool.handler(payload={"id": "42"}) == {"id": "42"}
+    assert fetch.is_closed and not fetch.is_stream_consumed
+    assert requests[1].headers["X-CSRF-Token"] == "csrf"
+    assert requests[1].headers["Cookie"] == "session=abc"
+
+
 async def test_soap_published_operation_and_fault(access, http):
     requests, responses = http
     tag = "{urn:example}GetItem"
