@@ -3114,7 +3114,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 token = run_context._silence_token
                 silent = token is not None and text == token
                 runner = self._guardrail_runner
-                changed = False
+                # Whether what goes out is not what the model wrote: a ``tool_args`` guardrail, or a person
+                # approving the call, may have rewritten it before it got here.
+                written = self._send_as_written(agent_span, run_context.current_span())
+                changed = written is not None and written.strip() != text
                 if not silent and runner is not None and runner.has_stage(GuardrailStage.MODEL_OUTPUT):
                     # What the user reads is screened like a final answer would be.
                     payload = Message(role="assistant", content=[TextContent(text=text)])
@@ -3174,8 +3177,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # recorded its message and before the message was out would leave the run saying it sent
             # what the user never got.
             interruptible=False,
+            # Where a guardrail asks a person before a send, "don't ask again" for this tool would be
+            # "never ask again about anything the agent says": an approval is for the one message.
+            approval_grantable=False,
         )
         tool.nest(self._path)
+        # Wired like the agent's own tools: its ``tool_args`` guardrails run on a send as on any call, so an
+        # application that gates calls at that stage (a block, an approval) gates what goes to the user too.
+        self._wire_tool_guardrails(tool)
         self._send_tools[name] = tool
         return tool
 
@@ -3347,7 +3356,75 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         finally:
             await events.aclose()
 
-    def _deliver_final(self, current_span: Any, offered: bool, before: int, stored: bool) -> OutputEvent | None:
+    @staticmethod
+    def _send_as_written(agent_span: Any, span: Any) -> str | None:
+        """The text of a send as the model wrote it: in the call the agent's memory holds (a ``call_tool``
+        dispatch included), before anything rewrote the input the tool ran with. Failing that, the input
+        the call's span holds."""
+        call_id = span.metadata.get("tool_call_id")
+        written: Any = None
+        if call_id is not None:
+            for message in reversed(agent_span.memory):
+                if message.role != "assistant":
+                    continue
+                calls = [c for c in message.content if isinstance(c, ToolUseContent) and c.id == call_id]
+                if calls:
+                    written = calls[0].input
+                    break
+        if written is None:
+            written = span.input
+        if isinstance(written, dict) and "text" not in written and "arguments" in written:
+            written = written["arguments"]  # dispatched: call_tool(name, arguments)
+            if isinstance(written, str):
+                try:
+                    written = json.loads(written)
+                except ValueError:
+                    return None
+        text = written.get("text") if isinstance(written, dict) else None
+        return text if isinstance(text, str) else None
+
+    async def _gate_draft(self, current_span: Any, send_name: str | None, text: str) -> str | None:
+        """A draft about to be delivered without a send (``delivery="tool"``): it stands for a send the
+        model did not make, so the agent's ``tool_args`` guardrails decide on it as on one. Returns the
+        text to deliver (as a rail rewrote it), or None when it is not to go out: a rail refuses it, or
+        asks for a person, who cannot be asked about a call that was never made.
+
+        Without this, the gate an application puts on sends at that stage has a way round it: a send it
+        refuses means the turn sent nothing, and a turn that sent nothing delivers its text.
+        """
+        runner = self._guardrail_runner
+        if runner is None or not runner.has_stage(GuardrailStage.TOOL_ARGS):
+            return text
+        args = {"text": text, "end_turn": True}
+        projected = json.dumps(args, sort_keys=True, default=str)  # as Runnable._apply_tool_args_guardrails
+        ctx = GuardrailContext(
+            stage=GuardrailStage.TOOL_ARGS, agent_path=self._path, tool_name=send_name, tool_args=args, payload=args
+        )
+        outcome = await runner.run_stage(GuardrailStage.TOOL_ARGS, projected, ctx)
+        record_guardrails_metadata(current_span, outcome.triggered, run_context=get_run_context())
+        if outcome.verdict is not None:
+            return None
+        if outcome.replaced:
+            rewritten: Any = outcome.replacement_args
+            if rewritten is None and outcome.text != projected:
+                try:
+                    rewritten = json.loads(outcome.text)
+                except ValueError:
+                    rewritten = None
+            if isinstance(rewritten, dict) and isinstance(rewritten.get("text"), str):
+                text = rewritten["text"].strip()
+        return text or None
+
+    def _withheld(self, current_span: Any, text: str | None, rest: Sequence = ()) -> Message:
+        """The turn's output when a draft is all it had for the user and the gate on sends changed it
+        (``text``) or kept it back (None): what was delivered, never the draft as the model wrote it."""
+        if text is None:
+            current_span.metadata["delivery"] = {"mode": "tool", "messages": 0, "withheld": True}
+        return Message(role="assistant", content=[TextContent(text=text or ""), *rest], stop_reason="end_turn")
+
+    async def _deliver_final(
+        self, current_span: Any, send_name: str | None, offered: bool, before: int, stored: bool
+    ) -> OutputEvent | None:
         """At a final answer (``delivery="tool"``): the turn's output, after delivering the draft when it is
         the reply. None: the draft is the output already (the turn sent nothing else), or there is none.
 
@@ -3355,28 +3432,52 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         reply rather than silence), or its step had no send tool (``offered`` is False: the budget is spent,
         or a denial limit took the tools away). ``stored``: whether the answer is in memory. An empty one
         is not kept, and the last message there is then the user's prompt or a runtime notice.
+
+        A draft that is delivered passes the gate on sends first (:meth:`_gate_draft`).
         """
         metadata = current_span.metadata
         draft = ""
         if stored and not metadata.get("silent"):
             draft = message_text(current_span.memory[-1]).strip()
         joined = False
+        text: str | None = draft
         if draft and not (offered and (before or metadata.get("messages_sent"))):
-            joined = self._deliver_text(current_span, draft, before)
+            text = await self._gate_draft(current_span, send_name, draft)
+            if text is not None:
+                joined = self._deliver_text(current_span, text, before)
         delivered = self._delivered(current_span, before)
-        if delivered is not None and joined:
-            metadata["delivery"]["fallback"] = True
-        return delivered
+        if delivered is not None:
+            if joined:
+                metadata["delivery"]["fallback"] = True
+            return delivered
+        if text == draft:
+            return None
+        # Alone, the draft would be the output as the model wrote it: the output is what went out.
+        reply = self._withheld(current_span, text)
+        return self._synthetic_event("delivery", RunStatus(code="success", reason="end_turn"), output=reply)
 
-    def _deliver_reply(self, current_span: Any, reply: Message, before: int) -> Message:
+    async def _deliver_reply(self, current_span: Any, send_name: str | None, reply: Message, before: int) -> Message:
         """Deliver ``on_max_iter``'s own reply (``delivery="tool"``): no step is left to send it with the tool.
-        Returns the turn's output: the reply, or after messages the turn sent, all it told the user."""
-        text = message_text(reply).strip()
-        if not text or not self._deliver_text(current_span, text, before):
-            return reply
-        told = self._delivered(current_span, before).output
-        current_span.metadata["delivery"]["fallback"] = True
-        return Message(role="assistant", content=told.content, stop_reason=reply.stop_reason, metadata=reply.metadata)
+        Returns the turn's output: the reply, or after messages the turn sent, all it told the user, with
+        what the reply holds besides text (a file a hook returned), whether or not it has a text. Its
+        text passes the gate on sends first (:meth:`_gate_draft`)."""
+        written = message_text(reply).strip()
+        text: str | None = written
+        if written:
+            text = await self._gate_draft(current_span, send_name, written)
+            if text is not None:
+                self._deliver_text(current_span, text, before)
+        rest = [item for item in reply.content if not isinstance(item, TextContent)]
+        if current_span.metadata.get("messages_sent") or before:
+            told = self._delivered(current_span, before).output
+            if written and text is not None:
+                current_span.metadata["delivery"]["fallback"] = True
+            content = [*told.content, *rest]
+        elif text == written:
+            return reply  # all the turn told the user: its output as it is
+        else:
+            content = self._withheld(current_span, text, rest).content
+        return Message(role="assistant", content=content, stop_reason=reply.stop_reason, metadata=reply.metadata)
 
     def _end_turn(self, current_span: Any, before: int, joined: bool) -> OutputEvent | None:
         """The turn's output when ``end_turn`` ends it. None: the turn goes on, because something joined its
@@ -4440,7 +4541,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         await _append_memory(reply)
                         if reply.role == "assistant":
                             if delivering:
-                                reply = self._deliver_reply(current_span, reply, sent_before)
+                                reply = await self._deliver_reply(current_span, send_name, reply, sent_before)
                             yield self._synthetic_event(
                                 "max_iter", RunStatus(code="success", reason="max_iter"), output=reply
                             )
@@ -5100,7 +5201,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     ):
                         current_span.metadata["silent"] = True
                     if delivering:
-                        delivered = self._deliver_final(current_span, send_offered, sent_before, last_output_stored)
+                        delivered = await self._deliver_final(
+                            current_span, send_name, send_offered, sent_before, last_output_stored
+                        )
                         if delivered is not None:
                             yield delivered  # the turn's answer is what it sent; this last text was a draft
                     break

@@ -170,6 +170,172 @@ class TestSendMessage:
         assert [m["text"] for m in messages] == ["I can't share that."]
         assert out.output.collect_text() == "I can't share that."
 
+    async def test_the_agent_s_tool_args_guardrails_run_on_a_send(self):
+        """To the agent's ``tool_args`` guardrails a send is a call like the others: an application that
+        gates calls at that stage gates this one too. A send it blocks emits no message, and the model is
+        told, so it can write another."""
+        seen = []
+
+        def gate(_text: str, ctx):
+            seen.append(ctx.tool_name)
+            if ctx.tool_name == SEND_MESSAGE_NAME and "secret" in ctx.tool_args["text"]:
+                return Verdict.block("not for users")
+            return True
+
+        fresh()
+        model = TestModel(
+            responses=[
+                calls(("work", {})),
+                calls(send("the secret plan", end_turn=True)),
+                calls(send("a public note", end_turn=True)),
+                "must not be requested",
+            ]
+        )
+        agent = Agent(
+            name="bot",
+            model=model,
+            tools=[work],
+            delivery="tool",
+            guardrails=[guardrail(gate, stages=["tool_args"], name="gate")],
+        )
+        out, messages = await run(agent)
+        assert seen == ["work", SEND_MESSAGE_NAME, SEND_MESSAGE_NAME]
+        assert [m["text"] for m in messages] == ["a public note"] and model.call_count == 3
+        assert out.output.collect_text() == "a public note"
+        assert any("[Blocked by guardrail]" in result for result in results(out))
+
+    async def test_a_tool_args_guardrail_can_ask_a_person_before_a_send(self):
+        """An escalation at that stage is an approval gate: nothing is sent until a person lets it go."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.types.events import ApprovalEvent
+
+        def ask(_text: str, ctx):
+            return Verdict.escalate("a person checks what goes out") if ctx.tool_name == SEND_MESSAGE_NAME else True
+
+        fresh()
+        set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+        model = TestModel(responses=[calls(send("Your refund is approved.", end_turn=True)), "must not be requested"])
+        agent = Agent(
+            name="bot",
+            model=model,
+            delivery="tool",
+            guardrails=[guardrail(ask, stages=["tool_args"], name="ask")],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        events = [event async for event in in_time(agent(prompt="go"))]
+        parked = events[-1]
+        assert parked.status.reason == "approval_required" and message_events(events) == []
+        approval = next(event for event in events if isinstance(event, ApprovalEvent))
+        set_run_context(RunContext(parent_id=parked.run_id, tracing_provider=InMemoryTracingProvider))
+        out, messages = await run(agent, resume={approval.approval_id: True})
+        assert [m["text"] for m in messages] == ["Your refund is approved."] and model.call_count == 1
+        assert out.output.collect_text() == "Your refund is approved."
+
+    async def test_a_draft_does_not_get_round_the_gate_on_sends(self):
+        """A draft that is delivered stands for a send the model did not make, so the same ``tool_args``
+        guardrails decide on it: what they refuse does not reach the user as a fallback, in a message or in
+        the run's output, whether the model tried a send first or never called the tool."""
+
+        def gate(_text: str, ctx):
+            if ctx.tool_name == SEND_MESSAGE_NAME and "secret" in ctx.tool_args["text"]:
+                return Verdict.block("not for users")
+            return True
+
+        rail = guardrail(gate, stages=["tool_args"], name="gate")
+        for responses, limits, sent in (
+            ([calls(send("the secret plan", True)), "the secret plan"], {}, []),  # refused, then said in text
+            (["the secret plan"], {}, []),  # never sent: the fallback is the only way out
+            ([calls(send("the secret plan", True)), "Nothing to share yet."], {}, ["Nothing to share yet."]),
+            (["Nothing to share yet."], {}, ["Nothing to share yet."]),
+            # A step without the tool (the denial limit took it away, the budget is spent) answers in text.
+            ([calls(send("the secret plan")), "the secret plan"], {"max_consecutive_denials": 1}, []),
+            ([calls(send("the secret plan")), "the secret plan"], {"max_iter": 1}, []),
+        ):
+            fresh()
+            model = TestModel(responses=[*responses, "must not be requested"])
+            agent = Agent(name="bot", model=model, delivery="tool", guardrails=[rail], **limits)
+            out, messages = await run(agent)
+            assert [m["text"] for m in messages] == sent, (responses, limits)
+            assert out.output.collect_text() == "".join(sent), (responses, limits)
+            assert "secret" not in repr(out.output)
+            if not sent:
+                assert out.metadata["delivery"] == {"mode": "tool", "messages": 0, "withheld": True}
+
+    async def test_a_draft_is_withheld_when_a_send_needs_a_person(self):
+        """An approval cannot be asked for a call the model did not make. Where the gate would ask, the
+        draft is not delivered: nothing goes out until a person lets it go."""
+
+        def ask(_text: str, ctx):
+            return Verdict.escalate("a person checks what goes out") if ctx.tool_name == SEND_MESSAGE_NAME else True
+
+        fresh()
+        model = TestModel(responses=["Your refund is approved.", "must not be requested"])
+        agent = Agent(name="bot", model=model, delivery="tool", guardrails=[guardrail(ask, stages=["tool_args"])])
+        out, messages = await run(agent)
+        assert messages == [] and out.output.collect_text() == "" and out.status.code == "success"
+        assert out.metadata["delivery"] == {"mode": "tool", "messages": 0, "withheld": True}
+
+    async def test_a_draft_a_tool_args_guardrail_rewrites_is_delivered_as_rewritten(self):
+        fresh()
+        rail = guardrail(lambda text: text.replace("4111", "[card]"), stages=["tool_args"], action="redact")
+        model = TestModel(responses=["Card 4111 charged.", "must not be requested"])
+        out, messages = await run(Agent(name="bot", model=model, delivery="tool", guardrails=[rail]))
+        assert [m["text"] for m in messages] == ["Card [card] charged."]
+        assert out.output.collect_text() == "Card [card] charged."  # the output is what was delivered
+
+    async def test_the_reply_of_on_max_iter_passes_the_gate_on_sends_too(self):
+        def gate(_text: str, ctx):
+            return Verdict.block("not for users") if "budget" in ctx.tool_args["text"] else True
+
+        for first, sent in ((calls(send("On it."), ("work", {})), ["On it."]), (calls(("work", {})), [])):
+            fresh()
+            model = TestModel(responses=[first, "must not be requested"])
+            agent = Agent(
+                name="bot",
+                model=model,
+                tools=[Tool(name="work", handler=work)],
+                delivery="tool",
+                max_iter=1,
+                on_max_iter="stop",  # its reply names the budget
+                guardrails=[guardrail(gate, stages=["tool_args"], name="gate")],
+            )
+            out, messages = await run(agent)
+            assert [m["text"] for m in messages] == sent and out.output.collect_text() == "".join(sent)
+
+    async def test_the_receipt_says_what_a_person_changed_when_approving(self):
+        """A person approving a send may edit it. What went out is then not what the model wrote, and the
+        receipt says so, as after a guardrail's rewrite."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.types.events import ApprovalEvent
+
+        def ask(_text: str, ctx):
+            return Verdict.escalate("a person checks what goes out") if ctx.tool_name == SEND_MESSAGE_NAME else True
+
+        fresh()
+        set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+        model = TestModel(
+            responses=[calls(send("Your refund of 500 is approved.", end_turn=True)), "must not be requested"]
+        )
+        agent = Agent(
+            name="bot",
+            model=model,
+            delivery="tool",
+            guardrails=[guardrail(ask, stages=["tool_args"], name="ask")],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        events = [event async for event in in_time(agent(prompt="go"))]
+        approval = next(event for event in events if isinstance(event, ApprovalEvent))
+        # "Don't ask again" for this tool would be "never ask again for anything the agent says".
+        assert approval.grantable is False
+        set_run_context(RunContext(parent_id=events[-1].run_id, tracing_provider=InMemoryTracingProvider))
+        edit = {"approved": True, "override_input": {"text": "Your refund of 50 is approved."}}
+        out, messages = await run(agent, resume={approval.approval_id: edit})
+        assert [m["text"] for m in messages] == ["Your refund of 50 is approved."]
+        assert results(out) == [
+            "Sent, after a guardrail changed it. The user received: Your refund of 50 is approved. "
+            "The turn ends after this step."
+        ]
+
     async def test_a_subagent_answers_with_text(self):
         fresh()
         inner_seen = []
@@ -669,6 +835,19 @@ class TestWhatCountsAsSent:
             "Sent. The turn ends after this step.",
         ]
 
+    async def test_the_receipt_says_what_a_tool_args_guardrail_changed(self):
+        """The agent's ``tool_args`` guardrails rewrite the call before the tool runs. What went out is then
+        not what the model wrote either, and the receipt says so."""
+        fresh()
+        rail = guardrail(lambda text: text.replace("4111", "[card]"), stages=["tool_args"], action="redact")
+        model = TestModel(responses=[calls(send("Card 4111 charged.")), calls(send("Done.", True)), "not requested"])
+        out, messages = await run(Agent(name="bot", model=model, delivery="tool", guardrails=[rail]))
+        assert [m["text"] for m in messages] == ["Card [card] charged.", "Done."]
+        assert results(out) == [
+            "Sent, after a guardrail changed it. The user received: Card [card] charged.",
+            "Sent. The turn ends after this step.",
+        ]
+
     async def test_an_empty_answer_delivers_nothing(self):
         """An empty answer is not kept in memory, so the last message there is the user's prompt, or a
         runtime notice: neither is the agent's reply."""
@@ -848,6 +1027,43 @@ class TestAStepWithoutTheTool:
             assert model.call_count == 1 and out.status.reason == "max_iter"
             assert [m["text"] for m in messages] == sent
             assert out.output.collect_text() == "\n\n".join(sent)
+
+    async def test_the_reply_of_an_on_max_iter_hook_keeps_its_file_and_what_was_sent(self, tmp_path):
+        """The turn's output is all it told the user and what the hook's reply holds besides text: the file
+        is not lost to the text of the messages, nor the messages to a reply that is only a file."""
+        from timbal.types.content import FileContent, TextContent
+        from timbal.types.file import File
+
+        path = tmp_path / "report.txt"
+        path.write_text("1,2,3")
+        for before, caption in (
+            ("Preparing the report.", "Here is what I have."),
+            ("Preparing the report.", ""),
+            (None, "Here is what I have."),
+            (None, ""),
+        ):
+
+            def hook(_context, caption=caption) -> Message:
+                content = [TextContent(text=caption)] if caption else []
+                return Message(role="assistant", content=[*content, FileContent(file=File.validate(str(path)))])
+
+            fresh()
+            first = calls(send(before), ("work", {})) if before else calls(("work", {}))
+            model = TestModel(responses=[first, "must not be requested"])
+            agent = Agent(
+                name="bot",
+                model=model,
+                tools=[Tool(name="work", handler=work)],
+                delivery="tool",
+                max_iter=1,
+                on_max_iter=hook,
+            )
+            out, messages = await run(agent)
+            sent = [text for text in (before, caption) if text]
+            assert model.call_count == 1 and out.status.reason == "max_iter"
+            assert [m["text"] for m in messages] == sent, (before, caption)
+            assert out.output.collect_text() == "\n\n".join(sent), (before, caption)
+            assert len(files_of(out.output.content)) == 1, (before, caption)
 
     async def test_a_slash_command_reaches_the_user(self):
         """A command's output is the turn's answer and no model runs: nothing else could send it."""
@@ -1353,6 +1569,67 @@ class TestAStepWithoutTheTool:
                 out, _ = await run(agent, "what was in the file?", delivery="text")
                 assert out.metadata["compaction"]["triggered"] is True
                 assert files_in(read[-1]) == ["tool result"], (command, stored)
+
+    async def test_a_slash_command_resumed_after_an_approval_is_delivered_like_any(self, tmp_path):
+        """A command that paused resumes as a command, whichever store its history comes back from: its answer
+        is delivered, screened and kept as for one that never paused, and no model is called for it."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
+        from timbal.types.content import FileContent, TextContent
+        from timbal.types.events import ApprovalEvent
+        from timbal.types.file import File
+
+        path = tmp_path / "chart.txt"
+        path.write_text("1,2,3")
+
+        def chart(caption: str = "") -> Message:
+            content = [TextContent(text=caption)] if caption else []
+            return Message(role="assistant", content=[*content, FileContent(file=File.validate(str(path)))])
+
+        def no_files(_text: str, ctx):
+            held = any(isinstance(item, FileContent) for item in ctx.payload.content)
+            return Verdict.block("an attachment") if held else True
+
+        number = 0
+        for command, refuse, sent, files in (
+            ("/chart Here.", False, ["Here."], 1),
+            ("/chart", False, [], 1),
+            ("/chart Here.", True, ["That file cannot be shown."], 0),
+            ("/chart", True, ["That file cannot be shown."], 0),
+        ):
+            for stored in (False, True):
+                number += 1
+                provider = InMemoryTracingProvider
+                if stored:
+                    provider = JsonlTracingProvider.configured(_path=tmp_path / f"traces{number}.jsonl")
+                rails = []
+                if refuse:
+                    rails = [
+                        guardrail(
+                            no_files,
+                            stages=["tool_result"],
+                            name="no_files",
+                            blocked_message="That file cannot be shown.",
+                        )
+                    ]
+                fresh()
+                set_run_context(RunContext(tracing_provider=provider))
+                model = TestModel(responses=["must not be requested"])
+                agent = Agent(
+                    name="bot",
+                    model=model,
+                    tools=[Tool(handler=chart, command="chart", requires_approval=True)],
+                    delivery="tool",
+                    guardrails=rails,
+                    tracing_provider=provider,
+                )
+                events = [event async for event in in_time(agent(prompt=command))]
+                parked = events[-1]
+                assert parked.status.reason == "approval_required" and message_events(events) == []
+                approval = next(event for event in events if isinstance(event, ApprovalEvent))
+                set_run_context(RunContext(parent_id=parked.run_id, tracing_provider=provider))
+                out, messages = await run(agent, command, resume={approval.approval_id: True})
+                assert [m["text"] for m in messages] == sent, (command, refuse, stored)
+                assert model.call_count == 0 and len(files_of(out.output.content)) == files, (command, refuse, stored)
 
     async def test_a_slash_command_that_returns_a_file(self, tmp_path):
         """A message event carries text. The result's files are in the run's output, as in text mode."""
