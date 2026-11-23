@@ -30,15 +30,19 @@ def message_text(message: Message) -> str:
 def replace_message_text(message: Message, new_text: str) -> None:
     """Swap a message's text for ``new_text`` in place, preserving non-text content.
 
-    The first text block carries the replacement; further text blocks are dropped
-    (they were part of the same checked text).
+    The first text block carries the replacement; further text blocks are dropped (they were
+    part of the same checked text). Its OpenAI Responses ``phase`` is the one every text block
+    had (one preamble, one final answer); a message whose blocks had different ones (a preamble
+    and an answer) gets none, since one phase would misname part of the text.
     """
+    phases = {c.phase for c in message.content if isinstance(c, TextContent)}
+    phase = phases.pop() if len(phases) == 1 else None
     new_content: list[Any] = []
     replaced = False
     for c in message.content:
         if isinstance(c, TextContent):
             if not replaced:
-                new_content.append(TextContent(text=new_text))
+                new_content.append(TextContent(text=new_text, phase=phase))
                 replaced = True
             continue
         new_content.append(c)

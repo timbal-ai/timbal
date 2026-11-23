@@ -260,6 +260,10 @@ def _one_text(values: list, items: list, chunks: bool) -> list:
     return [TextContent(text="".join(parts)), *files] if parts else files
 
 
+# Runtime notices that ask for an answer without tools (see ``Agent._take_back``).
+_TOOLLESS_NOTICES = frozenset({"max_iter", "max_iter_notice", "denial_limit"})
+
+
 class _CommandRun:
     """The slash command a turn runs: what ``_process_tool_event`` learns of its result, for the turn."""
 
@@ -3188,11 +3192,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         self._send_tools[name] = tool
         return tool
 
-    def _delivered(self, current_span: Any, before: int = 0) -> OutputEvent | None:
+    def _delivered(self, current_span: Any, before: int = 0, rest: Sequence = ()) -> OutputEvent | None:
         """The turn's output with ``delivery="tool"``: what it sent, as one assistant message (None if nothing).
 
         ``before``: the messages the turn sent in the run this one resumes (a pause for an approval or an
         answer). The output is this run's own messages; with none, an empty one, since the turn did answer.
+        ``rest``: the files of a draft delivered with them, after the text.
         """
         sent = current_span.metadata.get("messages_sent")
         if not sent:
@@ -3208,14 +3213,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # It spoke before the pause: not a silent turn, though this run adds nothing.
             current_span.metadata.pop("silent", None)
             current_span.metadata["delivery"] = {"mode": "tool", "messages": 0, "before_pause": before}
-            reply = Message(role="assistant", content=[TextContent(text="")], stop_reason="end_turn")
+            reply = Message(role="assistant", content=[TextContent(text=""), *rest], stop_reason="end_turn")
             return self._synthetic_event("delivery", RunStatus(code="success", reason="end_turn"), output=reply)
         # It said something: not a silent turn, whatever it ended on (the silent reply as its last text or message).
         current_span.metadata.pop("silent", None)
         current_span.metadata["delivery"] = {"mode": "tool", "messages": len(sent)}
         if before:
             current_span.metadata["delivery"]["before_pause"] = before
-        reply = Message(role="assistant", content=[TextContent(text="\n\n".join(sent))], stop_reason="end_turn")
+        content = [TextContent(text="\n\n".join(sent)), *rest]
+        reply = Message(role="assistant", content=content, stop_reason="end_turn")
         return self._synthetic_event("delivery", RunStatus(code="success", reason="end_turn"), output=reply)
 
     def _deliver_text(self, current_span: Any, text: str, before: int = 0) -> bool:
@@ -3457,22 +3463,39 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
     @staticmethod
     def _reworded(message: Message, text: str) -> Message:
-        """A copy of ``message`` that says ``text``: its first text block carries it, its other text blocks
-        go, and what it holds besides text stays where it is. A copy, since the message may be the model
-        call's own output, which stays what the model produced."""
-        content: list = []
-        placed = False
-        for item in message.content:
-            if not isinstance(item, TextContent):
-                content.append(item)
-            elif not placed:
-                content.append(TextContent(text=text))
-                placed = True
-        if not placed:
-            content.append(TextContent(text=text))
-        return Message(
-            role=message.role, content=content, stop_reason=message.stop_reason, metadata=dict(message.metadata)
+        """A copy of ``message`` that says ``text``, as :func:`replace_message_text` rewrites a message: its
+        first text block carries it, its other text blocks go, and what it holds besides text stays where it
+        is. A copy, since the message may be the model call's own output, which stays what the model
+        produced."""
+        copy = Message(
+            role=message.role,
+            content=list(message.content),
+            stop_reason=message.stop_reason,
+            metadata=dict(message.metadata),
         )
+        replace_message_text(copy, text)  # (as every guardrail rewrite of a message: the phase rule is there)
+        return copy
+
+    @staticmethod
+    def _take_back(current_span: Any, written: str) -> None:
+        """A draft the checks kept back: out of the turn's memory and its stored history, so that the next
+        turn's model does not read as the reply it gave what the user never got. Only the turn's last
+        message, and only if it is that draft (``written``, its text). The model call's own output keeps
+        what the model wrote.
+
+        With it go the runtime notices right before it that asked for a tool-less answer (the budget is
+        spent, a denial limit took the tools away; both, when one step did both): that answer is gone, and
+        left at the end of the history a notice would tell the next turn, which has its tools, that it has
+        none.
+        """
+        memory = current_span.memory
+        if not (memory and memory[-1].role == "assistant" and message_text(memory[-1]).strip() == written):
+            return
+        memory.pop()
+        current_span._memory_dump.pop()
+        while memory and memory[-1].metadata.get("kind") in _TOOLLESS_NOTICES and memory[-1].is_runtime():
+            memory.pop()
+            current_span._memory_dump.pop()
 
     async def _as_delivered(self, current_span: Any, text: str) -> Message:
         """Replace the turn's last message, in memory and as stored, by one that says the text that went
@@ -3499,25 +3522,35 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         or a denial limit took the tools away). ``stored``: whether the answer is in memory. An empty one
         is not kept, and the last message there is then the user's prompt or a runtime notice.
 
-        A draft that is delivered gets a send's checks first (:meth:`_gate_draft`). Where they rewrote it,
+        A draft that is delivered gets a send's checks first (:meth:`_gate_draft`), and what it holds
+        besides text (a file) goes with it, also after messages the turn sent. Where the checks rewrote it,
         the message in the history is replaced by one that says what went out, and alone that message is
-        the output.
+        the output. Where they kept it back, it is taken out of the history (:meth:`_take_back`): the next
+        turn's model reads that the user got nothing of it.
         """
         metadata = current_span.metadata
-        draft = ""
-        if stored and not metadata.get("silent"):
-            draft = message_text(current_span.memory[-1]).strip()
+        last = current_span.memory[-1] if stored and not metadata.get("silent") else None
+        draft = message_text(last).strip() if last is not None else ""
+        # What the checks are shown with the text; and what goes out with it, its files (not the model's
+        # reasoning, which a user never receives).
+        rest = [item for item in last.content if not isinstance(item, TextContent)] if last is not None else []
+        files = [item for item in rest if isinstance(item, FileContent)]
+        if not (draft or files) or (offered and (before or metadata.get("messages_sent"))):
+            files = []  # nothing to deliver, or a private draft: neither its text nor its files go out
+            draft = ""
         joined = False
         text: str | None = draft
         reworded: Message | None = None
-        if draft and not (offered and (before or metadata.get("messages_sent"))):
-            rest = [item for item in current_span.memory[-1].content if not isinstance(item, TextContent)]
+        if draft:
             text = await self._gate_draft(current_span, send_name, draft, rest=rest)
-            if text is not None:
+            if text is None:
+                self._take_back(current_span, draft)
+                files = []
+            else:
                 joined = self._deliver_text(current_span, text, before)
                 if text != draft:
                     reworded = await self._as_delivered(current_span, text)
-        delivered = self._delivered(current_span, before)
+        delivered = self._delivered(current_span, before, files)
         if delivered is not None:
             if joined:
                 metadata["delivery"]["fallback"] = True
@@ -3543,9 +3576,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         written = message_text(reply).strip()
         rest = [item for item in reply.content if not isinstance(item, TextContent)]
         text = await self._gate_draft(current_span, send_name, written, screened=False, rest=rest)
+        rest = [item for item in rest if not isinstance(item, ThinkingContent)]  # what goes out with the text
         reworded: Message | None = None
         if text is None:
             rest = []
+            self._take_back(current_span, written)
         elif text:
             self._deliver_text(current_span, text, before)
             if text != written:
