@@ -344,6 +344,32 @@ class TestRootRunId:
         assert (await store.load(session.id)).root_run_id == first
         await restored.close()
 
+    @pytest.mark.parametrize("steps", range(16))
+    async def test_the_session_id_is_one_run_at_most(self, db, steps):
+        """Swept over where an interrupt lands in the first turn. A turn cut before it started hands its message
+        back, and the turn that answers it is another run: never a second run under the session's id (the
+        session's records of the cut attempt would name the run that answers). The run that did start the thread
+        is its root."""
+        provider, _ = db
+        session = ChatSession(make_agent(provider, Gate(released=True)))
+        session.send("hi")
+        for _ in range(steps):
+            await asyncio.sleep(0)
+        session.interrupt()
+        await until(lambda: not session.busy and not session.pending_messages())
+        log = [
+            r for r in session.log.peek()[0] if isinstance(r, dict) and r.get("kind") in ("turn_started", "interrupt")
+        ]
+        await session.close()
+        started = [r["run_id"] for r in log if r["kind"] == "turn_started"]
+        assert len(set(started)) == len(started)
+        for i, record in enumerate(log):
+            before = [r["run_id"] for r in log[:i] if r["kind"] == "turn_started"]
+            if record["kind"] == "interrupt" and record.get("run_id") and record["run_id"] not in before:
+                cut = record["run_id"]  # cut before it started
+                assert cut not in [r["run_id"] for r in log[i:] if r["kind"] == "turn_started"], f"{cut} ran again"
+        assert session.root_run_id == (started[0] if started else None)
+
     async def test_a_first_turn_that_died_before_acting_does_not_name_the_thread(self, db):
         """Cut while its model thought (nothing dispatched), its message runs again under another id: that run
         starts the thread, and the hint follows it, not the id the dead run had."""

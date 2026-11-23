@@ -651,9 +651,9 @@ class ChatSession:
             )
         self.id: str = session_id or uuid7(as_type="hex")  # type: ignore[assignment]
         # A caller's session_id is its own key and may be reused for the same conversation: running a turn under it
-        # would collide with the earlier thread's root run. Only an id generated here doubles as a run id, and
-        # only in this object: a restored session (from_store) never runs under its id (its first turn may have
-        # started under it and died).
+        # would collide with the earlier thread's root run. Only an id generated here doubles as a run id: in this
+        # object, for its first attempt at a first turn (_run_turn). A restored session (from_store) never runs
+        # under its id (its first turn may have started under it and died).
         self._generated_id = not session_id
         self.root_run_id: str | None = self.id if session_id and parent_id is None else None
         """The thread's root run as the platform knows it, sent with every MCP call of the session's turns as the
@@ -1849,6 +1849,9 @@ class ChatSession:
             if scheduler.head is None:
                 # A new thread: this turn is its root.
                 if self._generated_id:
+                    # Once: a turn cut or failed before it started hands its work back, and the turn that takes
+                    # it is another run, with an id of its own (and the thread's root if it is the one to start).
+                    self._generated_id = False
                     context = RunContext(id=self.id, tracing_provider=self._agent.tracing_provider)
                 else:
                     context = RunContext(tracing_provider=self._agent.tracing_provider)
