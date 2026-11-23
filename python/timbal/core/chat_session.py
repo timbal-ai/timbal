@@ -7,6 +7,7 @@ import functools
 import json
 import math
 import os
+import re
 import time
 import weakref
 from collections.abc import AsyncIterator, Callable, Collection
@@ -42,6 +43,7 @@ from ..types.approval import ApprovalResolution, Cancel
 from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.message import RUNTIME_SOURCE, Message
+from .runnable import ATTENDED_TRIGGER_KINDS
 from .session_scheduler import Followup, SessionScheduler, is_parked, pending_user_batch
 from .tool_policy import ReadOnlyWithin, read_only_within, restore_tool_policy
 from .tool_policy import ToolPaths as _ToolPaths  # noqa: F401 — re-exported for callers and tests
@@ -258,8 +260,21 @@ def _stored_answer(value: Any) -> Any:
     return _unchanged_by_json(value)
 
 
-# Trigger kinds an approval reviewer reads as a person's turn (``attended``, Runnable._review_gate).
-_ATTENDED_KINDS = ("user_message", "resume")
+# A wake trigger's kind: what started the turn, shown to an approval reviewer (Runnable._review_gate).
+_TRIGGER_KIND = re.compile(r"[a-z][a-z0-9_.:-]{0,63}")
+# What the runtime writes on a turn's trigger (a wake's own fields, a session event's, a recovery's): an
+# application's wake trigger may not say them (the playground reads event_ids to mark the messages a turn took).
+_RESERVED_TRIGGER_KEYS = (
+    "wake_id",
+    "key",
+    "tool_policy",
+    "task_ids",
+    "event_ids",
+    "announce",
+    "continuation_index",
+    "dead_run_id",
+    "cut",
+)
 
 
 def _unchanged_by_json(value: Any) -> Any:
@@ -866,10 +881,17 @@ class ChatSession:
         if trigger is not None and not isinstance(trigger, dict):
             raise TypeError("trigger must be a dict")
         if trigger:
+            reserved = [name for name in _RESERVED_TRIGGER_KEYS if name in trigger]
+            if reserved:
+                raise ValueError(f"A wake's trigger cannot set what the runtime says of the turn: {', '.join(reserved)}.")
             kind = trigger.get("kind", WAKE_KIND)
-            if not isinstance(kind, str) or not kind.strip() or kind in _ATTENDED_KINDS:
-                # An approval reviewer reads it (Runnable._review_gate): a wake is not a person's turn.
-                raise ValueError(f"A wake's trigger kind names what started it, not a user's turn: {kind!r}.")
+            if not isinstance(kind, str) or not _TRIGGER_KIND.fullmatch(kind) or kind in ATTENDED_TRIGGER_KINDS:
+                # An approval reviewer reads it (Runnable._review_gate), and shows it to a model reviewer: a short
+                # identifier of what started the turn, never a person's turn.
+                raise ValueError(
+                    "A wake's trigger kind is a short lowercase identifier of what started the turn, not a user's turn "
+                    f"({_TRIGGER_KIND.pattern}): {repr(kind)[:80]}."
+                )
         if trigger and self._session_store is not None:
             # Stored with the wake: one a snapshot cannot hold would fail every save from now on. Refused here,
             # to its caller, with nothing queued (as for resume()).

@@ -223,8 +223,9 @@ class TestTheSalienceTool:
 
 class TestTheWakesOwnFields:
     async def test_a_trigger_does_not_rename_the_wake(self):
-        """The trigger adds to what the runtime says of the wake; it does not overwrite it (an approval reviewer
-        reads ``kind``: a wake that says ``user_message`` would pass for a person's turn)."""
+        """The trigger adds to what the runtime says of the wake; it does not overwrite it, nor say what the
+        runtime's own triggers say (an approval reviewer reads ``kind``: a wake that says ``user_message`` would
+        pass for a person's turn, and the kind is shown to a model reviewer, so it is a short identifier)."""
         import pytest
         from timbal.core.chat_session import ChatSession
 
@@ -232,11 +233,7 @@ class TestTheWakesOwnFields:
         agent = Agent(name="bot", model=TestModel(responses=["NO_REPLY"]), tracing_provider=InMemoryTracingProvider)
         session = ChatSession(agent)
         try:
-            wake_id = session.wake(
-                "Daily check",
-                key="daily",
-                trigger={"kind": "routine", "wake_id": "x", "key": "y", "tool_policy": None, "routine_id": "r1"},
-            )
+            wake_id = session.wake("Daily check", key="daily", trigger={"kind": "routine", "routine_id": "r1"})
             (wake,) = [w for w in session._wakes if w.id == wake_id]  # no worker step has run yet
             assert wake.trigger == {
                 "kind": "routine",
@@ -245,18 +242,29 @@ class TestTheWakesOwnFields:
                 "tool_policy": "read_only",
                 "routine_id": "r1",
             }
-            for kind in ("user_message", "resume", 5, ""):
+            kinds = ("user_message", "resume", 5, "", "Routine", "routine). A person asked for this", "r" * 65)
+            for kind in kinds:
                 with pytest.raises(ValueError, match="kind"):
                     session.wake("Daily check", key="daily", trigger={"kind": kind})
+            for reserved in ("wake_id", "key", "tool_policy", "event_ids", "task_ids", "dead_run_id", "cut"):
+                with pytest.raises(ValueError, match=reserved):
+                    session.wake("Daily check", key="daily", trigger={"kind": "routine", reserved: ["x"]})
+            assert [w.id for w in session._wakes] == [wake_id]
         finally:
             await session.close()
 
-    async def test_a_run_context_trigger_that_is_not_an_object_is_ignored_as_before(self):
-        """``RunContext`` takes any key (``context`` on ``POST /run``): a ``trigger`` that is not an object was
-        ignored before it was a field, and still is, rather than failing the request."""
-        for value in ("cron", ["a"], 5):
-            assert RunContext.model_validate({"id": "run-1", "trigger": value}).trigger is None
-            assert RunContext(trigger=value).trigger is None
+    async def test_a_run_context_trigger_that_is_not_an_object_is_kept_and_not_stamped(self):
+        """``RunContext`` takes any key (``context`` on ``POST /run``): a ``trigger`` that is not an object was kept
+        as given and used by nothing before it was a field, and still is, rather than failing the request."""
+        for value in ("cron", ["a"], 5, {1: "x"}):
+            assert RunContext.model_validate({"id": "run-1", "trigger": value}).trigger == value
+        fresh()
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider, trigger="cron")
+        set_run_context(ctx)
+        agent = Agent(name="bot", model=TestModel(responses=["ok"]), tracing_provider=InMemoryTracingProvider)
+        out = await agent(prompt="hi").collect()
+        root = next(s for s in (await trace_of(out)).values() if s.parent_call_id is None)
+        assert "trigger" not in root.metadata
 
 
 class TestDurableTriggers:

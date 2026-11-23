@@ -300,6 +300,11 @@ def _approval_id_for(path: str, input_dump: Any) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:32]
 
 
+ATTENDED_TRIGGER_KINDS = ("user_message", "resume")
+"""Root ``metadata.trigger`` kinds an approval reviewer reads as a person's turn (``ApprovalRequest.attended``;
+no trigger at all counts too). What an application starts (a wake, a routine) must not use them."""
+
+
 class Runnable(ABC, BaseModel):
     """Abstract base class for all runnable components in the Timbal framework.
 
@@ -1828,7 +1833,7 @@ class Runnable(ABC, BaseModel):
         attended = (
             outermost is not None
             and posted_by_code is None
-            and (not isinstance(trigger, dict) or trigger.get("kind") in ("user_message", "resume"))
+            and (not isinstance(trigger, dict) or trigger.get("kind") in ATTENDED_TRIGGER_KINDS)
         )
         user_messages = user_messages[-reviewer.context_messages :] if reviewer.context_messages else []
         delegation = posted_by_code

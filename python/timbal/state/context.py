@@ -8,7 +8,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from uuid_extensions import uuid7
 
 from ..errors import SpanNotFound
@@ -250,20 +250,15 @@ class RunContext(BaseModel):
         description="Platform configuration for the run.",
     )
 
-    trigger: dict[str, Any] | None = Field(
+    trigger: Any = Field(
         default=None,
         description=(
-            "What started this run, stamped as the root span's metadata.trigger when it has none "
-            '(e.g. {"kind": "routine", "routine_id": ..., "fire_id": ..., "scheduled_at": ...}).'
+            "What started this run: an object is stamped as the root span's metadata.trigger when it has none "
+            '(e.g. {"kind": "routine", "routine_id": ..., "fire_id": ..., "scheduled_at": ...}). Any value is '
+            "kept as given, as any key of a run context was before this field existed; anything but an object "
+            "is not used."
         ),
     )
-
-    @field_validator("trigger", mode="before")
-    @classmethod
-    def _trigger_object(cls, value: Any) -> Any:
-        # A run context takes any key (``context`` on POST /run): one that is not an object was ignored before
-        # ``trigger`` was a field, and still is, rather than failing the request.
-        return value if isinstance(value, dict) else None
 
     tracing_provider: Any = Field(
         default=TRACING_UNSET,
