@@ -28,7 +28,7 @@ except ImportError:
 
 from .. import uploads
 from ..trace import Trace
-from .base import TracingProvider, _RedactedRunContextView
+from .base import TracingProvider, _redacted_trace, _RedactedRunContextView
 
 if TYPE_CHECKING:
     from ...config import PlatformConfig
@@ -78,16 +78,14 @@ _UNSAVED_MAX = 256
 
 
 class _Flight:
-    """One run's saves, single-flight: the round to send next, the PATCHes on the wire, the task sending them,
-    and how many saves were asked for against how many a successful PATCH carried."""
+    """One run's saves on one event loop, single-flight: the round to send next, the PATCHes on the wire, the
+    task sending them, and the rounds an older save on the wire may need the outcome of."""
 
     __slots__ = (
         "arrival",
         "context",
         "driver",
-        "joins",
         "key",
-        "landed",
         "loop",
         "next",
         "on_wire",
@@ -113,8 +111,6 @@ class _Flight:
         self.round_of: dict[asyncio.Task, asyncio.Future[None]] = {}  # save on the wire -> its round
         self.driver: asyncio.Task | None = None
         self.arrival: asyncio.Future[None] | None = None  # wakes the driver when a save joins
-        self.joins = 0
-        self.landed = 0
 
     def waits(self) -> list[asyncio.Future[None]]:
         """The rounds not settled yet: a read of this run must not overtake them."""
@@ -160,7 +156,7 @@ def _transient(exc: BaseException) -> bool:
     return isinstance(exc, httpx.TransportError | OSError | TimeoutError)
 
 
-def _settle(flight: _Flight, joined: asyncio.Future[None], covers: int, save: asyncio.Task) -> None:
+def _settle(flight: _Flight, joined: asyncio.Future[None], save: asyncio.Task) -> None:
     """A round's save finished. Success also settles earlier rounds still on the wire (a stalled
     PATCH): this one carried their state and newer."""
     flight.on_wire.pop(save, None)
@@ -185,9 +181,6 @@ def _settle(flight: _Flight, joined: asyncio.Future[None], covers: int, save: as
             # No later save of an ended run is coming to carry this one.
             (flight.provider or PlatformTracingProvider)._schedule_retry(flight)
         return
-    flight.landed = max(flight.landed, covers)
-    if flight.landed >= flight.joins:
-        PlatformTracingProvider._unsaved.pop(flight.key, None)
     index = flight.sent.index(joined)
     settled, flight.sent[: index + 1] = flight.sent[: index + 1], []
     for future in settled:
@@ -196,9 +189,8 @@ def _settle(flight: _Flight, joined: asyncio.Future[None], covers: int, save: as
 
 
 class SaveSuperseded(RuntimeError):
-    """A save that was not sent: a newer save of the run went out from another event loop after it (or after
-    its copy of the run was made), whose outcome this one cannot wait for. Sent, it would be numbered above
-    that save and the host would keep the older state."""
+    """A resend that was not sent: a newer save of the run went out from another event loop after the PATCH it
+    resends, whose outcome this one cannot wait for. Sent, it would be numbered above that save."""
 
 
 async def _carried(flight: _Flight | None, joined: asyncio.Future[None] | None, key: str, snapshot: int) -> bool:
@@ -491,53 +483,6 @@ def _epoch_ns() -> int:
     return _epoch_offset_ns + perf_counter_ns()
 
 
-class _Copies:
-    """The copies of one run that a provider with a trace redactor stores (each ``put`` makes one, a redacted copy
-    of the trace as it is then), numbered in the order they were made, and the newest that has taken a snapshot
-    number. Kept on the run's own context, so it lives exactly as long as some copy of the run can still be sent.
-
-    A copy older than that one never takes a number: numbered above a newer state, the host would keep it. A
-    held copy is sent again by a shutdown flush, a background resend or a keep-alive, which picked it before a
-    newer one was made, and by the PATCHes of a flight whose newest copy another event loop overtook."""
-
-    __slots__ = ("made", "numbered")
-
-    def __init__(self) -> None:
-        self.made = 0
-        self.numbered = 0
-
-
-def _copy_of(run_context: RunContext | None) -> tuple[_Copies, int] | None:
-    """The run's copies and this copy's place among them; None for a run context that is no copy (no redactor:
-    its trace is read when it is sent, always the run's latest state). Called with ``_snapshot_lock`` held."""
-    if not isinstance(run_context, _RedactedRunContextView):
-        return None
-    origin = run_context._original.__dict__
-    copies = origin.get("_platform_copies")
-    if copies is None:
-        copies = origin["_platform_copies"] = _Copies()
-    version = run_context.__dict__.get("_platform_copy")
-    if version is None:
-        # The first provider call that sees it: put() made it in this same step.
-        copies.made += 1
-        version = run_context.__dict__["_platform_copy"] = copies.made
-    return copies, version
-
-
-def _older_copy(run_context: RunContext, than: RunContext | None) -> bool:
-    """``run_context`` is a copy made before ``than`` (both copies of one run)."""
-    with _snapshot_lock:
-        mine, other = _copy_of(run_context), _copy_of(than)
-    return mine is not None and other is not None and mine[1] < other[1]
-
-
-def _superseded(run_context: RunContext) -> bool:
-    """A newer copy of the run has taken a snapshot number: this one must never take one."""
-    with _snapshot_lock:
-        copy = _copy_of(run_context)
-        return copy is not None and copy[0].numbered > copy[1]
-
-
 class _Patches:
     """A run's PATCHes out in this process, from every event loop, and the newest snapshot number taken for it
     while any of them is out (see ``_carried``). Kept only while one is out: what it orders is in flight."""
@@ -553,7 +498,7 @@ class _Patches:
 _patches: dict[str, _Patches] = {}
 
 
-def _next_snapshot(key: str | None = None, *, after: int | None = None, copy: RunContext | None = None) -> int | None:
+def _next_snapshot(key: str | None = None, *, after: int | None = None) -> int | None:
     """Strictly increasing within the process and, by the clock, across processes (ns since the epoch).
 
     The platform ignores a save whose snapshot is not newer than the last it applied to the run, and a
@@ -567,9 +512,6 @@ def _next_snapshot(key: str | None = None, *, after: int | None = None, copy: Ru
     newer number was taken for the run since: checked in the same step, since another event loop's save can
     take one at any moment, and the resend would be numbered above it (see ``_carried``).
 
-    ``copy``: the run context the PATCH sends. None, and nothing taken, when it is a copy older than one that
-    has taken a number already (``_Copies``); checked in the same step, for the same reason.
-
     The lock is re-entrant: a collection on this thread can finish a save left suspended in a closed event loop,
     and that save's cleanup (``_patch_done``) asks for the lock. What a cleanup changes in between is put back.
     """
@@ -579,9 +521,6 @@ def _next_snapshot(key: str | None = None, *, after: int | None = None, copy: Ru
             entry = _patches.get(key)
             if entry is not None and entry.newest > after:
                 return None
-        copied = _copy_of(copy)
-        if copied is not None and copied[0].numbered > copied[1]:
-            return None
         _last_snapshot = max(_last_snapshot + 1, _epoch_ns())
         if key is not None:
             entry = _patches.get(key)
@@ -590,9 +529,32 @@ def _next_snapshot(key: str | None = None, *, after: int | None = None, copy: Ru
             entry.out += 1
             entry.newest = max(entry.newest, _last_snapshot)
             _patches[key] = entry  # also when a cleanup that ran meanwhile let go of it
-        if copied is not None:
-            copied[0].numbered = max(copied[0].numbered, copied[1])
         return _last_snapshot
+
+
+def _owe(key: str, run_context: RunContext) -> None:
+    """Note the run as owed (``_unsaved``): asked to be stored as it is now. Only a save that takes its number
+    after this, so sends the run as it is now or later, and lands, settles it (``_landed``)."""
+    unsaved = PlatformTracingProvider._unsaved
+    with _snapshot_lock:
+        run_context.__dict__["_platform_asked"] = _last_snapshot
+        unsaved[key] = run_context
+        unsaved.move_to_end(key)
+        while len(unsaved) > _UNSAVED_MAX:
+            _, dropped = unsaved.popitem(last=False)
+            # A shutdown flush can no longer send or report it.
+            logger.error("platform_trace_unsaved_evicted", run_id=dropped.id, max_runs=_UNSAVED_MAX)
+
+
+def _landed(key: str, snapshot: int) -> None:
+    """The PATCH numbered ``snapshot`` was stored: the run is no longer owed if that PATCH was sent after the run
+    was last asked to be stored. A save of the run as it was earlier (another event loop's, answered late) does
+    not settle a newer request whose own save failed."""
+    unsaved = PlatformTracingProvider._unsaved
+    with _snapshot_lock:
+        owed = unsaved.get(key)
+        if owed is not None and owed.__dict__.get("_platform_asked", -1) < snapshot:
+            del unsaved[key]
 
 
 def _patch_done(key: str) -> None:
@@ -1054,37 +1016,38 @@ class PlatformTracingProvider(TracingProvider):
 
     @classmethod
     @override
+    async def put(cls, run_context: RunContext) -> None:
+        """See base class. With a trace redactor, ``_store`` gets the run itself and each PATCH redacts it when it
+        is sent (``_save``): a copy made here could be sent after a newer save of the run, by a flush, a background
+        resend or another event loop, and the host would keep the older state. Exporters get the redacted copy, as
+        from the base class."""
+        exported = run_context
+        if cls._trace_redactor is not None and cls._exporters:
+            exported = _RedactedRunContextView(run_context, _redacted_trace(run_context._trace, cls._trace_redactor))
+        await cls._store(run_context)
+        for exporter in cls._exporters:
+            try:
+                await exporter.export(exported)
+            except Exception:
+                pass
+
+    @classmethod
+    @override
     async def _store(cls, run_context: RunContext) -> None:
         """See base class. Single-flight per run: a save that arrives while one is on the wire joins the
         next round, which goes out once, from the latest state, when that one is back (or has stalled
         for ``_stall_s``). The caller waits for the round carrying its state; cancelling it does not
         cancel the save."""
         _, _, key = cls._target(run_context)
-        unsaved = PlatformTracingProvider._unsaved
-        if _superseded(run_context):
-            # A copy picked before a newer one was made (a flush, a background resend, a keep-alive), and the newer
-            # one has gone out: sent, it would be numbered above it. Not sent. _unsaved is left as it is: only a save
-            # that lands takes a run out of it, and the newer copy's save put itself there.
-            raise SaveSuperseded("a newer copy of this run has been sent: this older one is not")
         loop = asyncio.get_running_loop()
-        keepalive = PlatformTracingProvider._keepalives.get(key)
-        if keepalive is None or not _older_copy(run_context, keepalive.context):
-            cls._arm_keepalive(key, run_context, loop)
+        cls._arm_keepalive(key, run_context, loop)
         flights = PlatformTracingProvider._flights
         flight = flights.get(key)
         if flight is None or flight.loop is not loop:
             flight = flights[key] = _Flight(key, loop)
-        if not _older_copy(run_context, flight.context):
-            flight.context = run_context
+        flight.context = run_context
         flight.provider = cls
-        flight.joins += 1
-        if not _older_copy(run_context, unsaved.get(key)):
-            unsaved[key] = run_context  # what is resent if the run's saves do not land: its newest copy
-        unsaved.move_to_end(key)
-        while len(unsaved) > _UNSAVED_MAX:
-            _, dropped = unsaved.popitem(last=False)
-            # A shutdown flush can no longer send or report it.
-            logger.error("platform_trace_unsaved_evicted", run_id=dropped.id, max_runs=_UNSAVED_MAX)
+        _owe(key, run_context)
         if not PlatformTracingProvider._exit_hook:
             PlatformTracingProvider._exit_hook = True
             atexit.register(_flush_at_exit)
@@ -1169,7 +1132,7 @@ class PlatformTracingProvider(TracingProvider):
                     flight.on_wire[save] = loop.time()
                     flight.rounds.append(joined)
                     flight.round_of[save] = joined
-                    save.add_done_callback(functools.partial(_settle, flight, joined, flight.joins))
+                    save.add_done_callback(functools.partial(_settle, flight, joined))
                     continue
                 flight.arrival = loop.create_future()
                 await asyncio.wait(
@@ -1218,7 +1181,7 @@ class PlatformTracingProvider(TracingProvider):
                     logger.info("platform_trace_retry_landed", run_id=context.id, attempts=attempt + 1)
                     return
                 except SaveSuperseded:
-                    return  # a newer copy of the run went out from another event loop: its saves own it now
+                    return  # a newer save of the run went out from another event loop: its saves own it now
                 except Exception as e:
                     if not _transient(e):
                         logger.error("platform_trace_retry_rejected", run_id=context.id, error=str(e))
@@ -1258,9 +1221,11 @@ class PlatformTracingProvider(TracingProvider):
             for flight in flights.values():
                 if flight.loop is loop and flight.arrival is not None and not flight.arrival.done():
                     flight.arrival.set_result(None)  # re-evaluate with _closing set
+            with _snapshot_lock:  # other event loops note and settle runs meanwhile
+                owed = list(PlatformTracingProvider._unsaved.items())
             orphans = [
                 context
-                for key, context in PlatformTracingProvider._unsaved.items()
+                for key, context in owed
                 if (flight := flights.get(key)) is None or flight.loop is not loop or flight.driver is None
             ]
             orphans.sort(key=lambda context: not _ended(context))
@@ -1270,7 +1235,8 @@ class PlatformTracingProvider(TracingProvider):
             waits = [*resends, *(r for f in flights.values() if f.loop is loop for r in f.waits())]
             if waits:
                 await asyncio.wait(waits, timeout=timeout)
-            left = [context.id for context in PlatformTracingProvider._unsaved.values()]
+            with _snapshot_lock:
+                left = [context.id for context in PlatformTracingProvider._unsaved.values()]
             if left:
                 logger.error("platform_trace_flush_incomplete", run_ids=left, timeout_s=timeout)
             return left
@@ -1340,22 +1306,26 @@ class PlatformTracingProvider(TracingProvider):
         delta = not plain and not shrink and cls._sending_deltas(caps)
         # Taken with no await before model_dump(), so numbers follow snapshot order. Counted as out for the run
         # until this PATCH is over (_patch_done), resends included: _carried compares against it.
-        snapshot = _next_snapshot(key, after=after, copy=run_context)
+        snapshot = _next_snapshot(key, after=after)
         if snapshot is None:
-            # A newer save of the run went out: since the PATCH this resends (another event loop, since the check that
-            # allowed it), or with a newer copy of the run than this one. Not sent: that save's outcome. The run stays
-            # in _unsaved: that save may still be out, carrying this same copy, and fail (only a save that lands takes
-            # a run out of it).
+            # A resend, and a newer save of the run went out since the check that allowed it (another event loop).
+            # Not sent: that save's outcome. The run stays in _unsaved: that save may still be out and fail (only a
+            # save that lands takes a run out of it, _landed).
             await _newer_outcome(flight, joined)
             return
         try:
             # Serialized before the await: model_dump() shares the agent's live memory list, which keeps growing
-            # while the PATCH is in flight. Same encoding httpx applies to json=.
+            # while the PATCH is in flight. Same encoding httpx applies to json=. The run itself, redacted now when
+            # the provider redacts (put() passes it as is): every PATCH sends the run as it is at its number, so a
+            # PATCH numbered later never carries an older state (no copy of the run is held and sent afterwards).
+            sending = run_context
+            if cls._trace_redactor is not None and not isinstance(run_context, _RedactedRunContextView):
+                sending = _RedactedRunContextView(run_context, _redacted_trace(run_context._trace, cls._trace_redactor))
             root_stored = False
             if delta:
-                body, cache_body, sent, root_stored = cls._delta_body(run_context, rev, key, snapshot)
+                body, cache_body, sent, root_stored = cls._delta_body(sending, rev, key, snapshot)
             else:
-                trace = run_context._trace.model_dump()
+                trace = sending._trace.model_dump()
                 payload = {"parent_id": run_context.parent_id, "trace": _shrink(trace) if shrink else trace}
                 if rev is not None:
                     payload["rev"] = rev
@@ -1455,6 +1425,7 @@ class PlatformTracingProvider(TracingProvider):
                 if not resend:
                     # Still behind after numbering above it: another process is writing this run right now.
                     logger.warning("platform_trace_save_superseded", run_id=run_context.id, stored=int(stored))
+                    _landed(key, snapshot)  # that process holds it now: nothing this one owes it is left to send
                     return
                 if await _carried(flight, joined, key, snapshot):
                     return
@@ -1469,6 +1440,7 @@ class PlatformTracingProvider(TracingProvider):
                 # A whole trace replaces the platform's span rows: what they acknowledged is gone.
                 PlatformTracingProvider._delta_runs[key].acked.clear()
             cls._remember(key, snapshot, cache_body)
+            _landed(key, snapshot)
         finally:
             _patch_done(key)
 
