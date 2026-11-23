@@ -990,6 +990,141 @@ class TestSingleFlight:
         assert len(patches) == 3  # the stalled one and those two: the older copy was not sent again
         assert stored_mid_run is False
 
+    async def test_a_flush_never_sends_a_copy_older_than_one_already_stored(self, monkeypatch):
+        """With a trace redactor every save carries its own copy of the run. A shutdown flush on another event loop
+        picks the copy it finds, and pauses before it takes a number; this loop then stores a newer copy, the run's
+        end. The flush's copy, sent now, would be numbered above the end and the host would take it."""
+        import threading
+
+        server = FakePlatform()
+        main = threading.get_ident()
+        first_sent, flush_paused, flush_go = asyncio.Event(), threading.Event(), threading.Event()
+        patches, ends = [], []  # ends: the stored root's t1 after each PATCH the host took
+        hold_first = asyncio.Event()
+
+        async def request(method, path, headers=None, **kwargs):
+            if method != "PATCH":
+                return await server.request(method, path, headers=headers, **kwargs)
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) == 1:
+                first_sent.set()
+                await hold_first.wait()
+            response = await server.request(method, path, headers=headers, **kwargs)
+            ends.append(server.runs[ctx.id]["trace"][0]["t1"])
+            return response
+
+        real_save = PlatformTracingProvider.__dict__["_save"].__func__
+
+        async def save(cls, *args, **kwargs):
+            if threading.get_ident() != main and not flush_go.is_set():
+                flush_paused.set()  # the flush has picked its copy and not taken a number yet
+                flush_go.wait(10)
+            return await real_save(cls, *args, **kwargs)
+
+        monkeypatch.setattr(PlatformTracingProvider, "_save", classmethod(save))
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        flushed = []
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))  # its copy: no end yet
+            await asyncio.wait_for(first_sent.wait(), 5)
+            other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
+            other_loop.start()
+            assert await asyncio.to_thread(flush_paused.wait, 10)
+            ctx._trace["r"].t1 = 5
+            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is True  # the end, stored
+            flush_go.set()
+            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
+            assert not other_loop.is_alive()
+            hold_first.set()
+            await asyncio.wait_for(mid_run, 5)
+        assert ends[0] == 5 and all(end == 5 for end in ends)  # the host never went back to the older copy
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 5
+        assert flushed == [[]]
+
+    def test_a_save_collected_while_the_snapshot_lock_is_held_does_not_wait_for_itself(self, monkeypatch):
+        """A save left suspended when its event loop was closed is finished by the garbage collector, on whatever
+        thread a collection happens to run: also on one that holds the lock the save's cleanup asks for."""
+        import gc
+        import sys
+        import threading
+
+        # This test's own lock, of the kind the module uses, and its own records: if the save waits for itself, it
+        # waits on these, and nothing else in the process is held up.
+        lock_kind = type(platform_module._snapshot_lock)
+        monkeypatch.setattr(
+            platform_module,
+            "_snapshot_lock",
+            threading.RLock() if lock_kind is type(threading.RLock()) else threading.Lock(),
+        )
+        monkeypatch.setattr(platform_module, "_patches", {})
+        monkeypatch.setattr(sys, "unraisablehook", lambda _info: None)  # "Task was destroyed but it is pending"
+        never = []
+
+        async def request(method, **_):
+            assert method == "PATCH"
+            if not never:
+                never.append(None)
+                await asyncio.get_running_loop().create_future()  # left on the wire: its loop closes
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+
+        def context():
+            ctx = RunContext(tracing_provider=provider)
+            ctx.platform_config = CONFIG
+            ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+            return ctx
+
+        left, other = context(), context()
+        _, _, key = PlatformTracingProvider._target(left)
+        allocations = []
+
+        class Collecting(platform_module._Patches):
+            """A collection that lands on this allocation, made with the lock held."""
+
+            __slots__ = ()
+
+            def __init__(self):
+                if not allocations:
+                    allocations.append(gc.collect())
+                super().__init__()
+
+        gc.collect()
+        gc.disable()  # nothing is collected below but where the test says
+        try:
+            with patch("timbal.platform.utils._request", request):
+
+                def leave_a_save():
+                    loop = asyncio.new_event_loop()
+                    loop.create_task(provider.put(left))
+
+                    async def out():
+                        while key not in platform_module._patches:
+                            await asyncio.sleep(0)
+
+                    loop.run_until_complete(asyncio.wait_for(out(), 5))
+                    loop.close()
+
+                first = threading.Thread(target=leave_a_save)
+                first.start()
+                first.join(10)
+                flushed = []  # the run sent again from another loop: its first loop's save is now only garbage
+                flush = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
+                flush.start()
+                flush.join(10)
+                assert flushed == [[]]
+                monkeypatch.setattr(platform_module, "_Patches", Collecting)
+                saving = threading.Thread(target=lambda: asyncio.run(provider.put(other)), daemon=True)
+                saving.start()
+                saving.join(10)
+        finally:
+            gc.enable()
+        assert not saving.is_alive()  # the save did not wait for itself
+        assert allocations and allocations[0] > 0  # a collection ran inside the lock, and found the save left behind
+
     async def test_a_stalled_patch_keeps_a_bounded_number_of_later_outcomes(self, monkeypatch):
         """While one PATCH is out, the run's end goes past it again and again and fails each time. What the stalled
         PATCH may need is the newest of those outcomes, not all of them: each failure holds the body it sent."""
