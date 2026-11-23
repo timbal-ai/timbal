@@ -651,11 +651,18 @@ class ChatSession:
             )
         self.id: str = session_id or uuid7(as_type="hex")  # type: ignore[assignment]
         # A caller's session_id is its own key and may be reused for the same conversation: running a turn under it
-        # would collide with the earlier thread's root run. Only an id generated here doubles as a run id.
-        self._generated_id = session_id is None
-        self.root_run_id: str | None = self.id if self._generated_id and parent_id is None else None
-        """The thread's root run (monolith#567), sent to the platform as the session hint. None while unknown:
-        continued from ``parent_id`` without it, or restored from a snapshot that did not record it."""
+        # would collide with the earlier thread's root run. Only an id generated here doubles as a run id, and
+        # only in this object: a restored session (from_store) never runs under its id (its first turn may have
+        # started under it and died).
+        self._generated_id = not session_id
+        self.root_run_id: str | None = self.id if session_id and parent_id is None else None
+        """The thread's root run as the platform knows it, sent with every MCP call of the session's turns as the
+        session hint (``timbal.ai/session_id``, monolith#565). A session opened with its own ``session_id`` and
+        no ``parent_id``: that id, which the platform's chat reserves as the thread's root run (no turn runs
+        under it here: the first turn gets a run id of its own, stored with no parent). A generated id: the run
+        that started the thread, once one has (the first turn runs under the session's id, so it is
+        ``session.id``). None while unknown: continued from ``parent_id``, or restored from a snapshot written
+        before the field existed (the first turn of one that had none sets it). Stored in the snapshot."""
         self.busy_mode: SendMode = busy_mode
         self.on_dead_turn: OnDeadTurn = on_dead_turn
         # As what they mean, whatever number or truth value the caller passed: a snapshot holds them.
@@ -1845,12 +1852,13 @@ class ChatSession:
                     context = RunContext(id=self.id, tracing_provider=self._agent.tracing_provider)
                 else:
                     context = RunContext(tracing_provider=self._agent.tracing_provider)
-                self.root_run_id = context.id
             else:
                 context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
             context._tracing_provider = self._turn_provider(context._tracing_provider)
             context._steering = options.steer
-            context._session_id = self.root_run_id
+            # The session hint: the thread's root run, or this turn when it starts the thread and the session
+            # has none (it becomes the root once it is the head, see _pump).
+            context._session_id = self.root_run_id or (context.id if context.parent_id is None else None)
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
             context._cut = asyncio.Event()
@@ -2020,6 +2028,8 @@ class ChatSession:
                     if not started:
                         started = True
                         self._scheduler.note_run(context.id)
+                        if self.root_run_id is None and context.parent_id is None:
+                            self.root_run_id = context.id  # it started the thread
                         self.turns += 1
                         self._parked = False  # a resume took the answers: what is stored now is this turn
                         self._in_flight = in_flight
@@ -2504,6 +2514,16 @@ class ChatSession:
         loaded._trace = trace
         return loaded
 
+    def _root_at(self, head: str | None, in_flight: dict[str, Any]) -> None:
+        """Keep :attr:`root_run_id` right as recovery settles a dead turn: ``head``, the run it is left on (None:
+        it goes back to the run before it, and is run again under another id)."""
+        if in_flight.get("parent_id") is not None:
+            return  # not the thread's first run
+        if head is not None and self.root_run_id is None:
+            self.root_run_id = head  # it started the thread
+        elif head is None and self.root_run_id == in_flight["run_id"]:
+            self.root_run_id = None  # it did not: the turn that runs its input again does
+
     async def _recover(
         self,
         in_flight: dict[str, Any],
@@ -2523,6 +2543,7 @@ class ChatSession:
             # as cut: a run that ended by itself (answered, parked on a question) was not cut, and treating
             # it as one would chain a recovery turn onto a run that waits for its user.
             self._scheduler.head = run_id
+            self._root_at(run_id, in_flight)
             self._parked = is_parked(root.status)
             self.last_status = _status_dict(root.status)
             self._last_context = context if self._parked else None
@@ -2549,6 +2570,7 @@ class ChatSession:
             # model call (a shutdown, most often) stores a trace whose memory need not hold its prompt,
             # and the message would be answered by nobody.
             self._scheduler.head = in_flight.get("parent_id")
+            self._root_at(None, in_flight)
             wake = in_flight.get("wake")
             if stopped and not resumed and (events or wake is not None):
                 # Not run again. Messages run after the stop would be acted on as the user's latest words (the
@@ -2575,6 +2597,7 @@ class ChatSession:
             # in the background). Nothing is run again: the recovery turn is told what it was answering (no
             # stored run holds that) and which calls it had started.
             self._scheduler.head = in_flight.get("parent_id")
+            self._root_at(None, in_flight)
             asked = [event.get("text") or "" for event in events]
             if in_flight.get("wake") is not None:
                 asked.append(in_flight["wake"].get("text") or "")
@@ -2592,6 +2615,7 @@ class ChatSession:
             )
         else:
             self._scheduler.head = run_id
+            self._root_at(run_id, in_flight)
             self._parked = False
             # What its stored memory shows it took, by event id (every message built from session events
             # carries them). A steered one it does not show would be lost with the run: back in the queue.

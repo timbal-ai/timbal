@@ -14,7 +14,10 @@ process would restore it, driven until it is idle, and checked:
 - **nothing said is forgotten**: while the process lives, every answer of a turn the session reported as
   finished is in the stored conversation (after a crash an unsaved answer is gone, and recovery says so);
 - **it settles**: the restored session becomes idle (answering what it still waits for), with nothing left
-  pending, and what it stores then matches what it holds.
+  pending, and what it stores then matches what it holds;
+- **the thread keeps its root**: ``root_run_id`` (the MCP session hint) is the run the thread started with,
+  never a run that died and was run again under another id; restored from snapshots written before the field
+  existed (``rooted_legacy``), it is that run or unknown.
 
 Further sweeps: the process dies a second time, during the recovery; it shuts down in order at that write
 instead of dying; it lives on while the session store, or the trace store, is away for a stretch of writes; it
@@ -174,9 +177,17 @@ class FaultySqlite(SqliteTracingProvider):
         return await super().claim_approval(parent_id, approval_id, run_id)
 
 
-def faulty_store(path, fault):
+def faulty_store(path, fault, *, legacy=False):
+    """``legacy``: every snapshot loads without ``root_run_id``, as one written before the field existed."""
     store = SqliteChatSessionStore(path)
     real_save, real_acquire, real_release = store.save, store.acquire_lease, store.release_lease
+    real_load = store.load
+
+    async def load(session_id):
+        snapshot = await real_load(session_id)
+        if legacy and snapshot is not None:
+            snapshot.root_run_id = None
+        return snapshot
 
     async def save(snapshot, *, expect_version, owner=None):
         if not fault.write():
@@ -197,7 +208,7 @@ def faulty_store(path, fault):
             raise asyncio.CancelledError
         return await real_release(session_id, owner)
 
-    store.save, store.acquire_lease, store.release_lease = save, acquire_lease, release_lease
+    store.save, store.acquire_lease, store.release_lease, store.load = save, acquire_lease, release_lease, load
     return store
 
 
@@ -593,6 +604,18 @@ async def wake_replaced(c):
     await c.settle()
 
 
+async def rooted(c):
+    """Two turns of one thread: the first starts it (its run is the root, under the session's id), the second
+    continues it. As ``rooted_legacy``, every restore reads a snapshot that does not say what the root is."""
+    await c.send("work")
+    await c.settle()
+    await c.send("later")
+    await c.settle()
+
+
+# Scenarios whose snapshots load as ones written before ``root_run_id`` existed.
+LEGACY_SNAPSHOTS = {"rooted_legacy"}
+
 SCENARIOS = {
     "plain": plain,
     "two_steps": two_steps,
@@ -612,6 +635,8 @@ SCENARIOS = {
     "approval_abandoned": approval_abandoned,
     "approval_abandoned_as_it_parks": approval_abandoned_as_it_parks,
     "wake_replaced": wake_replaced,
+    "rooted": rooted,
+    "rooted_legacy": rooted,
 }
 
 
@@ -639,6 +664,20 @@ async def history(session):
             memory.append(prompt)
         status = root.status
     return memory
+
+
+async def thread_root(session):
+    """The run the session's thread started with: the head's parents, followed to the run that has none.
+    None when the chain cannot be followed (a run in it is not stored)."""
+    run_id = session.head
+    while run_id is not None:
+        context = await session._load_run(run_id)
+        if context is None or context.root_span() is None:
+            return None
+        if context.parent_id is None:
+            return run_id
+        run_id = context.parent_id
+    return None
 
 
 def texts(message):
@@ -686,8 +725,9 @@ async def run_once(tmp_path, scenario, durability, *faults):
     path = tmp_path / f"{scenario}-{durability}-{next(_RUNS)}.db"
     faults = list(faults) or [Fault()]
     fault = faults.pop(0)
+    legacy = scenario in LEGACY_SNAPSHOTS
     provider = FaultySqlite.configured(_path=path, fault=fault, durability=durability)
-    store = faulty_store(path, fault)
+    store = faulty_store(path, fault, legacy=legacy)
     session = ChatSession(make_agent(provider, calls), session_store=store, collect_window=0.0)
     fault.session = session
     client = Client(session, fault, calls)
@@ -704,7 +744,7 @@ async def run_once(tmp_path, scenario, durability, *faults):
         acked, acked_wakes, must_not_run = client.acked, client.acked_wakes, client.must_not_run
         fault = faults.pop(0) if faults else Fault()
         provider = FaultySqlite.configured(_path=path, fault=fault, durability=durability)
-        store = faulty_store(path, fault)
+        store = faulty_store(path, fault, legacy=legacy)
         try:
             session = await ChatSession.from_store(make_agent(provider, calls), store, session.id)
         except LookupError:
@@ -726,6 +766,7 @@ async def run_once(tmp_path, scenario, durability, *faults):
         "store": store,
         "before": before,
         "path": path,
+        "legacy": legacy,
     }
 
 
@@ -772,13 +813,23 @@ async def _check(result, label):
     stored = await store.load(session.id)
     assert stored.in_flight is None and stored.pending == [] and stored.wakes == [], f"{label}: {stored}"
     assert stored.head == session.head and not stored.parked, f"{label}: stored head/parked differ"
-    turns, head = session.turns, session.head
+    root = await thread_root(session)
+    hint = session._last_context._session_id if session._last_context is not None else None
+    if result["legacy"]:
+        # Restored from snapshots that do not say: the root, or unknown (no hint), never another run.
+        assert session.root_run_id in (None, root), f"{label}: root {session.root_run_id!r}, thread {root!r}"
+    else:
+        assert root is None or session.root_run_id == root, f"{label}: root {session.root_run_id!r}, thread {root!r}"
+        assert stored.root_run_id == session.root_run_id, f"{label}: stored root differs"
+    assert hint is None or hint == session.root_run_id, f"{label}: the last turn's hint {hint!r} is not the root"
+    turns, head, root_run_id = session.turns, session.head, session.root_run_id
     await session.close(keep=True)
     forget(session)
     # Restoring it once more changes nothing: no turn starts, nothing comes back.
     again = await ChatSession.from_store(session._agent, store, session.id)
     await asyncio.sleep(0.01)
     assert (again.turns, again.head, again.busy) == (turns, head, False), f"{label}: a second restore ran something"
+    assert result["legacy"] or again.root_run_id == root_run_id, f"{label}: a second restore lost the root"
     assert not again.pending_messages() and not again._wakes and not again.parked, f"{label}: {again.state()}"
     await again.close(keep=True)
     forget(again)

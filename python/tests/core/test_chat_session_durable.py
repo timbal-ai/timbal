@@ -270,43 +270,55 @@ async def one_turn(session, text):
 
 
 class TestRootRunId:
+    """``root_run_id`` is the thread's root run as the platform knows it, sent as the MCP session hint
+    (``RunContext._session_id``): a caller's ``session_id`` (the platform's chat reserves it as the root and
+    files the first run under it), else the run that started the thread. Never a run id taken from a caller."""
+
     async def test_a_generated_id_is_the_first_turns_run_id(self, db):
         provider, _ = db
         async with ChatSession(make_agent(provider, Gate(released=True))) as session:
-            assert session.root_run_id == session.id
+            assert session.root_run_id is None  # no thread yet
             assert await one_turn(session, "hi") == session.id
+            assert session.root_run_id == session.id == session._last_context._session_id
             second = await one_turn(session, "again")
+            assert session._last_context._session_id == session.id
         assert second != session.id and session.root_run_id == session.id
 
-    async def test_a_caller_session_id_built_twice_makes_two_threads(self, db):
+    async def test_a_caller_session_id_is_the_hint_and_never_a_run_id(self, db):
         provider, _ = db
         async with ChatSession(make_agent(provider, Gate(released=True)), session_id="conv-42") as first:
+            assert first.root_run_id == "conv-42"
             run_1 = await one_turn(first, "one")
-            assert first.root_run_id == run_1 != "conv-42"
-        # The same conversation key again, without restore(): a new thread, never the old root's idempotency key.
+            assert run_1 != "conv-42" and first._last_context.parent_id is None
+            assert first._last_context._session_id == "conv-42"
+            await one_turn(first, "again")
+            assert first._last_context._session_id == first.root_run_id == "conv-42"
+        # The same conversation key again, without from_store(): a new first run, never the old one's id.
         async with ChatSession(make_agent(provider, Gate(released=True)), session_id="conv-42") as second:
             run_2 = await one_turn(second, "two")
-        assert run_2 not in (run_1, "conv-42") and second.root_run_id == run_2
+        assert run_2 not in (run_1, "conv-42") and second.root_run_id == "conv-42"
         assert await stored_answer(provider, run_1) == "echo: one"  # the first thread's root is untouched
 
-    async def test_continuing_from_a_parent_alone_leaves_the_root_unknown(self, db):
+    async def test_continuing_from_a_parent_leaves_the_root_unknown(self, db):
         provider, _ = db
         async with ChatSession(make_agent(provider, Gate(released=True))) as first:
             head = await one_turn(first, "one")
-        async with ChatSession(make_agent(provider, Gate(released=True)), parent_id=head) as session:
-            assert session.root_run_id is None
-            await one_turn(session, "two")
-            assert session.root_run_id is None and session._last_context._session_id is None
+        for session_id in (None, "conv-9"):
+            agent = make_agent(provider, Gate(released=True))
+            async with ChatSession(agent, parent_id=head, session_id=session_id) as session:
+                assert session.root_run_id is None
+                await one_turn(session, "two")
+                assert session.root_run_id is None and session._last_context._session_id is None
 
     async def test_restore_keeps_the_root_and_an_older_snapshot_claims_none(self, db):
         provider, store = db
         session = ChatSession(make_agent(provider, Gate(released=True)), session_id="conv-7", session_store=store)
-        root = await one_turn(session, "one")
+        await one_turn(session, "one")
         await session.close(keep=True)
         restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, "conv-7")
-        assert restored.root_run_id == root
+        assert restored.root_run_id == "conv-7"
         await one_turn(restored, "two")
-        assert restored._last_context._session_id == root
+        assert restored._last_context._session_id == "conv-7"
         await restored.close(keep=True)
 
         snapshot = await store.load("conv-7")
@@ -317,6 +329,42 @@ class TestRootRunId:
         await one_turn(older, "three")
         assert older._last_context._session_id is None
         await older.close()
+
+    async def test_a_generated_session_restored_before_its_first_turn(self, db):
+        """Restored, a session never runs under its id: the run that starts the thread is the root."""
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.persist()
+        await session.flush()
+        await session.close(keep=True)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
+        assert restored.root_run_id is None
+        first = await one_turn(restored, "hi")
+        assert first != session.id and restored.root_run_id == first == restored._last_context._session_id
+        assert (await store.load(session.id)).root_run_id == first
+        await restored.close()
+
+    async def test_a_first_turn_that_died_before_acting_does_not_name_the_thread(self, db):
+        """Cut while its model thought (nothing dispatched), its message runs again under another id: that run
+        starts the thread, and the hint follows it, not the id the dead run had."""
+        provider, store = db
+        model = ThinkingModel(slow={"first"})
+        agent = Agent(name="agent", model=model, tools=[], tracing_provider=provider)
+        session = ChatSession(agent, session_store=store)
+        session.send("first")
+        await asyncio.wait_for(model.thinking.wait(), 30)
+        assert (await store.load(session.id)).root_run_id == session.id  # stored as it started
+        await crash(session)
+        provider.crashed = False
+        model.slow.clear()
+        restored = await ChatSession.from_store(agent, store, session.id)
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert model.answered == ["first"]
+        assert restored.head != session.id and restored._last_context.parent_id is None
+        assert restored.root_run_id == restored.head == restored._last_context._session_id
+        await restored.flush()
+        assert (await store.load(session.id)).root_run_id == restored.head
+        await restored.close()
 
 
 class TestEdges:

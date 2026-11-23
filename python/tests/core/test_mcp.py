@@ -192,9 +192,10 @@ class TestProvenance:
         finally:
             await server.close()
         meta = json.loads(seen[0])
-        # A caller's session id is its key, never a run id: the hint is the root run the first turn made.
-        assert meta[PROVENANCE_RUN_KEY] != "chat-123"
-        assert meta[PROVENANCE_SESSION_KEY] == meta[PROVENANCE_RUN_KEY] == session.root_run_id
+        # A caller's session id is its key, never a run id: the first turn runs under one of its own, and the
+        # hint is the caller's id (the platform's chat reserves it as the thread's root run).
+        assert meta[PROVENANCE_RUN_KEY] not in ("chat-123", None)
+        assert meta[PROVENANCE_SESSION_KEY] == "chat-123" == session.root_run_id
         assert PROVENANCE_PARENT_KEY not in meta  # the root has no parent
         assert not any("token" in key for key in meta)  # identity is the request's credential, never _meta
 
