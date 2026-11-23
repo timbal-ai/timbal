@@ -3406,13 +3406,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return None
         if outcome.replaced:
             rewritten: Any = outcome.replacement_args
-            if rewritten is None and outcome.text != projected:
+            if rewritten is not None:
+                # A rail's own arguments for the call. Ones the send tool would not take (no text, a text
+                # that is not one) make a send fail: the draft is not delivered as the model wrote it.
+                text = rewritten.get("text") if isinstance(rewritten, dict) else None
+                if not isinstance(text, str):
+                    return None
+                text = text.strip()
+            elif outcome.text != projected:
+                # A scrub of the projection. Unparseable, it leaves a send as it was: so too the draft.
                 try:
                     rewritten = json.loads(outcome.text)
                 except ValueError:
                     rewritten = None
-            if isinstance(rewritten, dict) and isinstance(rewritten.get("text"), str):
-                text = rewritten["text"].strip()
+                if isinstance(rewritten, dict) and isinstance(rewritten.get("text"), str):
+                    text = rewritten["text"].strip()
         return text or None
 
     def _withheld(self, current_span: Any, text: str | None, rest: Sequence = ()) -> Message:

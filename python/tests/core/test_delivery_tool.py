@@ -283,9 +283,30 @@ class TestSendMessage:
         assert [m["text"] for m in messages] == ["Card [card] charged."]
         assert out.output.collect_text() == "Card [card] charged."  # the output is what was delivered
 
+    async def test_a_draft_is_withheld_when_a_guardrail_s_rewrite_is_not_a_send(self):
+        """A rail that answers with arguments the send tool would not take (no text, a text that is not
+        one) makes a send fail. The draft it stands for is not delivered as the model wrote it."""
+
+        def rewriting(replacement):
+            return guardrail(lambda _text: Verdict.replace(replacement), stages=["tool_args"], name="rewrite")
+
+        for replacement in ({}, {"text": None}, {"text": 5}, {"message": "clean"}, {"text": "  "}):
+            fresh()
+            model = TestModel(responses=["Card 4111 charged.", "must not be requested"])
+            agent = Agent(name="bot", model=model, delivery="tool", guardrails=[rewriting(replacement)])
+            out, messages = await run(agent)
+            assert messages == [] and out.output.collect_text() == "", replacement
+            assert out.metadata["delivery"] == {"mode": "tool", "messages": 0, "withheld": True}
+        # A rewrite that is one is what goes out.
+        fresh()
+        model = TestModel(responses=["Card 4111 charged.", "must not be requested"])
+        agent = Agent(name="bot", model=model, delivery="tool", guardrails=[rewriting({"text": "Card charged."})])
+        out, messages = await run(agent)
+        assert [m["text"] for m in messages] == ["Card charged."] and out.output.collect_text() == "Card charged."
+
     async def test_the_reply_of_on_max_iter_passes_the_gate_on_sends_too(self):
         def gate(_text: str, ctx):
-            return Verdict.block("not for users") if "budget" in ctx.tool_args["text"] else True
+            return Verdict.block("not for users") if "budget" in ctx.tool_args.get("text", "") else True
 
         for first, sent in ((calls(send("On it."), ("work", {})), ["On it."]), (calls(("work", {})), [])):
             fresh()
