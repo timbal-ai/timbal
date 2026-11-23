@@ -1,6 +1,9 @@
 import asyncio
 import contextvars
 import inspect
+import re
+import string
+import unicodedata
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -36,14 +39,28 @@ logger = structlog.get_logger("timbal.core.mcp")
 
 
 ELICITATION_KIND = "mcp_elicitation"
+"""``InteractionEvent.kind`` used when an MCP server elicits input mid tool call."""
+
 # ``tools/call`` ``_meta`` keys naming the calling run and the tool's span (``MCPServer.provenance``).
 PROVENANCE_RUN_KEY = "timbal.ai/run_id"
 PROVENANCE_CALL_KEY = "timbal.ai/call_id"
 PROVENANCE_PARENT_KEY = "timbal.ai/parent_run_id"
 PROVENANCE_SESSION_KEY = "timbal.ai/session_id"
+# The platform's server only: the app and revision the run belongs to, and the calling tool span's path.
+PROVENANCE_APP_KEY = "timbal.ai/app_id"
+PROVENANCE_REV_KEY = "timbal.ai/rev"
+PROVENANCE_PATH_KEY = "timbal.ai/path"
 
-
-"""``InteractionEvent.kind`` used when an MCP server elicits input mid tool call."""
+# What the platform's ``_meta`` reader takes (monolith ``src/mcp/meta.rs``). It refuses the whole tool call (a
+# 400) for a claim it cannot read and for any value shaped like a credential, so a value that would not pass is
+# left out here instead: a call never fails because of its provenance, it goes through unlinked.
+_CLAIM_ID_MAX = 128
+_CLAIM_ID_CHARS = frozenset(string.ascii_letters + string.digits + "-_.:")
+_CLAIM_REV_MAX = 255
+_CLAIM_PATH_MAX = 512
+_CLAIM_APP_ID_MAX = 2**63 - 1  # the platform reads it as an i64
+_API_KEY_PREFIX = re.compile(r"t\+?[0-9]+_")
+_JWT_CHARS = frozenset(string.ascii_letters + string.digits + "-_=")
 
 _ELICIT_ACTIONS = frozenset({"accept", "decline", "cancel"})
 
@@ -88,6 +105,67 @@ _JSON_TYPE_CHECKS: dict[str, Callable[[Any], bool]] = {
     "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
     "number": lambda v: isinstance(v, int | float) and not isinstance(v, bool),
 }
+
+
+def _looks_like_a_credential(value: str) -> bool:
+    """A value the platform takes for a credential in ``_meta``: an ``Authorization`` value (``Bearer`` /
+    ``Basic``), a Timbal API key (``t<n>_`` with a random tail of 32 or more letters and digits) or a JWT."""
+    value = value.strip()
+    if value[:7].lower() == "bearer " or value[:6].lower() == "basic ":
+        return True
+    tail = value.rsplit("_", 1)[-1]
+    if len(tail) >= 32 and tail.isascii() and tail.isalnum() and _API_KEY_PREFIX.match(value):
+        return True
+    parts = value.split(".")
+    return len(parts) == 3 and value.startswith("eyJ") and all(part and set(part) <= _JWT_CHARS for part in parts)
+
+
+def _claim_id(value: Any) -> str | None:
+    """``value`` if the platform reads it as an id (1 to 128 letters, digits, ``-``, ``_``, ``.``, ``:``)."""
+    if (
+        isinstance(value, str)
+        and 0 < len(value) <= _CLAIM_ID_MAX
+        and set(value) <= _CLAIM_ID_CHARS
+        and not _looks_like_a_credential(value)
+    ):
+        return value
+    return None
+
+
+def _claim_text(value: Any, limit: int) -> str | None:
+    """``value`` if the platform reads it as free text (``rev``, ``path``): not blank, at most ``limit``
+    characters, no control character. Spaces and any other Unicode are fine: agent names are free text."""
+    if (
+        isinstance(value, str)
+        and value.strip()
+        and len(value) <= limit
+        and not any(unicodedata.category(c) == "Cc" for c in value)
+        and not _looks_like_a_credential(value)
+    ):
+        return value
+    return None
+
+
+def _claim_app_id(value: Any) -> int | None:
+    """``value`` as the positive integer the platform reads for ``app_id`` (sent as a JSON number)."""
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        value = int(value)
+    if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= _CLAIM_APP_ID_MAX:
+        return value
+    return None
+
+
+def _platform_claims(run_context: Any, call_id: str | None) -> dict[str, Any]:
+    """The ``_meta`` claims for the platform's server only: the app and revision the run belongs to
+    (``platform_config.subject``), and the calling tool span's path (the agent that made the call is the
+    path without its last segment). Each is None when the platform would refuse its value."""
+    subject = getattr(run_context.platform_config, "subject", None)
+    span = run_context._trace.get(call_id) if call_id else None
+    return {
+        PROVENANCE_APP_KEY: _claim_app_id(getattr(subject, "app_id", None)),
+        PROVENANCE_REV_KEY: _claim_text(getattr(subject, "rev", None), _CLAIM_REV_MAX),
+        PROVENANCE_PATH_KEY: _claim_text(getattr(span, "path", None), _CLAIM_PATH_MAX),
+    }
 
 
 def _convert_call_tool_result(tool_name: str, result: mcp_types.CallToolResult) -> Any:
@@ -426,7 +504,12 @@ class MCPServer(ToolSet):
     (``timbal.ai/run_id``, ``timbal.ai/call_id``), so the server can attribute what the call did
     to the exact span (monolith#565). Per-call ids cannot ride on HTTP headers: those are fixed
     per connection, which runs share. ``None`` (default): on for ``service="api"`` (the platform's
-    own server) only, so third-party servers never see run ids."""
+    own server) only, so third-party servers never see run ids.
+
+    Also ``timbal.ai/parent_run_id`` and ``timbal.ai/session_id`` when known; for the platform's
+    server only, ``timbal.ai/app_id`` (a JSON integer), ``timbal.ai/rev`` (``platform_config.subject``)
+    and ``timbal.ai/path`` (the tool span's). A value the platform would refuse is left out, never
+    sent, so a call never fails because of its provenance (see ``_claim_id``)."""
 
     sampling_model: Any = None
     """Timbal model string (e.g. ``"anthropic/claude-haiku-4-5"``) or a ``TestModel`` used
@@ -435,6 +518,8 @@ class MCPServer(ToolSet):
     loop, so other traffic on this session waits while the LLM call runs."""
 
     _session: Any | None = PrivateAttr(default=None)
+    # The per-run connection a ``service="api"`` server opens to the platform: it sends the platform's claims.
+    _first_party: bool = PrivateAttr(default=False)
     _session_task: asyncio.Task | None = PrivateAttr(default=None)
     _session_closed: asyncio.Event | None = PrivateAttr(default=None)
     _get_session_id: Callable[[], str | None] | None = PrivateAttr(default=None)
@@ -497,6 +582,7 @@ class MCPServer(ToolSet):
             sampling_model=self.sampling_model,
             provenance=self._sends_provenance(),
         )
+        server._first_party = True
         try:
             yield server
         finally:
@@ -1043,28 +1129,29 @@ class MCPServer(ToolSet):
     def _sends_provenance(self) -> bool:
         return self.provenance if self.provenance is not None else self.service == "api"
 
-    def _provenance_meta(self) -> dict[str, str] | None:
+    def _provenance_meta(self) -> dict[str, Any] | None:
         """``tools/call`` ``_meta`` naming the calling run and the tool's span, when enabled (see ``provenance``).
 
         Also the parent run (when chained: the server derives the thread from it before the run is stored) and
-        the session (a hint, when the run belongs to a ``ChatSession`` whose id is the thread's root). Claims for
-        linking only: identity is the request's own credential, never anything in ``_meta``.
+        the session (a hint, see ``ChatSession.root_run_id``); for the platform's server, the app, revision and
+        tool span path. Claims for linking only: identity is the request's own credential, never anything in
+        ``_meta``. A value the platform would refuse is left out (see ``_claim_id``), never sent.
         """
         if not self._sends_provenance():
             return None
         run_context = get_run_context()
         if run_context is None:
             return None
-        meta = {PROVENANCE_RUN_KEY: run_context.id}
         call_id = get_call_id()
-        if call_id:
-            meta[PROVENANCE_CALL_KEY] = call_id
-        if run_context.parent_id:
-            meta[PROVENANCE_PARENT_KEY] = run_context.parent_id
-        session_id = getattr(run_context, "_session_id", None)
-        if session_id:
-            meta[PROVENANCE_SESSION_KEY] = session_id
-        return meta
+        claims = {
+            PROVENANCE_RUN_KEY: _claim_id(run_context.id),
+            PROVENANCE_CALL_KEY: _claim_id(call_id),
+            PROVENANCE_PARENT_KEY: _claim_id(run_context.parent_id),
+            PROVENANCE_SESSION_KEY: _claim_id(getattr(run_context, "_session_id", None)),
+        }
+        if self._first_party or self.service == "api":
+            claims.update(_platform_claims(run_context, call_id))
+        return {key: value for key, value in claims.items() if value is not None} or None
 
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
         # Bare name for the wire call; qualified name for the agent registry.
