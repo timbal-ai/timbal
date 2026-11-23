@@ -1,3 +1,4 @@
+import itertools
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
@@ -17,14 +18,26 @@ class _RedactedRunContextView:
     delegates to the original context. The live run's spans are never mutated: the
     redaction operates on span copies, so agent memory, dumps, and outputs keep their
     raw content in-process while storage and export see the redacted view.
+
+    ``_redactor`` says which policy made it: a provider handed this view can then send the run itself through
+    the same policies (and its own) instead of a copy frozen when it was made. ``_made``: when it was made, on
+    ``_COPIES``, taken right after its trace was copied: a copy made earlier holds no newer state than one made
+    later, so a provider that is handed copies out of order can tell the older one.
     """
 
-    def __init__(self, original: "RunContext", trace: Trace) -> None:
+    def __init__(self, original: "RunContext", trace: Trace, redactor: Callable[[Any], Any] | None = None) -> None:
         self._original = original
         self._trace = trace
+        self._redactor = redactor
+        self._made = next(_COPIES)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._original, name)
+
+
+# Redacted copies in the order they were made (_RedactedRunContextView._made); a provider that keeps the run itself
+# takes a number from it when it notes a save, to order those against copies.
+_COPIES = itertools.count(1)
 
 
 _SPAN_DUMP_ATTRS = ("_input_dump", "_output_dump", "_memory_dump", "_prev_memory_dump", "_session_dump")
@@ -317,7 +330,9 @@ class TracingProvider(ABC):
                          keyed by ``run_context.id``.
         """
         if cls._trace_redactor is not None:
-            run_context = _RedactedRunContextView(run_context, _redacted_trace(run_context._trace, cls._trace_redactor))
+            run_context = _RedactedRunContextView(
+                run_context, _redacted_trace(run_context._trace, cls._trace_redactor), cls._trace_redactor
+            )
         await cls._store(run_context)
         for exporter in cls._exporters:
             try:

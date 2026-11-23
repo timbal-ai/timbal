@@ -21,8 +21,9 @@ from timbal.state import get_run_context, set_call_id, set_parent_call_id, set_r
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.context import RunContext
 from timbal.state.tracing import uploads
+from timbal.state.tracing.providers import InMemoryTracingProvider
 from timbal.state.tracing.providers import platform as platform_module
-from timbal.state.tracing.providers.platform import DELTA_MEDIA_TYPE, PlatformTracingProvider
+from timbal.state.tracing.providers.platform import DELTA_MEDIA_TYPE, PlatformTracingProvider, RunPath
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
 
@@ -708,745 +709,6 @@ class TestSingleFlight:
         assert errors == []  # the stalled PATCH finishing late raises nothing in its done callback
         assert len(sent) == 2 and not PlatformTracingProvider._retries  # and nothing is resent
 
-    @pytest.mark.parametrize("end", ["landed", "stored_but_unanswered", "not_yet_at_the_host"])
-    @pytest.mark.parametrize("answer", ["too_large", "format_rejected", "stale", "delta_unconfirmed"])
-    async def test_a_patch_overtaken_by_the_runs_end_is_not_sent_again(self, monkeypatch, answer, end):
-        """With a trace redactor every put carries its own copy of the trace as it was then. A mid-run PATCH that
-        the platform answers with "send it again" (too large, a format it does not take, stale, a delta it did not
-        confirm) once the run's end has gone past it must not go out again, whether the end has landed, has been
-        stored with its answer still on the way, or has not reached the host yet: a resend is numbered above the
-        end, with the same older copy, and the host would take it for the newest (the stored run loses its end)."""
-        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)  # the end does not wait for the PATCH on the wire
-        server = FakePlatform()
-        first_sent, answer_it, answered = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        end_held, release_end = asyncio.Event(), asyncio.Event()
-        patches = []
-        if answer in ("format_rejected", "delta_unconfirmed"):
-            PlatformTracingProvider._host_caps(CONFIG.host).delta = True  # the first PATCH goes out as a delta
-
-        async def first():
-            first_sent.set()
-            await answer_it.wait()
-            answered.set()  # whatever the save does next with this answer, it does in this step
-            if answer == "too_large":
-                raise PlatformError("payload too large", status_code=413)
-            if answer == "format_rejected":
-                raise PlatformError("unsupported media type", status_code=415)
-            if answer == "stale":  # another process holds something newer than this PATCH
-                stored = {"X-Timbal-Snapshot": str(patches[0] + 10**12), "X-Timbal-Snapshot-Applied": "false"}
-                return SimpleNamespace(raise_for_status=lambda: None, headers=stored, json=lambda: {})
-            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})  # no echo of a delta
-
-        async def request(method, path, headers=None, **kwargs):
-            if method != "PATCH":
-                return await server.request(method, path, headers=headers, **kwargs)
-            patches.append(int(headers["X-Timbal-Snapshot"]))
-            if len(patches) == 1:
-                return await first()
-            PlatformTracingProvider._host_caps(CONFIG.host).delta = False  # what follows goes whole
-            if len(patches) == 2 and end == "not_yet_at_the_host":
-                end_held.set()
-                await release_end.wait()
-            response = await server.request(method, path, headers=headers, **kwargs)
-            if len(patches) == 2 and end == "stored_but_unanswered":
-                end_held.set()
-                await release_end.wait()
-            return response
-
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        ctx = RunContext(tracing_provider=provider)
-        ctx.platform_config = CONFIG
-        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
-        _, _, key = PlatformTracingProvider._target(ctx)
-
-        async def off_the_wire():
-            while key in PlatformTracingProvider._flights:
-                await asyncio.sleep(0)
-
-        with patch("timbal.platform.utils._request", request):
-            mid_run = asyncio.create_task(provider.put(ctx))
-            await asyncio.wait_for(first_sent.wait(), 5)
-            ctx._trace["r"].t1 = 5
-            ending = asyncio.create_task(provider.put(ctx))  # goes past the PATCH on the wire
-            if end == "landed":
-                await asyncio.wait_for(ending, 5)
-                assert server.runs[ctx.id]["trace"][0]["t1"] == 5
-            else:
-                await asyncio.wait_for(end_held.wait(), 5)
-            answer_it.set()
-            await asyncio.wait_for(answered.wait(), 5)  # the mid-run save has acted on its answer
-            release_end.set()
-            await asyncio.wait_for(asyncio.gather(mid_run, ending, return_exceptions=True), 5)
-            await asyncio.wait_for(off_the_wire(), 5)
-        assert ending.exception() is None
-        assert server.runs[ctx.id]["trace"][0]["t1"] == 5
-        assert len(patches) == 2
-
-    async def test_a_patch_waiting_on_the_runs_end_takes_its_failure_and_is_not_sent_again(self, monkeypatch):
-        """The end the stalled PATCH waits for fails: the stalled save reports that failure and still sends nothing
-        older. The end's own failure handling (a background resend of the live run) is what stores the run."""
-        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
-        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))  # the resend itself is not this test
-        first_sent, answer_it, answered, end_held, release_end = (asyncio.Event() for _ in range(5))
-        patches = []
-
-        async def request(method, headers=None, **_):
-            assert method == "PATCH"
-            patches.append(int(headers["X-Timbal-Snapshot"]))
-            if len(patches) == 1:
-                first_sent.set()
-                await answer_it.wait()
-                answered.set()
-                raise PlatformError("payload too large", status_code=413)
-            end_held.set()
-            await release_end.wait()
-            raise PlatformError("upstream", status_code=503)
-
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        ctx = RunContext(tracing_provider=provider)
-        ctx.platform_config = CONFIG
-        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
-        with patch("timbal.platform.utils._request", request):
-            mid_run = asyncio.create_task(provider.put(ctx))
-            await asyncio.wait_for(first_sent.wait(), 5)
-            ctx._trace["r"].t1 = 5
-            ending = asyncio.create_task(provider.put(ctx))
-            await asyncio.wait_for(end_held.wait(), 5)
-            answer_it.set()
-            await asyncio.wait_for(answered.wait(), 5)
-            release_end.set()
-            done, _ = await asyncio.wait({mid_run, ending}, timeout=5)
-        assert done == {mid_run, ending}
-        assert isinstance(ending.exception(), PlatformError) and ending.exception().status_code == 503
-        assert isinstance(mid_run.exception(), PlatformError) and mid_run.exception().status_code == 503
-        assert len(patches) == 2  # the older copy was never sent again
-        _, _, key = PlatformTracingProvider._target(ctx)
-        assert key in PlatformTracingProvider._retries  # the ended run is resent from its latest state
-
-    @pytest.mark.parametrize("answer", ["too_large", "format_rejected", "stale", "delta_unconfirmed"])
-    async def test_a_patch_the_runs_end_overtook_is_not_sent_again_after_the_end_failed(self, monkeypatch, answer):
-        """The end went past the stalled PATCH and failed before the stalled one was answered: a timeout after the
-        host had stored it. The stalled save must not take that failure for "nothing newer was sent": its resend
-        would be numbered above the stored end and carry the older copy. It reports the end's failure instead,
-        and the end's own background resend of the live run is what follows."""
-        import httpx
-
-        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
-        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))  # the resend itself is not this test
-        server = FakePlatform()
-        first_sent, answer_it, answered = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        patches = []
-        if answer in ("format_rejected", "delta_unconfirmed"):
-            PlatformTracingProvider._host_caps(CONFIG.host).delta = True  # the first PATCH goes out as a delta
-
-        async def request(method, path, headers=None, **kwargs):
-            if method != "PATCH":
-                return await server.request(method, path, headers=headers, **kwargs)
-            patches.append(int(headers["X-Timbal-Snapshot"]))
-            if len(patches) > 1:
-                PlatformTracingProvider._host_caps(CONFIG.host).delta = False
-                await server.request(method, path, headers=headers, **kwargs)  # stored by the host
-                raise httpx.ReadTimeout("the answer never came")
-            first_sent.set()
-            await answer_it.wait()
-            answered.set()
-            if answer == "too_large":
-                raise PlatformError("payload too large", status_code=413)
-            if answer == "format_rejected":
-                raise PlatformError("unsupported media type", status_code=415)
-            if answer == "stale":
-                stored = {"X-Timbal-Snapshot": str(patches[0] + 10**12), "X-Timbal-Snapshot-Applied": "false"}
-                return SimpleNamespace(raise_for_status=lambda: None, headers=stored, json=lambda: {})
-            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
-
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        ctx = RunContext(tracing_provider=provider)
-        ctx.platform_config = CONFIG
-        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
-        with patch("timbal.platform.utils._request", request):
-            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
-            await asyncio.wait_for(first_sent.wait(), 5)
-            ctx._trace["r"].t1 = 5
-            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False  # the end: stored, unanswered
-            assert server.runs[ctx.id]["trace"][0]["t1"] == 5
-            answer_it.set()
-            await asyncio.wait_for(answered.wait(), 5)
-            stored_mid_run = await asyncio.wait_for(mid_run, 5)
-        assert server.runs[ctx.id]["trace"][0]["t1"] == 5
-        assert len(patches) == 2  # the older copy was never sent again
-        assert stored_mid_run is False  # it reports the failure of the round that carried its state
-        assert ctx._trace_unsaved
-        _, _, key = PlatformTracingProvider._target(ctx)
-        assert key in PlatformTracingProvider._retries  # the ended run is resent from its latest state
-
-    async def test_a_patch_superseded_from_another_event_loop_is_not_sent_again(self, monkeypatch):
-        """A shutdown flush on another event loop sends the ended run again while an older PATCH is still out on
-        this one. That flush replaces the run's flight; the older PATCH, answered "too large" afterwards, must
-        still see that a newer save went out, and not resend its older copy numbered above it."""
-        import threading
-
-        import httpx
-
-        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
-        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))  # the resend itself is not this test
-        server = FakePlatform()
-        first_sent, answer_it, answered = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        patches = []
-
-        async def request(method, path, headers=None, **kwargs):
-            if method != "PATCH":
-                return await server.request(method, path, headers=headers, **kwargs)
-            patches.append(int(headers["X-Timbal-Snapshot"]))
-            if len(patches) == 1:
-                first_sent.set()
-                await answer_it.wait()
-                answered.set()
-                raise PlatformError("payload too large", status_code=413)
-            response = await server.request(method, path, headers=headers, **kwargs)  # stored by the host
-            if len(patches) == 2:
-                raise httpx.ReadTimeout("the answer never came")  # the end, on this loop
-            return response  # the flush, on the other loop
-
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        ctx = RunContext(tracing_provider=provider)
-        ctx.platform_config = CONFIG
-        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
-        flushed = []
-        with patch("timbal.platform.utils._request", request):
-            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
-            await asyncio.wait_for(first_sent.wait(), 5)
-            ctx._trace["r"].t1 = 5
-            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False  # the end: stored, unanswered
-            other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
-            other_loop.start()
-            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
-            assert flushed == [[]]  # the flush sent the ended run, and it landed
-            assert server.runs[ctx.id]["trace"][0]["t1"] == 5
-            answer_it.set()
-            await asyncio.wait_for(answered.wait(), 5)
-            stored_mid_run = await asyncio.wait_for(mid_run, 5)
-        assert server.runs[ctx.id]["trace"][0]["t1"] == 5
-        assert len(patches) == 3  # the older copy was never sent again
-        assert stored_mid_run is False
-
-    async def test_a_save_from_another_loop_between_the_check_and_the_resend_stops_the_resend(self, monkeypatch):
-        """The check that no newer save went out and the resend taking its number are not one step: another event
-        loop can send the ended run in between (a shutdown flush). The resend must still not go out numbered above
-        it with the older copy."""
-        import threading
-
-        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 3600.0)  # the end waits behind the stalled PATCH
-        server = FakePlatform()
-        first_sent, answer_it = asyncio.Event(), asyncio.Event()
-        patches, ends = [], []  # ends: the stored root's t1 after each PATCH the host took
-
-        async def request(method, path, headers=None, **kwargs):
-            if method != "PATCH":
-                return await server.request(method, path, headers=headers, **kwargs)
-            patches.append(int(headers["X-Timbal-Snapshot"]))
-            if len(patches) == 1:
-                first_sent.set()
-                await answer_it.wait()
-                raise PlatformError("payload too large", status_code=413)
-            response = await server.request(method, path, headers=headers, **kwargs)
-            ends.append(server.runs[ctx.id]["trace"][0]["t1"])
-            return response
-
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        real_carried, flushed = platform_module._carried, []
-
-        async def carried_then_a_flush_elsewhere(*args):
-            found = await real_carried(*args)
-            if not found and not flushed:
-                # In the gap, with no await on this loop: another loop sends the run's latest state, and it lands.
-                other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
-                other_loop.start()
-                other_loop.join(10)
-                assert flushed == [[]] and server.runs[ctx.id]["trace"][0]["t1"] == 5
-            return found
-
-        monkeypatch.setattr(platform_module, "_carried", carried_then_a_flush_elsewhere)
-        ctx = RunContext(tracing_provider=provider)
-        ctx.platform_config = CONFIG
-        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
-        _, _, key = PlatformTracingProvider._target(ctx)
-
-        async def off_the_wire():
-            while key in PlatformTracingProvider._flights or key in platform_module._patches:
-                await asyncio.sleep(0)
-
-        with patch("timbal.platform.utils._request", request):
-            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
-            await asyncio.wait_for(first_sent.wait(), 5)
-            ctx._trace["r"].t1 = 5
-            ending = asyncio.create_task(ctx._save_trace(barrier=True))  # waits behind the stalled PATCH
-            await asyncio.wait_for(until_joined(key), 5)
-            answer_it.set()
-            stored_mid_run = await asyncio.wait_for(mid_run, 10)
-            await asyncio.wait_for(ending, 5)
-            await asyncio.wait_for(off_the_wire(), 5)
-        assert flushed == [[]]
-        assert ends == [5, 5]  # the other loop's save and this loop's end: the host never went back
-        assert len(patches) == 3  # the stalled one and those two: the older copy was not sent again
-        assert stored_mid_run is False
-
-    @staticmethod
-    def recording(server, run_id, patches, ends):
-        """``server.request``, recording each PATCH's number and the stored root's t1 after each one it takes."""
-
-        async def request(method, path, headers=None, **kwargs):
-            if method != "PATCH":
-                return await server.request(method, path, headers=headers, **kwargs)
-            patches.append(int(headers["X-Timbal-Snapshot"]))
-            response = await server.request(method, path, headers=headers, **kwargs)
-            ends.append(server.runs[run_id]["trace"][0]["t1"])
-            return response
-
-        return request
-
-    @staticmethod
-    def redacting_context(provider, **root):
-        ctx = RunContext(tracing_provider=provider)
-        ctx.platform_config = CONFIG
-        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None, **root}
-        return ctx
-
-    async def test_a_save_paused_after_put_never_stores_older_state_than_a_save_that_landed(self, monkeypatch):
-        """A save of the run on this loop is held up between put() and the moment it is sent; another loop saves the
-        same run, ended, and that lands. What this loop's save sends must not be older than that."""
-        import threading
-
-        server, patches, ends = FakePlatform(), [], []
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        ctx = self.redacting_context(provider)
-        main, held = threading.get_ident(), []
-        real_target = PlatformTracingProvider.__dict__["_target"].__func__
-
-        def target(cls, run_context):
-            if threading.get_ident() == main and not held:
-                held.append(None)  # this loop's save, after put(): meanwhile the run ends and another loop saves it
-                ctx._trace["r"].t1 = 5
-                other_loop = threading.Thread(target=lambda: asyncio.run(provider.put(ctx)))
-                other_loop.start()
-                other_loop.join(10)
-                assert ends == [5]
-            return real_target(cls, run_context)
-
-        monkeypatch.setattr(PlatformTracingProvider, "_target", classmethod(target))
-        with patch("timbal.platform.utils._request", self.recording(server, ctx.id, patches, ends)):
-            await asyncio.wait_for(provider.put(ctx), 10)
-        assert held and ends and all(end == 5 for end in ends)  # the host never went back to the older state
-
-    async def test_a_fresh_context_with_the_same_run_id_replaces_what_is_stored(self, monkeypatch):
-        """A finished run id used again (the HTTP job store allows it): the fresh context's save, sent after the old
-        one's, stores the fresh context's trace."""
-        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 3600.0)
-        server, patches, ends = FakePlatform(), [], []
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        old = self.redacting_context(provider, t1=1, output="previous")
-        fresh = RunContext(id=old.id, tracing_provider=provider)
-        fresh.platform_config = CONFIG
-        fresh._trace["r"] = {
-            "call_id": "r",
-            "path": "a",
-            "t0": 0,
-            "t1": 1,
-            "parent_call_id": None,
-            "output": "replacement",
-        }
-        on_wire, release = asyncio.Event(), asyncio.Event()
-        record = self.recording(server, old.id, patches, ends)
-
-        async def request(method, path, headers=None, **kwargs):
-            if method == "PATCH" and len(patches) == 1:  # the old context's second save: held on the wire
-                on_wire.set()
-                await release.wait()
-            return await record(method, path, headers=headers, **kwargs)
-
-        with patch("timbal.platform.utils._request", request):
-            await asyncio.wait_for(provider.put(old), 5)
-            second = asyncio.create_task(provider.put(old))
-            await asyncio.wait_for(on_wire.wait(), 5)
-            replacing = asyncio.create_task(provider.put(fresh))  # waits behind the PATCH on the wire
-            await asyncio.wait_for(until_joined(PlatformTracingProvider._target(fresh)[2]), 5)
-            release.set()
-            await asyncio.wait_for(asyncio.gather(second, replacing), 5)
-        assert server.runs[old.id]["trace"][0]["output"] == "replacement"
-
-    @pytest.mark.parametrize("fresh_lands", [True, False], ids=["the fresh run lands", "the fresh run fails"])
-    async def test_a_save_of_an_older_context_of_a_reused_run_id_is_not_sent(self, monkeypatch, fresh_lands):
-        """A finished run id used again by a fresh context, while a flush on another loop is already sending the old
-        context (its end failed, so it was owed). The old context's PATCH must not be numbered above the fresh one's,
-        and must not settle the fresh one when it is the fresh one that is owed."""
-        import threading
-
-        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))
-        server = FakePlatform(deltas=False)  # whole traces only: each PATCH says which context it sends
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        old = self.redacting_context(provider, t1=1, output="previous")
-        fresh = RunContext(id=old.id, tracing_provider=provider)
-        fresh.platform_config = CONFIG
-        fresh._trace["r"] = {
-            "call_id": "r",
-            "path": "a",
-            "t0": 0,
-            "t1": 1,
-            "parent_call_id": None,
-            "output": "replacement",
-        }
-        _, _, key = PlatformTracingProvider._target(old)
-        main, paused, go = threading.get_ident(), threading.Event(), threading.Event()
-        outputs, refused = [], []  # outputs: the stored output after each PATCH the host took
-        real_arm = PlatformTracingProvider.__dict__["_arm_keepalive"].__func__
-
-        def arm(cls, *args):
-            if threading.get_ident() != main and not go.is_set():
-                paused.set()  # the flush is inside _store with the old context
-                go.wait(10)
-            return real_arm(cls, *args)
-
-        async def request(method, path, headers=None, content=None, **kwargs):
-            if method == "PATCH":
-                raw = gzip.decompress(content) if (headers or {}).get("Content-Encoding") == "gzip" else content
-                sending = json.loads(raw)["trace"][0]["output"]
-                if not refused or (sending == "replacement" and not fresh_lands):
-                    refused.append(sending)
-                    raise PlatformError("upstream", status_code=503)
-                response = await server.request(method, path, headers=headers, content=content, **kwargs)
-                outputs.append(server.runs[old.id]["trace"][0]["output"])
-                return response
-            return await server.request(method, path, headers=headers, content=content, **kwargs)
-
-        monkeypatch.setattr(PlatformTracingProvider, "_arm_keepalive", classmethod(arm))
-        flushed = []
-        with patch("timbal.platform.utils._request", request):
-            assert await asyncio.wait_for(old._save_trace(barrier=True), 5) is False  # the old run's end: owed
-            other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
-            other_loop.start()
-            assert await asyncio.to_thread(paused.wait, 10)
-            assert await asyncio.wait_for(fresh._save_trace(barrier=True), 5) is fresh_lands  # the id, used again
-            go.set()
-            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
-        assert "previous" not in outputs  # the old context was never stored over the fresh one
-        if fresh_lands:
-            assert outputs == ["replacement"] and flushed == [[]]
-        else:
-            assert outputs == [] and flushed == [[old.id]]  # the fresh run is still owed, and reported
-            assert PlatformTracingProvider._unsaved.get(key) is fresh
-
-    async def test_an_older_save_landing_on_another_loop_leaves_a_newer_failed_one_unsaved(self, monkeypatch):
-        """Another loop's save stores the run as it was before its end, and its answer is held. Meanwhile this loop's
-        save of the end fails. That older save's success must not take the run off the list of runs still owed:
-        the flush reports it."""
-        import threading
-
-        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))
-        server, patches, ends = FakePlatform(), [], []
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        ctx = self.redacting_context(provider)
-        record = self.recording(server, ctx.id, patches, ends)
-        flush_stored, flush_answers = threading.Event(), threading.Event()
-
-        async def request(method, path, headers=None, **kwargs):
-            if method == "PATCH" and not patches:
-                patches.append(int(headers["X-Timbal-Snapshot"]))
-                raise PlatformError("upstream", status_code=503)  # the mid-run save: the run is owed
-            if method == "PATCH" and len(patches) == 1:  # the flush, on the other loop
-                response = await record(method, path, headers=headers, **kwargs)
-                flush_stored.set()
-                flush_answers.wait(10)
-                return response
-            if method == "PATCH":  # the end, on this loop
-                patches.append(int(headers["X-Timbal-Snapshot"]))
-                raise PlatformError("upstream", status_code=503)
-            return await record(method, path, headers=headers, **kwargs)
-
-        flushed = []
-        with patch("timbal.platform.utils._request", request):
-            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False
-            other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
-            other_loop.start()
-            assert await asyncio.to_thread(flush_stored.wait, 10)
-            assert ends == [None]  # the host has the run as it was before its end
-            ctx._trace["r"].t1 = 5
-            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False  # the end: refused
-            flush_answers.set()
-            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
-        assert flushed == [[ctx.id]]  # the end is still owed, and reported
-        assert ctx.id in [owed.id for owed in PlatformTracingProvider._unsaved.values()]
-
-    async def test_a_flush_held_before_it_registers_the_run_leaves_nothing_owed_once_the_end_landed(self, monkeypatch):
-        """A flush on another loop is held up after it picked the run and before it notes it as owed; this loop then
-        stores the run's end. The flush must not leave the run noted as owed: later flushes find nothing to send."""
-        import threading
-
-        server, patches, ends = FakePlatform(), [], []
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        ctx = self.redacting_context(provider)
-        record = self.recording(server, ctx.id, patches, ends)
-        main, paused, go = threading.get_ident(), threading.Event(), threading.Event()
-        real_arm = PlatformTracingProvider.__dict__["_arm_keepalive"].__func__
-
-        def arm(cls, *args):
-            if threading.get_ident() != main and not go.is_set():
-                paused.set()
-                go.wait(10)
-            return real_arm(cls, *args)
-
-        async def request(method, path, headers=None, **kwargs):
-            if method == "PATCH" and not patches:
-                patches.append(int(headers["X-Timbal-Snapshot"]))
-                raise PlatformError("upstream", status_code=503)  # the mid-run save: the run is owed
-            return await record(method, path, headers=headers, **kwargs)
-
-        monkeypatch.setattr(PlatformTracingProvider, "_arm_keepalive", classmethod(arm))
-        flushed = []
-
-        def flush():
-            flushed.append(asyncio.run(provider.flush(5)))
-
-        with patch("timbal.platform.utils._request", request):
-            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False
-            other_loop = threading.Thread(target=flush)
-            other_loop.start()
-            assert await asyncio.to_thread(paused.wait, 10)
-            ctx._trace["r"].t1 = 5
-            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is True  # the end, stored
-            go.set()
-            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
-            sent = len(patches)
-            for _ in range(2):
-                again = threading.Thread(target=flush)
-                again.start()
-                await asyncio.wait_for(asyncio.to_thread(again.join, 10), 15)
-        assert flushed == [[], [], []]
-        assert len(patches) == sent  # the later flushes found nothing owed and sent nothing
-        assert all(end == 5 for end in ends[ends.index(5) :])
-
-    async def test_a_refused_resend_leaves_the_run_to_the_save_that_overtook_it(self, monkeypatch):
-        """A resend refused because another loop's save of the run went out meanwhile, carrying the same copy (a
-        shutdown flush sends the run's held copy): that save is still out. If it then fails, the run must still be
-        there to resend and to report, not dropped by the refused one."""
-        import threading
-
-        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 3600.0)
-        first_sent, answer_it = asyncio.Event(), asyncio.Event()
-        flush_sent, flush_fails = threading.Event(), threading.Event()
-        patches = []
-
-        async def request(method, headers=None, **_):
-            assert method == "PATCH"
-            patches.append(int(headers["X-Timbal-Snapshot"]))
-            if len(patches) == 1:
-                first_sent.set()
-                await answer_it.wait()
-                raise PlatformError("payload too large", status_code=413)
-            flush_sent.set()  # the other loop's PATCH is out
-            flush_fails.wait(10)
-            raise PlatformError("upstream", status_code=503)
-
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        real_carried, flushed = platform_module._carried, []
-
-        async def carried_then_a_flush_elsewhere(*args):
-            found = await real_carried(*args)
-            if not found and not flushed:
-                # In the gap, with no await on this loop: another loop sends the run's held copy, and it is out.
-                threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5)))).start()
-                assert flush_sent.wait(10)
-            return found
-
-        monkeypatch.setattr(platform_module, "_carried", carried_then_a_flush_elsewhere)
-        ctx = RunContext(tracing_provider=provider)
-        ctx.platform_config = CONFIG
-        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
-        _, _, key = PlatformTracingProvider._target(ctx)
-        with patch("timbal.platform.utils._request", request):
-            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
-            await asyncio.wait_for(first_sent.wait(), 5)
-            answer_it.set()
-            assert await asyncio.wait_for(mid_run, 10) is False  # refused: the other loop's save carries it
-            assert key in PlatformTracingProvider._unsaved  # still the run's to send, while that save is out
-            flush_fails.set()
-
-            async def flush_done():
-                while not flushed:
-                    await asyncio.sleep(0)
-
-            await asyncio.wait_for(flush_done(), 10)
-        assert flushed == [[ctx.id]]  # the flush reports the run it could not store
-        assert key in PlatformTracingProvider._unsaved
-        assert len(patches) == 2  # the refused resend never went out
-
-    async def test_a_flush_never_sends_a_copy_older_than_one_already_stored(self, monkeypatch):
-        """With a trace redactor every save carries its own copy of the run. A shutdown flush on another event loop
-        picks the copy it finds, and pauses before it takes a number; this loop then stores a newer copy, the run's
-        end. The flush's copy, sent now, would be numbered above the end and the host would take it."""
-        import threading
-
-        server = FakePlatform()
-        main = threading.get_ident()
-        first_sent, flush_paused, flush_go = asyncio.Event(), threading.Event(), threading.Event()
-        patches, ends = [], []  # ends: the stored root's t1 after each PATCH the host took
-        hold_first = asyncio.Event()
-
-        async def request(method, path, headers=None, **kwargs):
-            if method != "PATCH":
-                return await server.request(method, path, headers=headers, **kwargs)
-            patches.append(int(headers["X-Timbal-Snapshot"]))
-            if len(patches) == 1:
-                first_sent.set()
-                await hold_first.wait()
-            response = await server.request(method, path, headers=headers, **kwargs)
-            ends.append(server.runs[ctx.id]["trace"][0]["t1"])
-            return response
-
-        real_save = PlatformTracingProvider.__dict__["_save"].__func__
-
-        async def save(cls, *args, **kwargs):
-            if threading.get_ident() != main and not flush_go.is_set():
-                flush_paused.set()  # the flush has picked its copy and not taken a number yet
-                flush_go.wait(10)
-            return await real_save(cls, *args, **kwargs)
-
-        monkeypatch.setattr(PlatformTracingProvider, "_save", classmethod(save))
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
-        ctx = RunContext(tracing_provider=provider)
-        ctx.platform_config = CONFIG
-        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
-        flushed = []
-        with patch("timbal.platform.utils._request", request):
-            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))  # its copy: no end yet
-            await asyncio.wait_for(first_sent.wait(), 5)
-            other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
-            other_loop.start()
-            assert await asyncio.to_thread(flush_paused.wait, 10)
-            ctx._trace["r"].t1 = 5
-            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is True  # the end, stored
-            flush_go.set()
-            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
-            assert not other_loop.is_alive()
-            hold_first.set()
-            await asyncio.wait_for(mid_run, 5)
-        assert ends[0] == 5 and all(end == 5 for end in ends)  # the host never went back to the older copy
-        assert server.runs[ctx.id]["trace"][0]["t1"] == 5
-        assert flushed == [[]]
-
-    def test_a_save_collected_while_the_snapshot_lock_is_held_does_not_wait_for_itself(self, monkeypatch):
-        """A save left suspended when its event loop was closed is finished by the garbage collector, on whatever
-        thread a collection happens to run: also on one that holds the lock the save's cleanup asks for."""
-        import gc
-        import sys
-        import threading
-
-        # This test's own lock, of the kind the module uses, and its own records: if the save waits for itself, it
-        # waits on these, and nothing else in the process is held up.
-        lock_kind = type(platform_module._snapshot_lock)
-        monkeypatch.setattr(
-            platform_module,
-            "_snapshot_lock",
-            threading.RLock() if lock_kind is type(threading.RLock()) else threading.Lock(),
-        )
-        monkeypatch.setattr(platform_module, "_patches", {})
-        monkeypatch.setattr(sys, "unraisablehook", lambda _info: None)  # "Task was destroyed but it is pending"
-        never = []
-
-        async def request(method, **_):
-            assert method == "PATCH"
-            if not never:
-                never.append(None)
-                await asyncio.get_running_loop().create_future()  # left on the wire: its loop closes
-            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
-
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
-
-        def context():
-            ctx = RunContext(tracing_provider=provider)
-            ctx.platform_config = CONFIG
-            ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
-            return ctx
-
-        left, other = context(), context()
-        _, _, key = PlatformTracingProvider._target(left)
-        allocations = []
-
-        class Collecting(platform_module._Patches):
-            """A collection that lands on this allocation, made with the lock held."""
-
-            __slots__ = ()
-
-            def __init__(self):
-                if not allocations:
-                    allocations.append(gc.collect())
-                super().__init__()
-
-        gc.collect()
-        gc.disable()  # nothing is collected below but where the test says
-        try:
-            with patch("timbal.platform.utils._request", request):
-
-                def leave_a_save():
-                    loop = asyncio.new_event_loop()
-                    loop.create_task(provider.put(left))
-
-                    async def out():
-                        while key not in platform_module._patches:
-                            await asyncio.sleep(0)
-
-                    loop.run_until_complete(asyncio.wait_for(out(), 5))
-                    loop.close()
-
-                first = threading.Thread(target=leave_a_save)
-                first.start()
-                first.join(10)
-                flushed = []  # the run sent again from another loop: its first loop's save is now only garbage
-                flush = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
-                flush.start()
-                flush.join(10)
-                assert flushed == [[]]
-                monkeypatch.setattr(platform_module, "_Patches", Collecting)
-                saving = threading.Thread(target=lambda: asyncio.run(provider.put(other)), daemon=True)
-                saving.start()
-                saving.join(10)
-        finally:
-            gc.enable()
-        assert not saving.is_alive()  # the save did not wait for itself
-        assert allocations and allocations[0] > 0  # a collection ran inside the lock, and found the save left behind
-
-    async def test_a_stalled_patch_keeps_a_bounded_number_of_later_outcomes(self, monkeypatch):
-        """While one PATCH is out, the run's end goes past it again and again and fails each time. What the stalled
-        PATCH may need is the newest of those outcomes, not all of them: each failure holds the body it sent."""
-        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
-        first_sent, release = asyncio.Event(), asyncio.Event()
-        patches = []
-
-        async def request(method, headers=None, **_):
-            assert method == "PATCH"
-            patches.append(int(headers["X-Timbal-Snapshot"]))
-            if len(patches) == 1:
-                first_sent.set()
-                await release.wait()
-                return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
-            raise PlatformError("forbidden", status_code=403)
-
-        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
-        ctx = RunContext(tracing_provider=provider)
-        ctx.platform_config = CONFIG
-        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
-        _, _, key = PlatformTracingProvider._target(ctx)
-        with patch("timbal.platform.utils._request", request):
-            first = asyncio.create_task(provider.put(ctx))
-            await asyncio.wait_for(first_sent.wait(), 5)
-            ctx._trace["r"].t1 = 5
-            for _ in range(32):
-                with pytest.raises(PlatformError):
-                    await asyncio.wait_for(provider.put(ctx), 5)
-            flight = PlatformTracingProvider._flights[key]
-            assert len(patches) == 33
-            assert len(flight.rounds) <= 2  # the stalled one, and the newest that went past it
-            release.set()
-            await asyncio.wait_for(first, 5)
-
     async def test_never_more_than_two_patches_on_the_wire(self, monkeypatch):
         monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
         on_wire, most, release = [0], [0], asyncio.Event()
@@ -1553,6 +815,1117 @@ class TestSingleFlight:
         assert all(p["kind"] == "full" for p in server.patches[-2:])  # whole from the refusal on
 
 
+def masking(secret, mark):
+    """A trace redactor that replaces ``secret`` with ``mark`` in every string it is given."""
+
+    def redact(value):
+        if isinstance(value, str):
+            return value.replace(secret, mark)
+        if isinstance(value, dict):
+            return {k: redact(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [redact(v) for v in value]
+        return value
+
+    return redact
+
+
+def whole_root(server, run_id):
+    run = server.runs.get(run_id)
+    return run["trace"][0] if run and run.get("trace") else None
+
+
+class TestOrderAcrossPaths:
+    """Whatever path sends a save of a run (its own round, a resend after "send it again", a flush on another event
+    loop, a background retry), the host never goes back to an older state than one it took; a newer save that
+    failed stays owed until a PATCH carrying it lands; once the newest save landed, nothing is left to send. With
+    a trace redactor throughout: that is where a copy of the run, made when it was saved, could be sent late."""
+
+    @staticmethod
+    def context(provider, **root):
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None, **root}
+        return ctx
+
+    @staticmethod
+    def recording(server, run_id, ends):
+        """``server.request``, recording the stored root's t1 after every PATCH the host takes."""
+
+        async def request(method, path, headers=None, **kwargs):
+            response = await server.request(method, path, headers=headers, **kwargs)
+            if method == "PATCH" and (root := whole_root(server, run_id)) is not None:
+                ends.append(root.get("t1"))
+            return response
+
+        return request
+
+    @staticmethod
+    def never_back(ends):
+        """The host held the run's end, and kept it from then on."""
+        return 5 in ends and all(end == 5 for end in ends[ends.index(5) :])
+
+    @staticmethod
+    def redacting():
+        return PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
+
+    @staticmethod
+    def answering(answer, patches):
+        """What the host answers the stalled PATCH: "send it again", one way or another."""
+        if answer == "too_large":
+            raise PlatformError("payload too large", status_code=413)
+        if answer == "format_rejected":
+            raise PlatformError("unsupported media type", status_code=415)
+        if answer == "stale":  # another process holds something newer than this PATCH
+            stored = {"X-Timbal-Snapshot": str(patches[0] + 10**12), "X-Timbal-Snapshot-Applied": "false"}
+            return SimpleNamespace(raise_for_status=lambda: None, headers=stored, json=lambda: {})
+        return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})  # no echo of a delta
+
+    ANSWERS = pytest.mark.parametrize("answer", ["too_large", "format_rejected", "stale", "delta_unconfirmed"])
+
+    @pytest.mark.parametrize("end", ["landed", "stored_but_unanswered", "not_yet_at_the_host"])
+    @ANSWERS
+    async def test_a_stalled_patch_sent_again_never_takes_the_run_back(self, monkeypatch, answer, end):
+        """A mid-run PATCH stalls; the run's end goes past it (and has landed, or is stored with its answer on the
+        way, or has not reached the host yet); then the stalled one is answered "send it again"."""
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        server, ends, patches = FakePlatform(), [], []
+        first_sent, answer_it, answered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        end_held, release_end = asyncio.Event(), asyncio.Event()
+        if answer in ("format_rejected", "delta_unconfirmed"):
+            PlatformTracingProvider._host_caps(CONFIG.host).delta = True  # the first PATCH goes out as a delta
+        provider = self.redacting()
+        ctx = self.context(provider)
+        record = self.recording(server, ctx.id, ends)
+
+        async def request(method, path, headers=None, **kwargs):
+            if method != "PATCH":
+                return await server.request(method, path, headers=headers, **kwargs)
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) == 1:
+                first_sent.set()
+                await answer_it.wait()
+                answered.set()  # whatever the save does next with this answer, it does in this step
+                return self.answering(answer, patches)
+            PlatformTracingProvider._host_caps(CONFIG.host).delta = False  # what follows goes whole
+            if len(patches) == 2 and end == "not_yet_at_the_host":
+                end_held.set()
+                await release_end.wait()
+            response = await record(method, path, headers=headers, **kwargs)
+            if len(patches) == 2 and end == "stored_but_unanswered":
+                end_held.set()
+                await release_end.wait()
+            return response
+
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(provider.put(ctx))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            ending = asyncio.create_task(provider.put(ctx))  # goes past the PATCH on the wire
+            if end == "landed":
+                await asyncio.wait_for(ending, 5)
+            else:
+                await asyncio.wait_for(end_held.wait(), 5)
+            answer_it.set()
+            await asyncio.wait_for(answered.wait(), 5)
+            release_end.set()
+            await asyncio.wait_for(asyncio.gather(mid_run, ending), 5)
+        assert self.never_back(ends)
+        assert not PlatformTracingProvider._unsaved  # the end landed: nothing owed
+
+    @ANSWERS
+    async def test_a_stalled_patch_sent_again_after_the_end_failed_stores_the_end(self, monkeypatch, answer):
+        """The end went past the stalled PATCH, was stored by the host, and failed on the way back (a timeout).
+        What the stalled save sends again is the run as it is now, with its end: the host keeps it, and the run is
+        no longer owed once that lands."""
+        import httpx
+
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))  # the resend itself is not this test
+        server, ends, patches = FakePlatform(), [], []
+        first_sent, answer_it = asyncio.Event(), asyncio.Event()
+        if answer in ("format_rejected", "delta_unconfirmed"):
+            PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        provider = self.redacting()
+        ctx = self.context(provider)
+        record = self.recording(server, ctx.id, ends)
+
+        async def request(method, path, headers=None, **kwargs):
+            if method != "PATCH":
+                return await server.request(method, path, headers=headers, **kwargs)
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) == 1:
+                first_sent.set()
+                await answer_it.wait()
+                return self.answering(answer, patches)
+            PlatformTracingProvider._host_caps(CONFIG.host).delta = False
+            response = await record(method, path, headers=headers, **kwargs)
+            if len(patches) == 2:
+                raise httpx.ReadTimeout("the answer never came")  # the end: stored by the host
+            return response
+
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False  # the end: stored, unanswered
+            answer_it.set()
+            assert await asyncio.wait_for(mid_run, 5) is True  # sent again: the run with its end, and it landed
+        assert self.never_back(ends)
+        assert not PlatformTracingProvider._unsaved
+        assert not ctx._trace_unsaved
+
+    async def test_when_every_save_of_the_end_fails_the_run_stays_owed_and_nothing_older_is_sent(self, monkeypatch):
+        """The end fails, and so does everything the stalled save sends again: the run stays owed (resent in the
+        background, reported by a flush), and no PATCH after the end was asked carries the run without it."""
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))
+        first_sent, answer_it, end_sent = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        bodies = []  # the root's t1 in each PATCH after the first
+
+        async def request(method, content=None, **_):
+            assert method == "PATCH"
+            if not first_sent.is_set():
+                first_sent.set()
+                await answer_it.wait()
+                raise PlatformError("payload too large", status_code=413)
+            bodies.append(json.loads(content)["trace"][0].get("t1"))
+            end_sent.set()
+            raise PlatformError("upstream", status_code=503)
+
+        provider = self.redacting()
+        ctx = self.context(provider)
+        _, _, key = PlatformTracingProvider._target(ctx)
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            ending = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(end_sent.wait(), 5)
+            answer_it.set()
+            assert await asyncio.wait_for(asyncio.gather(mid_run, ending), 5) == [False, False]
+        assert bodies and all(t1 == 5 for t1 in bodies)
+        assert PlatformTracingProvider._unsaved[key].context is ctx  # still owed
+        assert key in PlatformTracingProvider._retries  # and resent in the background
+
+    async def test_a_save_landing_on_another_loop_meanwhile_is_never_undone(self, monkeypatch):
+        """A shutdown flush on another event loop stores the ended run while an older PATCH is still out here; that
+        one is then answered "too large"."""
+        import threading
+
+        import httpx
+
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))
+        server, ends, patches = FakePlatform(), [], []
+        first_sent, answer_it = asyncio.Event(), asyncio.Event()
+        provider = self.redacting()
+        ctx = self.context(provider)
+        record = self.recording(server, ctx.id, ends)
+
+        async def request(method, path, headers=None, **kwargs):
+            if method != "PATCH":
+                return await server.request(method, path, headers=headers, **kwargs)
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) == 1:
+                first_sent.set()
+                await answer_it.wait()
+                raise PlatformError("payload too large", status_code=413)
+            response = await record(method, path, headers=headers, **kwargs)
+            if len(patches) == 2:
+                raise httpx.ReadTimeout("the answer never came")  # the end, on this loop
+            return response
+
+        flushed = []
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False
+            other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
+            other_loop.start()
+            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
+            assert flushed == [[]]  # the flush sent the ended run, and it landed
+            answer_it.set()
+            await asyncio.wait_for(mid_run, 5)
+        assert self.never_back(ends)
+        assert not PlatformTracingProvider._unsaved
+
+    async def test_another_loops_save_at_the_moment_a_resend_is_decided_is_never_undone(self, monkeypatch):
+        """Another event loop sends the ended run in the very step this loop's stalled PATCH is answered "too
+        large", with no await between: what is sent again here is numbered above it, and must hold no less."""
+        import threading
+
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 3600.0)  # the end waits behind the stalled PATCH
+        server, ends, patches = FakePlatform(), [], []
+        first_sent, answer_it = asyncio.Event(), asyncio.Event()
+        provider = self.redacting()
+        ctx = self.context(provider)
+        _, _, key = PlatformTracingProvider._target(ctx)
+        record = self.recording(server, ctx.id, ends)
+        flushed = []
+
+        async def request(method, path, headers=None, **kwargs):
+            if method != "PATCH":
+                return await server.request(method, path, headers=headers, **kwargs)
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) == 1:
+                first_sent.set()
+                await answer_it.wait()
+                other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
+                other_loop.start()
+                other_loop.join(10)  # blocking: nothing else runs on this loop meanwhile
+                raise PlatformError("payload too large", status_code=413)
+            return await record(method, path, headers=headers, **kwargs)
+
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            ending = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(until_joined(key), 5)
+            answer_it.set()
+            assert await asyncio.wait_for(asyncio.gather(mid_run, ending), 10) == [True, True]
+        assert flushed == [[]]
+        assert self.never_back(ends)
+        assert not PlatformTracingProvider._unsaved
+
+    async def test_a_flush_held_after_it_picked_a_run_never_sends_older_state(self, monkeypatch):
+        """A flush on another loop picks the run and is held before it sends; this loop then stores the end."""
+        import threading
+
+        server, ends = FakePlatform(), []
+        provider = self.redacting()
+        ctx = self.context(provider)
+        record = self.recording(server, ctx.id, ends)
+        main, paused, go = threading.get_ident(), threading.Event(), threading.Event()
+        first_sent, hold_first = asyncio.Event(), asyncio.Event()
+        real_save = PlatformTracingProvider.__dict__["_save"].__func__
+        sent = []
+
+        async def save(cls, *args, **kwargs):
+            if threading.get_ident() != main and not go.is_set():
+                paused.set()
+                go.wait(10)
+            return await real_save(cls, *args, **kwargs)
+
+        async def request(method, path, headers=None, **kwargs):
+            if method == "PATCH":
+                sent.append(None)
+                if len(sent) == 1:
+                    first_sent.set()
+                    await hold_first.wait()
+            return await record(method, path, headers=headers, **kwargs)
+
+        monkeypatch.setattr(PlatformTracingProvider, "_save", classmethod(save))
+        flushed = []
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
+            other_loop.start()
+            assert await asyncio.to_thread(paused.wait, 10)
+            ctx._trace["r"].t1 = 5
+            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is True  # the end, stored
+            go.set()
+            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
+            hold_first.set()
+            await asyncio.wait_for(mid_run, 5)
+        assert self.never_back(ends)
+        assert flushed == [[]]
+
+    async def test_a_save_held_between_put_and_sending_never_stores_older_state(self, monkeypatch):
+        """This loop's save is held up after put(); another loop saves the run, ended, and that lands."""
+        import threading
+
+        server, ends = FakePlatform(), []
+        provider = self.redacting()
+        ctx = self.context(provider)
+        main, held = threading.get_ident(), []
+        real_target = PlatformTracingProvider.__dict__["_target"].__func__
+
+        def target(cls, run_context):
+            if threading.get_ident() == main and not held:
+                held.append(None)
+                ctx._trace["r"].t1 = 5
+                other_loop = threading.Thread(target=lambda: asyncio.run(provider.put(ctx)))
+                other_loop.start()
+                other_loop.join(10)
+                assert ends == [5]
+            return real_target(cls, run_context)
+
+        monkeypatch.setattr(PlatformTracingProvider, "_target", classmethod(target))
+        with patch("timbal.platform.utils._request", self.recording(server, ctx.id, ends)):
+            await asyncio.wait_for(provider.put(ctx), 10)
+        assert held and self.never_back(ends)
+
+    async def test_an_older_save_landing_late_does_not_settle_a_newer_one_that_failed(self, monkeypatch):
+        """Another loop's save stores the run as it was before its end, and its answer is held; meanwhile this
+        loop's save of the end fails. The run stays owed, and the flush reports it."""
+        import threading
+
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))
+        server, ends, patches = FakePlatform(), [], []
+        provider = self.redacting()
+        ctx = self.context(provider)
+        record = self.recording(server, ctx.id, ends)
+        flush_stored, flush_answers = threading.Event(), threading.Event()
+
+        async def request(method, path, headers=None, **kwargs):
+            if method == "PATCH" and not patches:
+                patches.append(None)
+                raise PlatformError("upstream", status_code=503)  # the mid-run save: the run is owed
+            if method == "PATCH" and len(patches) == 1:  # the flush, on the other loop
+                patches.append(None)
+                response = await record(method, path, headers=headers, **kwargs)
+                flush_stored.set()
+                flush_answers.wait(10)
+                return response
+            if method == "PATCH":  # the end, on this loop
+                patches.append(None)
+                raise PlatformError("upstream", status_code=503)
+            return await record(method, path, headers=headers, **kwargs)
+
+        flushed = []
+        with patch("timbal.platform.utils._request", request):
+            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False
+            other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
+            other_loop.start()
+            assert await asyncio.to_thread(flush_stored.wait, 10)
+            assert ends == [None]  # the host has the run as it was before its end
+            ctx._trace["r"].t1 = 5
+            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False  # the end: refused
+            flush_answers.set()
+            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
+        assert flushed == [[ctx.id]]  # the end is still owed, and reported
+        assert [write.id for write in PlatformTracingProvider._unsaved.values()] == [ctx.id]
+
+    async def test_once_the_newest_save_landed_a_flush_sends_nothing(self, monkeypatch):
+        """A flush on another loop is held after it picked the run; this loop stores the end meanwhile. That flush
+        and the ones after it have nothing left to send."""
+        import threading
+
+        server, ends, sent = FakePlatform(), [], []
+        provider = self.redacting()
+        ctx = self.context(provider)
+        record = self.recording(server, ctx.id, ends)
+        main, paused, go = threading.get_ident(), threading.Event(), threading.Event()
+        real_send = PlatformTracingProvider.__dict__["_send"].__func__
+
+        async def send(cls, *args, **kwargs):
+            if threading.get_ident() != main and not go.is_set():
+                paused.set()
+                go.wait(10)
+            return await real_send(cls, *args, **kwargs)
+
+        async def request(method, path, headers=None, **kwargs):
+            if method == "PATCH":
+                sent.append(None)
+                if len(sent) == 1:
+                    raise PlatformError("upstream", status_code=503)  # the mid-run save: the run is owed
+            return await record(method, path, headers=headers, **kwargs)
+
+        monkeypatch.setattr(PlatformTracingProvider, "_send", classmethod(send))
+        flushed = []
+
+        def flush():
+            flushed.append(asyncio.run(provider.flush(5)))
+
+        with patch("timbal.platform.utils._request", request):
+            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False
+            other_loop = threading.Thread(target=flush)
+            other_loop.start()
+            assert await asyncio.to_thread(paused.wait, 10)
+            ctx._trace["r"].t1 = 5
+            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is True
+            go.set()
+            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
+            after_end = len(sent)
+            for _ in range(2):
+                again = threading.Thread(target=flush)
+                again.start()
+                await asyncio.wait_for(asyncio.to_thread(again.join, 10), 15)
+        assert flushed == [[], [], []]
+        assert len(sent) == after_end  # nothing owed: no PATCH from any of the flushes
+        assert self.never_back(ends)
+
+    async def test_a_run_whose_every_save_failed_stays_owed_while_another_loop_sends_it(self):
+        """This loop's stalled PATCH is answered "too large" while a flush on another loop is sending the run; both
+        then fail. The run stays owed and the flush reports it."""
+        import threading
+
+        main = threading.get_ident()
+        first_sent, answer_it = asyncio.Event(), asyncio.Event()
+        flush_sent, flush_fails = threading.Event(), threading.Event()
+        flushed = []
+        provider = self.redacting()
+
+        async def request(method, **_):
+            assert method == "PATCH"
+            if threading.get_ident() != main:
+                flush_sent.set()
+                flush_fails.wait(10)
+                raise PlatformError("upstream", status_code=503)
+            if not first_sent.is_set():
+                first_sent.set()
+                await answer_it.wait()
+                threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5)))).start()
+                assert flush_sent.wait(10)  # the other loop's PATCH is out
+                raise PlatformError("payload too large", status_code=413)
+            raise PlatformError("upstream", status_code=503)
+
+        ctx = self.context(provider)
+        _, _, key = PlatformTracingProvider._target(ctx)
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            answer_it.set()
+            assert await asyncio.wait_for(mid_run, 10) is False
+            assert key in PlatformTracingProvider._unsaved  # still owed while the other loop's save is out
+            flush_fails.set()
+
+            async def flush_done():
+                while not flushed:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(flush_done(), 10)
+        assert flushed == [[ctx.id]]
+        assert key in PlatformTracingProvider._unsaved
+
+    async def test_a_fresh_context_with_the_same_run_id_replaces_what_is_stored(self, monkeypatch):
+        """A finished run id used again (the HTTP job store allows it): the fresh context's save, sent after the old
+        one's, stores the fresh context's trace."""
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 3600.0)
+        server = FakePlatform()
+        provider = self.redacting()
+        old = self.context(provider, t1=1, output="previous")
+        fresh = RunContext(id=old.id, tracing_provider=provider)
+        fresh.platform_config = CONFIG
+        fresh._trace["r"] = {
+            "call_id": "r",
+            "path": "a",
+            "t0": 0,
+            "t1": 1,
+            "parent_call_id": None,
+            "output": "replacement",
+        }
+        on_wire, release, patches = asyncio.Event(), asyncio.Event(), []
+
+        async def request(method, path, headers=None, **kwargs):
+            if method == "PATCH":
+                patches.append(None)
+                if len(patches) == 2:  # the old context's second save: held on the wire
+                    on_wire.set()
+                    await release.wait()
+            return await server.request(method, path, headers=headers, **kwargs)
+
+        with patch("timbal.platform.utils._request", request):
+            await asyncio.wait_for(provider.put(old), 5)
+            second = asyncio.create_task(provider.put(old))
+            await asyncio.wait_for(on_wire.wait(), 5)
+            replacing = asyncio.create_task(provider.put(fresh))  # waits behind the PATCH on the wire
+            await asyncio.wait_for(until_joined(PlatformTracingProvider._target(fresh)[2]), 5)
+            release.set()
+            await asyncio.wait_for(asyncio.gather(second, replacing), 5)
+        assert whole_root(server, old.id)["output"] == "replacement"
+
+    @pytest.mark.parametrize("fresh_lands", [True, False], ids=["the fresh run lands", "the fresh run fails"])
+    async def test_an_older_context_of_a_reused_run_id_is_never_stored_over_the_fresh_one(
+        self, monkeypatch, fresh_lands
+    ):
+        """A flush on another loop is about to send the old context (its end failed, so it was owed) when the id is
+        used again by a fresh context. The old context is not stored over the fresh one, and does not settle the
+        fresh one when it is the fresh one that is owed."""
+        import threading
+
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))
+        server = FakePlatform(deltas=False)  # whole traces only: each PATCH says which context it sends
+        provider = self.redacting()
+        old = self.context(provider, t1=1, output="previous")
+        fresh = RunContext(id=old.id, tracing_provider=provider)
+        fresh.platform_config = CONFIG
+        fresh._trace["r"] = {
+            "call_id": "r",
+            "path": "a",
+            "t0": 0,
+            "t1": 1,
+            "parent_call_id": None,
+            "output": "replacement",
+        }
+        _, _, key = PlatformTracingProvider._target(old)
+        main, paused, go = threading.get_ident(), threading.Event(), threading.Event()
+        outputs, refused = [], []
+        real_send = PlatformTracingProvider.__dict__["_send"].__func__
+
+        async def send(cls, *args, **kwargs):
+            if threading.get_ident() != main and not go.is_set():
+                paused.set()  # the flush has picked the run, with the old context owed
+                go.wait(10)
+            return await real_send(cls, *args, **kwargs)
+
+        async def request(method, path, headers=None, content=None, **kwargs):
+            if method == "PATCH":
+                raw = gzip.decompress(content) if (headers or {}).get("Content-Encoding") == "gzip" else content
+                sending = json.loads(raw)["trace"][0]["output"]
+                if not refused or (sending == "replacement" and not fresh_lands):
+                    refused.append(sending)
+                    raise PlatformError("upstream", status_code=503)
+                response = await server.request(method, path, headers=headers, content=content, **kwargs)
+                outputs.append(whole_root(server, old.id)["output"])
+                return response
+            return await server.request(method, path, headers=headers, content=content, **kwargs)
+
+        monkeypatch.setattr(PlatformTracingProvider, "_send", classmethod(send))
+        flushed = []
+        with patch("timbal.platform.utils._request", request):
+            assert await asyncio.wait_for(old._save_trace(barrier=True), 5) is False  # the old run's end: owed
+            other_loop = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
+            other_loop.start()
+            assert await asyncio.to_thread(paused.wait, 10)
+            assert await asyncio.wait_for(fresh._save_trace(barrier=True), 5) is fresh_lands  # the id, used again
+            go.set()
+            await asyncio.wait_for(asyncio.to_thread(other_loop.join, 10), 15)
+        assert "previous" not in outputs  # the old context was never stored over the fresh one
+        if fresh_lands:
+            assert outputs == ["replacement"] and flushed == [[]]
+        else:
+            assert outputs == [] and flushed == [[old.id]]  # the fresh run is still owed, and reported
+            assert PlatformTracingProvider._unsaved[key].context is fresh
+
+    @pytest.mark.parametrize("fresh_lands", [True, False], ids=["the fresh run landed", "the fresh run failed"])
+    async def test_a_late_save_of_an_older_context_of_a_reused_run_id_is_dropped(self, monkeypatch, fresh_lands):
+        """Work that outlived a finished run saves it again after its id was used by a fresh context (or its
+        keep-alive, or a buffered upload, does): that save is not stored, and does not take the fresh run's place
+        as what is owed."""
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))
+        server = FakePlatform(deltas=False)
+        provider = self.redacting()
+        old = self.context(provider, t1=1, output="previous")
+        fresh = RunContext(id=old.id, tracing_provider=provider)
+        fresh.platform_config = CONFIG
+        fresh._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None, "output": "new"}
+        _, _, key = PlatformTracingProvider._target(old)
+        with patch("timbal.platform.utils._request", server.request):
+            await asyncio.wait_for(provider.put(old), 5)
+            if fresh_lands:
+                await asyncio.wait_for(provider.put(fresh), 5)
+            else:
+                server.fail_next = 1
+                with pytest.raises(PlatformError):
+                    await asyncio.wait_for(provider.put(fresh), 5)
+            old._trace["r"].output = "previous, saved late"
+            await asyncio.wait_for(provider.put(old), 5)
+        if fresh_lands:
+            assert whole_root(server, old.id)["output"] == "new"
+            assert not PlatformTracingProvider._unsaved
+        else:
+            assert whole_root(server, old.id)["output"] == "previous"  # nothing newer landed
+            assert PlatformTracingProvider._unsaved[key].context is fresh  # still owed: the fresh run
+
+    async def test_a_buffered_run_id_used_again_uploads_the_fresh_run(self, monkeypatch):
+        """Buffered uploads keep retrying a finished run whose end failed; its id is then used again by a fresh
+        context. What is uploaded from then on is the fresh run, and a late save of the old one is not."""
+        from timbal.state.tracing import uploads
+
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))
+        server, failed = FakePlatform(deltas=False), []
+        down = True
+
+        async def request(method, path, **kwargs):
+            if method == "PATCH" and down:
+                failed.append(None)
+                raise PlatformError("upstream", status_code=503)
+            return await server.request(method, path, **kwargs)
+
+        async def until(predicate):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+        provider = PlatformTracingProvider.configured(
+            platform_config=CONFIG, durability="buffered", flush_interval_s=0.05
+        )
+        old = self.context(provider, output="old")
+        fresh = RunContext(id=old.id, tracing_provider=provider)
+        fresh.platform_config = CONFIG
+        fresh._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None, "output": "fresh"}
+        try:
+            with patch("timbal.platform.utils._request", request):
+                assert uploads.schedule(old)
+                await asyncio.wait_for(until(lambda: failed), 5)  # its mid-run upload failed: retried
+                old._trace["r"].t1 = 1
+                with pytest.raises(PlatformError):
+                    await asyncio.wait_for(uploads.write_through(old, provider.put), 5)  # its end, refused too
+                down = False
+                assert uploads.schedule(fresh)  # the id, used again
+                await asyncio.wait_for(until(lambda: old.id in server.runs and not uploads.pending_runs()), 5)
+                old._trace["r"].output = "old, saved late"
+                assert uploads.schedule(old)
+                assert await asyncio.wait_for(uploads.write_through(old, provider.put), 5) is False
+        finally:
+            self.reset_uploads()
+        root = whole_root(server, old.id)
+        assert root["output"] == "fresh" and root.get("t1") is None
+
+    @staticmethod
+    def reset_uploads():
+        from timbal.state.tracing import uploads
+
+        for run in list(uploads._RUNS.values()):
+            if run.task is not None:
+                run.task.cancel()
+        uploads._reset_for_tests()
+
+    async def test_a_fresh_run_taking_a_buffered_entry_over_still_falls_back_to_awaited_saves(self):
+        """The old run left an upload pending; the fresh context that takes the entry over and falls behind too
+        goes back to awaited saves, as any run does."""
+        from timbal.state.tracing import uploads
+
+        async def request(**_):
+            raise PlatformError("upstream", status_code=503)  # the platform is down
+
+        provider = PlatformTracingProvider.configured(
+            platform_config=CONFIG, durability="buffered", flush_interval_s=0.05, max_lag_s=0
+        )
+        old = self.context(provider, t1=1, output="old")
+        fresh = RunContext(id=old.id, tracing_provider=provider)
+        fresh.platform_config = CONFIG
+        fresh._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None, "output": "fresh"}
+        try:
+            with patch("timbal.platform.utils._request", request):
+                assert uploads.schedule(old)
+                assert not uploads.schedule(old)  # behind: the caller saves now
+                assert uploads.schedule(fresh)  # the id, used again
+                assert not uploads.schedule(fresh)  # behind as well
+        finally:
+            self.reset_uploads()
+
+    async def test_an_old_runs_barrier_waiting_when_the_id_is_used_again_does_not_store_it(self):
+        """Work that outlived a finished run waits to store it behind the run's end; meanwhile the id is used again.
+        That save stores nothing, and does not count the fresh run's save as done: the fresh run is uploaded."""
+        from timbal.state.tracing import uploads
+
+        server, sent = FakePlatform(advertise=False), []
+        on_wire, release = asyncio.Event(), asyncio.Event()
+
+        async def request(method, path, headers=None, content=None, **kwargs):
+            if method == "PATCH":
+                sent.append(json.loads(content)["trace"][0]["output"])
+                if len(sent) == 1:
+                    on_wire.set()
+                    await release.wait()
+            return await server.request(method, path, headers=headers, content=content, **kwargs)
+
+        async def until(predicate):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+        provider = PlatformTracingProvider.configured(
+            platform_config=CONFIG, durability="buffered", flush_interval_s=0.05
+        )
+        old = self.context(provider, t1=1, output="old")
+        fresh = RunContext(id=old.id, tracing_provider=provider)
+        fresh.platform_config = CONFIG
+        fresh._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None, "output": "fresh"}
+        try:
+            with patch("timbal.platform.utils._request", request):
+                end = asyncio.create_task(uploads.write_through(old, provider.put))
+                await asyncio.wait_for(on_wire.wait(), 5)
+                late = asyncio.create_task(uploads.write_through(old, provider.put))
+                run = uploads._RUNS[uploads._key(old)]
+                await asyncio.wait_for(until(lambda: run.writers == 2), 5)
+                assert uploads.schedule(fresh)  # the id, used again
+                release.set()
+                assert await asyncio.wait_for(end, 5) is True
+                assert await asyncio.wait_for(late, 5) is False
+                await asyncio.wait_for(until(lambda: "fresh" in sent and not uploads.pending_runs()), 5)
+        finally:
+            self.reset_uploads()
+        assert sent == ["old", "fresh"]
+        assert whole_root(server, old.id)["output"] == "fresh"
+
+    async def test_a_shutdown_flush_sends_an_end_that_failed_past_a_stalled_patch(self, monkeypatch):
+        """The run's end goes past a stalled mid-run PATCH and fails; a shutdown flush then runs while the stalled
+        one is still out. The flush sends the end, which lands."""
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))
+        server, ends, patches = FakePlatform(deltas=False), [], []
+        first_sent, release = asyncio.Event(), asyncio.Event()
+        provider = self.redacting()
+        ctx = self.context(provider)
+        record = self.recording(server, ctx.id, ends)
+
+        async def request(method, path, headers=None, **kwargs):
+            if method != "PATCH":
+                return await server.request(method, path, headers=headers, **kwargs)
+            patches.append(None)
+            if len(patches) == 1:
+                first_sent.set()
+                await release.wait()  # the mid-run PATCH: stalled, then it lands
+            elif len(patches) == 2:
+                raise PlatformError("upstream", status_code=503)  # the end, past it
+            return await record(method, path, headers=headers, **kwargs)
+
+        async def flush_sent():
+            while len(patches) < 3:
+                await asyncio.sleep(0)
+
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            assert await asyncio.wait_for(ctx._save_trace(barrier=True), 5) is False
+            flushing = asyncio.create_task(provider.flush(5))
+            await asyncio.wait_for(flush_sent(), 5)
+            release.set()
+            assert await asyncio.wait_for(flushing, 10) == []
+            await asyncio.wait_for(mid_run, 5)
+        assert self.never_back(ends)
+        assert not PlatformTracingProvider._unsaved
+
+
+class TestRedactionAcrossPaths:
+    """Every PATCH applies the redaction policy of the provider that accepted the save, and those of the copies it
+    was handed: whichever path sends it, and whatever was sent before it."""
+
+    @staticmethod
+    def context(provider=None, **root):
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {
+            "call_id": "r",
+            "path": "a",
+            "t0": 0,
+            "t1": 1,
+            "parent_call_id": None,
+            "input": {"prompt": "secret-in"},
+            "output": "secret-out",
+            **root,
+        }
+        return ctx
+
+    async def test_a_store_of_its_own_gets_the_redacted_copy(self):
+        """A subclass that stores runs its own way (it overrides ``_store``) persists what it is given."""
+        stored = []
+
+        class OwnStore(PlatformTracingProvider):
+            platform_config = CONFIG
+            _trace_redactor = staticmethod(masking("secret-out", "[OUT]"))
+
+            @classmethod
+            async def _store(cls, run_context):
+                stored.append(run_context._trace.model_dump())
+
+        await OwnStore.put(self.context())
+        (trace,) = stored
+        assert trace[0]["output"] == "[OUT]"
+
+    async def test_a_store_of_its_own_that_scrubs_more_and_passes_it_on_keeps_both(self):
+        """A subclass's ``_store`` scrubs the redacted copy it is given further, then hands it to the built-in store:
+        what is stored has both, and the live run neither."""
+        server = FakePlatform(deltas=False)
+
+        class ScrubsMore(PlatformTracingProvider):
+            platform_config = CONFIG
+            _trace_redactor = staticmethod(masking("secret-out", "[OUT]"))
+
+            @classmethod
+            async def _store(cls, run_context):
+                run_context._trace["r"].input = {"prompt": "[IN]"}  # its copy only
+                await super()._store(run_context)
+
+        ctx = self.context(ScrubsMore)
+        with patch("timbal.platform.utils._request", server.request):
+            await asyncio.wait_for(ScrubsMore.put(ctx), 5)
+        root = whole_root(server, ctx.id)
+        assert root["input"] == {"prompt": "[IN]"} and root["output"] == "[OUT]"
+        assert ctx._trace["r"].input == {"prompt": "secret-in"} and ctx._trace["r"].output == "secret-out"
+
+    async def test_a_copy_held_in_a_store_of_its_own_never_lands_over_a_newer_one(self):
+        """A subclass's ``_store`` awaits before passing its redacted copy on; a mid-run save is held there while
+        the run's end goes through and lands. The held copy, older, is not stored over it."""
+        server = FakePlatform(deltas=False)
+        held, release = asyncio.Event(), asyncio.Event()
+
+        class Waits(PlatformTracingProvider):
+            platform_config = CONFIG
+            _trace_redactor = staticmethod(masking("secret-out", "[OUT]"))
+
+            @classmethod
+            async def _store(cls, run_context):
+                if not held.is_set():
+                    held.set()
+                    await release.wait()
+                await super()._store(run_context)
+
+        ctx = self.context(Waits, t1=None)
+        with patch("timbal.platform.utils._request", server.request):
+            mid_run = asyncio.create_task(Waits.put(ctx))
+            await asyncio.wait_for(held.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            await asyncio.wait_for(Waits.put(ctx), 5)  # the end
+            release.set()
+            await asyncio.wait_for(mid_run, 5)
+            assert await PlatformTracingProvider.flush(timeout=1) == []
+        root = whole_root(server, ctx.id)
+        assert root["t1"] == 5 and root["output"] == "[OUT]"
+
+    async def test_a_copy_made_before_a_save_of_the_run_itself_went_out_is_not_stored_over_it(self):
+        """One destination gets saves of the run itself (a built-in provider) and copies (a subclass whose own
+        ``_store`` awaits before passing its copy on), with one policy. A copy made while a save of the run itself
+        waited to go out is older than what that save sent: it is not stored after it."""
+        server, applied = FakePlatform(deltas=False), []
+        on_wire, release, copied, pass_on = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
+        redactor = masking("secret-out", "[OUT]")
+        live = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=redactor)
+
+        class OwnStore(PlatformTracingProvider):
+            platform_config = CONFIG
+            _trace_redactor = staticmethod(redactor)
+
+            @classmethod
+            async def _store(cls, run_context):
+                copied.set()
+                await pass_on.wait()
+                await super()._store(run_context)
+
+        async def request(method, path, **kwargs):
+            if method == "PATCH" and not on_wire.is_set():
+                on_wire.set()
+                await release.wait()
+            response = await server.request(method, path, **kwargs)
+            if method == "PATCH":
+                applied.append(whole_root(server, ctx.id)["output"])
+            return response
+
+        ctx = self.context(live, t1=None, output="v0")
+        with patch("timbal.platform.utils._request", request):
+            first = asyncio.create_task(live.put(ctx))
+            await asyncio.wait_for(on_wire.wait(), 5)
+            ctx._trace["r"].output = "v1"
+            queued = asyncio.create_task(live.put(ctx))  # waits behind the PATCH on the wire
+            await asyncio.wait_for(until_joined(PlatformTracingProvider._target(ctx)[2]), 5)
+            copying = asyncio.create_task(OwnStore.put(ctx))  # a copy of v1, held in its _store
+            await asyncio.wait_for(copied.wait(), 5)
+            ctx._trace["r"].output = "v2"
+            release.set()
+            await asyncio.wait_for(asyncio.gather(first, queued), 5)  # the queued round sends the run as it is: v2
+            pass_on.set()
+            await asyncio.wait_for(copying, 5)
+            assert await PlatformTracingProvider.flush(timeout=1) == []
+        assert applied[-1] == "v2" and "v1" not in applied[applied.index("v2") :]
+
+    async def test_a_save_queued_behind_another_providers_is_sent_with_its_own_policy(self, monkeypatch):
+        """A run id used again by a context saved with a redacting provider, queued behind a PATCH of the old one
+        from a provider that does not redact: the queued round sends the fresh save with its own provider's
+        policy."""
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 3600.0)
+        server = FakePlatform(deltas=False)
+        plain = PlatformTracingProvider.configured(platform_config=CONFIG)
+        masked = PlatformTracingProvider.configured(
+            platform_config=CONFIG, _trace_redactor=masking("secret-out", "[OUT]")
+        )
+        old = self.context(plain)
+        fresh = RunContext(id=old.id, tracing_provider=masked)
+        fresh.platform_config = CONFIG
+        fresh._trace["r"] = dict(old._trace["r"].model_dump(), output="secret-out again")
+        on_wire, release = asyncio.Event(), asyncio.Event()
+
+        async def request(method, path, **kwargs):
+            if method == "PATCH" and not on_wire.is_set():
+                on_wire.set()
+                await release.wait()
+            return await server.request(method, path, **kwargs)
+
+        with patch("timbal.platform.utils._request", request):
+            first = asyncio.create_task(old._save_trace(barrier=True))
+            await asyncio.wait_for(on_wire.wait(), 5)
+            replacing = asyncio.create_task(fresh._save_trace(barrier=True))
+            await asyncio.wait_for(until_joined(PlatformTracingProvider._target(fresh)[2]), 5)
+            release.set()
+            assert await asyncio.wait_for(asyncio.gather(first, replacing), 5) == [True, True]
+        assert whole_root(server, old.id)["output"] == "[OUT] again"
+
+    async def test_a_shutdown_flush_sends_with_the_provider_that_accepted_the_save(self):
+        """A configured provider called directly, for a run context that names no provider of its own: its save
+        fails; the process-wide flush resends it with that provider's policy, not the base class's."""
+        server = FakePlatform(deltas=False)
+        server.fail_next = 1
+        masked = PlatformTracingProvider.configured(
+            platform_config=CONFIG, _trace_redactor=masking("secret-out", "[OUT]")
+        )
+        ctx = self.context(None)
+        with patch("timbal.platform.utils._request", server.request):
+            with pytest.raises(PlatformError):
+                await masked.put(ctx)
+            assert await PlatformTracingProvider.flush(timeout=1) == []
+        assert whole_root(server, ctx.id)["output"] == "[OUT]"
+
+    async def test_a_copy_forwarded_from_another_provider_gets_both_policies(self):
+        """An exporter of a provider that masks the input forwards its redacted copy to a platform provider that
+        masks the output: what the platform stores has both masked."""
+        server = FakePlatform(deltas=False)
+        platform = PlatformTracingProvider.configured(
+            platform_config=CONFIG, _trace_redactor=masking("secret-out", "[OUT]")
+        )
+
+        class Forward:
+            async def export(self, run_context):
+                await platform.put(run_context)
+
+        local = InMemoryTracingProvider.configured(_trace_redactor=masking("secret-in", "[IN]"), _exporters=[Forward()])
+        ctx = self.context(local)
+        with patch("timbal.platform.utils._request", server.request):
+            await local.put(ctx)
+        root = whole_root(server, ctx.id)
+        assert root["input"] == {"prompt": "[IN]"} and root["output"] == "[OUT]"
+
+
+class TestDestinations:
+    async def test_each_destination_settles_on_its_own_acknowledgement(self):
+        """One run saved to two destinations (two providers, two run paths). The first destination's answer comes
+        after the second has stored the run: both are settled, and a flush has nothing left to send."""
+
+        class OtherPlace(PlatformTracingProvider):
+            platform_config = CONFIG
+
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return RunPath(f"orgs/1/elsewhere/runs/{run_id}", family="orgs/1/elsewhere/runs")
+
+        here, there = FakePlatform(deltas=False), FakePlatform(deltas=False)
+        first_stored, answer_first, sent = asyncio.Event(), asyncio.Event(), []
+
+        async def request(method, path, **kwargs):
+            if method != "PATCH":
+                return await (there if "elsewhere" in path else here).request(method, path, **kwargs)
+            sent.append(path)
+            if "elsewhere" in path:
+                return await there.request(method, path, **kwargs)
+            response = await here.request(method, path, **kwargs)
+            if not first_stored.is_set():
+                first_stored.set()
+                await answer_first.wait()  # stored; its answer comes after the other destination's save
+            return response
+
+        default = PlatformTracingProvider.configured(platform_config=CONFIG)
+        ctx = TestRedactionAcrossPaths.context(default)
+        with patch("timbal.platform.utils._request", request):
+            first = asyncio.create_task(default.put(ctx))
+            await asyncio.wait_for(first_stored.wait(), 5)
+            await asyncio.wait_for(OtherPlace.put(ctx), 5)
+            answer_first.set()
+            await asyncio.wait_for(first, 5)
+            before = len(sent)
+            assert await PlatformTracingProvider.flush(timeout=1) == []
+            assert await PlatformTracingProvider.flush(timeout=1) == []
+        assert len(sent) == before  # nothing owed at either destination
+        assert ctx.id in here.runs and ctx.id in there.runs
+
+
+class TestHousekeeping:
+    def test_a_save_collected_while_the_snapshot_lock_is_held_does_not_wait_for_itself(self, monkeypatch):
+        """A save left suspended when its event loop was closed is finished by the garbage collector, on whatever
+        thread a collection happens to run: also on one that holds the lock the provider's bookkeeping uses."""
+        import gc
+        import sys
+        import threading
+
+        lock_kind = type(platform_module._snapshot_lock)
+        monkeypatch.setattr(
+            platform_module,
+            "_snapshot_lock",
+            threading.RLock() if lock_kind is type(threading.RLock()) else threading.Lock(),
+        )
+        monkeypatch.setattr(sys, "unraisablehook", lambda _info: None)  # "Task was destroyed but it is pending"
+        never = []
+
+        async def request(method, **_):
+            assert method == "PATCH"
+            if not never:
+                never.append(None)
+                await asyncio.get_running_loop().create_future()  # left on the wire: its loop closes
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+        left, other = (TestOrderAcrossPaths.context(provider) for _ in range(2))
+        _, _, key = PlatformTracingProvider._target(left)
+        allocations = []
+
+        class Collecting(platform_module._Write):
+            """A collection that lands on this allocation, made with the lock held."""
+
+            __slots__ = ()
+
+            def __init__(self, *args):
+                if not allocations:
+                    allocations.append(gc.collect())
+                super().__init__(*args)
+
+        gc.collect()
+        gc.disable()
+        try:
+            with patch("timbal.platform.utils._request", request):
+
+                def leave_a_save():
+                    loop = asyncio.new_event_loop()
+                    loop.create_task(provider.put(left))
+
+                    async def out():
+                        while not never:
+                            await asyncio.sleep(0)
+
+                    loop.run_until_complete(asyncio.wait_for(out(), 5))
+                    loop.close()
+
+                first = threading.Thread(target=leave_a_save)
+                first.start()
+                first.join(10)
+                flushed = []  # the run sent again from another loop: its first loop's save is now only garbage
+                flush = threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5))))
+                flush.start()
+                flush.join(10)
+                assert flushed == [[]]
+                monkeypatch.setattr(platform_module, "_Write", Collecting)
+                saving = threading.Thread(target=lambda: asyncio.run(provider.put(other)), daemon=True)
+                saving.start()
+                saving.join(10)
+        finally:
+            gc.enable()
+        assert not saving.is_alive()  # the save did not wait for itself
+        assert allocations and allocations[0] > 0  # a collection ran inside the lock, and found the save left behind
+
+    async def test_a_stalled_patch_keeps_no_finished_rounds(self, monkeypatch):
+        """While one PATCH is out, the run's end goes past it again and again and fails each time: nothing of
+        those failed rounds is kept (each failure holds the body it sent)."""
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        first_sent, release, patches = asyncio.Event(), asyncio.Event(), []
+
+        async def request(method, **_):
+            assert method == "PATCH"
+            patches.append(None)
+            if len(patches) == 1:
+                first_sent.set()
+                await release.wait()
+                return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+            raise PlatformError("forbidden", status_code=403)
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+        ctx = TestOrderAcrossPaths.context(provider)
+        _, _, key = PlatformTracingProvider._target(ctx)
+        with patch("timbal.platform.utils._request", request):
+            first = asyncio.create_task(provider.put(ctx))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            for _ in range(32):
+                with pytest.raises(PlatformError):
+                    await asyncio.wait_for(provider.put(ctx), 5)
+            flight = PlatformTracingProvider._flights[key]
+            assert len(patches) == 33
+            assert len(flight.sent) <= 1  # the stalled round alone
+            release.set()
+            await asyncio.wait_for(first, 5)
+
+
 class TestShutdownFlush:
     async def test_saves_owed_land_before_shutdown_ends(self, monkeypatch):
         monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 60.0)
@@ -1592,7 +1965,7 @@ class TestShutdownFlush:
         ctx.platform_config = CONFIG
         ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}
         _, _, key = PlatformTracingProvider._target(ctx)
-        PlatformTracingProvider._unsaved[key] = ctx  # asked for; its loop was torn down before it landed
+        platform_module._owe(key, ctx, provider)  # asked for; its loop was torn down before it landed
         with patch("timbal.platform.utils._request", server.request):
             assert await PlatformTracingProvider.flush(timeout=1) == []
         assert server.runs[ctx.id]["trace"][0]["t1"] == 1
@@ -1612,7 +1985,7 @@ class TestShutdownFlush:
         ctx.platform_config = CONFIG
         ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}
         _, _, key = PlatformTracingProvider._target(ctx)
-        PlatformTracingProvider._unsaved[key] = ctx
+        platform_module._owe(key, ctx, provider)
         set_run_context(None)
         with patch("timbal.platform.utils._request", request):
             assert await PlatformTracingProvider.flush(timeout=1) == []
@@ -1762,7 +2135,7 @@ class TestTransientFailures:
             await self.until(lambda: not PlatformTracingProvider._retries)
         assert not PlatformTracingProvider._retries
         assert any(log["event"] == "platform_trace_retry_exhausted" for log in logs)
-        assert list(PlatformTracingProvider._unsaved.values()) == [ctx]  # still owed: a shutdown flush reports it
+        assert [write.context for write in PlatformTracingProvider._unsaved.values()] == [ctx]  # still owed
 
     async def test_a_run_buffered_uploads_hold_all_window_is_not_reported_as_given_up(self, monkeypatch):
         from timbal.state.tracing import uploads

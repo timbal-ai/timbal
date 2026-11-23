@@ -37,6 +37,7 @@ Configure per provider (``Provider.configured(durability="buffered", flush_inter
 from __future__ import annotations
 
 import asyncio
+import itertools
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -124,6 +125,7 @@ class _RunUploads:
     )  # fmt: skip
 
     def __init__(self, context: RunContext, provider: type[TracingProvider]) -> None:
+        _seen(context)
         self.context = context
         self.provider = provider
         self.task: asyncio.Task | None = None
@@ -143,6 +145,30 @@ class _RunUploads:
 
 
 _RUNS: dict[tuple[int, str], _RunUploads] = {}
+# Run contexts in the order buffered uploads first saw them (``_holds``).
+_SEEN = itertools.count(1)
+
+
+def _seen(run_context: RunContext) -> int:
+    state = run_context.__dict__
+    seen = state.get("_uploads_seen")
+    if seen is None:
+        seen = state["_uploads_seen"] = next(_SEEN)
+    return seen
+
+
+def _holds(run: _RunUploads, run_context: RunContext) -> bool:
+    """Whether ``run`` stores ``run_context``. A run id used again by a fresh context (once its run finished: the
+    HTTP job store allows it) takes the entry over, and what the older context left pending is no longer the id's
+    to store; a save of a context older than the one held is not stored (also one that was waiting for the lock
+    when the entry was taken over: ``write_through`` asks again once it holds it)."""
+    if run.context is run_context:
+        return True
+    if _seen(run_context) < _seen(run.context):
+        return False
+    run.context = run_context
+    run.pending, run.unsent_since, run.failures = False, None, 0
+    return True
 
 
 class _Turns:
@@ -172,6 +198,8 @@ def schedule(run_context: RunContext) -> bool:
     run = _RUNS.get(_key(run_context))
     if run is None:
         run = _RUNS[_key(run_context)] = _RunUploads(run_context, provider)
+    elif not _holds(run, run_context):
+        return True  # an older context of a run id used again: nothing of it is stored
     now = loop.time()
     # At or past the limit (inclusive: on a coarse clock, Windows before Python 3.13, a backlog started in
     # this 15.6 ms tick reads as 0 s behind, and max_lag_s=0 must still mean "always synchronous").
@@ -246,9 +274,13 @@ async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[
                 turn.landed = mine
             return True
         run = _RUNS[key] = _RunUploads(run_context, provider)
+    elif not _holds(run, run_context):
+        return False  # an older context of a run id used again: not stored, the id is the newer run's
     run.writers += 1
     try:
         async with run.lock:
+            if run.context is not run_context:
+                return False  # taken over meanwhile by a fresh context of the run id: this one is not stored
             covered = run.requests
             await put(run_context)
             if run.requests == covered:
