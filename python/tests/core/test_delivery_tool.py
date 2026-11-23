@@ -304,6 +304,199 @@ class TestSendMessage:
         out, messages = await run(agent)
         assert [m["text"] for m in messages] == ["Card charged."] and out.output.collect_text() == "Card charged."
 
+    async def test_a_draft_a_tool_args_guardrail_rewrote_is_screened_like_a_send(self):
+        """A send passes the ``tool_args`` guardrails and then, in its handler, the ``model_output`` ones. A
+        draft the first rewrite is checked by the second like the send it stands for, not delivered as the
+        first left it. (The ``model_output`` guardrails have seen the draft once before, as the model wrote
+        it: a final answer is screened as it ends, whatever becomes of it.)"""
+        renames = guardrail(
+            lambda text: text.replace("invoice_123", "order_123"), stages=["tool_args"], action="redact", name="a"
+        )
+        formats = guardrail(
+            lambda text: text.replace("order_123", "Order 123"), stages=["model_output"], action="redact", name="b"
+        )
+        refuses = guardrail(
+            lambda text: Verdict.block("an order") if "order_123" in text else True, stages=["model_output"], name="c"
+        )
+        for second, sent in ((formats, ["See Order 123."]), (refuses, [])):
+            for first in (calls(send("See invoice_123.", True)), "See invoice_123."):
+                fresh()
+                # (A send that is refused is answered to the model, which here has nothing more to say.)
+                model = TestModel(responses=[first, "nothing more"])
+                agent = Agent(name="bot", model=model, delivery="tool", guardrails=[renames, second], max_iter=2)
+                out, messages = await run(agent)
+                delivered = [m["text"] for m in messages if m["text"] != "nothing more"]
+                assert delivered == sent, (second.name, first)
+                assert "order_123" not in repr(out.output) and "invoice_123" not in repr(out.output)
+
+    async def test_history_keeps_a_draft_as_it_was_delivered(self, tmp_path):
+        """The gate rewrote the draft: the user read the rewrite, so the next turn's model reads it too."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
+
+        rail = guardrail(lambda text: text.replace("Monday", "Tuesday"), stages=["tool_args"], action="redact")
+        for provider in (InMemoryTracingProvider, JsonlTracingProvider.configured(_path=tmp_path / "traces.jsonl")):
+            read = []
+
+            def model(messages, read=read):
+                read.append(list(messages))
+                return "Delivery is Monday."
+
+            fresh()
+            set_run_context(RunContext(tracing_provider=provider))
+            agent = Agent(
+                name="bot",
+                model=TestModel(handler=model),
+                delivery="tool",
+                guardrails=[rail],
+                tracing_provider=provider,
+            )
+            out, messages = await run(agent, "when?")
+            assert [m["text"] for m in messages] == ["Delivery is Tuesday."]
+            set_run_context(RunContext(parent_id=out.run_id, tracing_provider=provider))
+            await run(agent, "sure?")
+            assert [m.collect_text() for m in read[-1] if m.role == "assistant"] == ["Delivery is Tuesday."]
+
+    async def test_a_rewritten_draft_keeps_what_came_with_it(self, tmp_path):
+        """The final answer may hold more than text. A rail that edits the text leaves the rest in the output."""
+        from timbal.types.content import FileContent, TextContent
+        from timbal.types.file import File
+
+        path = tmp_path / "chart.txt"
+        path.write_text("1,2,3")
+        answer = Message(
+            role="assistant",
+            content=[TextContent(text="Card 4111 charged."), FileContent(file=File.validate(str(path)))],
+            stop_reason="end_turn",
+        )
+        edit = guardrail(lambda text: text.replace("4111", "[card]"), stages=["tool_args"], action="redact")
+        for rails, text in (([], "Card 4111 charged."), ([edit], "Card [card] charged.")):
+            fresh()
+            model = TestModel(responses=[answer, "must not be requested"])
+            out, messages = await run(Agent(name="bot", model=model, delivery="tool", guardrails=rails))
+            assert [m["text"] for m in messages] == [text] and out.output.collect_text() == text
+            assert len(files_of(out.output.content)) == 1, text
+
+    async def test_a_draft_is_not_screened_twice_where_nothing_changed_it(self):
+        """The ``model_output`` guardrails have seen a final answer. They see it again only as another text."""
+        shown = []
+        watches = guardrail(lambda text: shown.append(text) or True, stages=["model_output"], name="watches")
+        lets_through = guardrail(lambda _text: True, stages=["tool_args"], name="lets_through")
+        renames = guardrail(
+            lambda text: text.replace("Monday", "Tuesday"), stages=["tool_args"], action="redact", name="renames"
+        )
+        for first, expected in (
+            (lets_through, ["Delivery is Monday."]),
+            (renames, ["Delivery is Monday.", "Delivery is Tuesday."]),
+        ):
+            shown.clear()
+            fresh()
+            model = TestModel(responses=["Delivery is Monday.", "must not be requested"])
+            await run(Agent(name="bot", model=model, delivery="tool", guardrails=[first, watches]))
+            assert shown == expected
+
+    async def test_a_rewritten_draft_leaves_the_model_call_s_own_output_alone(self):
+        """History says what the user read. The model call's span and its event say what the model produced."""
+        from timbal.state import get_run_context
+
+        fresh()
+        rail = guardrail(lambda text: text.replace("Monday", "Tuesday"), stages=["tool_args"], action="redact")
+        model = TestModel(responses=["Delivery is Monday.", "must not be requested"])
+        agent = Agent(name="bot", model=model, delivery="tool", guardrails=[rail])
+        events = [event async for event in agent(prompt="when?")]
+        assert events[-1].output.collect_text() == "Delivery is Tuesday."
+        (call,) = [span for span in get_run_context()._trace.values() if span.path == "bot.llm"]
+        assert call.output.collect_text() == "Delivery is Monday."
+        produced = [e.output for e in events if getattr(e, "path", None) == "bot.llm" and e.type == "OUTPUT"]
+        assert [message.collect_text() for message in produced] == ["Delivery is Monday."]
+
+    async def test_a_draft_keeps_its_shape_when_rewritten_and_nothing_of_it_when_refused(self, tmp_path):
+        """Rewritten, the output is the final message with its text replaced where it was. Refused, nothing
+        of the message goes out: not the file its text came with."""
+        from timbal.types.content import FileContent, TextContent
+        from timbal.types.file import File
+
+        path = tmp_path / "chart.txt"
+        path.write_text("1,2,3")
+        answer = Message(
+            role="assistant",
+            content=[FileContent(file=File.validate(str(path))), TextContent(text="Card 4111 charged.")],
+            stop_reason="end_turn",
+        )
+        edit = guardrail(lambda text: text.replace("4111", "[card]"), stages=["tool_args"], action="redact")
+        refuse = guardrail(lambda _text: Verdict.block("not for users"), stages=["tool_args"], name="refuse")
+        for rail, kinds, text in ((edit, ["file", "text"], "Card [card] charged."), (refuse, ["text"], "")):
+            fresh()
+            model = TestModel(responses=[answer, "must not be requested"])
+            out, _ = await run(Agent(name="bot", model=model, delivery="tool", guardrails=[rail]))
+            assert [item.type for item in out.output.content] == kinds and out.output.collect_text() == text
+
+    async def test_the_reply_of_an_on_max_iter_hook_is_screened_with_what_it_holds(self, tmp_path):
+        """The hook's reply is shown to the ``model_output`` guardrails as the message it is, so one that
+        reads the message decides on its file, with or without a text next to it. Refused, nothing of the
+        reply goes out. And a reply stored without its empty text block is still found in the history."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.types.content import FileContent, TextContent
+        from timbal.types.file import File
+
+        path = tmp_path / "report.txt"
+        path.write_text("1,2,3")
+
+        def no_files(_text: str, ctx):
+            held = any(isinstance(item, FileContent) for item in ctx.payload.content)
+            return Verdict.block("an attachment") if held else True
+
+        for caption in ("Here is what I have.", ""):
+
+            def hook(_context, caption=caption) -> Message:
+                content = [TextContent(text=caption)] if caption else []
+                return Message(role="assistant", content=[*content, FileContent(file=File.validate(str(path)))])
+
+            fresh()
+            model = TestModel(responses=[calls(("work", {})), "must not be requested"])
+            agent = Agent(
+                name="bot",
+                model=model,
+                tools=[Tool(name="work", handler=work)],
+                delivery="tool",
+                max_iter=1,
+                on_max_iter=hook,
+                guardrails=[guardrail(no_files, stages=["model_output"], name="no_files")],
+            )
+            out, messages = await run(agent)
+            assert messages == [] and files_of(out.output.content) == [], caption
+            assert out.output.collect_text() == ""
+
+        # A reply whose first text block is empty is stored without it: found all the same.
+        read = []
+
+        def model_fn(messages):
+            read.append(list(messages))
+            return calls(("work", {})) if len(read) == 1 else "ok"
+
+        fresh()
+        set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=model_fn),
+            tools=[Tool(name="work", handler=work)],
+            delivery="tool",
+            max_iter=1,
+            on_max_iter=lambda _context: Message(
+                role="assistant", content=[TextContent(text=""), TextContent(text="Delivery is Monday.")]
+            ),
+            guardrails=[
+                guardrail(lambda text: text.replace("Monday", "Tuesday"), stages=["tool_args"], action="redact")
+            ],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out, messages = await run(agent)
+        assert [m["text"] for m in messages] == ["Delivery is Tuesday."]
+        set_run_context(RunContext(parent_id=out.run_id, tracing_provider=InMemoryTracingProvider))
+        await run(agent, "sure?", delivery="text")
+        assert [m.collect_text() for m in read[-1] if m.role == "assistant" and m.collect_text()] == [
+            "Delivery is Tuesday."
+        ]
+
     async def test_the_reply_of_on_max_iter_passes_the_gate_on_sends_too(self):
         def gate(_text: str, ctx):
             return Verdict.block("not for users") if "budget" in ctx.tool_args.get("text", "") else True
@@ -322,6 +515,50 @@ class TestSendMessage:
             )
             out, messages = await run(agent)
             assert [m["text"] for m in messages] == sent and out.output.collect_text() == "".join(sent)
+
+    async def test_the_reply_of_on_max_iter_is_screened_and_kept_as_delivered(self):
+        """No guardrail has seen ``on_max_iter``'s own reply. Delivered, it gets what a send gets: the
+        ``model_output`` guardrails too, and the history holds it as the user read it."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        softens = guardrail(
+            lambda text: text.replace("exhausted", "used up"), stages=["model_output"], action="redact", name="softens"
+        )
+        refuses = guardrail(
+            lambda text: Verdict.block("internal") if "budget" in text else True,
+            stages=["model_output"],
+            name="refuses",
+        )
+        for rail, said in ((softens, "used up"), (refuses, None)):
+            read = []
+
+            def model(messages, read=read):
+                read.append(list(messages))
+                return calls(("work", {})) if len(read) == 1 else "ok"
+
+            fresh()
+            set_run_context(RunContext(tracing_provider=InMemoryTracingProvider))
+            agent = Agent(
+                name="bot",
+                model=TestModel(handler=model),
+                tools=[Tool(name="work", handler=work)],
+                delivery="tool",
+                max_iter=1,
+                on_max_iter="stop",
+                guardrails=[rail],
+                tracing_provider=InMemoryTracingProvider,
+            )
+            out, messages = await run(agent)
+            assert out.status.reason == "max_iter" and "exhausted" not in repr(out.output)
+            if said is None:
+                assert messages == [] and out.output.collect_text() == ""
+                continue
+            assert len(messages) == 1 and said in messages[0]["text"]
+            set_run_context(RunContext(parent_id=out.run_id, tracing_provider=InMemoryTracingProvider))
+            await run(agent, "and then?", delivery="text")
+            assert [m.collect_text() for m in read[-1] if m.role == "assistant" and m.collect_text()] == [
+                messages[0]["text"]
+            ]
 
     async def test_the_receipt_says_what_a_person_changed_when_approving(self):
         """A person approving a send may edit it. What went out is then not what the model wrote, and the

@@ -3383,52 +3383,110 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         text = written.get("text") if isinstance(written, dict) else None
         return text if isinstance(text, str) else None
 
-    async def _gate_draft(self, current_span: Any, send_name: str | None, text: str) -> str | None:
+    async def _gate_draft(
+        self, current_span: Any, send_name: str | None, text: str, screened: bool = True, rest: Sequence = ()
+    ) -> str | None:
         """A draft about to be delivered without a send (``delivery="tool"``): it stands for a send the
-        model did not make, so the agent's ``tool_args`` guardrails decide on it as on one. Returns the
-        text to deliver (as a rail rewrote it), or None when it is not to go out: a rail refuses it, or
-        asks for a person, who cannot be asked about a call that was never made.
+        model did not make, so it gets the checks a send gets. The agent's ``tool_args`` guardrails decide
+        on it as on a call, and what they leave of it is screened by the ``model_output`` ones, as in the
+        send's handler. Returns the text to deliver (as the rails rewrote it), or None when the draft is
+        not to go out: a rail refuses it, leaves nothing of it, or asks for a person, who cannot be asked
+        about a call that was never made.
 
-        Without this, the gate an application puts on sends at that stage has a way round it: a send it
-        refuses means the turn sent nothing, and a turn that sent nothing delivers its text.
+        ``screened``: the ``model_output`` guardrails have seen this message already. A final answer is
+        screened as it ends, as the model wrote it, so they are run again only on a text the first stage
+        changed. (That is one difference with a send, whose text they see only once the ``tool_args``
+        ones are through with it.) ``rest``: what the message holds besides text, shown to them with it:
+        a rail that reads the message decides on its files, also when there is no text (and no send to
+        stand for).
+
+        Without the first stage, the gate an application puts on sends there has a way round it: a send
+        it refuses means the turn sent nothing, and a turn that sent nothing delivers its text.
         """
         runner = self._guardrail_runner
-        if runner is None or not runner.has_stage(GuardrailStage.TOOL_ARGS):
+        if runner is None:
             return text
-        args = {"text": text, "end_turn": True}
-        projected = json.dumps(args, sort_keys=True, default=str)  # as Runnable._apply_tool_args_guardrails
-        ctx = GuardrailContext(
-            stage=GuardrailStage.TOOL_ARGS, agent_path=self._path, tool_name=send_name, tool_args=args, payload=args
-        )
-        outcome = await runner.run_stage(GuardrailStage.TOOL_ARGS, projected, ctx)
-        record_guardrails_metadata(current_span, outcome.triggered, run_context=get_run_context())
-        if outcome.verdict is not None:
-            return None
-        if outcome.replaced:
-            rewritten: Any = outcome.replacement_args
-            if rewritten is not None:
-                # A rail's own arguments for the call. Ones the send tool would not take (no text, a text
-                # that is not one) make a send fail: the draft is not delivered as the model wrote it.
-                text = rewritten.get("text") if isinstance(rewritten, dict) else None
-                if not isinstance(text, str):
+        written = text
+        if text and runner.has_stage(GuardrailStage.TOOL_ARGS):
+            args = {"text": text, "end_turn": True}
+            projected = json.dumps(args, sort_keys=True, default=str)  # as Runnable._apply_tool_args_guardrails
+            ctx = GuardrailContext(
+                stage=GuardrailStage.TOOL_ARGS, agent_path=self._path, tool_name=send_name, tool_args=args, payload=args
+            )
+            outcome = await runner.run_stage(GuardrailStage.TOOL_ARGS, projected, ctx)
+            record_guardrails_metadata(current_span, outcome.triggered, run_context=get_run_context())
+            if outcome.verdict is not None:
+                return None
+            if outcome.replaced:
+                rewritten: Any = outcome.replacement_args
+                if rewritten is not None:
+                    # A rail's own arguments for the call. Ones the send tool would not take (no text, a
+                    # text that is not one) make a send fail: the draft is not delivered as the model wrote it.
+                    text = rewritten.get("text") if isinstance(rewritten, dict) else None
+                    if not isinstance(text, str):
+                        return None
+                    text = text.strip()
+                elif outcome.text != projected:
+                    # A scrub of the projection. Unparseable, it leaves a send as it was: so too the draft.
+                    try:
+                        rewritten = json.loads(outcome.text)
+                    except ValueError:
+                        rewritten = None
+                    if isinstance(rewritten, dict) and isinstance(rewritten.get("text"), str):
+                        text = rewritten["text"].strip()
+                if not text:
                     return None
-                text = text.strip()
-            elif outcome.text != projected:
-                # A scrub of the projection. Unparseable, it leaves a send as it was: so too the draft.
-                try:
-                    rewritten = json.loads(outcome.text)
-                except ValueError:
-                    rewritten = None
-                if isinstance(rewritten, dict) and isinstance(rewritten.get("text"), str):
-                    text = rewritten["text"].strip()
-        return text or None
+        if (
+            (text or rest)
+            and (not screened or text != written)
+            and runner.has_stage(GuardrailStage.MODEL_OUTPUT)
+        ):
+            said = [TextContent(text=text)] if text else []
+            payload = Message(role="assistant", content=[*said, *rest])
+            ctx = GuardrailContext(stage=GuardrailStage.MODEL_OUTPUT, agent_path=self._path, payload=payload)
+            outcome = await runner.run_stage(GuardrailStage.MODEL_OUTPUT, text, ctx)
+            record_guardrails_metadata(current_span, outcome.triggered, run_context=get_run_context())
+            if outcome.verdict is not None:
+                return None
+            if outcome.replaced:
+                left = outcome.text.strip()
+                if text and not left:
+                    return None
+                text = left
+        return text
 
-    def _withheld(self, current_span: Any, text: str | None, rest: Sequence = ()) -> Message:
-        """The turn's output when a draft is all it had for the user and the gate on sends changed it
-        (``text``) or kept it back (None): what was delivered, never the draft as the model wrote it."""
-        if text is None:
-            current_span.metadata["delivery"] = {"mode": "tool", "messages": 0, "withheld": True}
-        return Message(role="assistant", content=[TextContent(text=text or ""), *rest], stop_reason="end_turn")
+    @staticmethod
+    def _reworded(message: Message, text: str) -> Message:
+        """A copy of ``message`` that says ``text``: its first text block carries it, its other text blocks
+        go, and what it holds besides text stays where it is. A copy, since the message may be the model
+        call's own output, which stays what the model produced."""
+        content: list = []
+        placed = False
+        for item in message.content:
+            if not isinstance(item, TextContent):
+                content.append(item)
+            elif not placed:
+                content.append(TextContent(text=text))
+                placed = True
+        if not placed:
+            content.append(TextContent(text=text))
+        return Message(
+            role=message.role, content=content, stop_reason=message.stop_reason, metadata=dict(message.metadata)
+        )
+
+    async def _as_delivered(self, current_span: Any, text: str) -> Message:
+        """Replace the turn's last message, in memory and as stored, by one that says the text that went
+        out (:meth:`_reworded`): the next turn's model reads what the user read. Returns it."""
+        message = self._reworded(current_span.memory[-1], text)
+        current_span.memory[-1] = message
+        current_span._memory_dump[-1] = await dump(message)
+        return message
+
+    def _withheld(self, current_span: Any) -> Message:
+        """The turn's output when a draft was all it had for the user and the checks kept it back: nothing
+        of the draft's message, text or files."""
+        current_span.metadata["delivery"] = {"mode": "tool", "messages": 0, "withheld": True}
+        return Message(role="assistant", content=[TextContent(text="")], stop_reason="end_turn")
 
     async def _deliver_final(
         self, current_span: Any, send_name: str | None, offered: bool, before: int, stored: bool
@@ -3441,7 +3499,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         or a denial limit took the tools away). ``stored``: whether the answer is in memory. An empty one
         is not kept, and the last message there is then the user's prompt or a runtime notice.
 
-        A draft that is delivered passes the gate on sends first (:meth:`_gate_draft`).
+        A draft that is delivered gets a send's checks first (:meth:`_gate_draft`). Where they rewrote it,
+        the message in the history is replaced by one that says what went out, and alone that message is
+        the output.
         """
         metadata = current_span.metadata
         draft = ""
@@ -3449,10 +3509,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             draft = message_text(current_span.memory[-1]).strip()
         joined = False
         text: str | None = draft
+        reworded: Message | None = None
         if draft and not (offered and (before or metadata.get("messages_sent"))):
-            text = await self._gate_draft(current_span, send_name, draft)
+            rest = [item for item in current_span.memory[-1].content if not isinstance(item, TextContent)]
+            text = await self._gate_draft(current_span, send_name, draft, rest=rest)
             if text is not None:
                 joined = self._deliver_text(current_span, text, before)
+                if text != draft:
+                    reworded = await self._as_delivered(current_span, text)
         delivered = self._delivered(current_span, before)
         if delivered is not None:
             if joined:
@@ -3461,30 +3525,46 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if text == draft:
             return None
         # Alone, the draft would be the output as the model wrote it: the output is what went out.
-        reply = self._withheld(current_span, text)
+        if reworded is None:
+            reply = self._withheld(current_span)
+        else:
+            reply = Message(role="assistant", content=reworded.content, stop_reason="end_turn")
         return self._synthetic_event("delivery", RunStatus(code="success", reason="end_turn"), output=reply)
 
     async def _deliver_reply(self, current_span: Any, send_name: str | None, reply: Message, before: int) -> Message:
         """Deliver ``on_max_iter``'s own reply (``delivery="tool"``): no step is left to send it with the tool.
         Returns the turn's output: the reply, or after messages the turn sent, all it told the user, with
-        what the reply holds besides text (a file a hook returned), whether or not it has a text. Its
-        text passes the gate on sends first (:meth:`_gate_draft`)."""
+        what the reply holds besides text (a file a hook returned), whether or not it has a text.
+
+        The reply gets a send's checks first (:meth:`_gate_draft`; no guardrail has seen it). Refused,
+        nothing of it goes out. Rewritten, the reply in the history is replaced by one that says what
+        went out.
+        """
         written = message_text(reply).strip()
-        text: str | None = written
-        if written:
-            text = await self._gate_draft(current_span, send_name, written)
-            if text is not None:
-                self._deliver_text(current_span, text, before)
         rest = [item for item in reply.content if not isinstance(item, TextContent)]
+        text = await self._gate_draft(current_span, send_name, written, screened=False, rest=rest)
+        reworded: Message | None = None
+        if text is None:
+            rest = []
+        elif text:
+            self._deliver_text(current_span, text, before)
+            if text != written:
+                reworded = self._reworded(reply, text)
+                last = current_span.memory[-1] if current_span.memory else None
+                # (As stored: the reply itself, or a copy without its empty text blocks.)
+                if last is not None and last.role == "assistant" and message_text(last).strip() == written:
+                    reworded = await self._as_delivered(current_span, text)
         if current_span.metadata.get("messages_sent") or before:
             told = self._delivered(current_span, before).output
-            if written and text is not None:
+            if text:
                 current_span.metadata["delivery"]["fallback"] = True
             content = [*told.content, *rest]
         elif text == written:
             return reply  # all the turn told the user: its output as it is
+        elif reworded is None:
+            content = self._withheld(current_span).content
         else:
-            content = self._withheld(current_span, text, rest).content
+            content = reworded.content
         return Message(role="assistant", content=content, stop_reason=reply.stop_reason, metadata=reply.metadata)
 
     def _end_turn(self, current_span: Any, before: int, joined: bool) -> OutputEvent | None:
