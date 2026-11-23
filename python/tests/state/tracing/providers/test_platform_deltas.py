@@ -702,28 +702,26 @@ class TestSingleFlight:
         assert errors == []  # the stalled PATCH finishing late raises nothing in its done callback
         assert len(sent) == 2 and not PlatformTracingProvider._retries  # and nothing is resent
 
+    @pytest.mark.parametrize("end", ["landed", "stored_but_unanswered", "not_yet_at_the_host"])
     @pytest.mark.parametrize("answer", ["too_large", "format_rejected", "stale", "delta_unconfirmed"])
-    async def test_a_patch_overtaken_by_the_runs_end_is_not_sent_again(self, monkeypatch, answer):
+    async def test_a_patch_overtaken_by_the_runs_end_is_not_sent_again(self, monkeypatch, answer, end):
         """With a trace redactor every put carries its own copy of the trace as it was then. A mid-run PATCH that
         the platform answers with "send it again" (too large, a format it does not take, stale, a delta it did not
-        confirm) after the run's end has gone past it and landed must not go out again: the same older copy
-        under a newer snapshot number would be taken for the newer state, and the stored run would have no end."""
+        confirm) once the run's end has gone past it must not go out again, whether the end has landed, has been
+        stored with its answer still on the way, or has not reached the host yet: a resend is numbered above the
+        end, with the same older copy, and the host would take it for the newest (the stored run loses its end)."""
         monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)  # the end does not wait for the PATCH on the wire
         server = FakePlatform()
-        first_sent, answer_it = asyncio.Event(), asyncio.Event()
+        first_sent, answer_it, answered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        end_held, release_end = asyncio.Event(), asyncio.Event()
         patches = []
         if answer in ("format_rejected", "delta_unconfirmed"):
             PlatformTracingProvider._host_caps(CONFIG.host).delta = True  # the first PATCH goes out as a delta
 
-        async def request(method, path, headers=None, **kwargs):
-            if method != "PATCH":
-                return await server.request(method, path, headers=headers, **kwargs)
-            patches.append(int(headers["X-Timbal-Snapshot"]))
-            if len(patches) > 1:
-                PlatformTracingProvider._host_caps(CONFIG.host).delta = False  # what follows goes whole
-                return await server.request(method, path, headers=headers, **kwargs)
+        async def first():
             first_sent.set()
             await answer_it.wait()
+            answered.set()  # whatever the save does next with this answer, it does in this step
             if answer == "too_large":
                 raise PlatformError("payload too large", status_code=413)
             if answer == "format_rejected":
@@ -732,6 +730,22 @@ class TestSingleFlight:
                 stored = {"X-Timbal-Snapshot": str(patches[0] + 10**12), "X-Timbal-Snapshot-Applied": "false"}
                 return SimpleNamespace(raise_for_status=lambda: None, headers=stored, json=lambda: {})
             return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})  # no echo of a delta
+
+        async def request(method, path, headers=None, **kwargs):
+            if method != "PATCH":
+                return await server.request(method, path, headers=headers, **kwargs)
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) == 1:
+                return await first()
+            PlatformTracingProvider._host_caps(CONFIG.host).delta = False  # what follows goes whole
+            if len(patches) == 2 and end == "not_yet_at_the_host":
+                end_held.set()
+                await release_end.wait()
+            response = await server.request(method, path, headers=headers, **kwargs)
+            if len(patches) == 2 and end == "stored_but_unanswered":
+                end_held.set()
+                await release_end.wait()
+            return response
 
         provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
         ctx = RunContext(tracing_provider=provider)
@@ -747,13 +761,61 @@ class TestSingleFlight:
             mid_run = asyncio.create_task(provider.put(ctx))
             await asyncio.wait_for(first_sent.wait(), 5)
             ctx._trace["r"].t1 = 5
-            await asyncio.wait_for(provider.put(ctx), 5)  # the end goes past the PATCH on the wire, and lands
-            assert server.runs[ctx.id]["trace"][0]["t1"] == 5
+            ending = asyncio.create_task(provider.put(ctx))  # goes past the PATCH on the wire
+            if end == "landed":
+                await asyncio.wait_for(ending, 5)
+                assert server.runs[ctx.id]["trace"][0]["t1"] == 5
+            else:
+                await asyncio.wait_for(end_held.wait(), 5)
             answer_it.set()
-            await asyncio.wait_for(mid_run, 5)
+            await asyncio.wait_for(answered.wait(), 5)  # the mid-run save has acted on its answer
+            release_end.set()
+            await asyncio.wait_for(asyncio.gather(mid_run, ending, return_exceptions=True), 5)
             await asyncio.wait_for(off_the_wire(), 5)
+        assert ending.exception() is None
         assert server.runs[ctx.id]["trace"][0]["t1"] == 5
         assert len(patches) == 2
+
+    async def test_a_patch_waiting_on_the_runs_end_takes_its_failure_and_is_not_sent_again(self, monkeypatch):
+        """The end the stalled PATCH waits for fails: the stalled save reports that failure and still sends nothing
+        older. The end's own failure handling (a background resend of the live run) is what stores the run."""
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (300.0,))  # the resend itself is not this test
+        first_sent, answer_it, answered, end_held, release_end = (asyncio.Event() for _ in range(5))
+        patches = []
+
+        async def request(method, headers=None, **_):
+            assert method == "PATCH"
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) == 1:
+                first_sent.set()
+                await answer_it.wait()
+                answered.set()
+                raise PlatformError("payload too large", status_code=413)
+            end_held.set()
+            await release_end.wait()
+            raise PlatformError("upstream", status_code=503)
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(provider.put(ctx))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            ctx._trace["r"].t1 = 5
+            ending = asyncio.create_task(provider.put(ctx))
+            await asyncio.wait_for(end_held.wait(), 5)
+            answer_it.set()
+            await asyncio.wait_for(answered.wait(), 5)
+            release_end.set()
+            done, _ = await asyncio.wait({mid_run, ending}, timeout=5)
+        assert done == {mid_run, ending}
+        assert isinstance(ending.exception(), PlatformError) and ending.exception().status_code == 503
+        assert isinstance(mid_run.exception(), PlatformError) and mid_run.exception().status_code == 503
+        assert len(patches) == 2  # the older copy was never sent again
+        _, _, key = PlatformTracingProvider._target(ctx)
+        assert key in PlatformTracingProvider._retries  # the ended run is resent from its latest state
 
     async def test_never_more_than_two_patches_on_the_wire(self, monkeypatch):
         monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
