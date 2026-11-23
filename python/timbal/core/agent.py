@@ -3567,7 +3567,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     async def _deliver_reply(self, current_span: Any, send_name: str | None, reply: Message, before: int) -> Message:
         """Deliver ``on_max_iter``'s own reply (``delivery="tool"``): no step is left to send it with the tool.
         Returns the turn's output: the reply, or after messages the turn sent, all it told the user, with
-        what the reply holds besides text (a file a hook returned), whether or not it has a text.
+        what the reply holds besides text (a file a hook returned), whether or not it has a text. Never its
+        thinking: a user does not receive that.
 
         The reply gets a send's checks first (:meth:`_gate_draft`; no guardrail has seen it). Refused,
         nothing of it goes out. Rewritten, the reply in the history is replaced by one that says what
@@ -3594,12 +3595,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if text:
                 current_span.metadata["delivery"]["fallback"] = True
             content = [*told.content, *rest]
-        elif text == written:
-            return reply  # all the turn told the user: its output as it is
-        elif reworded is None:
+        elif text is None:
             content = self._withheld(current_span).content
         else:
-            content = reworded.content
+            # All the turn told the user: the reply as the checks left it, but for its reasoning, which a
+            # user never receives (with messages before it, ``rest`` is that already).
+            said = reply if reworded is None else reworded
+            content = [item for item in said.content if not isinstance(item, ThinkingContent)]
+            if not content:
+                content = [TextContent(text="")]
         return Message(role="assistant", content=content, stop_reason=reply.stop_reason, metadata=reply.metadata)
 
     def _end_turn(self, current_span: Any, before: int, joined: bool) -> OutputEvent | None:

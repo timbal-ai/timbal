@@ -674,27 +674,51 @@ class TestSendMessage:
             replace_message_text(original, "new")
             assert [(c.text, c.phase) for c in original.content] == [("new", kept)], phases
 
-    async def test_an_on_max_iter_reply_keeps_what_it_holds_after_a_message_but_its_thinking(self):
-        """A hook's reply goes out whole with what the turn sent, but for the reasoning a user never receives."""
+    async def test_an_on_max_iter_reply_keeps_what_it_holds_but_its_thinking(self):
+        """A hook's reply goes out whole, but for the reasoning a user never receives: with or without a
+        message the turn sent before, and as a guardrail left its text."""
         from timbal.types.content import CustomContent, TextContent, ThinkingContent
 
         def hook(_context) -> Message:
             content = [ThinkingContent(thinking="hm"), TextContent(text="Here."), CustomContent(value={"card": 1})]
             return Message(role="assistant", content=content)
 
+        def thinking_only(_context) -> Message:
+            return Message(role="assistant", content=[ThinkingContent(thinking="hm")])
+
+        rewrite = guardrail(lambda text: text.replace("Here", "There"), stages=["tool_args"], action="redact")
+        for progress in (True, False):
+            for rails, said in (([], "Here."), ([rewrite], "There.")):
+                fresh()
+                first = calls(send("Preparing."), ("work", {})) if progress else calls(("work", {}))
+                model = TestModel(responses=[first, "must not be requested"])
+                agent = Agent(
+                    name="bot",
+                    model=model,
+                    tools=[Tool(name="work", handler=work)],
+                    delivery="tool",
+                    max_iter=1,
+                    on_max_iter=hook,
+                    guardrails=rails,
+                )
+                out, messages = await run(agent)
+                sent = (["Preparing."] if progress else []) + [said]
+                assert [m["text"] for m in messages] == sent, (progress, said)
+                assert [item.type for item in out.output.content] == ["text", "custom"], (progress, said)
+                assert out.output.collect_text() == "\n\n".join(sent), (progress, said)
+        # A reply that is only reasoning: nothing of it goes out.
         fresh()
-        model = TestModel(responses=[calls(send("Preparing."), ("work", {})), "must not be requested"])
+        model = TestModel(responses=[calls(("work", {})), "must not be requested"])
         agent = Agent(
             name="bot",
             model=model,
             tools=[Tool(name="work", handler=work)],
             delivery="tool",
             max_iter=1,
-            on_max_iter=hook,
+            on_max_iter=thinking_only,
         )
         out, messages = await run(agent)
-        assert [m["text"] for m in messages] == ["Preparing.", "Here."]
-        assert [item.type for item in out.output.content] == ["text", "custom"]
+        assert messages == [] and [(item.type, item.text) for item in out.output.content] == [("text", "")]
 
     async def test_the_reply_of_on_max_iter_passes_the_gate_on_sends_too(self):
         def gate(_text: str, ctx):
