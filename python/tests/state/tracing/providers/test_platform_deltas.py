@@ -990,6 +990,61 @@ class TestSingleFlight:
         assert len(patches) == 3  # the stalled one and those two: the older copy was not sent again
         assert stored_mid_run is False
 
+    async def test_a_refused_resend_leaves_the_run_to_the_save_that_overtook_it(self, monkeypatch):
+        """A resend refused because another loop's save of the run went out meanwhile, carrying the same copy (a
+        shutdown flush sends the run's held copy): that save is still out. If it then fails, the run must still be
+        there to resend and to report, not dropped by the refused one."""
+        import threading
+
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 3600.0)
+        first_sent, answer_it = asyncio.Event(), asyncio.Event()
+        flush_sent, flush_fails = threading.Event(), threading.Event()
+        patches = []
+
+        async def request(method, headers=None, **_):
+            assert method == "PATCH"
+            patches.append(int(headers["X-Timbal-Snapshot"]))
+            if len(patches) == 1:
+                first_sent.set()
+                await answer_it.wait()
+                raise PlatformError("payload too large", status_code=413)
+            flush_sent.set()  # the other loop's PATCH is out
+            flush_fails.wait(10)
+            raise PlatformError("upstream", status_code=503)
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, _trace_redactor=lambda value: value)
+        real_carried, flushed = platform_module._carried, []
+
+        async def carried_then_a_flush_elsewhere(*args):
+            found = await real_carried(*args)
+            if not found and not flushed:
+                # In the gap, with no await on this loop: another loop sends the run's held copy, and it is out.
+                threading.Thread(target=lambda: flushed.append(asyncio.run(provider.flush(5)))).start()
+                assert flush_sent.wait(10)
+            return found
+
+        monkeypatch.setattr(platform_module, "_carried", carried_then_a_flush_elsewhere)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        _, _, key = PlatformTracingProvider._target(ctx)
+        with patch("timbal.platform.utils._request", request):
+            mid_run = asyncio.create_task(ctx._save_trace(barrier=True))
+            await asyncio.wait_for(first_sent.wait(), 5)
+            answer_it.set()
+            assert await asyncio.wait_for(mid_run, 10) is False  # refused: the other loop's save carries it
+            assert key in PlatformTracingProvider._unsaved  # still the run's to send, while that save is out
+            flush_fails.set()
+
+            async def flush_done():
+                while not flushed:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(flush_done(), 10)
+        assert flushed == [[ctx.id]]  # the flush reports the run it could not store
+        assert key in PlatformTracingProvider._unsaved
+        assert len(patches) == 2  # the refused resend never went out
+
     async def test_a_flush_never_sends_a_copy_older_than_one_already_stored(self, monkeypatch):
         """With a trace redactor every save carries its own copy of the run. A shutdown flush on another event loop
         picks the copy it finds, and pauses before it takes a number; this loop then stores a newer copy, the run's

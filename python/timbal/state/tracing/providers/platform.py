@@ -1063,9 +1063,8 @@ class PlatformTracingProvider(TracingProvider):
         unsaved = PlatformTracingProvider._unsaved
         if _superseded(run_context):
             # A copy picked before a newer one was made (a flush, a background resend, a keep-alive), and the newer
-            # one has gone out: sent, it would be numbered above it. Not sent, and no longer the run's to resend.
-            if unsaved.get(key) is run_context:
-                unsaved.pop(key, None)
+            # one has gone out: sent, it would be numbered above it. Not sent. _unsaved is left as it is: only a save
+            # that lands takes a run out of it, and the newer copy's save put itself there.
             raise SaveSuperseded("a newer copy of this run has been sent: this older one is not")
         loop = asyncio.get_running_loop()
         keepalive = PlatformTracingProvider._keepalives.get(key)
@@ -1344,9 +1343,9 @@ class PlatformTracingProvider(TracingProvider):
         snapshot = _next_snapshot(key, after=after, copy=run_context)
         if snapshot is None:
             # A newer save of the run went out: since the PATCH this resends (another event loop, since the check that
-            # allowed it), or with a newer copy of the run than this one. Not sent: that save's outcome.
-            if PlatformTracingProvider._unsaved.get(key) is run_context:
-                PlatformTracingProvider._unsaved.pop(key, None)  # nothing can send this copy any more
+            # allowed it), or with a newer copy of the run than this one. Not sent: that save's outcome. The run stays
+            # in _unsaved: that save may still be out, carrying this same copy, and fail (only a save that lands takes
+            # a run out of it).
             await _newer_outcome(flight, joined)
             return
         try:
