@@ -243,6 +243,9 @@ _PAUSE_REASONS = frozenset({"approval_required", "input_required"})
 # Why a tool call ended that stops the whole run, with nothing fed back to the model: a person cancelled it, or a
 # gate it left waiting was already claimed by another run continuing the same paused turn (that one goes on).
 _STOP_REASONS = frozenset({"cancelled", "approval_already_claimed"})
+# ``metadata.kind`` of the assistant message holding the tool call an agent makes up for a slash command (the user's
+# own request, run without the model). It tells that call from a model's: see ``Agent._reopen_command``.
+_COMMAND_CALL = "command"
 
 # Consecutive turns that stored no memory (see Agent._previous_memory) a turn reaches back through.
 _MAX_TURNS_WITHOUT_MEMORY = 8
@@ -1424,6 +1427,69 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         fulfilled.add(c.id)
             return [tu for tu in tool_uses if tu.id not in fulfilled]
         return []
+
+    @staticmethod
+    def _reopen_command(current_span: Any) -> tuple[Message, Any] | None:
+        """A turn that continues one in which a slash command paused: take the command's call back out of the
+        history, so that it ends with the user's message and the command runs again from it. Returns the
+        call as it was (the message and its dump), or None when the history holds none to take out.
+
+        The command branch of :meth:`handler` stores a made-up ``tool_use`` (marked ``_COMMAND_CALL``) before
+        the command runs, and its result once it has one. A command that pauses has none: the paused turn's
+        history ends with that call. Read back as it is, the resume would run it as a model's pending call
+        (``_find_pending_tool_uses``) and then call the model, which would answer where the command's own
+        output is the answer; and under a tool call id the first run did not have, which a ``suspend()`` id
+        hashes, so the answer would not reach the question it was given to.
+
+        Called once the turn has started as the continuation it is, the call still in place: ahead of a
+        pending call nothing new is taken in (no completion notices or session events, no second screening
+        of the user's message by input guardrails), exactly as when a model's call waits.
+
+        Left alone, and so run as a pending call as before: the unmarked call of a run that an earlier
+        version paused. And a call taken out goes back if the step runs no command for it after all
+        (:meth:`_run_as_pending`).
+        """
+        memory = current_span.memory
+        if len(memory) < 2 or memory[-1].metadata.get("kind") != _COMMAND_CALL:
+            return None
+        return memory.pop(), current_span._memory_dump.pop()
+
+    @staticmethod
+    def _run_as_pending(current_span: Any, reopened: tuple[Message, Any]) -> None:
+        """Put back the command's call that :meth:`_reopen_command` took out: no command ran for it.
+
+        The message before it no longer names a command of this agent for the tool the call names: the
+        command was renamed, removed or given to another tool since the pause (a deploy), this turn's tool
+        policy hides it, or the message is not the user's any more (a compaction). The call is still a call
+        of that tool, and the user's answer is for it: back in the history, it runs as the pending call it
+        was stored as, and the model is called after it. What a resumed command did before commands were
+        run again.
+        """
+        current_span.memory.append(reopened[0])
+        current_span._memory_dump.append(reopened[1])
+
+    @staticmethod
+    def _leave_command_waiting(current_span: Any, command_call: dict, command_at: int) -> None:
+        """As a turn that ran a slash command is left by an exception: if it ends waiting on the command,
+        leave its memory as its history is stored.
+
+        Waiting: the command paused (``PauseRequired``), or the caller stopped reading at the approval or
+        the question (``GeneratorExit`` on a run that is paused already), and the command has no result (its
+        call, ``command_call``, is the last thing stored). Memory, from ``command_at`` on, becomes that call:
+        what a store holds, so the turn that continues this one starts the same whichever provider it reads
+        the history from (see :meth:`_reopen_command`). Until here it held what the command's steps had
+        returned before the pause, appended as text: read back as the last message, the command would not
+        be found, and the model would be called on it.
+        """
+        if current_span._memory_dump[-1] is not command_call:
+            return
+        import sys  # here only: a turn left by an exception while it runs a command
+
+        leaving = sys.exception()
+        if isinstance(leaving, PauseRequired) or (
+            isinstance(leaving, GeneratorExit) and _is_pause(current_span.status)
+        ):
+            current_span.memory[command_at:] = [Message.validate(command_call)]
 
     def _synthesize_missing_tool_results(self, memory: list[Message]) -> None:
         """Append synthetic error results for any tool_use blocks that were interrupted.
@@ -3222,6 +3288,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if self._guardrail_runner is not None and self._guardrail_runner.has_stage(GuardrailStage.INPUT):
             async for guardrail_event in self._run_input_guardrails(run_context, current_span, _append_memory):
                 yield guardrail_event
+        # The call of the slash command this turn runs again, taken out of its history (_reopen_command).
+        reopened = None
+        if current_span.memory and current_span.memory[-1].role == "assistant":
+            # Only a turn that continues another starts with an assistant message last.
+            reopened = self._reopen_command(current_span)
 
         # Names of tools (resolved for the current iteration) whose results must be pinned
         # against memory compaction. Updated each iteration from the resolved tool list.
@@ -3537,6 +3608,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Own the active nested iterator explicitly: closing this handler while
         # it is suspended at a yield must finish child cleanup before returning.
         active_events: AsyncGenerator | None = None
+        # The slash command this turn runs, if it runs one: its made-up call as stored, and where memory stood.
+        command_call: dict | None = None
+        command_at = 0
         try:
             while True:
                 need_retry = False
@@ -3597,7 +3671,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             command = args[0].strip("/")
                             args = args[1:]
                             # If no command is found, we'll simply let the message pass through the LLM
-                            if command in commands:
+                            # (A call taken back out is run again only by the command of the tool it names.)
+                            if command in commands and (
+                                reopened is None or commands[command].name == reopened[0].content[0].name
+                            ):
                                 tool = commands[command]
                                 tool_input = {}
                                 # NOTE: do not name this loop variable `i` — it would shadow
@@ -3621,8 +3698,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                                 "input": tool_input,
                                             }
                                         ],
+                                        # Not a model's call: if the command pauses, the turn that continues
+                                        # this one runs the command again (_reopen_command).
+                                        "metadata": {"kind": _COMMAND_CALL},
                                     }
                                 )
+                                command_at, command_call = len(current_span.memory), current_span._memory_dump[-1]
+                                command_paused = command_lost = None
+                                # No model call in this step, so nothing of one to salvage if the command pauses
+                                # or is cut. (A command steered into a turn comes after a model step: salvaged,
+                                # that step's output would be appended a second time, and its calls run again.)
+                                _llm_memory_saved = True
                                 if run_context._before_tool_dispatch is not None:
                                     await run_context._before_tool_dispatch(
                                         self._path, [(tool_use_id, tool.name, tool_input)]
@@ -3641,9 +3727,23 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     if isinstance(event, OutputEvent) and event.output is not None:
                                         if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
                                             yield event
+                                            if reopened is not None:
+                                                # Run again by a resume: the turn pauses once the command's
+                                                # stream is over, as it does after a batch of pending calls.
+                                                # The command (an agent, a workflow) may have a call in flight
+                                                # that the user has just approved, and closing its stream now
+                                                # would cut it. (A first run stops here: nothing is approved
+                                                # yet, and what finished would take effect again on the resume.)
+                                                command_paused = command_paused or event
+                                                continue
                                             raise PauseRequired(event)
                                         if event.status.code == "cancelled" and event.status.reason in _STOP_REASONS:
                                             yield event
+                                            if reopened is not None and event.status.reason != "cancelled":
+                                                # A gate another run claimed: this run stops, after the stream
+                                                # too (a call of it this run did claim is running).
+                                                command_lost = command_lost or event
+                                                continue
                                             raise RunCancelled(
                                                 event.status.message or "Run cancelled by user.",
                                                 reason=event.status.reason,
@@ -3657,9 +3757,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                             )
                                         )
                                     yield event
+                                if command_lost is not None:
+                                    raise RunCancelled(
+                                        command_lost.status.message or "", reason=command_lost.status.reason
+                                    )
+                                if command_paused is not None:
+                                    raise PauseRequired(command_paused)
                                 active_events = None
                                 return
 
+                if reopened is not None:
+                    # No command ran for the call this turn took back out: it runs as a pending call.
+                    reopened = self._run_as_pending(current_span, reopened)
                 # Resume path: if the trailing assistant message has tool_uses
                 # that were left unresolved by an earlier approval gate, run
                 # them directly. Skipping the LLM call here is important —
@@ -4219,6 +4328,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # the background while a strategy of this one is still running on a thread (see _drop_prepared).
             if prepared is not None:
                 self._drop_prepared(run_context, prepared)
+            if command_call is not None:
+                self._leave_command_waiting(current_span, command_call, command_at)
+            elif reopened is not None:
+                # Left before the step got to run a command for the call it took out (its tools could not be
+                # resolved, a cancellation): the call goes back, so the history this turn stores still has it.
+                self._run_as_pending(current_span, reopened)
             raise
         finally:
             try:
