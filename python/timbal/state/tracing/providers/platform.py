@@ -15,6 +15,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 from time import perf_counter_ns, time_ns
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
 
 import structlog
@@ -211,6 +212,9 @@ def _env_seconds(name: str, default: float) -> float:
 
 # Set in the task a keep-alive save runs in: it is no progress of the run's own.
 _KEEPALIVE: contextvars.ContextVar[bool] = contextvars.ContextVar("timbal_trace_keepalive", default=False)
+# Set by get_strict around its get(): that read asks for the whole trace, never the select=resume projection.
+# A context variable, not an argument: a subclass that overrides get() is still the one get_strict calls.
+_WHOLE_TRACE: contextvars.ContextVar[bool] = contextvars.ContextVar("timbal_trace_whole_read", default=False)
 _KEEPALIVES_MAX = 2048
 
 
@@ -257,6 +261,12 @@ def _flush_at_exit() -> None:
 
 DELTA_MEDIA_TYPE = "application/vnd.timbal.trace-delta+json"
 _DELTA_RUNS_MAX = 2048
+# Entries of each kind kept in the capability cache besides the hosts of app runs (``_host_caps``): declared
+# families (one per org, say) and runs' own destinations (one per run), each bounded on its own.
+_CAPS_FAMILIES_MAX = 1024
+# Saves and reads run on event loops in more than one thread (a worker per thread, the flush at exit): the
+# capability cache is read, filled, refreshed and evicted under this lock.
+_CAPS_LOCK = threading.Lock()
 _GZIP_INLINE_MAX = 256 * 1024
 
 
@@ -293,6 +303,45 @@ class _HostCaps:
         stored = found.get(SNAPSHOT_HEADER, "").strip()
         if stored.isdigit():
             _observe_snapshot(int(stored))
+
+
+class RunPath(str):
+    """A run path that says which runs share its endpoint: what ``_run_path`` returns when it knows.
+
+    ``family`` names the endpoint and is a prefix of the path, so a declaration is tied to the route it
+    declares, e.g. ``RunPath(f"orgs/{org}/chat/runs/{run_id}", family=f"orgs/{org}/chat/runs")``. What that
+    endpoint advertised (gzip, span deltas, ``select=resume``) and refused is then learned once for all its
+    runs. A plain string declares nothing: that run's destination keeps its own, which is always right (one
+    destination is one endpoint) and costs relearning per run, including one refused save per run for a format
+    the endpoint advertises (or is forced) and then refuses. Whoever computes the path declares it: a subclass
+    or ``configured()`` copy that returns another path declares again or keeps the default. A family shared
+    by routes that are not one endpoint (one too short a prefix) is the author's declaration, and trusted.
+    """
+
+    family: str
+
+    def __new__(cls, path: str, family: str) -> RunPath:
+        if not isinstance(path, str):
+            raise TypeError("RunPath's path is a string")
+        if not isinstance(family, str) or not family:
+            raise TypeError("RunPath(family=...) is a non-empty string: the name every run of its endpoint shares")
+        if not path.startswith(family):
+            raise ValueError(f"RunPath family {family!r} is not a prefix of its path {path!r}")
+        run_path = super().__new__(cls, path)
+        run_path.family = family
+        return run_path
+
+    def __getnewargs__(self) -> tuple[str, str]:
+        return str(self), self.family  # copy and pickle rebuild it with its family
+
+
+class RunNotStored(LookupError):
+    """Raised by a ``_run_path`` for a run this provider does not store (a registry that does not know it).
+
+    Reads answer it as not stored (``None``), as they do a 404; saves fail on it. Only this exception: any other
+    one ``_run_path`` raises, a ``KeyError`` included, is a bug or a misconfiguration and goes to the caller (read
+    as "not stored", an HTTP resume would run without the tool policy of the run it resumes).
+    """
 
 
 def _header_items(headers) -> dict[str, str]:
@@ -455,6 +504,14 @@ class PlatformTracingProvider(TracingProvider):
     """
 
     platform_config: PlatformConfig | None = None
+    """The platform config of runs that use this provider, and of their traces: a run started without one
+    takes it (``RunContext``), and its model router, tools and files use it too."""
+
+    trace_platform_config: PlatformConfig | None = None
+    """Credentials for the traces alone (``configured(trace_platform_config=...)``): every request of this
+    provider uses it, and it never becomes a run's config, which stays what the run resolved for itself
+    (passed, ``platform_config`` above, or the environment). For a provider that stores runs somewhere other
+    than an app's runs (:meth:`_run_path`), or with a token of its own."""
 
     default_durability = "buffered"
     """A save is a PATCH round trip: awaiting one per finished span adds seconds to a long turn. Saves while
@@ -463,14 +520,15 @@ class PlatformTracingProvider(TracingProvider):
 
     compress: bool | None = None
     """Gzip each PATCH body (``Content-Encoding: gzip``). ``None``: when ``TIMBAL_TRACE_GZIP`` is set, or
-    once the host advertised it (``Accept-Encoding: gzip`` on a response, RFC 7694)."""
+    once the endpoint advertised it (``Accept-Encoding: gzip`` on a response, RFC 7694; for an app's runs, the
+    host)."""
 
     deltas: bool | None = None
     """Send span deltas instead of whole traces (``Content-Type: application/vnd.timbal.trace-delta+json``):
     a save carries the finished spans the platform has not acknowledged and a root header; the run's end
-    carries the full root. ``None``: once the host advertised it (``Accept-Patch``, RFC 5789). A host that
-    rejects either format (400/415/422) while it takes the same save without it falls back to whole
-    uncompressed traces for good, forced or not."""
+    carries the full root. ``None``: once the endpoint advertised it (``Accept-Patch``, RFC 5789). An endpoint
+    that rejects either format (400/415/422) while it takes the same save without it falls back to whole
+    uncompressed traces for good, forced or not (per endpoint: the host, for an app's runs; see ``_family``)."""
 
     keepalive_s: float | None = None
     """While a run is in flight and has not saved for this long (a long tool call, a slow model), it saves
@@ -481,7 +539,8 @@ class PlatformTracingProvider(TracingProvider):
     saved for itself in ``TIMBAL_TRACE_KEEPALIVE_MAX_SECS`` (default 4 h; a hung tool) stops, and reads
     ``timeout`` again."""
 
-    _caps: ClassVar[dict[str, _HostCaps]] = {}
+    # host (app runs) or "host family" -> what it advertised and refused. Families are bounded (_CAPS_FAMILIES_MAX).
+    _caps: ClassVar[OrderedDict[str, _HostCaps]] = OrderedDict()
     _delta_runs: ClassVar[OrderedDict[str, _DeltaRun]] = OrderedDict()
     # run key -> its keep-alive timer, while the run is in flight and has saved at least once.
     _keepalives: ClassVar[OrderedDict[str, _KeepAlive]] = OrderedDict()
@@ -521,12 +580,32 @@ class PlatformTracingProvider(TracingProvider):
     # elsewhere); past this, the platform's copy is the one to trust.
     _recent_ttl_s: ClassVar[float] = 300.0
 
+    @classmethod
+    def _run_path(cls, platform_config: PlatformConfig, run_id: str) -> str:
+        """Where the run ``run_id`` is stored and read: ``orgs/{org_id}/apps/{app_id}/runs/{run_id}``, an app's runs.
+
+        A subclass that stores runs somewhere else on the platform (runs that belong to no app) overrides this,
+        and ``_resolve_config`` for its credentials, and gets the whole save pipeline as it is: span deltas,
+        gzip, snapshot ordering, keep-alive saves, single flight, retries, reads. Every request and every
+        per-run key of this provider comes from it. What a host advertises is learned per host for an app's
+        runs (as before), and for any other run per destination, unless the path it returns is a
+        :class:`RunPath` that declares the family its runs share (:meth:`_family`). A run it cannot place (a registry that does
+        not know it) raises :class:`RunNotStored`: reads answer it as not stored (``None``, as a 404), saves
+        fail. Anything else it raises is a bug or a configuration error and goes to the caller.
+        """
+        subject = platform_config.subject
+        if subject is None:
+            raise RuntimeError("PlatformTracingProvider requires a subject (org_id + app_id) in platform_config.")
+        if not subject.app_id:
+            raise ValueError("Cannot use platform tracing provider without an app or project subject")
+        return f"orgs/{subject.org_id}/apps/{subject.app_id}/runs/{run_id}"
+
     @staticmethod
-    def _recent_key(platform_config: PlatformConfig, subject_path: str, run_id: str) -> str:
-        """A run is read back only by the credentials, org and app that stored it,
+    def _recent_key(platform_config: PlatformConfig, run_path: str) -> str:
+        """A run is read back only by the credentials that stored it, at the path it was stored at,
         so memory never answers a request the platform would have refused."""
         token = hashlib.sha256(platform_config.auth.token.get_secret_value().encode()).hexdigest()
-        return f"{platform_config.host}/orgs/{platform_config.subject.org_id}/{subject_path}/runs/{run_id}#{token}"
+        return f"{platform_config.host}/{run_path}#{token}"
 
     @classmethod
     def _recent_limits(cls) -> tuple[int, float]:
@@ -586,11 +665,74 @@ class PlatformTracingProvider(TracingProvider):
         return Trace(stored["trace"], parent_id=stored.get("parent_id"))
 
     @staticmethod
-    def _host_caps(host: str) -> _HostCaps:
-        caps = PlatformTracingProvider._caps.get(host)
-        if caps is None:
-            caps = PlatformTracingProvider._caps[host] = _HostCaps()
+    def _host_caps(host: str, family: str = "", *, create: bool = True) -> _HostCaps:
+        """What ``host`` advertised for the runs of ``family`` (:meth:`_family`; ``""``: an app's runs).
+
+        ``create=False``: a family not seen yet is answered with nothing learned and not stored. App runs keep
+        one entry per host. Declared families (``=``) and runs' own destinations (``@``) are each the least
+        recently used ``_CAPS_FAMILIES_MAX``, bounded apart, so thousands of runs never push out the endpoint
+        every one of them leans on, nor the reverse (one evicted learns again what its endpoint takes, and may
+        have one save refused again).
+        """
+        caps_by_key = PlatformTracingProvider._caps
+        key = f"{host} {family}" if family else host
+        with _CAPS_LOCK:
+            caps = caps_by_key.get(key)
+            if caps is None:
+                caps = _HostCaps()
+                if not create:
+                    return caps
+                caps_by_key[key] = caps
+                if family and len(caps_by_key) > _CAPS_FAMILIES_MAX:
+                    # "=" declared, "@" a run's own destination: the character after the host (hosts have no
+                    # space), not a substring of the name, which may contain anything.
+                    same = [known for known in caps_by_key if known.partition(" ")[2][:1] == family[0]]
+                    for oldest in same[: max(0, len(same) - _CAPS_FAMILIES_MAX)]:
+                        del caps_by_key[oldest]
+            elif family:
+                caps_by_key.move_to_end(key)
         return caps
+
+    @classmethod
+    def _family(cls, run_path: str | None) -> str | None:
+        """The key a run's capabilities are kept under besides its host.
+
+        What a host advertised and refused is kept per endpoint (one may take deltas, gzip or the
+        ``select=resume`` projection while another does not yet, and a refusal is for good, see ``_HostCaps``),
+        and the provider does not guess which paths share one:
+
+        - ``""`` for an app's runs (the default ``_run_path``): their host's entry, as before;
+        - ``"=" + family`` for a :class:`RunPath` that declares it: every run of that endpoint shares it;
+        - ``"@" + run_path`` otherwise: the run's own destination, one endpoint whatever routes there. Each run
+          then learns on its own: its first save goes whole, a format the endpoint advertises (or is forced)
+          and then refuses costs one refused save per run, a parent read in another process rarely gets the
+          projection (bytes, never a wrong format; the cache's bound keeps the memory flat). So does a
+          subclass whose ``_run_path`` only wraps ``super()._run_path``: it is not the default one;
+        - ``None`` without a run (``takes_deltas``) for any run path but the default: no destination.
+        """
+        if getattr(cls._run_path, "__func__", None) is _DEFAULT_RUN_PATH:
+            return ""
+        if run_path is None:
+            return None
+        family = getattr(run_path, "family", None)
+        return f"={family}" if family else f"@{run_path}"
+
+    @classmethod
+    def _family_log(cls, run_path: str) -> dict[str, str]:
+        """The family a log line names: none for an app's runs, whose lines stay as they were."""
+        family = cls._family(run_path)
+        return {"family": family} if family else {}
+
+    @classmethod
+    def _family_caps(
+        cls, platform_config: PlatformConfig, run_path: str | None = None, *, create: bool = True
+    ) -> _HostCaps:
+        """What the endpoint of ``run_path`` on ``platform_config``'s host advertised, and what it turned down
+        (:meth:`_family`). Nothing learned, and nothing stored, without a run for a non-default ``_run_path``."""
+        family = cls._family(run_path)
+        if family is None:
+            return _HostCaps()
+        return cls._host_caps(platform_config.host, family, create=create)
 
     @classmethod
     def _compressing(cls, caps: _HostCaps) -> bool:
@@ -610,13 +752,20 @@ class PlatformTracingProvider(TracingProvider):
 
     @classmethod
     def takes_deltas(cls, platform_config: PlatformConfig | None = None) -> bool:
-        """Whether saves to this provider's host go out as span deltas right now (each save is then small)."""
-        cfg = platform_config or cls.platform_config
-        if cfg is None:
-            from ....state.config_loader import resolve_platform_config
+        """Whether saves to this provider's endpoint go out as span deltas right now (each save is then small).
 
-            cfg = resolve_platform_config(None)
-        return cfg is not None and cls._sending_deltas(cls._host_caps(cfg.host))
+        For the config a save of a run whose own config is ``platform_config`` would use: ``_resolve_config``
+        is asked with a stand-in run holding only that (so ``trace_platform_config`` comes first, then
+        ``platform_config``, then the class's, then the environment's, and a subclass's own
+        ``_resolve_config`` is followed; one that needs more of the run than its config answers False). False
+        when it finds none. Asking stores nothing. For a ``_run_path`` other than the default there is no
+        destination without a run: only a forced ``deltas=True`` answers True, whatever an endpoint refused.
+        """
+        try:
+            cfg = cls._resolve_config(SimpleNamespace(platform_config=platform_config))
+        except Exception:
+            return False
+        return cfg is not None and cls._sending_deltas(cls._family_caps(cfg, create=False))
 
     @staticmethod
     def _delta_run(key: str) -> _DeltaRun:
@@ -634,13 +783,20 @@ class PlatformTracingProvider(TracingProvider):
     def _resolve_config(cls, run_context: RunContext):
         """Return platform_config, with the following priority:
 
+        0. cls.trace_platform_config    — the traces' own credentials; returned as is, never written back
         1. run_context.platform_config  — set by auto-detection or a previous call
         2. cls.platform_config          — set explicitly via configured()
         3. env vars / config file       — resolved lazily, written back to run_context
 
-        The resolved config is written back to run_context so that _request(),
-        which also reads run_context.platform_config directly, finds it.
+        The resolved config is written back to run_context, so the run's other
+        platform calls find it too. This provider's own requests carry the config
+        this returns. Credentials for the traces alone go in
+        ``trace_platform_config`` (or a subclass returns its own here, without
+        writing them onto the run): the run keeps its config for its model
+        router, tools and files.
         """
+        if cls.trace_platform_config is not None:
+            return cls.trace_platform_config  # for the traces alone: never written onto the run
         cfg = run_context.platform_config or cls.platform_config
         if cfg is None:
             from ....state.config_loader import resolve_platform_config
@@ -658,11 +814,20 @@ class PlatformTracingProvider(TracingProvider):
     @classmethod
     @override
     async def get_strict(cls, run_context: RunContext) -> Trace | None:
-        """See base class: a 404 is a run the platform does not have; other failures raise."""
+        """See base class: a 404 is a run the platform does not have; other failures raise.
+
+        Always the whole trace, never the ``select=resume`` projection ``get`` asks for (the root and the agent
+        spans, what the next turn's memory needs). Strict reads are the ones that decide what a stored run
+        left: restoring a session (``ChatSession``: the approvals and questions it waits for are on the tool
+        spans), recovering a dead turn (which calls completed, by their tool spans and model calls), the tool
+        policy a resume keeps (nested agents note theirs on the call's span), and the approval claims of a
+        provider that makes them (this one does not, yet).
+        """
         import httpx
 
         from ....errors import PlatformError
 
+        whole = _WHOLE_TRACE.set(True)
         try:
             return await cls.get(run_context)
         except PlatformError as error:
@@ -674,6 +839,8 @@ class PlatformTracingProvider(TracingProvider):
             if error.response is not None and error.response.status_code == 404:
                 return None
             raise
+        finally:
+            _WHOLE_TRACE.reset(whole)
 
     @classmethod
     @override
@@ -682,15 +849,11 @@ class PlatformTracingProvider(TracingProvider):
         from ....platform.utils import _request
 
         platform_config = cls._resolve_config(run_context)
-        subject = platform_config.subject
-        if subject is None:
-            raise RuntimeError("PlatformTracingProvider.get requires a subject (org_id + app_id) in platform_config.")
-
-        if subject.app_id:
-            subject_path = f"apps/{subject.app_id}"
-        else:
-            raise ValueError("Cannot use platform tracing provider without an app or project subject")
-        key = cls._recent_key(platform_config, subject_path, run_context.parent_id)
+        try:
+            run_path = cls._run_path(platform_config, run_context.parent_id)
+        except RunNotStored:
+            return None  # _run_path does not know the run (a registry miss): not stored here, as a 404
+        key = cls._recent_key(platform_config, run_path)
         saves = PlatformTracingProvider._saving.get(key)
         flight = PlatformTracingProvider._flights.get(key)
         waits = list(saves.pending.values()) if saves is not None else []
@@ -704,13 +867,15 @@ class PlatformTracingProvider(TracingProvider):
         recalled = cls._recall(key)
         if recalled is not None:
             return recalled
-        caps = cls._host_caps(platform_config.host)
+        caps = cls._family_caps(platform_config, run_path)
         with _pooled(), _as_run(run_context):
             res = await _request(
                 method="GET",
-                path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.parent_id}",
-                # The root and the agent spans: what resuming reads, without the LLM and tool spans' bytes.
-                params={"select": "resume"} if caps.select_resume else None,
+                path=run_path,
+                platform_config=platform_config,
+                # The root and the agent spans: what resuming reads, without the LLM and tool spans' bytes. Not
+                # for a strict read (get_strict), which needs the tool spans too.
+                params={"select": "resume"} if caps.select_resume and not _WHOLE_TRACE.get() else None,
             )
         res.raise_for_status()
         caps.learn(getattr(res, "headers", None))
@@ -964,17 +1129,10 @@ class PlatformTracingProvider(TracingProvider):
 
     @classmethod
     def _target(cls, run_context: RunContext):
+        """The config, the run path and the per-run key of the run ``run_context`` saves."""
         platform_config = cls._resolve_config(run_context)
-        subject = platform_config.subject
-        if subject is None:
-            raise RuntimeError(
-                "PlatformTracingProvider._store requires a subject (org_id + app_id) in platform_config."
-            )
-        if subject.app_id:
-            subject_path = f"apps/{subject.app_id}"
-        else:
-            raise ValueError("Cannot use platform tracing provider without an app or project subject")
-        return platform_config, subject_path, cls._recent_key(platform_config, subject_path, run_context.id)
+        run_path = cls._run_path(platform_config, run_context.id)
+        return platform_config, run_path, cls._recent_key(platform_config, run_path)
 
     @classmethod
     async def _save(cls, run_context: RunContext, *, plain: bool = False, resend: bool = True) -> None:
@@ -983,9 +1141,10 @@ class PlatformTracingProvider(TracingProvider):
         from ....errors import PlatformError
         from ....platform.utils import _request
 
-        platform_config, subject_path, key = cls._target(run_context)
-        subject = platform_config.subject
-        caps = cls._host_caps(platform_config.host)
+        platform_config, run_path, key = cls._target(run_context)
+        # A run stored somewhere other than an app's runs (a subclass's _run_path) may have no subject.
+        rev = platform_config.subject.rev if platform_config.subject is not None else None
+        caps = cls._family_caps(platform_config, run_path)
         # A run the platform refused as too large goes whole with long strings cut, so its end still lands.
         shrink = key in PlatformTracingProvider._oversized
         delta = not plain and not shrink and cls._sending_deltas(caps)
@@ -995,12 +1154,12 @@ class PlatformTracingProvider(TracingProvider):
         # while the PATCH is in flight. Same encoding httpx applies to json=.
         root_stored = False
         if delta:
-            body, cache_body, sent, root_stored = cls._delta_body(run_context, subject.rev, key, snapshot)
+            body, cache_body, sent, root_stored = cls._delta_body(run_context, rev, key, snapshot)
         else:
             trace = run_context._trace.model_dump()
             payload = {"parent_id": run_context.parent_id, "trace": _shrink(trace) if shrink else trace}
-            if subject.rev is not None:
-                payload["rev"] = subject.rev
+            if rev is not None:
+                payload["rev"] = rev
             body = cache_body = _encode(payload)
             sent = {}
         saves = PlatformTracingProvider._saving.setdefault(key, _Saves())
@@ -1021,7 +1180,8 @@ class PlatformTracingProvider(TracingProvider):
             with _pooled(), _as_run(run_context):
                 res = await _request(
                     method="PATCH",
-                    path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
+                    path=run_path,
+                    platform_config=platform_config,
                     headers=headers,
                     content=wire,
                     timeout=cls._patch_timeout(),
@@ -1043,7 +1203,7 @@ class PlatformTracingProvider(TracingProvider):
                 raise
             # Today's server answers a gzip body with 400 (its JSON extractor cannot parse it), a server
             # with the layer with 415. The same save whole and uncompressed tells a rejected format from
-            # a bad save: only when that one lands is the format off for this host, starting now.
+            # a bad save: only when that one lands is the format off for this endpoint, starting now.
             await cls._save(run_context, plain=True, resend=resend)
             caps.delta_rejected = caps.delta_rejected or delta
             caps.gzip_rejected = caps.gzip_rejected or compressed
@@ -1053,6 +1213,7 @@ class PlatformTracingProvider(TracingProvider):
                 status=e.status_code,
                 deltas=delta,
                 gzip=compressed,
+                **cls._family_log(run_path),
             )
             return
         except BaseException:
@@ -1069,7 +1230,11 @@ class PlatformTracingProvider(TracingProvider):
             cls._remember(key, snapshot, None)
             await cls._save(run_context, plain=True, resend=resend)
             caps.delta_rejected = True
-            logger.warning("platform_trace_delta_unconfirmed", host=platform_config.host)
+            logger.warning(
+                "platform_trace_delta_unconfirmed",
+                host=platform_config.host,
+                **cls._family_log(run_path),
+            )
             return
         if (
             found.get(APPLIED_HEADER, "").strip().lower() == "false"
@@ -1197,6 +1362,23 @@ def _shrink(trace: list) -> list:
     if root is not None:
         root["metadata"] = {**(root.get("metadata") or {}), "trace_truncated": {"max_chars": cap, "strings_cut": cut}}
     return shrunk
+
+
+# The default run path (an app's runs): a provider whose ``_run_path`` is this one shares what a host
+# advertised by host alone (``_family``).
+_DEFAULT_RUN_PATH = PlatformTracingProvider._run_path.__func__
+
+
+def _new_locks_after_fork() -> None:
+    """In a forked child: a lock another thread of the parent held is copied held, with no thread left to let
+    it go, and the child's first save or read would wait for it for good."""
+    global _CAPS_LOCK, _snapshot_lock
+    _CAPS_LOCK = threading.Lock()
+    _snapshot_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_new_locks_after_fork)
 
 
 def _encode(payload) -> bytes:

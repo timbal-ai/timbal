@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 import structlog
@@ -16,6 +16,9 @@ import structlog
 from ..errors import PlatformError
 from ..state import get_or_create_run_context
 from ._http_session import request_client
+
+if TYPE_CHECKING:
+    from ..state.config import PlatformConfig
 
 logger = structlog.get_logger("timbal.platform.utils")
 
@@ -95,26 +98,29 @@ def _resolve_url_and_headers(
     service: str | None,
     path: str,
     headers: dict[str, str],
+    platform_config: "PlatformConfig | None" = None,
 ) -> tuple[str, dict[str, str]]:
     """Build the final URL and auth headers for a request.
 
-    When service is None, uses platform_config (existing behavior).
+    When service is None, uses ``platform_config`` if given, else the current run's (existing behavior).
     When service is set, resolves the target URL and auth headers based on
     the environment: TIMBAL_PROJECT_ENV_ID distinguishes remote from local.
     """
-    run_context = get_or_create_run_context()
-
     # If service is None, we want to perform a platform API call.
     if service is None:
-        if not run_context.platform_config:
-            raise ValueError("No platform config available for platform API calls.")
-        platform_config = run_context.platform_config
+        if platform_config is None:
+            run_context = get_or_create_run_context()
+            if not run_context.platform_config:
+                raise ValueError("No platform config available for platform API calls.")
+            platform_config = run_context.platform_config
         url = f"https://{platform_config.host}/{path}"
         headers = {
             **headers,
             platform_config.auth.header_key: platform_config.auth.header_value,
         }
         return url, headers
+
+    run_context = get_or_create_run_context()
 
     # We want to resolve a call to a service in the project environment.
     env_id = os.environ.get("TIMBAL_PROJECT_ENV_ID")
@@ -245,6 +251,7 @@ async def _request(
     timeout: httpx.Timeout | float | None = None,
     service: str | None = None,
     total_timeout: float | None = None,
+    platform_config: "PlatformConfig | None" = None,
 ) -> Any:
     """Utility function for making HTTP requests.
 
@@ -258,9 +265,12 @@ async def _request(
     :class:`PlatformError`. A retry whose wait would end past the deadline is
     not attempted: the call ends as it does after its last retry, raising that
     failure. ``timeout`` alone cannot give this bound: it applies per phase
-    and per read, and again on every retry.
+    and per read, and again on every retry. ``platform_config``: the host and
+    credentials of a platform API call (``service=None``), instead of the
+    current run's: a trace provider that stores runs with credentials of its
+    own, while the run keeps its config for its other calls.
     """
-    url, headers = _resolve_url_and_headers(service, path, headers)
+    url, headers = _resolve_url_and_headers(service, path, headers, platform_config)
     if timeout is None:
         timeout = _default_timeout()
     elif isinstance(timeout, (int, float)):
