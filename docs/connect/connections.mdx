@@ -352,6 +352,10 @@ Rules the connector enforces:
 
 With at least one share configured, the connector reports the `fs:browse` and `fs:copy` capabilities. With none, those features don't exist on it. To explore a share and copy files into a knowledge base: [File shares in Timbal](/connect/filesystems).
 
+## Web services
+
+From connector 0.1.35, `config.json` can also list MCP servers on your network under `services`, so that Cursor or a Timbal agent can call them through Timbal. The service's address and credential stay on the server. How to set one up: [Web services](/connect/web-services).
+
 ## Apply and verify
 
 Restart the service after every change, then run `doctor`, which really connects to every database in the configuration and reports, per connection, whether it worked and why not. It also checks each share and reports whether the directory is readable.

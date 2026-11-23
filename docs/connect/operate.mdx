@@ -51,6 +51,7 @@ timbal-connect doctor --connection shop --table shopdb.orders   # MySQL: schema 
 | `[egress]` | The server reaches Timbal on port 443 | A firewall drops outbound HTTPS, or a proxy is needed |
 | `[connection: name]` | A real login works, the server banner is read and tables are listed. On SQL Server it prints the `auth=` mode it used | Bad connection string, wrong authentication, TLS, no read permission |
 | `--table` | Columns are listed with `[pkN]` and `[cursor]` marks | Table not found |
+| `[service: name]` | The [web service](/connect/web-services) answers an MCP handshake with its configured credential | Wrong `url`, service down, credential refused, a `${VAR}` that isn't set |
 
 `--table` needs `--connection`. A bare name uses the default schema; `schema.table` splits on the **first** dot, so names with dots still work: `--table "dbo.Cust. Ledger Entry"` is schema `dbo`, table `Cust. Ledger Entry`.
 

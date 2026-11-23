@@ -95,6 +95,7 @@ await agent(prompt='/pipeline "quarterly report"').collect()
 | --- | --- |
 | **No LLM call** | Matching commands execute the runnable directly — no tokens spent on tool selection |
 | **Memory** | Command invocations are recorded in conversation memory as a synthetic tool use + result |
+| **Approvals and questions** | A command that waits for an approval or an answer pauses the run like any tool. Resume it the same way (same prompt, `parent_id`, `resume`): the command runs again from its start, with no LLM call. Approved, the run's output is the command's; denied, the run ends `cancelled` / `approval_denied`. An agent or a workflow used as a command repeats the steps it had finished before the pause, so keep them safe to repeat |
 | **Unknown `/foo`** | Falls through to the LLM if `foo` is not a registered command |
 | **Collisions** | Two tools with the same `command` name log a warning; the first registered wins |
 
