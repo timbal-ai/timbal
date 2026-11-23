@@ -309,6 +309,28 @@ class _HostCaps:
             _observe_snapshot(int(stored))
 
 
+class RunNotStored(LookupError):
+    """Raised by a ``_run_path`` for a run this provider does not store (a registry that does not know it).
+
+    Reads answer it as not stored (``None``), as they do a 404; saves fail on it. Only this exception: any other
+    one ``_run_path`` raises, a ``KeyError`` included, is a bug or a misconfiguration and goes to the caller (read
+    as "not stored", an HTTP resume would run without the tool policy of the run it resumes).
+    """
+
+
+class _RefusalsOnly(_HostCaps):
+    """What is kept for runs whose endpoint cannot be told from their path: what it refused, not what it
+    advertised. An advertisement kept for the wrong endpoint sends it a format it does not take; a refusal kept
+    too widely only sends plain saves, and one not kept is paid again on every save (a forced format)."""
+
+    __slots__ = ()
+
+    def learn(self, headers) -> None:
+        stored = _header_items(headers).get(SNAPSHOT_HEADER, "").strip()
+        if stored.isdigit():
+            _observe_snapshot(int(stored))
+
+
 def _header_items(headers) -> dict[str, str]:
     items = getattr(headers, "items", None)
     if items is None:
@@ -552,7 +574,9 @@ class PlatformTracingProvider(TracingProvider):
         and ``_resolve_config`` for its credentials, and gets the whole save pipeline as it is: span deltas,
         gzip, snapshot ordering, keep-alive saves, single flight, retries, reads. Every request and every
         per-run key of this provider comes from it. What a host advertises is learned for the endpoint that
-        answered, not for the whole host (:meth:`_caps_family`).
+        answered, not for the whole host (:meth:`_caps_family`). A run it cannot place (a registry that does
+        not know it) raises :class:`RunNotStored`: reads answer it as not stored (``None``, as a 404), saves
+        fail. Anything else it raises is a bug or a configuration error and goes to the caller.
         """
         subject = platform_config.subject
         if subject is None:
@@ -626,7 +650,7 @@ class PlatformTracingProvider(TracingProvider):
         return Trace(stored["trace"], parent_id=stored.get("parent_id"))
 
     @staticmethod
-    def _host_caps(host: str, family: str = "", *, create: bool = True) -> _HostCaps:
+    def _host_caps(host: str, family: str = "", *, create: bool = True, refusals_only: bool = False) -> _HostCaps:
         """What ``host`` advertised for the runs of ``family`` (:meth:`_caps_family`; ``""``: an app's runs).
 
         ``create=False``: a family not seen yet is answered with nothing learned and not stored. App runs keep
@@ -638,7 +662,7 @@ class PlatformTracingProvider(TracingProvider):
         with _CAPS_LOCK:
             caps = caps_by_key.get(key)
             if caps is None:
-                caps = _HostCaps()
+                caps = _RefusalsOnly() if refusals_only else _HostCaps()
                 if not create:
                     return caps
                 caps_by_key[key] = caps
@@ -664,8 +688,9 @@ class PlatformTracingProvider(TracingProvider):
         apart by where each run really goes, whatever class, factory, function or registry routes it. Asked
         without a run (``takes_deltas``), it asks ``_run_path`` about ``_PROBE_RUN_ID``, shaped like a real
         run id. ``None`` when the endpoint cannot be told: the run id is not found in the path (hashed, say),
-        or ``_run_path`` refuses the probe. Then nothing is shared and nothing stored: a family per run would
-        pay a refused save on every run and fill the cache with one entry each. A path with per-org (or
+        or ``_run_path`` refuses the probe. Then what the endpoint advertises is not shared (only what it
+        refused is kept, per class: :meth:`_family_caps`); a family per run would pay a refused save on every
+        run and fill the cache with one entry each. A path with per-org (or
         per-user) parts gets a family per org: each learns on its own, within the cache's bound. Override
         this to share one family across them.
         """
@@ -677,9 +702,17 @@ class PlatformTracingProvider(TracingProvider):
             except Exception:
                 return None
         for spelling in _run_id_spellings(run_id):
-            if spelling in run_path:
-                return run_path.replace(spelling, "{run_id}")
+            # The run's own place is the last: a short custom id may also be part of an earlier segment.
+            head, found, tail = run_path.rpartition(spelling)
+            if found:
+                return f"{head}{{run_id}}{tail}"
         return None
+
+    @classmethod
+    def _family_log(cls, platform_config: PlatformConfig, run_path: str, run_id: str) -> dict[str, str]:
+        """The family a log line names: none for an app's runs, whose lines stay as they were."""
+        family = cls._caps_family(platform_config, run_path, run_id)
+        return {"family": family} if family else {}
 
     @classmethod
     def _family_caps(
@@ -691,10 +724,13 @@ class PlatformTracingProvider(TracingProvider):
         create: bool = True,
     ) -> _HostCaps:
         """What the endpoint of ``run_path`` (this provider's, without a run) on ``platform_config``'s host
-        advertised, and what it turned down. Nothing learned, and nothing stored, when it cannot be told."""
+        advertised, and what it turned down. When the endpoint cannot be told, only what it turned down, kept
+        for the class that routes it (:class:`_RefusalsOnly`)."""
         family = cls._caps_family(platform_config, run_path, run_id)
         if family is None:
-            return _HostCaps()
+            owner = next(klass for klass in cls.__mro__ if "_run_path" in vars(klass))
+            refusals = f"?{owner.__module__}.{owner.__qualname__}"
+            return cls._host_caps(platform_config.host, refusals, create=create, refusals_only=True)
         return cls._host_caps(platform_config.host, family, create=create)
 
     @classmethod
@@ -720,7 +756,8 @@ class PlatformTracingProvider(TracingProvider):
         For the config a save of a run whose own config is ``platform_config`` would use: ``_resolve_config``
         is asked with a stand-in run holding only that (so ``trace_platform_config`` comes first, then
         ``platform_config``, then the class's, then the environment's, and a subclass's own
-        ``_resolve_config`` is followed). False when it finds none. Asking stores nothing.
+        ``_resolve_config`` is followed; one that needs more of the run than its config answers False). False
+        when it finds none. Asking stores nothing.
         """
         try:
             cfg = cls._resolve_config(SimpleNamespace(platform_config=platform_config))
@@ -810,7 +847,10 @@ class PlatformTracingProvider(TracingProvider):
         from ....platform.utils import _request
 
         platform_config = cls._resolve_config(run_context)
-        run_path = cls._run_path(platform_config, run_context.parent_id)
+        try:
+            run_path = cls._run_path(platform_config, run_context.parent_id)
+        except RunNotStored:
+            return None  # _run_path does not know the run (a registry miss): not stored here, as a 404
         key = cls._recent_key(platform_config, run_path)
         saves = PlatformTracingProvider._saving.get(key)
         flight = PlatformTracingProvider._flights.get(key)
@@ -1168,10 +1208,10 @@ class PlatformTracingProvider(TracingProvider):
             logger.warning(
                 "platform_trace_format_rejected",
                 host=platform_config.host,
-                family=cls._caps_family(platform_config, run_path, run_context.id) or None,
                 status=e.status_code,
                 deltas=delta,
                 gzip=compressed,
+                **cls._family_log(platform_config, run_path, run_context.id),
             )
             return
         except BaseException:
@@ -1191,7 +1231,7 @@ class PlatformTracingProvider(TracingProvider):
             logger.warning(
                 "platform_trace_delta_unconfirmed",
                 host=platform_config.host,
-                family=cls._caps_family(platform_config, run_path, run_context.id) or None,
+                **cls._family_log(platform_config, run_path, run_context.id),
             )
             return
         if (

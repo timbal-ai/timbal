@@ -13,6 +13,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
+from structlog.testing import capture_logs
 from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
 from timbal.errors import PlatformError
@@ -433,6 +434,17 @@ class TestFamiliesOfRunPathsThatCheckTheRunId:
         assert [c["params"] for c in host.apps.calls] == [None, {"select": "resume"}]
         assert [c["params"] for c in host.chat.calls] == [None]
 
+    def test_a_short_run_id_is_taken_out_of_its_own_place_only(self):
+        """Custom run ids can be short: ``"r"`` is in ``orgs`` and ``runs`` too. The run's own place is the last."""
+
+        class Chat(PlatformTracingProvider):
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{CHAT_PREFIX}{run_id}"
+
+        assert Chat._caps_family(ORG_ONLY, Chat._run_path(ORG_ONLY, "r"), "r") == f"{CHAT_PREFIX}{{run_id}}"
+        assert Chat._family_caps(ORG_ONLY, Chat._run_path(ORG_ONLY, "r"), "r") is Chat._family_caps(ORG_ONLY)
+
     def test_a_run_path_that_spells_the_run_id_as_a_uuid_is_one_family(self):
         class Dashed(PlatformTracingProvider):
             @classmethod
@@ -448,22 +460,103 @@ class TestFamiliesOfRunPathsThatCheckTheRunId:
         caps(one).delta_rejected = True
         assert caps(other).delta_rejected  # a refusal is learned once for the endpoint, not once per run
 
-    def test_a_run_path_the_run_id_cannot_be_found_in_stores_nothing(self):
-        """Hashed, say: the endpoint cannot be told from the path, so nothing is shared, and nothing stored. Not
-        a family per run: each run would pay a refused save again, and fill the cache with one entry per run."""
+    def test_a_run_path_the_run_id_cannot_be_found_in_keeps_only_what_it_refused(self):
+        """Hashed, say: the endpoint cannot be told from the path. What it advertises is not kept (it could be
+        another endpoint's); what it refused is, once for the class (a refusal kept too widely only sends plain
+        saves). Not a family per run: each run would pay a refused save again and fill the cache."""
 
         class Hashed(PlatformTracingProvider):
             @classmethod
             def _run_path(cls, platform_config, run_id):  # noqa: ARG003
                 return f"{CHAT_PREFIX}{sum(map(ord, run_id)) % 97}"
 
-        before = dict(PlatformTracingProvider._caps)
-        for run_id in ("run-1", "run-2", "run-3"):
-            caps = Hashed._family_caps(ORG_ONLY, Hashed._run_path(ORG_ONLY, run_id), run_id)
-            caps.delta = True  # learned from an answer: kept nowhere
-        assert PlatformTracingProvider._caps == before
-        assert not Hashed._family_caps(ORG_ONLY, Hashed._run_path(ORG_ONLY, "run-1"), "run-1").delta
+        def caps(run_id):
+            return Hashed._family_caps(ORG_ONLY, Hashed._run_path(ORG_ONLY, run_id), run_id)
+
+        advertised = {
+            "Accept-Patch": f"application/json, {platform_module.DELTA_MEDIA_TYPE}",
+            "Accept-Encoding": "gzip",
+            "X-Timbal-Select": "resume",
+        }
+        caps("run-1").learn(advertised)
+        assert not (caps("run-2").delta or caps("run-2").gzip or caps("run-2").select_resume)
+        caps("run-1").gzip_rejected = True
+        assert caps("run-2").gzip_rejected and caps("run-3") is caps("run-1")  # one entry for the class
+        assert not [key for key in PlatformTracingProvider._caps if "{run_id}" in key]
         assert not Hashed.takes_deltas(ORG_ONLY)
+
+    @pytest.mark.parametrize("forced", ["compress", "deltas"])
+    async def test_a_forced_format_the_endpoint_refuses_is_refused_once_not_on_every_save(self, forced):
+        """What an endpoint advertises is not shared when it cannot be told; what it refused is: a format
+        forced on (``compress=True``, ``deltas=True``, ``TIMBAL_TRACE_GZIP``) and turned down would otherwise go
+        out on every save, be refused, and be sent again."""
+
+        class Hashed(PlatformTracingProvider):
+            trace_platform_config = ORG_ONLY
+
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{CHAT_PREFIX}{sum(map(ord, run_id)) % 97}"
+
+        provider = Hashed.configured(**{forced: True})
+        endpoint = Endpoint(deltas=False, gzip_ok=False, advertise=False)
+
+        async def request(method, path, **kwargs):
+            return await endpoint.request(method, path, **kwargs)
+
+        with patch("timbal.platform.utils._request", request):
+            for _ in range(2):
+                await run(tool_loop(provider, steps=3), provider, None)
+        saves = [call for call in endpoint.calls if call["method"] == "PATCH"]
+        assert len(saves) == len(endpoint.patches) + 1  # one refused, the rest whole and plain
+
+    async def test_a_run_path_that_cannot_place_a_run_reads_it_as_not_stored(self):
+        """``_run_path`` raises ``RunNotStored`` (a registry that does not know the run): no such run here, as a
+        404 is. A restore must not fail and retry for good on it."""
+
+        class Registry(PlatformTracingProvider):
+            trace_platform_config = ORG_ONLY
+
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                if run_id != "known":
+                    raise platform_module.RunNotStored(run_id)
+                return f"{CHAT_PREFIX}known"
+
+        endpoint = Endpoint()
+        with patch("timbal.platform.utils._request", endpoint.request):
+            assert await read_back(Registry, "unknown", None) is None
+            assert await read_back(Registry, "unknown", None, strict=True) is None
+        assert not endpoint.calls
+
+    async def test_a_bug_in_run_path_is_not_read_as_a_run_not_stored(self):
+        """Any other error, a ``KeyError`` included, is a bug or a misconfiguration: a strict read raises it. Read
+        as "not stored", an HTTP resume would run without the tool policy of the run it resumes."""
+
+        class Broken(PlatformTracingProvider):
+            trace_platform_config = ORG_ONLY
+            settings: dict = {}
+
+            @classmethod
+            def _run_path(cls, platform_config, run_id):  # noqa: ARG003
+                return f"{cls.settings['prefix']}{run_id}"  # the setting is missing
+
+        endpoint = Endpoint()
+        with patch("timbal.platform.utils._request", endpoint.request), pytest.raises(KeyError):
+            await read_back(Broken, "run-1", None, strict=True)
+        assert not endpoint.calls
+
+    async def test_the_app_runs_logs_are_as_before(self):
+        """A refused format is logged without a ``family`` for app runs, as before."""
+        server = Endpoint(deltas=False)
+        server.deltas = True  # advertises, then refuses
+        apps = app_provider()
+        with patch("timbal.platform.utils._request", server.request), capture_logs() as logs:
+            first = await run(tool_loop(apps, steps=1), apps, CONFIG)
+            server.deltas = False
+            await run(tool_loop(apps), apps, CONFIG)
+        refused = [entry for entry in logs if entry["event"] == "platform_trace_format_rejected"]
+        assert first.id and refused and all("family" not in entry for entry in refused)
 
 
 class TestTheCapabilityCache:
@@ -506,11 +599,12 @@ class TestTheCapabilityCache:
             except BaseException as error:  # noqa: BLE001 - any of them is the failure
                 errors.append(error)
 
-        threads = [threading.Thread(target=fill, args=(offset,)) for offset in range(4)]
+        threads = [threading.Thread(target=fill, args=(offset,), daemon=True) for offset in range(4)]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join(60)
+        assert not any(thread.is_alive() for thread in threads), "a thread is stuck in the cache"
         assert not errors, errors[:1]
         assert len([key for key in PlatformTracingProvider._caps if " " in key]) <= bound
 
