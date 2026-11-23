@@ -8,7 +8,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from uuid_extensions import uuid7
 
 from ..errors import SpanNotFound
@@ -257,6 +257,13 @@ class RunContext(BaseModel):
             '(e.g. {"kind": "routine", "routine_id": ..., "fire_id": ..., "scheduled_at": ...}).'
         ),
     )
+
+    @field_validator("trigger", mode="before")
+    @classmethod
+    def _trigger_object(cls, value: Any) -> Any:
+        # A run context takes any key (``context`` on POST /run): one that is not an object was ignored before
+        # ``trigger`` was a field, and still is, rather than failing the request.
+        return value if isinstance(value, dict) else None
 
     tracing_provider: Any = Field(
         default=TRACING_UNSET,

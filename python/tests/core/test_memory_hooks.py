@@ -221,6 +221,44 @@ class TestTheSalienceTool:
         assert mark.status.code == "blocked"
 
 
+class TestTheWakesOwnFields:
+    async def test_a_trigger_does_not_rename_the_wake(self):
+        """The trigger adds to what the runtime says of the wake; it does not overwrite it (an approval reviewer
+        reads ``kind``: a wake that says ``user_message`` would pass for a person's turn)."""
+        import pytest
+        from timbal.core.chat_session import ChatSession
+
+        fresh()
+        agent = Agent(name="bot", model=TestModel(responses=["NO_REPLY"]), tracing_provider=InMemoryTracingProvider)
+        session = ChatSession(agent)
+        try:
+            wake_id = session.wake(
+                "Daily check",
+                key="daily",
+                trigger={"kind": "routine", "wake_id": "x", "key": "y", "tool_policy": None, "routine_id": "r1"},
+            )
+            (wake,) = [w for w in session._wakes if w.id == wake_id]  # no worker step has run yet
+            assert wake.trigger == {
+                "kind": "routine",
+                "wake_id": wake_id,
+                "key": "daily",
+                "tool_policy": "read_only",
+                "routine_id": "r1",
+            }
+            for kind in ("user_message", "resume", 5, ""):
+                with pytest.raises(ValueError, match="kind"):
+                    session.wake("Daily check", key="daily", trigger={"kind": kind})
+        finally:
+            await session.close()
+
+    async def test_a_run_context_trigger_that_is_not_an_object_is_ignored_as_before(self):
+        """``RunContext`` takes any key (``context`` on ``POST /run``): a ``trigger`` that is not an object was
+        ignored before it was a field, and still is, rather than failing the request."""
+        for value in ("cron", ["a"], 5):
+            assert RunContext.model_validate({"id": "run-1", "trigger": value}).trigger is None
+            assert RunContext(trigger=value).trigger is None
+
+
 class TestDurableTriggers:
     async def test_a_durable_session_refuses_a_trigger_it_cannot_store(self):
         """A wake is stored with its trigger: one JSON cannot carry would fail every save after it."""
@@ -234,7 +272,13 @@ class TestDurableTriggers:
         agent = Agent(name="bot", model=TestModel(responses=["NO_REPLY"]), tracing_provider=InMemoryTracingProvider)
         session = ChatSession(agent, session_store=InMemoryChatSessionStore())
         try:
-            for trigger in ({"at": datetime.datetime.now()}, {"ratio": float("nan")}, {"ids": (1, 2)}, {1: "a"}):
+            for trigger in (
+                {"at": datetime.datetime.now()},
+                {"ratio": float("nan")},
+                {"ids": (1, 2)},
+                {1: "a"},
+                {"note": "x\udcff"},  # a lone surrogate: JSON in Python, not UTF-8 (a SQLite store cannot write it)
+            ):
                 with pytest.raises(TypeError, match="trigger"):
                     session.wake("Daily check", trigger=trigger)
             assert session.state()["wakes"] == []

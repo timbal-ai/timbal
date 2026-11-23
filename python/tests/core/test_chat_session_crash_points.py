@@ -178,7 +178,8 @@ class FaultySqlite(SqliteTracingProvider):
 
 
 def faulty_store(path, fault, *, legacy=False):
-    """``legacy``: every snapshot loads without ``root_run_id``, as one written before the field existed."""
+    """``legacy``: every snapshot loads without ``root_run_id`` (nor ``in_flight.starts_thread``), as one written
+    before the fields existed."""
     store = SqliteChatSessionStore(path)
     real_save, real_acquire, real_release = store.save, store.acquire_lease, store.release_lease
     real_load = store.load
@@ -187,6 +188,8 @@ def faulty_store(path, fault, *, legacy=False):
         snapshot = await real_load(session_id)
         if legacy and snapshot is not None:
             snapshot.root_run_id = None
+            if snapshot.in_flight is not None:
+                snapshot.in_flight.pop("starts_thread", None)
         return snapshot
 
     async def save(snapshot, *, expect_version, owner=None):

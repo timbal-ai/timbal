@@ -258,6 +258,10 @@ def _stored_answer(value: Any) -> Any:
     return _unchanged_by_json(value)
 
 
+# Trigger kinds an approval reviewer reads as a person's turn (``attended``, Runnable._review_gate).
+_ATTENDED_KINDS = ("user_message", "resume")
+
+
 def _unchanged_by_json(value: Any) -> Any:
     """``value``, if JSON carries it and gives it back unchanged. TypeError otherwise."""
     try:
@@ -861,12 +865,18 @@ class ChatSession:
         key = (key or "").strip() or None
         if trigger is not None and not isinstance(trigger, dict):
             raise TypeError("trigger must be a dict")
+        if trigger:
+            kind = trigger.get("kind", WAKE_KIND)
+            if not isinstance(kind, str) or not kind.strip() or kind in _ATTENDED_KINDS:
+                # An approval reviewer reads it (Runnable._review_gate): a wake is not a person's turn.
+                raise ValueError(f"A wake's trigger kind names what started it, not a user's turn: {kind!r}.")
         if trigger and self._session_store is not None:
             # Stored with the wake: one a snapshot cannot hold would fail every save from now on. Refused here,
             # to its caller, with nothing queued (as for resume()).
             try:
                 _unchanged_by_json(trigger)
-            except TypeError as error:
+                json.dumps(trigger, ensure_ascii=False).encode("utf-8")  # a lone surrogate is no UTF-8
+            except (TypeError, UnicodeEncodeError) as error:
                 raise TypeError(
                     f"The wake's trigger cannot be stored ({error}): a durable session takes what JSON can carry."
                 ) from None
@@ -880,12 +890,13 @@ class ChatSession:
             self._record("wake_superseded", wake_id=old.id, key=key)
         wake = _Wake(text=text, key=key, tool_policy=policy, silent_ok=bool(silent_ok), replaced=replaced)
         if trigger:
+            # The caller's fields, then the wake's own, which no trigger renames (its kind may be the caller's).
             wake.trigger = {
                 "kind": WAKE_KIND,
+                **trigger,
                 "wake_id": wake.id,
                 "key": key,
                 "tool_policy": _describe_policy(policy),
-                **trigger,
             }
         self._wakes.append(wake)
         self.last_activity = time.monotonic()
@@ -1873,6 +1884,8 @@ class ChatSession:
             in_flight = {
                 "run_id": context.id,
                 "parent_id": context.parent_id,
+                # It starts the thread and the session knows no root: recovery may make it the root (_root_at).
+                "starts_thread": context.parent_id is None and self.root_run_id is None,
                 "trigger": trigger,
                 "events": [event.to_dict() for event in followup.events] if followup is not None else [],
                 "wake": wake.to_dict() if wake is not None else None,
@@ -2522,8 +2535,10 @@ class ChatSession:
         it goes back to the run before it, and is run again under another id)."""
         if in_flight.get("parent_id") is not None:
             return  # not the thread's first run
-        if head is not None and self.root_run_id is None:
-            self.root_run_id = head  # it started the thread
+        if head is not None and self.root_run_id is None and in_flight.get("starts_thread"):
+            # It started the thread. (Stored before the field existed, a first run is no proof of the root: for
+            # the platform's chat that is its session id. No hint then, as before.)
+            self.root_run_id = head
         elif head is None and self.root_run_id == in_flight["run_id"]:
             self.root_run_id = None  # it did not: the turn that runs its input again does
 

@@ -134,12 +134,13 @@ def _claim_id(value: Any) -> str | None:
 
 def _claim_text(value: Any, limit: int) -> str | None:
     """``value`` if the platform reads it as free text (``rev``, ``path``): not blank, at most ``limit``
-    characters, no control character. Spaces and any other Unicode are fine: agent names are free text."""
+    characters, no control character. Spaces and any other Unicode are fine: agent names are free text. Not a
+    lone surrogate (a ``str`` can hold one, read with ``surrogateescape``): no UTF-8 request can carry it."""
     if (
         isinstance(value, str)
         and value.strip()
         and len(value) <= limit
-        and not any(unicodedata.category(c) == "Cc" for c in value)
+        and not any(unicodedata.category(c) in ("Cc", "Cs") for c in value)
         and not _looks_like_a_credential(value)
     ):
         return value
@@ -148,8 +149,11 @@ def _claim_text(value: Any, limit: int) -> str | None:
 
 def _claim_app_id(value: Any) -> int | None:
     """``value`` as the positive integer the platform reads for ``app_id`` (sent as a JSON number)."""
-    if isinstance(value, str) and value.isascii() and value.isdigit():
-        value = int(value)
+    if isinstance(value, str):
+        digits = value.lstrip("0")
+        if not (value.isascii() and value.isdigit()) or len(digits) > 19:
+            return None  # (and int() parses no more than 4,300 digits from text)
+        value = int(digits or "0")
     if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= _CLAIM_APP_ID_MAX:
         return value
     return None

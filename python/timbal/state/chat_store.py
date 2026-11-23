@@ -157,8 +157,6 @@ class SessionSnapshot:
     """The agent's name: a session is only restored for the agent it belongs to."""
     config: dict[str, Any] = field(default_factory=dict)
     head: str | None = None
-    root_run_id: str | None = None
-    """The thread's root run, once known (:attr:`ChatSession.root_run_id`); absent from older snapshots."""
     turns: int = 0
     last_status: dict[str, Any] | None = None
     parked: bool = False
@@ -176,6 +174,9 @@ class SessionSnapshot:
     log_cursor: int = 0
     closed: bool = False
     version: int = 0
+    root_run_id: str | None = None
+    """The thread's root run, once known (:attr:`ChatSession.root_run_id`); absent from older snapshots. Last, so
+    a snapshot built by position means what it did before the field."""
 
     def to_json(self) -> str:
         """Raises for a value JSON cannot carry (TypeError; ValueError for NaN and Infinity, which Python would

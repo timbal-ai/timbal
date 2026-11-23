@@ -370,6 +370,30 @@ class TestRootRunId:
                 assert cut not in [r["run_id"] for r in log[i:] if r["kind"] == "turn_started"], f"{cut} ran again"
         assert session.root_run_id == (started[0] if started else None)
 
+    async def test_an_older_snapshot_with_its_first_turn_in_flight_claims_no_root(self, db):
+        """Written before the root was recorded (the platform's chat at the upgrade: a rolling deploy cuts the
+        first turns still running), the dead first run recovery adopts is no proof of the thread's root: for the
+        platform's chat that is its session id. No hint, as before the field, not the dead run's id."""
+        provider, store = db
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_id="conv-old", session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 30)
+        await crash(session)
+        provider.crashed = False
+        gate.release.set()
+        snapshot = await store.load("conv-old")
+        assert snapshot.in_flight is not None and snapshot.in_flight["parent_id"] is None
+        snapshot.root_run_id = None  # neither field existed
+        snapshot.in_flight.pop("starts_thread", None)
+        await store.save(snapshot, expect_version=snapshot.version)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, "conv-old")
+        await records(restored, "turn_finished", 1, after=after_restore(restored))  # the recovery turn
+        assert restored.root_run_id is None and restored._last_context._session_id is None
+        await one_turn(restored, "after")
+        assert restored._last_context._session_id is None
+        await restored.close()
+
     async def test_a_first_turn_that_died_before_acting_does_not_name_the_thread(self, db):
         """Cut while its model thought (nothing dispatched), its message runs again under another id: that run
         starts the thread, and the hint follows it, not the id the dead run had."""
@@ -412,6 +436,18 @@ FIELDS_BEFORE_ROOT_RUN_ID = (
     "closed",
     "version",
 )
+
+
+def test_a_snapshot_built_by_position_keeps_its_fields():
+    """``root_run_id`` is the last field: a snapshot built by position before it existed means the same."""
+    snapshot = SessionSnapshot("s", "agent", {}, "head", 3, {"code": "success"}, True)
+    assert (snapshot.head, snapshot.turns, snapshot.last_status, snapshot.parked) == (
+        "head",
+        3,
+        {"code": "success"},
+        True,
+    )
+    assert snapshot.root_run_id is None
 
 
 class TestThePlatformChatsPath:

@@ -182,7 +182,11 @@ def _app_id(meta: dict):
 
 def platform_read(meta: dict) -> dict:
     """What the platform makes of a ``_meta`` sent over the wire, or ``Refused``."""
-    meta = json.loads(json.dumps(meta))  # as it arrives
+    try:
+        # As it arrives: UTF-8 JSON (serde_json refuses a lone surrogate, which Python writes as an escape).
+        meta = json.loads(json.dumps(meta, ensure_ascii=False).encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise Refused("not UTF-8") from error
     for key, value in meta.items():
         _reject_credentials(key, value)
     return {
@@ -235,6 +239,7 @@ class TestTheOracle:
             {PROVENANCE_PATH_KEY: "  "},
             {PROVENANCE_CALL_KEY: "has space"},
             {PROVENANCE_CALL_KEY: "x" * 129},
+            {PROVENANCE_REV_KEY: "main\udcff"},
         ],
     )
     def test_it_refuses_what_the_platform_refuses(self, meta):
@@ -322,6 +327,7 @@ class TestPlatformClaims:
             ({"app_id": "١٢"}, PROVENANCE_APP_KEY),  # Arabic-Indic digits: int() takes them, the platform does not
             ({"app_id": str(2**63)}, PROVENANCE_APP_KEY),
             ({"app_id": None}, PROVENANCE_APP_KEY),
+            ({"app_id": "1" * 5000}, PROVENANCE_APP_KEY),  # past what int() parses from text: refused, not raised
             ({"rev": "tab\there"}, PROVENANCE_REV_KEY),
             ({"rev": "nl\n"}, PROVENANCE_REV_KEY),
             ({"rev": "x" * 256}, PROVENANCE_REV_KEY),
@@ -335,6 +341,8 @@ class TestPlatformClaims:
             ({"path": "Bearer bot.tool"}, PROVENANCE_PATH_KEY),  # an agent named "Bearer bot"
             ({"path": "eyJhbG.billing.tool"}, PROVENANCE_PATH_KEY),  # a JWT's shape
             ({"path": "basic support.tool"}, PROVENANCE_PATH_KEY),
+            ({"rev": "main\udcff"}, PROVENANCE_REV_KEY),  # a lone surrogate (an env var read with surrogateescape)
+            ({"path": "bot\ud800.tool"}, PROVENANCE_PATH_KEY),
         ],
     )
     def test_a_value_the_platform_would_refuse_is_left_out(self, change, left_out):
@@ -367,7 +375,9 @@ class TestPlatformClaims:
             ("12", 12),
             ("000123", 123),
             (str(2**63 - 1), 2**63 - 1),  # 19 digits: sent as a number, which the platform reads as an i64
+            ("0" * 5000 + "7", 7),
         ],
+        ids=["digits", "leading zeros", "i64 max", "5000 leading zeros"],
     )
     def test_an_app_id_is_sent_as_a_number(self, value, kept):
         meta = meta_of(platform_context(app_id=value))
