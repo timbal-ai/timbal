@@ -334,9 +334,9 @@ class RunContext(BaseModel):
     #       the run this one continues left waiting, read once when a gate asks (``_left_waiting``)
     #   _live_background: int — background work (spawned tasks, handed-off
     #       continuations) running on this context; it can outlive the root run.
-    #   _save_turn: None | True | uploads._Turns — a ``sync`` provider's saves of this run, one at a
-    #       time (``uploads.write_through``): True while one is being written, the queue they wait
-    #       in once two overlapped. Absent until the run's first such save
+    #   _save_turn: None | uploads._Queues — a ``sync`` provider's saves of this run, one at a time per
+    #       event loop (``uploads.write_through``): per loop, a mark while one is being written, the queue
+    #       they wait in once two overlapped. Absent until the run's first such save
     # ``_invoker``, ``_parent_pending``, ``_driver`` and ``_save_turn`` are only set when they apply (read
     # them with ``__dict__.get``): a default for each would be paid by every run.
     # Do not add class-level annotations for them — pydantic would turn any

@@ -718,7 +718,7 @@ class TestAnyProvider:
         context = RunContext(tracing_provider=provider)
         for _ in range(3):
             await uploads.write_through(context, provider.put)
-        assert context.__dict__["_save_turn"] is None
+        assert not context.__dict__["_save_turn"]  # no mark, no queue
 
     async def test_a_failed_write_lets_the_next_one_go(self):
         provider = Remote.fresh()
@@ -785,3 +785,612 @@ class TestAnyProvider:
         first_lands.set()
         await asyncio.wait_for(first, DEADLINE)
         assert "_save_turn" not in saves.context.__dict__
+
+
+class Slow(TracingProvider):
+    """Stores the run after a moment, as a request would, so saves asked for together overlap."""
+
+    stored: dict
+
+    @classmethod
+    def fresh(cls, **kwargs):
+        return cls.configured(stored={}, **kwargs)
+
+    @classmethod
+    async def get(cls, _run_context):
+        return None
+
+    @classmethod
+    async def _store(cls, run_context):
+        body = json.dumps(run_context._trace.model_dump(), default=str)
+        await asyncio.sleep(0.005)
+        cls.stored[run_context.id] = body
+
+
+def stored_t1(path, run_id, call_id):
+    """The root's ``t1`` as the file holds it, read on a connection of its own."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    try:
+        row = conn.execute("SELECT span FROM spans WHERE run_id = ? AND call_id = ?", (run_id, call_id)).fetchone()
+    finally:
+        conn.close()
+    return None if row is None else json.loads(row[0]).get("t1")
+
+
+class TestAcrossEventLoopsCopiesAndConnections:
+    """The order holds where a run's saves come from more than one event loop, a copy of its context, two
+    connections to one file, or a provider with exporters; and a save from another loop never fails for it."""
+
+    async def test_a_tools_nested_event_loops_store_every_save_of_its_run(self, monkeypatch):
+        """A tool whose blocking handler runs two batches with ``asyncio.run()``, each saving the tool's own run
+        context: two event loops saving one run. In each batch two saves overlap (as parallel nested calls ending
+        together do), so the first batch's saves queue on its loop. Every save of the second batch is stored, none
+        fails on a lock of the first loop, and the tool's own end is stored on its loop."""
+        import contextvars
+
+        from timbal.state import get_run_context
+
+        main = asyncio.get_running_loop()
+        entered = [0]
+        arrival = contextvars.ContextVar("arrival", default=0)
+        real = uploads.write_through
+
+        async def counted(run_context, put):
+            entered[0] += 1
+            arrival.set(entered[0])
+            return await real(run_context, put)
+
+        monkeypatch.setattr(uploads, "write_through", counted)
+
+        class Overlapping(Slow):
+            """On a nested loop, the first save of each pair is stored only once the second has arrived."""
+
+            @classmethod
+            async def _store(cls, run_context):
+                mine = arrival.get()
+                if asyncio.get_running_loop() is not main and mine % 2 == 1:
+                    await asyncio.wait_for(until(lambda: entered[0] > mine), DEADLINE)
+                await super()._store(run_context)
+
+        provider = Overlapping.fresh()
+
+        def outer_handler() -> list:
+            run = get_run_context()
+
+            async def batch():
+                return list(await asyncio.gather(run._save_trace(barrier=True), run._save_trace(barrier=True)))
+
+            return [asyncio.run(batch()) for _ in range(2)]
+
+        outer = Tool(name="outer", handler=outer_handler, offload_blocking=True, tracing_provider=provider)
+        result = await asyncio.wait_for(outer().collect(), DEADLINE)
+        assert result.status.code == "success"
+        assert result.output == [[True, True], [True, True]]  # every save of both loops stored
+        assert result.run_id in provider.stored
+
+    async def test_a_copy_of_a_context_made_during_a_write_does_not_wait_for_it(self):
+        """A run context is copied (``model_copy``) while its save is being written, as a fork would: the copy's
+        own save does not wait for a write it never had."""
+        provider = Remote.fresh()
+        context = RunContext(tracing_provider=provider)
+        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        lands = provider.hold(1)
+        writing = asyncio.create_task(uploads.write_through(context, provider.put))
+        await asyncio.wait_for(until(lambda: provider.log), DEADLINE)
+        forked = context.model_copy(update={"id": "forked"})
+        lands.set()
+        await asyncio.wait_for(writing, DEADLINE)
+        assert await asyncio.wait_for(uploads.write_through(forked, provider.put), DEADLINE) is True
+        assert "forked" in provider.stored
+
+    def test_sqlite_numbers_a_snapshot_before_it_reads_the_run(self, tmp_path, monkeypatch):
+        """Two event loops save one run to SQLite. The first is held while it reads the run (after the root,
+        still running); the second saves the run's end. Whichever commits last, the file keeps the end."""
+        path = tmp_path / "t.db"
+        provider = SqliteTracingProvider.configured(_path=path)
+        db = sqlite_module.database(path)
+        reading, go = threading.Event(), threading.Event()
+
+        class Slow:
+            def __str__(self):
+                if not reading.is_set():
+                    reading.set()
+                    assert go.wait(DEADLINE)
+                return "output"
+
+        class Watched:
+            """The order lock, saying when a thread had to wait for it."""
+
+            def __init__(self, lock):
+                self.lock, self.waiting = lock, threading.Event()
+
+            def __enter__(self):
+                if not self.lock.acquire(blocking=False):
+                    self.waiting.set()
+                    self.lock.acquire()
+                return self
+
+            def __exit__(self, *_):
+                self.lock.release()
+
+        watched = Watched(db.writing_lock)
+        monkeypatch.setattr(db, "writing_lock", watched)
+        context = RunContext(tracing_provider=provider)
+        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None, "output": Slow()}
+        errors = []
+
+        def save():
+            try:
+                asyncio.run(provider.put(context))
+            except BaseException as e:  # noqa: BLE001 - reported below
+                errors.append(e)
+
+        first = threading.Thread(target=save, daemon=True)
+        first.start()
+        assert reading.wait(DEADLINE)
+        context._trace["r"].t1 = 5
+        context._trace["r"].output = "the end"
+        second = threading.Thread(target=save, daemon=True)
+        second.start()
+        deadline = threading.Event()
+        timer = threading.Timer(DEADLINE, deadline.set)
+        timer.start()
+        try:
+            # The second save waits for the first one's read, or (without that) commits the end meanwhile.
+            while not (watched.waiting.is_set() or stored_t1(path, context.id, "r") == 5 or deadline.is_set()):
+                threading.Event().wait(0.001)
+        finally:
+            timer.cancel()
+            go.set()
+        first.join(DEADLINE)
+        second.join(DEADLINE)
+        assert not errors and not first.is_alive() and not second.is_alive()
+        assert stored_t1(path, context.id, "r") == 5
+
+    async def test_two_connections_to_one_file_share_the_order(self, tmp_path, monkeypatch):
+        """A provider with ``synchronous="NORMAL"`` and one with ``"FULL"`` on one file get a connection each. A
+        save through the first is held before it commits; the run's end is committed through the second; the
+        held write then finds a newer one stored and leaves it."""
+        path = tmp_path / "t.db"
+        normal = SqliteTracingProvider.configured(_path=path)
+        full = SqliteTracingProvider.configured(_path=path, synchronous="FULL")
+        lock = HeldLock(sqlite_module.database(path), monkeypatch)
+        lock.armed = True
+        context = RunContext(tracing_provider=normal)
+        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        held = asyncio.create_task(normal.put(context))
+        try:
+            assert await asyncio.to_thread(lock.parked.wait, DEADLINE)
+            context._trace["r"].t1 = 5
+            await asyncio.wait_for(full.put(context), DEADLINE)
+            assert stored_t1(path, context.id, "r") == 5
+        finally:
+            lock.go.set()
+        await asyncio.wait_for(held, DEADLINE)
+        assert stored_t1(path, context.id, "r") == 5
+
+    async def test_exports_of_a_provider_that_orders_its_own_saves_are_ordered_too(self):
+        """An in-memory provider with an exporter: its exports are awaited in ``put()``. A mid-run export is held
+        while the run's end is saved; the exporter ends with the end."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        release, held = asyncio.Event(), asyncio.Event()
+        sink = {}
+
+        class Sink:
+            async def export(self, run_context):
+                t1 = run_context._trace["r"].t1  # what this export carries
+                if not held.is_set():
+                    held.set()
+                    await release.wait()
+                sink["t1"] = t1
+
+        provider = InMemoryTracingProvider.configured(_exporters=[Sink()])
+        context = RunContext(tracing_provider=provider)
+        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        first = asyncio.create_task(uploads.write_through(context, provider.put))
+        await asyncio.wait_for(held.wait(), DEADLINE)
+        context._trace["r"].t1 = 5
+        second = asyncio.create_task(uploads.write_through(context, provider.put))
+        await asyncio.wait_for(until(lambda: "_save_turn" in context.__dict__ or second.done()), DEADLINE)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(first, second), DEADLINE)
+        assert sink["t1"] == 5
+
+    async def test_a_buffered_barrier_on_another_event_loop_is_stored(self):
+        """Buffered uploads of a run are under way on this loop (an upload in flight holds the run's lock) when a
+        barrier of the run comes from another event loop: it is stored, not left waiting on a lock of this loop."""
+        provider = Remote.fresh(durability="buffered", flush_interval_s=0.0)
+        context = RunContext(tracing_provider=provider)
+        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        lands = provider.hold(1)
+        try:
+            assert uploads.schedule(context)
+            await asyncio.wait_for(until(lambda: provider.log), DEADLINE)  # the upload is in flight
+            done = await asyncio.wait_for(
+                asyncio.to_thread(lambda: asyncio.run(uploads.write_through(context, provider.put))), DEADLINE
+            )
+            assert done is True
+            assert ("stored", 2) in provider.log
+        finally:
+            lands.set()
+            for run in list(uploads._RUNS.values()):
+                if run.task is not None:
+                    run.task.cancel()
+            uploads._reset_for_tests()
+
+
+def remote_t1(provider, run_id):
+    """The root's ``t1`` as ``Remote`` stored it last."""
+    return next(span for span in json.loads(provider.stored[run_id]) if span["call_id"] == "r")["t1"]
+
+
+async def give_way():
+    """A few steps of this loop, for a write that must not start to show that it did (a bounded window: what is
+    asserted afterwards is the order the writes were stored in, not that nothing happened in it)."""
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+
+class TestEachLoopKeepsItsOwnOrder:
+    """Saves of one run from several event loops: each loop's saves stay in order, and no loop's save waits on, or
+    releases, another loop's queue."""
+
+    @staticmethod
+    def context(provider):
+        context = RunContext(tracing_provider=provider)
+        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        return context
+
+    async def test_a_save_left_on_a_closed_loop_does_not_release_this_loops_queue(self):
+        """A save of the run is left suspended on a loop that was closed. This loop's saves then queue (the second
+        waits for the first); the abandoned save is collected meanwhile. The second still waits, and the run's
+        newer state is what is stored last."""
+        provider = Remote.fresh()
+        context = self.context(provider)
+        abandoned = {}
+
+        def abandon():
+            loop = asyncio.new_event_loop()
+            try:
+
+                async def main():
+                    inside, never = asyncio.Event(), asyncio.Event()
+
+                    async def put(_context):
+                        inside.set()
+                        await never.wait()
+
+                    abandoned["task"] = asyncio.ensure_future(uploads.write_through(context, put))
+                    await inside.wait()
+
+                loop.run_until_complete(main())
+            finally:
+                loop.close()
+
+        thread = threading.Thread(target=abandon, daemon=True)
+        thread.start()
+        await asyncio.to_thread(thread.join, DEADLINE)
+        lands = provider.hold(1)
+        first = asyncio.create_task(uploads.write_through(context, provider.put))
+        await asyncio.wait_for(until(lambda: ("sent", 1) in provider.log), DEADLINE)
+        context._trace["r"].t1 = 5
+        second = asyncio.create_task(uploads.write_through(context, provider.put))
+        await give_way()
+        abandoned.clear()
+        gc.collect()  # the abandoned save's cleanup runs here
+        await give_way()
+        lands.set()
+        assert await asyncio.wait_for(asyncio.gather(first, second), DEADLINE) == [True, True]
+        assert provider.log.index(("stored", 1)) < provider.log.index(("sent", 2))
+        assert remote_t1(provider, context.id) == 5
+
+    async def test_this_loops_saves_stay_in_order_while_another_loop_writes(self):
+        """Another loop (a tool's nested ``asyncio.run()``) has a write of the run in flight. Two saves of the run on
+        this loop still go one after the other, and the newer state is stored last."""
+        provider = Remote.fresh()
+        context = self.context(provider)
+        inside, go = threading.Event(), threading.Event()
+
+        async def nested_put(_context):
+            inside.set()
+            await asyncio.to_thread(go.wait, DEADLINE)
+
+        thread = threading.Thread(target=lambda: asyncio.run(uploads.write_through(context, nested_put)), daemon=True)
+        thread.start()
+        try:
+            assert await asyncio.to_thread(inside.wait, DEADLINE)
+            lands = provider.hold(1)
+            first = asyncio.create_task(uploads.write_through(context, provider.put))
+            await asyncio.wait_for(until(lambda: ("sent", 1) in provider.log), DEADLINE)
+            context._trace["r"].t1 = 5
+            second = asyncio.create_task(uploads.write_through(context, provider.put))
+            await give_way()
+            lands.set()
+            await asyncio.wait_for(asyncio.gather(first, second), DEADLINE)
+        finally:
+            go.set()
+            await asyncio.to_thread(thread.join, DEADLINE)
+        assert provider.log.index(("stored", 1)) < provider.log.index(("sent", 2))
+        assert remote_t1(provider, context.id) == 5
+
+    async def test_a_buffered_run_whose_loop_ended_is_taken_over(self):
+        """A nested loop started the run's buffered uploads and ended. Back on this loop, an upload is in flight
+        when the run's end is saved: the end waits for it, and is what is stored last."""
+        provider = Remote.fresh(durability="buffered", flush_interval_s=0.0)
+        context = self.context(provider)
+        try:
+
+            async def nested():
+                assert uploads.schedule(context)
+                await asyncio.wait_for(until(lambda: ("stored", 1) in provider.log), DEADLINE)
+
+            thread = threading.Thread(target=lambda: asyncio.run(nested()), daemon=True)
+            thread.start()
+            await asyncio.to_thread(thread.join, DEADLINE)
+            lands = provider.hold(2)
+            assert uploads.schedule(context)
+            await asyncio.wait_for(until(lambda: ("sent", 2) in provider.log), DEADLINE)
+            context._trace["r"].t1 = 5
+            end = asyncio.create_task(uploads.write_through(context, provider.put))
+            await give_way()
+            lands.set()
+            await asyncio.wait_for(end, DEADLINE)
+            await asyncio.wait_for(until(lambda: ("stored", 2) in provider.log), DEADLINE)
+            assert provider.log.index(("stored", 2)) < provider.log.index(("sent", 3))
+            assert remote_t1(provider, context.id) == 5
+        finally:
+            for run in list(uploads._RUNS.values()):
+                if run.task is not None and not run.task.done():
+                    run.task.cancel()
+            uploads._reset_for_tests()
+
+    def test_sqlite_with_a_redactor_numbers_a_snapshot_before_it_is_taken(self, tmp_path, monkeypatch):
+        """Two event loops save one run through a SQLite provider with a trace redactor. The first is held before
+        it numbers its snapshot; the second saves the run's end. The file keeps the end."""
+        path = tmp_path / "t.db"
+        provider = SqliteTracingProvider.configured(_path=path, _trace_redactor=lambda value: value)
+        db = sqlite_module.database(path)
+        real, parked, go, arming = db.writing_lock, threading.Event(), threading.Event(), [True]
+
+        class Parking:
+            """The order lock: the first thread to ask for it waits for ``go`` before it takes it."""
+
+            def __enter__(self):
+                mine, arming[0] = arming[0], False
+                if mine:
+                    parked.set()
+                    assert go.wait(DEADLINE)
+                real.acquire()
+                return self
+
+            def __exit__(self, *_):
+                real.release()
+
+        monkeypatch.setattr(db, "writing_lock", Parking())
+        context = self.context(provider)
+        errors = []
+
+        def save():
+            try:
+                asyncio.run(provider.put(context))
+            except BaseException as e:  # noqa: BLE001 - reported below
+                errors.append(e)
+
+        first = threading.Thread(target=save, daemon=True)
+        first.start()
+        try:
+            assert parked.wait(DEADLINE)
+            context._trace["r"].t1 = 5
+            second = threading.Thread(target=save, daemon=True)
+            second.start()
+            second.join(DEADLINE)
+            assert stored_t1(path, context.id, "r") == 5
+        finally:
+            go.set()
+        first.join(DEADLINE)
+        assert not errors and not first.is_alive()
+        assert stored_t1(path, context.id, "r") == 5
+
+    async def test_one_sqlite_file_under_two_names_keeps_one_order(self, tmp_path, monkeypatch):
+        """Two providers on one file whose paths differ only in case (a case-insensitive file system): a save
+        through the first is held before it commits, the end is committed through the second, then the held write
+        finds a newer one stored and leaves it."""
+        import os
+
+        lower, upper = tmp_path / "t.db", tmp_path / "T.db"
+        first, second = SqliteTracingProvider.configured(_path=lower), SqliteTracingProvider.configured(_path=upper)
+        db = sqlite_module.database(lower)
+        if not os.path.samefile(lower, upper):
+            pytest.skip("case-sensitive file system: two names are two files")
+        lock = HeldLock(db, monkeypatch)
+        lock.armed = True
+        context = self.context(first)
+        held = asyncio.create_task(first.put(context))
+        try:
+            assert await asyncio.to_thread(lock.parked.wait, DEADLINE)
+            context._trace["r"].t1 = 5
+            await asyncio.wait_for(second.put(context), DEADLINE)
+        finally:
+            lock.go.set()
+        await asyncio.wait_for(held, DEADLINE)
+        assert stored_t1(lower, context.id, "r") == 5
+
+
+class TestCollectionsForksAndKeptLoops:
+    """What runs a save's cleanup, or holds its locks, from outside: a collection, a fork, a loop kept but stopped."""
+
+    @staticmethod
+    def context(provider):
+        context = RunContext(tracing_provider=provider)
+        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        return context
+
+    async def test_a_collection_while_a_save_registers_keeps_this_loops_order(self, monkeypatch):
+        """A save of the run is abandoned on a closed loop. This loop's first save sets off a collection as it
+        registers (any allocation can), which finishes the abandoned save and its cleanup. This loop's second save
+        still waits for the first, and the newer state is stored last."""
+        provider = Remote.fresh()
+        context = self.context(provider)
+        abandoned, closed_out = {}, []
+
+        def abandon():
+            loop = asyncio.new_event_loop()
+            try:
+
+                async def main():
+                    inside, never = asyncio.Event(), asyncio.Event()
+
+                    async def put(_context):
+                        inside.set()
+                        try:
+                            await never.wait()
+                        finally:
+                            closed_out.append(True)
+
+                    abandoned["task"] = asyncio.ensure_future(uploads.write_through(context, put))
+                    await inside.wait()
+
+                loop.run_until_complete(main())
+            finally:
+                loop.close()
+
+        thread = threading.Thread(target=abandon, daemon=True)
+        thread.start()
+        await asyncio.to_thread(thread.join, DEADLINE)
+        armed = [True]
+
+        class Collecting(uploads._Writing):
+            __slots__ = ()
+
+            def __init__(self):
+                if armed[0]:
+                    armed[0] = False
+                    abandoned.clear()
+                    gc.collect()
+
+        gc.collect()
+        gc.disable()
+        monkeypatch.setattr(sys, "unraisablehook", lambda _info: None)  # "Task was destroyed but it is pending"
+        try:
+            monkeypatch.setattr(uploads, "_Writing", Collecting)
+            lands = provider.hold(1)
+            first = asyncio.create_task(uploads.write_through(context, provider.put))
+            await asyncio.wait_for(until(lambda: ("sent", 1) in provider.log), DEADLINE)
+            assert closed_out == [True]  # the abandoned save was finished by that collection
+            context._trace["r"].t1 = 5
+            second = asyncio.create_task(uploads.write_through(context, provider.put))
+            await give_way()
+            lands.set()
+            assert await asyncio.wait_for(asyncio.gather(first, second), DEADLINE) == [True, True]
+        finally:
+            gc.enable()
+        assert provider.log.index(("stored", 1)) < provider.log.index(("sent", 2))
+        assert remote_t1(provider, context.id) == 5
+
+    @pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="needs os.fork")
+    def test_a_child_forked_while_a_thread_holds_the_queue_lock_can_save(self):
+        """Another thread holds the lock the queues are changed under when the process forks: the child's saves do
+        not wait for a thread that is not there."""
+        import os
+        import select
+        import warnings
+
+        provider = Remote.fresh()
+        holding, release = threading.Event(), threading.Event()
+
+        def hold():
+            with uploads._QUEUES_LOCK:
+                holding.set()
+                release.wait(DEADLINE)
+
+        thread = threading.Thread(target=hold, daemon=True)
+        thread.start()
+        assert holding.wait(DEADLINE)
+        read_end, write_end = os.pipe()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)  # forking a process that has threads
+            pid = os.fork()
+        if pid == 0:  # the child: one save of a run, then out
+            report = "error"
+            try:
+                result = asyncio.run(uploads.write_through(self.context(provider), provider.put))
+                report = f"ok {result}"
+            finally:
+                os.write(write_end, report.encode())
+                os._exit(0)
+        os.close(write_end)
+        try:
+            ready, _, _ = select.select([read_end], [], [], DEADLINE)
+            report = os.read(read_end, 100).decode() if ready else "child hung"
+        finally:
+            release.set()
+            thread.join(DEADLINE)
+            os.close(read_end)
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
+        assert report == "ok True"
+
+    async def test_a_buffered_run_whose_loop_was_stopped_is_taken_over(self):
+        """A helper ran nested work on a loop it keeps (``run_until_complete``, not closed) and scheduled a save of
+        the run there. Back on this loop, the root's end and the background work's end are two barriers: they go
+        one after the other, and the newer state is stored last."""
+        provider = Remote.fresh(durability="buffered", flush_interval_s=0.0)
+        context = self.context(provider)
+        kept = {}
+        try:
+
+            def helper():
+                loop = kept["loop"] = asyncio.new_event_loop()
+
+                async def nested():
+                    assert uploads.schedule(context)
+                    await asyncio.wait_for(until(lambda: ("stored", 1) in provider.log), DEADLINE)
+                    await asyncio.wait_for(until(lambda: not uploads.pending_runs()), DEADLINE)
+
+                loop.run_until_complete(nested())
+
+            thread = threading.Thread(target=helper, daemon=True)
+            thread.start()
+            await asyncio.to_thread(thread.join, DEADLINE)
+            lands = provider.hold(2)
+            first = asyncio.create_task(uploads.write_through(context, provider.put))
+            await asyncio.wait_for(until(lambda: ("sent", 2) in provider.log), DEADLINE)
+            context._trace["r"].t1 = 5
+            second = asyncio.create_task(uploads.write_through(context, provider.put))
+            await give_way()
+            lands.set()
+            await asyncio.wait_for(asyncio.gather(first, second), DEADLINE)
+            assert provider.log.index(("stored", 2)) < provider.log.index(("sent", 3))
+            assert remote_t1(provider, context.id) == 5
+        finally:
+            for run in list(uploads._RUNS.values()):
+                if run.task is not None and not run.task.done():
+                    run.task.cancel()
+            uploads._reset_for_tests()
+            if "loop" in kept:
+                kept["loop"].close()
+
+    @pytest.mark.parametrize("redactor", [None, lambda value: value], ids=["no redactor", "a redactor"])
+    async def test_a_sqlite_subclass_store_is_called(self, tmp_path, redactor):
+        """A ``SqliteTracingProvider`` subclass that wraps ``_store`` (as tests and applications do): ``put`` goes
+        through it, with or without a trace redactor."""
+        calls = []
+
+        class Wrapped(SqliteTracingProvider):
+            @classmethod
+            async def _store(cls, run_context):
+                calls.append(run_context.id)
+                await super()._store(run_context)
+
+        provider = Wrapped.configured(_path=tmp_path / "t.db", _trace_redactor=redactor)
+        context = self.context(provider)
+        context._trace["r"].t1 = 1
+        await asyncio.wait_for(provider.put(context), DEADLINE)
+        assert calls == [context.id]
+        assert stored_t1(tmp_path / "t.db", context.id, "r") == 1

@@ -225,11 +225,14 @@ class TracingProvider(ABC):
     for has returned. True for a provider that keeps that order itself or has none to keep: the platform
     provider sends one request per run at a time and folds the saves asked for meanwhile into the next, the
     in-memory one stores the trace in the step that copies it. A subclass of either whose ``_store`` copies
-    the trace and then awaits sets it back to False.
+    the trace and then awaits sets it back to False. Not while exporters are attached (``_exporters``): they
+    are awaited in :meth:`put`, and their exports are ordered by the queue like any other write.
 
     What this does not cover: a ``put`` whose caller is cancelled returns at once, and the next save starts.
     A provider whose write goes on without its caller (a worker thread, a shielded request) has to drop it
-    itself once a later save has landed, as ``SqliteTracingProvider`` does."""
+    itself once a later save has landed, as ``SqliteTracingProvider`` does. And the queue is one event loop's:
+    a save of the run from another loop goes straight to :meth:`put`, ordered only by a provider that orders
+    its own writes, as ``SqliteTracingProvider`` does."""
 
     flush_interval_s: float | None = None
     """Buffered mode: the least time between the starts of two background saves of one run. ``None`` reads
