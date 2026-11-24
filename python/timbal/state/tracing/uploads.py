@@ -161,15 +161,24 @@ class _Turns:
 
     ``started`` counts the writes begun, ``landed`` is the latest of them that succeeded. A save asked for
     when n had begun is stored once write n + 1 or a later one has landed: that write took its snapshot
-    after the save was asked for.
+    after the save was asked for. ``users``: the saves holding or waiting for it; the last one out retires it
+    (``_retire``), since it would keep its loop alive.
     """
 
-    __slots__ = ("lock", "started", "landed")
+    __slots__ = ("lock", "started", "landed", "users")
 
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
         self.started = 1  # the write in flight this was made for
         self.landed = 0
+        self.users = 0
+
+
+def _retire(queues: _Queues, loop: asyncio.AbstractEventLoop, turn: _Turns) -> None:
+    """Drop a loop's queue that no save holds or waits for: a nested ``asyncio.run()`` per call would otherwise
+    keep every loop it made alive through the run context. Called with ``_QUEUES_LOCK`` held."""
+    if turn.users == 0 and not turn.lock.locked() and queues.get(loop) is turn:
+        del queues[loop]
 
 
 class _Queues(dict):
@@ -209,6 +218,20 @@ def _gone(loop: asyncio.AbstractEventLoop) -> bool:
     return loop.is_closed() or not loop.is_running()
 
 
+def _movable(run: _RunUploads) -> bool:
+    """Whether another loop may take a run's buffered uploads over: their loop is gone, or nothing of them is under
+    way there (nothing pending, no upload, no barrier), so that loop's lock orders nothing."""
+    return _gone(run.loop) or not (run.pending or run.sending or run.writers)
+
+
+def _take_over(key: tuple[int, str], run: _RunUploads, run_context: RunContext) -> _RunUploads:
+    """Move a run's buffered uploads to this loop. What was owed comes along: a change no upload stored stays
+    pending here, to be stored by this loop's next upload, barrier or flush."""
+    moved = _RUNS[key] = _RunUploads(run_context, run.provider)
+    moved.pending, moved.unsent_since, moved.failures = run.pending, run.unsent_since, run.failures
+    return moved
+
+
 def _key(run_context: RunContext) -> tuple[int, str]:
     return id(run_context._tracing_provider), run_context.id
 
@@ -217,12 +240,14 @@ def schedule(run_context: RunContext) -> bool:
     """Defer this mid-run save. False: the run is too far behind, and the caller saves synchronously."""
     provider = run_context._tracing_provider
     loop = asyncio.get_running_loop()
-    run = _RUNS.get(_key(run_context))
-    if run is None or (run.loop is not loop and _gone(run.loop)):
-        # None yet, or the loop that had them is closed or stopped, and its drain with it: this loop takes them over.
-        run = _RUNS[_key(run_context)] = _RunUploads(run_context, provider)
+    key = _key(run_context)
+    run = _RUNS.get(key)
+    if run is None:
+        run = _RUNS[key] = _RunUploads(run_context, provider)
     elif run.loop is not loop:
-        return False  # the run's uploads are another live loop's: stored now, by the caller
+        if not _movable(run):
+            return False  # under way on another live loop: stored now, by the caller, as it comes
+        run = _take_over(key, run, run_context)
     now = loop.time()
     # At or past the limit (inclusive: on a coarse clock, Windows before Python 3.13, a backlog started in
     # this 15.6 ms tick reads as 0 s behind, and max_lag_s=0 must still mean "always synchronous").
@@ -307,6 +332,8 @@ async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[
                             continue
                         turn = queues[loop] = turns
                         took = True
+                    if turn is not None:
+                        turn.users += 1
                 break
             if turn is None:
                 try:
@@ -319,25 +346,32 @@ async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[
                             turn = None
                     if turn is not None and not loop.is_closed():
                         turn.lock.release()  # the queue a save of this loop made in this write's name
+                        with _QUEUES_LOCK:
+                            _retire(queues, loop, turn)
                 return True
-            if took:
-                await turn.lock.acquire()
-            covering = turn.started + 1
-            async with turn.lock:
-                if turn.landed >= covering:
-                    return False  # a write that began after this save was asked for has landed
-                turn.started = mine = turn.started + 1
-                await put(run_context)
-                turn.landed = mine
-            return True
+            try:
+                if took:
+                    await turn.lock.acquire()
+                covering = turn.started + 1
+                async with turn.lock:
+                    if turn.landed >= covering:
+                        return False  # a write that began after this save was asked for has landed
+                    turn.started = mine = turn.started + 1
+                    await put(run_context)
+                    turn.landed = mine
+                return True
+            finally:
+                with _QUEUES_LOCK:
+                    turn.users -= 1
+                    _retire(queues, loop, turn)
         run = _RUNS[key] = _RunUploads(run_context, provider)
     elif run.loop is not asyncio.get_running_loop():
-        if _gone(run.loop):
-            # The loop that had the run's uploads is closed or stopped, and its drain with it: this loop takes them
-            # over.
-            run = _RUNS[key] = _RunUploads(run_context, run.provider)
+        if _movable(run):
+            # Their loop is closed or stopped, or nothing of them is under way there: this loop takes them over,
+            # with what was owed, and this loop's barriers queue here.
+            run = _take_over(key, run, run_context)
         else:
-            # A barrier on another live event loop: the run's lock and drain are that loop's. Stored as it comes.
+            # Under way on another live event loop, whose lock this one cannot wait on: stored as it comes.
             await put(run_context)
             return True
     run.writers += 1

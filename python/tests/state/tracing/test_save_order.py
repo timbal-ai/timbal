@@ -1147,53 +1147,6 @@ class TestEachLoopKeepsItsOwnOrder:
                     run.task.cancel()
             uploads._reset_for_tests()
 
-    def test_sqlite_with_a_redactor_numbers_a_snapshot_before_it_is_taken(self, tmp_path, monkeypatch):
-        """Two event loops save one run through a SQLite provider with a trace redactor. The first is held before
-        it numbers its snapshot; the second saves the run's end. The file keeps the end."""
-        path = tmp_path / "t.db"
-        provider = SqliteTracingProvider.configured(_path=path, _trace_redactor=lambda value: value)
-        db = sqlite_module.database(path)
-        real, parked, go, arming = db.writing_lock, threading.Event(), threading.Event(), [True]
-
-        class Parking:
-            """The order lock: the first thread to ask for it waits for ``go`` before it takes it."""
-
-            def __enter__(self):
-                mine, arming[0] = arming[0], False
-                if mine:
-                    parked.set()
-                    assert go.wait(DEADLINE)
-                real.acquire()
-                return self
-
-            def __exit__(self, *_):
-                real.release()
-
-        monkeypatch.setattr(db, "writing_lock", Parking())
-        context = self.context(provider)
-        errors = []
-
-        def save():
-            try:
-                asyncio.run(provider.put(context))
-            except BaseException as e:  # noqa: BLE001 - reported below
-                errors.append(e)
-
-        first = threading.Thread(target=save, daemon=True)
-        first.start()
-        try:
-            assert parked.wait(DEADLINE)
-            context._trace["r"].t1 = 5
-            second = threading.Thread(target=save, daemon=True)
-            second.start()
-            second.join(DEADLINE)
-            assert stored_t1(path, context.id, "r") == 5
-        finally:
-            go.set()
-        first.join(DEADLINE)
-        assert not errors and not first.is_alive()
-        assert stored_t1(path, context.id, "r") == 5
-
     async def test_one_sqlite_file_under_two_names_keeps_one_order(self, tmp_path, monkeypatch):
         """Two providers on one file whose paths differ only in case (a case-insensitive file system): a save
         through the first is held before it commits, the end is committed through the second, then the held write
@@ -1396,31 +1349,223 @@ class TestCollectionsForksAndKeptLoops:
         assert stored_t1(tmp_path / "t.db", context.id, "r") == 1
 
 
-class TestExportsOfDroppedWrites:
-    @pytest.mark.parametrize("redactor", [None, lambda value: value], ids=["no redactor", "a redactor"])
-    async def test_a_sqlite_write_the_file_was_newer_than_is_not_exported(self, tmp_path, monkeypatch, redactor):
-        """A SQLite save of a run is numbered and held before it commits; the run's end is saved meanwhile
-        (another event loop's save, not queued behind it), committed and exported. The held write then finds the
-        end stored and leaves it: it exports nothing either, so the exporter ends with the end."""
-        path = tmp_path / "t.db"
-        exported = []
+def masking(secret, mark):
+    """A trace redactor that replaces ``secret`` with ``mark`` in every string it is given."""
 
-        class Sink:
-            async def export(self, run_context):
-                exported.append(run_context._trace["r"].t1)
+    def redact(value):
+        if isinstance(value, str):
+            return value.replace(secret, mark)
+        if isinstance(value, dict):
+            return {k: redact(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [redact(v) for v in value]
+        return value
 
-        provider = SqliteTracingProvider.configured(_path=path, _trace_redactor=redactor, _exporters=[Sink()])
-        lock = HeldLock(sqlite_module.database(path), monkeypatch)
-        lock.armed = True
+    return redact
+
+
+def stored_root(path, run_id):
+    """The run's row and root span as the file holds them, read on a connection of its own."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    try:
+        parent = conn.execute("SELECT parent_id FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+        span = conn.execute("SELECT span FROM spans WHERE run_id = ? AND call_id = 'r'", (run_id,)).fetchone()
+    finally:
+        conn.close()
+    return (parent[0] if parent else None), (json.loads(span[0]) if span else None)
+
+
+class TestRedactionTakeoversAndRetiredQueues:
+    """Redaction where SQLite stores, buffered runs moving between loops, the parent read with the spans, a read
+    that holds up no other run, and queues that do not outlive their loop."""
+
+    @staticmethod
+    def context(provider, **root):
         context = RunContext(tracing_provider=provider)
-        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
-        held = asyncio.create_task(provider.put(context))
+        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None, **root}
+        return context
+
+    async def test_a_sqlite_subclass_store_gets_the_redacted_copy(self, tmp_path):
+        """A subclass's ``_store`` copies a field elsewhere (an audit sink) before the built-in store: it is given
+        the redacted copy, as every ``_store`` is."""
+        audit = []
+
+        class Audited(SqliteTracingProvider):
+            @classmethod
+            async def _store(cls, run_context):
+                audit.append(run_context._trace["r"].output)
+                await super()._store(run_context)
+
+        path = tmp_path / "t.db"
+        provider = Audited.configured(_path=path, _trace_redactor=masking("secret", "[MASKED]"))
+        await asyncio.wait_for(provider.put(self.context(provider, t1=1, output="secret")), DEADLINE)
+        assert audit == ["[MASKED]"]
+
+    async def test_a_trace_forwarded_to_sqlite_gets_its_policy_too(self, tmp_path):
+        """An in-memory provider that masks the input forwards its copy to a SQLite provider that masks the output:
+        the stored row has both masked."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        path = tmp_path / "t.db"
+        sqlite = SqliteTracingProvider.configured(_path=path, _trace_redactor=masking("out-secret", "[OUT]"))
+
+        class Forward:
+            async def export(self, run_context):
+                await sqlite.put(run_context)
+
+        local = InMemoryTracingProvider.configured(_trace_redactor=masking("in-secret", "[IN]"), _exporters=[Forward()])
+        context = self.context(local, t1=1, input={"prompt": "in-secret"}, output="out-secret")
+        await asyncio.wait_for(local.put(context), DEADLINE)
+        _, root = stored_root(path, context.id)
+        assert root["input"] == {"prompt": "[IN]"} and root["output"] == "[OUT]"
+
+    async def test_buffered_barriers_on_another_loop_queue_there_once_the_first_is_idle(self):
+        """The run's buffered uploads started on this loop and are done (nothing pending). On another loop, two
+        barriers of the run overlap: they go one after the other there, and the newer state is stored last."""
+        provider = Remote.fresh(durability="buffered", flush_interval_s=0.0)
+        context = self.context(provider)
         try:
-            assert await asyncio.to_thread(lock.parked.wait, DEADLINE)
-            context._trace["r"].t1 = 5
-            await asyncio.wait_for(provider.put(context), DEADLINE)
+            assert uploads.schedule(context)
+            await asyncio.wait_for(
+                until(lambda: ("stored", 1) in provider.log and not uploads.pending_runs()), DEADLINE
+            )
+
+            async def on_another_loop():
+                lands = provider.hold(2)
+                first = asyncio.create_task(uploads.write_through(context, provider.put))
+                await asyncio.wait_for(until(lambda: ("sent", 2) in provider.log), DEADLINE)
+                context._trace["r"].t1 = 5
+                second = asyncio.create_task(uploads.write_through(context, provider.put))
+                await give_way()
+                lands.set()
+                return await asyncio.wait_for(asyncio.gather(first, second), DEADLINE)
+
+            results = await asyncio.wait_for(asyncio.to_thread(lambda: asyncio.run(on_another_loop())), DEADLINE)
+            assert results == [True, True]
+            assert provider.log.index(("stored", 2)) < provider.log.index(("sent", 3))
+            assert remote_t1(provider, context.id) == 5
         finally:
-            lock.go.set()
-        await asyncio.wait_for(held, DEADLINE)
-        assert stored_t1(path, context.id, "r") == 5
-        assert exported == [5]
+            for run in list(uploads._RUNS.values()):
+                if run.task is not None and not run.task.done():
+                    run.task.cancel()
+            uploads._reset_for_tests()
+
+    async def test_a_buffered_run_taken_over_keeps_what_it_owed(self):
+        """A buffered upload fails on a loop that then closes, the run's change still owed. The next loop's end
+        barrier fails too; once storage is back, a flush stores the end."""
+
+        class Down(Remote):
+            down = True
+
+            @classmethod
+            async def _store(cls, run_context):
+                if cls.down:
+                    raise OSError("storage is down")
+                await super()._store(run_context)
+
+        provider = Down.fresh(durability="buffered", flush_interval_s=0.0)
+        context = self.context(provider)
+        try:
+
+            async def first_loop():
+                assert uploads.schedule(context)
+                run = uploads._RUNS[uploads._key(context)]
+                await asyncio.wait_for(until(lambda: run.failures >= 1), DEADLINE)
+
+            await asyncio.wait_for(asyncio.to_thread(lambda: asyncio.run(first_loop())), DEADLINE)
+            context._trace["r"].t1 = 5
+            with pytest.raises(OSError):
+                await asyncio.wait_for(uploads.write_through(context, provider.put), DEADLINE)
+            provider.down = False
+            await asyncio.wait_for(uploads.flush_all(timeout=DEADLINE), DEADLINE)
+            assert remote_t1(provider, context.id) == 5
+        finally:
+            for run in list(uploads._RUNS.values()):
+                if run.task is not None and not run.task.done():
+                    run.task.cancel()
+            uploads._reset_for_tests()
+
+    def test_a_queue_does_not_keep_its_loop_alive(self):
+        """Forty short-lived loops (``asyncio.run()``), each with two overlapping saves of one run: once they are
+        done, none of the loops is kept alive by the run's queues."""
+        import weakref
+
+        provider = Slow.fresh()
+        context = self.context(provider)
+        loops = []
+
+        async def two_saves():
+            loops.append(weakref.ref(asyncio.get_running_loop()))
+            await asyncio.gather(*(uploads.write_through(context, provider.put) for _ in range(2)))
+
+        for _ in range(40):
+            asyncio.run(two_saves())
+        gc.collect()
+        assert not context.__dict__["_save_turn"]
+        assert [ref for ref in loops if ref() is not None] == []
+
+    def test_a_sqlite_read_holds_up_no_other_run(self, tmp_path):
+        """A save of one run is held while it reads the run (a slow redactor, a large trace); a save of another
+        run to the same file, on another event loop, goes through meanwhile."""
+        path = tmp_path / "t.db"
+        provider = SqliteTracingProvider.configured(_path=path)
+        reading, go = threading.Event(), threading.Event()
+
+        class Held:
+            def __str__(self):
+                reading.set()
+                assert go.wait(DEADLINE)
+                return "output"
+
+        slow, other = self.context(provider, output=Held()), self.context(provider, t1=1, output="other")
+        first = threading.Thread(target=lambda: asyncio.run(provider.put(slow)), daemon=True)
+        first.start()
+        try:
+            assert reading.wait(DEADLINE)
+            second = threading.Thread(target=lambda: asyncio.run(provider.put(other)), daemon=True)
+            second.start()
+            second.join(DEADLINE / 2)
+            assert not second.is_alive()  # it did not wait for the held read
+            assert stored_t1(path, other.id, "r") == 1
+        finally:
+            go.set()
+            first.join(DEADLINE)
+
+    def test_a_sqlite_save_stores_the_parent_it_read_with_its_spans(self, tmp_path, monkeypatch):
+        """A save of a run is held before it is numbered; the run's parent changes (a continuation re-chained) and
+        another save stores it. The held save, numbered after that one, stores the new parent too."""
+        path = tmp_path / "t.db"
+        provider = SqliteTracingProvider.configured(_path=path)
+        db = sqlite_module.database(path)
+        real, parked, go, arming = db.writing_lock, threading.Event(), threading.Event(), [True]
+
+        class Parking:
+            def __enter__(self):
+                mine, arming[0] = arming[0], False
+                if mine:
+                    parked.set()
+                    assert go.wait(DEADLINE)
+                real.acquire()
+                return self
+
+            def __exit__(self, *_):
+                real.release()
+
+        monkeypatch.setattr(db, "writing_lock", Parking())
+        context = RunContext(parent_id="old", tracing_provider=provider)
+        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        first = threading.Thread(target=lambda: asyncio.run(provider.put(context)), daemon=True)
+        first.start()
+        try:
+            assert parked.wait(DEADLINE)
+            context.parent_id = "new"
+            second = threading.Thread(target=lambda: asyncio.run(provider.put(context)), daemon=True)
+            second.start()
+            second.join(DEADLINE)
+            assert stored_root(path, context.id)[0] == "new"
+        finally:
+            go.set()
+            first.join(DEADLINE)
+        assert stored_root(path, context.id)[0] == "new"

@@ -1,5 +1,4 @@
 import asyncio
-import contextvars
 import json
 import os
 import sqlite3
@@ -15,7 +14,7 @@ except ImportError:
     from typing_extensions import override
 
 from ..trace import Trace
-from .base import TracingProvider, _redacted_trace, _RedactedRunContextView
+from .base import TracingProvider
 
 if TYPE_CHECKING:
     from ...context import RunContext
@@ -42,11 +41,11 @@ class _FileOrder:
     """What orders the writes of runs to one file, shared by every connection to it (``NORMAL`` and ``FULL``
     providers on one file get a connection each).
 
-    ``writing``: per run with a write on its way, its ``_Writes``. ``lock``: held while a snapshot is numbered
-    and read, so two captures of a run (two event loops saving it) never overlap and the numbers order their
-    states; re-entrant, since a save left suspended when its loop was closed is closed by the garbage collector,
-    whose cleanup asks for it on whatever thread is allocating, one that holds it included. ``commit``: held
-    from the comparison with what is stored to the end of the commit, on any connection to the file.
+    ``writing``: per run with a write on its way, its ``_Writes``. ``lock``: held while a snapshot is numbered,
+    for a few statements; re-entrant, since a save left suspended when its loop was closed is closed by the
+    garbage collector, whose cleanup asks for it on whatever thread is allocating, one that holds it included.
+    ``commit``: held from the comparison with what is stored to the end of the commit, on any connection to the
+    file.
     """
 
     __slots__ = ("commit", "lock", "writing")
@@ -113,10 +112,6 @@ class _Database:
 
 
 _DATABASES: dict[tuple[str, str], _Database] = {}
-# What the last _write of this task stored (the run, or its redacted copy): what put() hands its exporters. _OLDER
-# when it stored nothing, the file holding a newer snapshot of the run already.
-_STORED: contextvars.ContextVar = contextvars.ContextVar("timbal_sqlite_stored", default=None)
-_OLDER = object()
 # Per file (device and inode, which every name of the file shares: case-insensitive paths, links): what orders its
 # writes, whichever connection makes them. Under _DATABASES_LOCK.
 _ORDERS: dict[Any, _FileOrder] = {}
@@ -368,58 +363,20 @@ class SqliteTracingProvider(TracingProvider):
 
     @classmethod
     @override
-    async def put(cls, run_context: "RunContext") -> None:
-        """See base class. ``_store`` is handed the run itself: with a ``_trace_redactor``, the redacted copy is made
-        there, after the snapshot is numbered and under the same lock (a copy made before, as the base class makes
-        it, would be a snapshot taken before its number, and two event loops could store an older one last).
-        Exporters get what was stored, and nothing for a write the file was already newer than: saves of a run
-        from two event loops are not queued against each other, and that export would come after the newer
-        one's."""
-        token = _STORED.set(None)
-        try:
-            await cls._store(run_context)  # a subclass's own _store too
-            exported = _STORED.get()
-        finally:
-            _STORED.reset(token)
-        if exported is _OLDER:
-            return
-        if exported is None:
-            # A _store that did not go through _write (a subclass storing elsewhere): its exporters get the run, or
-            # a copy made now.
-            exported = run_context
-            if cls._trace_redactor is not None and not isinstance(run_context, _RedactedRunContextView):
-                exported = _RedactedRunContextView(
-                    run_context, _redacted_trace(run_context._trace, cls._trace_redactor)
-                )
-        for exporter in cls._exporters:
-            try:
-                await exporter.export(exported)
-            except Exception:
-                pass
-
-    @classmethod
-    @override
     async def _store(cls, run_context: "RunContext") -> None:
         """Store the spans of the current run that changed since its last save.
 
         Raises:
             RuntimeError: If ``_path`` has not been set via ``configured()``.
         """
-        await cls._write(run_context)
-
-    @classmethod
-    async def _write(cls, run_context: "RunContext") -> "RunContext":
-        """``_store``, returning what it stored: the run, or its redacted copy when this provider has a
-        ``_trace_redactor`` and was handed the run itself (``put``)."""
         db = cls._db()
         run_id = str(run_context.id)
-        parent_id = str(run_context.parent_id) if run_context.parent_id else None
 
         # Commits are not in snapshot order: each write is on a worker thread of its own, whichever takes the
         # connection first goes first, and the write of a save whose caller was cancelled still happens. The
-        # number tells an older snapshot from a newer one then. It is taken before the run is read, and the
-        # read happens under the same lock: two event loops saving one run never read it at once, so a
-        # higher number never holds an older state.
+        # number tells an older snapshot from a newer one then. It is taken before the run is read (its spans
+        # and its parent): a save numbered after this one read the run after it. The lock is held for the
+        # number alone, not for the read, which other runs of the file never wait for.
         with db.writing_lock:
             writes = db.writing.get(run_id)
             if writes is None:
@@ -427,42 +384,40 @@ class SqliteTracingProvider(TracingProvider):
             writes.pending += 1
             snapshot = writes.snapshots = writes.snapshots + 1
 
-            def over() -> None:
-                """This write can no longer commit. Called with ``db.writing_lock`` held."""
-                writes.pending -= 1
-                if not writes.pending and db.writing.get(run_id) is writes:
-                    del db.writing[run_id]
+        def over() -> None:
+            """This write can no longer commit. Called with ``db.writing_lock`` held."""
+            writes.pending -= 1
+            if not writes.pending and db.writing.get(run_id) is writes:
+                del db.writing[run_id]
 
-            try:
-                if cls._trace_redactor is not None and not isinstance(run_context, _RedactedRunContextView):
-                    run_context = _RedactedRunContextView(
-                        run_context, _redacted_trace(run_context._trace, cls._trace_redactor)
-                    )
-                spans = run_context._trace.as_records()
-                root = next((span for span in spans if span.parent_call_id is None), None)
-                ended = root is not None and root.t1 is not None
-                state = db.run_state(run_id)
-                order: dict[str, int] = state["seq"]
-                rows = []
-                finished = []
-                for span in spans:
-                    seq = order.setdefault(span.call_id, len(order))
-                    if not ended and span.call_id in state["stored"]:
-                        continue
-                    rows.append((run_id, span.call_id, seq, json.dumps(span.model_dump(), default=str)))
-                    if span.t1 is not None:
-                        finished.append(span.call_id)
-            except BaseException:
+        try:
+            parent_id = str(run_context.parent_id) if run_context.parent_id else None
+            spans = run_context._trace.as_records()
+            root = next((span for span in spans if span.parent_call_id is None), None)
+            ended = root is not None and root.t1 is not None
+            state = db.run_state(run_id)
+            order: dict[str, int] = state["seq"]
+            rows = []
+            finished = []
+            for span in spans:
+                seq = order.setdefault(span.call_id, len(order))
+                if not ended and span.call_id in state["stored"]:
+                    continue
+                rows.append((run_id, span.call_id, seq, json.dumps(span.model_dump(), default=str)))
+                if span.t1 is not None:
+                    finished.append(span.call_id)
+        except BaseException:
+            with db.writing_lock:
                 over()  # nothing to write: this number orders nothing
-                raise
+            raise
         stored_at = int(time.time() * 1000)
         # An ended run also gets the whole trace in runs.spans, as before: one write per run
         # keeps readers of that column working. While it runs, only its span rows are current.
         blob = "[" + ",".join(row[3] for row in rows) + "]" if ended else ""
-        began = dropped = older = False
+        began = dropped = False
 
         def _write() -> None:
-            nonlocal began, older
+            nonlocal began
             with db.writing_lock:
                 if dropped:
                     return
@@ -478,7 +433,6 @@ class SqliteTracingProvider(TracingProvider):
                         # finished and stored before), so this one would only take the run back: the root's
                         # end over the late output of background work, or a run still going over one that
                         # ended.
-                        older = True
                         return
                     with db.conn:  # one transaction: committed whole, or rolled back on any error
                         db.conn.execute(
@@ -508,14 +462,9 @@ class SqliteTracingProvider(TracingProvider):
                     dropped = True
                     over()
             raise
-        if older:
-            _STORED.set(_OLDER)  # nothing stored, nothing to export: the newer snapshot's save does both
-            return run_context
         # Only once committed: a save that failed leaves them for the next one to write.
         if ended:
             # Later saves (background work outliving the root) rewrite everything again.
             state["stored"].clear()
         else:
             state["stored"].update(finished)
-        _STORED.set(run_context)
-        return run_context
