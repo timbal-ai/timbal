@@ -113,8 +113,10 @@ class _Database:
 
 
 _DATABASES: dict[tuple[str, str], _Database] = {}
-# What the last _write of this task stored (the run, or its redacted copy): what put() hands its exporters.
+# What the last _write of this task stored (the run, or its redacted copy): what put() hands its exporters. _OLDER
+# when it stored nothing, the file holding a newer snapshot of the run already.
 _STORED: contextvars.ContextVar = contextvars.ContextVar("timbal_sqlite_stored", default=None)
+_OLDER = object()
 # Per file (device and inode, which every name of the file shares: case-insensitive paths, links): what orders its
 # writes, whichever connection makes them. Under _DATABASES_LOCK.
 _ORDERS: dict[Any, _FileOrder] = {}
@@ -367,21 +369,28 @@ class SqliteTracingProvider(TracingProvider):
     @classmethod
     @override
     async def put(cls, run_context: "RunContext") -> None:
-        """See base class. With a ``_trace_redactor``, the redacted copy is made in ``_store``, after the snapshot
-        is numbered and under the same lock: a copy made before (as the base class makes it) would be a snapshot
-        taken before its number, and two event loops could store an older one last. Exporters get that copy."""
-        if cls._trace_redactor is None:
-            await super().put(run_context)
-            return
+        """See base class. ``_store`` is handed the run itself: with a ``_trace_redactor``, the redacted copy is made
+        there, after the snapshot is numbered and under the same lock (a copy made before, as the base class makes
+        it, would be a snapshot taken before its number, and two event loops could store an older one last).
+        Exporters get what was stored, and nothing for a write the file was already newer than: saves of a run
+        from two event loops are not queued against each other, and that export would come after the newer
+        one's."""
         token = _STORED.set(None)
         try:
             await cls._store(run_context)  # a subclass's own _store too
             exported = _STORED.get()
         finally:
             _STORED.reset(token)
+        if exported is _OLDER:
+            return
         if exported is None:
-            # A _store that did not go through _write (a subclass storing elsewhere): its exporters get a copy now.
-            exported = _RedactedRunContextView(run_context, _redacted_trace(run_context._trace, cls._trace_redactor))
+            # A _store that did not go through _write (a subclass storing elsewhere): its exporters get the run, or
+            # a copy made now.
+            exported = run_context
+            if cls._trace_redactor is not None and not isinstance(run_context, _RedactedRunContextView):
+                exported = _RedactedRunContextView(
+                    run_context, _redacted_trace(run_context._trace, cls._trace_redactor)
+                )
         for exporter in cls._exporters:
             try:
                 await exporter.export(exported)
@@ -450,10 +459,10 @@ class SqliteTracingProvider(TracingProvider):
         # An ended run also gets the whole trace in runs.spans, as before: one write per run
         # keeps readers of that column working. While it runs, only its span rows are current.
         blob = "[" + ",".join(row[3] for row in rows) + "]" if ended else ""
-        began = dropped = False
+        began = dropped = older = False
 
         def _write() -> None:
-            nonlocal began
+            nonlocal began, older
             with db.writing_lock:
                 if dropped:
                     return
@@ -469,6 +478,7 @@ class SqliteTracingProvider(TracingProvider):
                         # finished and stored before), so this one would only take the run back: the root's
                         # end over the late output of background work, or a run still going over one that
                         # ended.
+                        older = True
                         return
                     with db.conn:  # one transaction: committed whole, or rolled back on any error
                         db.conn.execute(
@@ -498,6 +508,9 @@ class SqliteTracingProvider(TracingProvider):
                     dropped = True
                     over()
             raise
+        if older:
+            _STORED.set(_OLDER)  # nothing stored, nothing to export: the newer snapshot's save does both
+            return run_context
         # Only once committed: a save that failed leaves them for the next one to write.
         if ended:
             # Later saves (background work outliving the root) rewrite everything again.

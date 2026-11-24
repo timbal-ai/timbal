@@ -1394,3 +1394,33 @@ class TestCollectionsForksAndKeptLoops:
         await asyncio.wait_for(provider.put(context), DEADLINE)
         assert calls == [context.id]
         assert stored_t1(tmp_path / "t.db", context.id, "r") == 1
+
+
+class TestExportsOfDroppedWrites:
+    @pytest.mark.parametrize("redactor", [None, lambda value: value], ids=["no redactor", "a redactor"])
+    async def test_a_sqlite_write_the_file_was_newer_than_is_not_exported(self, tmp_path, monkeypatch, redactor):
+        """A SQLite save of a run is numbered and held before it commits; the run's end is saved meanwhile
+        (another event loop's save, not queued behind it), committed and exported. The held write then finds the
+        end stored and leaves it: it exports nothing either, so the exporter ends with the end."""
+        path = tmp_path / "t.db"
+        exported = []
+
+        class Sink:
+            async def export(self, run_context):
+                exported.append(run_context._trace["r"].t1)
+
+        provider = SqliteTracingProvider.configured(_path=path, _trace_redactor=redactor, _exporters=[Sink()])
+        lock = HeldLock(sqlite_module.database(path), monkeypatch)
+        lock.armed = True
+        context = RunContext(tracing_provider=provider)
+        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        held = asyncio.create_task(provider.put(context))
+        try:
+            assert await asyncio.to_thread(lock.parked.wait, DEADLINE)
+            context._trace["r"].t1 = 5
+            await asyncio.wait_for(provider.put(context), DEADLINE)
+        finally:
+            lock.go.set()
+        await asyncio.wait_for(held, DEADLINE)
+        assert stored_t1(path, context.id, "r") == 5
+        assert exported == [5]
