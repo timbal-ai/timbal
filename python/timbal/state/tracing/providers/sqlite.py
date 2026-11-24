@@ -20,6 +20,42 @@ if TYPE_CHECKING:
     from ...context import RunContext
 
 
+class _Writes:
+    """The writes of one run that are on their way to a file, in the order their snapshots were taken.
+
+    Kept from the first of them until the last is over (committed, failed, found older than what is stored,
+    or dropped before a worker took it), also once its caller has been cancelled: while one of them can still
+    commit, a later save of the run has to be able to tell which of the two is newer. With none left there is
+    nothing to order, and the run's next save starts another.
+    """
+
+    __slots__ = ("pending", "snapshots", "committed")
+
+    def __init__(self) -> None:
+        self.pending = 0  # not over yet
+        self.snapshots = 0  # the number of the latest one taken
+        self.committed = 0  # the newest one stored
+
+
+class _FileOrder:
+    """What orders the writes of runs to one file, shared by every connection to it (``NORMAL`` and ``FULL``
+    providers on one file get a connection each).
+
+    ``writing``: per run with a write on its way, its ``_Writes``. ``lock``: held while a snapshot is numbered,
+    for a few statements; re-entrant, since a save left suspended when its loop was closed is closed by the
+    garbage collector, whose cleanup asks for it on whatever thread is allocating, one that holds it included.
+    ``commit``: held from the comparison with what is stored to the end of the commit, on any connection to the
+    file.
+    """
+
+    __slots__ = ("commit", "lock", "writing")
+
+    def __init__(self) -> None:
+        self.writing: dict[str, _Writes] = {}
+        self.lock = threading.RLock()
+        self.commit = threading.Lock()
+
+
 class _Database:
     """One connection per database file, shared by every configured provider on it.
 
@@ -27,7 +63,7 @@ class _Database:
     at a time anyway, and a queue in the process beats retrying ``SQLITE_BUSY``.
     """
 
-    def __init__(self, path: Path, synchronous: str) -> None:
+    def __init__(self, path: Path, synchronous: str, order: _FileOrder | None = None) -> None:
         self.path = path
         self.lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), timeout=10, check_same_thread=False)
@@ -40,6 +76,14 @@ class _Database:
         # and the order spans were first seen. Kept per connection: a file recreated after being deleted
         # holds none of them. Bounded: a run whose process died never ends.
         self.runs: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        # Per run with a write on its way: what orders them (_Writes). Not in ``runs``: that cache lets go
+        # of a run however many of its writes are still out, and one parked on its worker meanwhile would
+        # then be compared with nothing. Bounded by the writes in flight. Shared by every connection to the
+        # file (_FileOrder): two connections are two writers of the same rows. The lock is held while a
+        # snapshot is numbered and read, on the event loop too: never while the connection is in use.
+        self.order = _FileOrder() if order is None else order
+        self.writing = self.order.writing
+        self.writing_lock = self.order.lock
 
     def _file_at_path(self) -> tuple[int, int] | None:
         try:
@@ -68,6 +112,9 @@ class _Database:
 
 
 _DATABASES: dict[tuple[str, str], _Database] = {}
+# Per file (device and inode, which every name of the file shares: case-insensitive paths, links): what orders its
+# writes, whichever connection makes them. Under _DATABASES_LOCK.
+_ORDERS: dict[Any, _FileOrder] = {}
 _DATABASES_LOCK = threading.Lock()
 _RUN_STATE_MAX = 2048
 # The parent's connections, in a forked child: kept referenced so that they are never closed there.
@@ -87,6 +134,7 @@ def _forget_databases_after_fork() -> None:
     global _DATABASES_LOCK
     _INHERITED_AFTER_FORK.extend(_DATABASES.values())
     _DATABASES.clear()
+    _ORDERS.clear()  # its locks may be held by a parent thread
     _DATABASES_LOCK = threading.Lock()
 
 
@@ -166,6 +214,11 @@ def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
     # cannot be opened now (a stalled mount) holds up its own callers, not those of every other file.
     opened = _Database(Path(path), mode)
     with _DATABASES_LOCK:
+        ident = opened._file if opened._file is not None else key[0]
+        order = _ORDERS.get(ident)
+        if order is None:
+            order = _ORDERS[ident] = _FileOrder()
+        opened.order, opened.writing, opened.writing_lock = order, order.writing, order.lock
         current = _DATABASES.get(key)
         if current is not None and current is not db and current.alive():
             # Another thread opened it meanwhile: one connection per file, theirs. Only while theirs is
@@ -318,42 +371,97 @@ class SqliteTracingProvider(TracingProvider):
         """
         db = cls._db()
         run_id = str(run_context.id)
-        parent_id = str(run_context.parent_id) if run_context.parent_id else None
-        spans = run_context._trace.as_records()
-        root = next((span for span in spans if span.parent_call_id is None), None)
-        ended = root is not None and root.t1 is not None
 
-        state = db.run_state(run_id)
-        order: dict[str, int] = state["seq"]
-        rows = []
-        finished = []
-        for span in spans:
-            seq = order.setdefault(span.call_id, len(order))
-            if not ended and span.call_id in state["stored"]:
-                continue
-            rows.append((run_id, span.call_id, seq, json.dumps(span.model_dump(), default=str)))
-            if span.t1 is not None:
-                finished.append(span.call_id)
+        # Commits are not in snapshot order: each write is on a worker thread of its own, whichever takes the
+        # connection first goes first, and the write of a save whose caller was cancelled still happens. The
+        # number tells an older snapshot from a newer one then. It is taken before the run is read (its spans
+        # and its parent): a save numbered after this one read the run after it. The lock is held for the
+        # number alone, not for the read, which other runs of the file never wait for.
+        with db.writing_lock:
+            writes = db.writing.get(run_id)
+            if writes is None:
+                writes = db.writing[run_id] = _Writes()
+            writes.pending += 1
+            snapshot = writes.snapshots = writes.snapshots + 1
+
+        def over() -> None:
+            """This write can no longer commit. Called with ``db.writing_lock`` held."""
+            writes.pending -= 1
+            if not writes.pending and db.writing.get(run_id) is writes:
+                del db.writing[run_id]
+
+        try:
+            parent_id = str(run_context.parent_id) if run_context.parent_id else None
+            spans = run_context._trace.as_records()
+            root = next((span for span in spans if span.parent_call_id is None), None)
+            ended = root is not None and root.t1 is not None
+            state = db.run_state(run_id)
+            order: dict[str, int] = state["seq"]
+            rows = []
+            finished = []
+            for span in spans:
+                seq = order.setdefault(span.call_id, len(order))
+                if not ended and span.call_id in state["stored"]:
+                    continue
+                rows.append((run_id, span.call_id, seq, json.dumps(span.model_dump(), default=str)))
+                if span.t1 is not None:
+                    finished.append(span.call_id)
+        except BaseException:
+            with db.writing_lock:
+                over()  # nothing to write: this number orders nothing
+            raise
         stored_at = int(time.time() * 1000)
         # An ended run also gets the whole trace in runs.spans, as before: one write per run
         # keeps readers of that column working. While it runs, only its span rows are current.
         blob = "[" + ",".join(row[3] for row in rows) + "]" if ended else ""
+        began = dropped = False
 
         def _write() -> None:
-            with db.lock, db.conn:  # one transaction: committed whole, or rolled back on any error
-                db.conn.execute(
-                    """
-                    INSERT INTO runs (run_id, parent_id, spans, stored_at) VALUES (?, ?, ?, ?)
-                    ON CONFLICT (run_id) DO UPDATE SET parent_id = excluded.parent_id, spans = excluded.spans,
-                        stored_at = excluded.stored_at
-                    """,
-                    (run_id, parent_id, blob, stored_at),
-                )
-                db.conn.executemany(
-                    "INSERT OR REPLACE INTO spans (run_id, call_id, seq, span) VALUES (?, ?, ?, ?)", rows
-                )
+            nonlocal began
+            with db.writing_lock:
+                if dropped:
+                    return
+                began = True
+            try:
+                # This connection's lock, then the file's commit lock: another connection to the file (a provider
+                # with the other ``synchronous``) compares and commits the same runs. Nothing holds the commit lock
+                # while it asks for a connection's, so the two cannot wait for each other.
+                with db.lock, db.order.commit:
+                    if writes.committed > snapshot:
+                        # A newer snapshot of this run is stored. It holds everything this one does (each
+                        # span as it was then or later; a span this one has and that one left out was
+                        # finished and stored before), so this one would only take the run back: the root's
+                        # end over the late output of background work, or a run still going over one that
+                        # ended.
+                        return
+                    with db.conn:  # one transaction: committed whole, or rolled back on any error
+                        db.conn.execute(
+                            """
+                            INSERT INTO runs (run_id, parent_id, spans, stored_at) VALUES (?, ?, ?, ?)
+                            ON CONFLICT (run_id) DO UPDATE SET parent_id = excluded.parent_id,
+                                spans = excluded.spans, stored_at = excluded.stored_at
+                            """,
+                            (run_id, parent_id, blob, stored_at),
+                        )
+                        db.conn.executemany(
+                            "INSERT OR REPLACE INTO spans (run_id, call_id, seq, span) VALUES (?, ?, ?, ?)", rows
+                        )
+                    writes.committed = snapshot
+            finally:
+                with db.writing_lock:
+                    over()
 
-        await asyncio.to_thread(_write)
+        try:
+            await asyncio.to_thread(_write)
+        except BaseException:
+            # The caller was cancelled, or the write never reached a worker. One a worker has begun goes on
+            # and stays counted until it is over. One it has not begun is dropped here: what orders the run's
+            # writes is kept until each is over, and nothing says when a worker would get to this one.
+            with db.writing_lock:
+                if not began:
+                    dropped = True
+                    over()
+            raise
         # Only once committed: a save that failed leaves them for the next one to write.
         if ended:
             # Later saves (background work outliving the root) rewrite everything again.

@@ -33,6 +33,9 @@ class InMemoryTracingProvider(TracingProvider):
     _storage: dict[str, Trace] = {}
 
     durable = False  # process-local: a restart leaves nothing to read
+    # Stored in the step that asks (the live trace, or its redacted copy): nothing lands late. With exporters attached
+    # its saves are queued all the same (TracingProvider.overlapping_saves).
+    overlapping_saves = True
     
     @classmethod
     @override

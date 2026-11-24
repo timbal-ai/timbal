@@ -334,8 +334,11 @@ class RunContext(BaseModel):
     #       the run this one continues left waiting, read once when a gate asks (``_left_waiting``)
     #   _live_background: int — background work (spawned tasks, handed-off
     #       continuations) running on this context; it can outlive the root run.
-    # ``_invoker``, ``_parent_pending`` and ``_driver`` are only set when they apply (read them with
-    # ``__dict__.get``): a default for each would be paid by every run.
+    #   _save_turn: None | uploads._Queues — a ``sync`` provider's saves of this run, one at a time per
+    #       event loop (``uploads.write_through``): per loop, a mark while one is being written, the queue
+    #       they wait in once two overlapped. Absent until the run's first such save
+    # ``_invoker``, ``_parent_pending``, ``_driver`` and ``_save_turn`` are only set when they apply (read
+    # them with ``__dict__.get``): a default for each would be paid by every run.
     # Do not add class-level annotations for them — pydantic would turn any
     # annotated underscore name back into a (slow) private attribute.
 
@@ -581,7 +584,7 @@ class RunContext(BaseModel):
                 return True
         t0 = time.monotonic()
         try:
-            await uploads.write_through(self, self._tracing_provider.put)
+            wrote = await uploads.write_through(self, self._tracing_provider.put)
         except Exception as e:
             _get_logger().error(
                 "Trace save failed. The run continues, but this snapshot was not stored...",
@@ -594,7 +597,8 @@ class RunContext(BaseModel):
             return False
         finally:
             uploads.count(self, "tracing:wait_ms", round((time.monotonic() - t0) * 1000))
-        uploads.count(self, "tracing:saves")
+        # Stored either way. A save another one's write held (overlapping saves of a sync provider) is not a write.
+        uploads.count(self, "tracing:saves_coalesced" if wrote is False else "tracing:saves")
         self.__dict__["_trace_unsaved"] = False
         return True
 
