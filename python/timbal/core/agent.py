@@ -3219,9 +3219,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             """
             from ..state import mark_salient as _mark
 
+            if not (why.strip() if isinstance(why, str) else ""):
+                raise ValueError("Nothing was marked: give a reason.")
             run_context = get_run_context()
             if not _mark(why, span=run_context.parent_span()):
-                raise ValueError("Nothing was marked: give a reason.")
+                # (The agent's own metadata keeps something other than a mapping under "memory".)
+                raise ValueError("Nothing was marked: this agent's metadata has no room for marks.")
             return "Marked."
 
         tool = Tool(

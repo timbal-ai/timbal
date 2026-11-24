@@ -21,7 +21,10 @@ See the function docstrings for usage details and warnings.
 
 import hashlib
 import json
+import os
 import re
+import threading
+from collections.abc import Mapping
 from contextvars import ContextVar
 from typing import Any
 
@@ -100,6 +103,17 @@ def emit(data: Any) -> None:
 
 
 MAX_SALIENT_CHARS = 500
+# Re-entrant: the copy runs code of the caller's (a mapping subclass), which may mark again on the same thread.
+_SALIENT_LOCK = threading.RLock()
+
+
+def _new_salient_lock() -> None:
+    global _SALIENT_LOCK
+    _SALIENT_LOCK = threading.RLock()  # a forked child starts with none held, whatever the parent was doing
+
+
+if hasattr(os, "register_at_fork"):  # (not on Windows)
+    os.register_at_fork(after_in_child=_new_salient_lock)
 
 
 def mark_salient(why: str, *, span: Any = None) -> bool:
@@ -107,7 +121,8 @@ def mark_salient(why: str, *, span: Any = None) -> bool:
 
     For memory consolidation (monolith#565's dreams read marked spans first); it writes nothing to a
     memory store and costs no model call. ``span`` defaults to the current span. Returns False (and
-    marks nothing) outside a run or for an empty reason; reasons are capped at
+    marks nothing) outside a run, for an empty reason, or when the span's ``memory`` is not a mapping (the
+    runnable's own metadata keeps something else there); reasons are capped at
     :data:`MAX_SALIENT_CHARS` characters. Counted in usage as ``memory:salient``.
     """
     run_context = get_run_context()
@@ -119,8 +134,17 @@ def mark_salient(why: str, *, span: Any = None) -> bool:
             span = run_context.current_span()
         except RuntimeError:
             return False
-    memory = span.metadata.setdefault("memory", {})
-    memory.setdefault("salient", []).append(why[:MAX_SALIENT_CHARS])
+    # Copied, never written in place: a span's metadata starts as a shallow copy of its runnable's own, so a
+    # ``memory`` dict there may be the runnable's configuration, which every later run of it starts from. Under
+    # a lock: a tool run on a thread may mark the same span (read, copy and assign would lose a mark).
+    with _SALIENT_LOCK:
+        memory = span.metadata.get("memory")
+        if memory is not None and not isinstance(memory, Mapping):
+            return False  # the runnable keeps something else under that key: nowhere to put the mark
+        memory = dict(memory) if memory is not None else {}
+        salient = memory.get("salient")
+        memory["salient"] = [*(salient if isinstance(salient, list | tuple) else ()), why[:MAX_SALIENT_CHARS]]
+        span.metadata["memory"] = memory
     run_context.update_usage("memory:salient", 1)
     return True
 

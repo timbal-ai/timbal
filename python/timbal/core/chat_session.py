@@ -278,7 +278,7 @@ _RESERVED_TRIGGER_KEYS = (
 
 
 def _unchanged_by_json(value: Any) -> Any:
-    """``value``, if JSON carries it and gives it back unchanged. TypeError otherwise."""
+    """What JSON gives back of ``value`` (a copy), if it gives it back unchanged. TypeError otherwise."""
     try:
         # allow_nan=False: NaN and Infinity are not JSON (Python writes and reads them all the same).
         carried = json.loads(json.dumps(value, allow_nan=False))
@@ -287,7 +287,7 @@ def _unchanged_by_json(value: Any) -> Any:
     if carried != value:
         # JSON takes it and hands back something else (a tuple as a list, a number key as text).
         raise TypeError(f"{type(value).__name__} does not come back from JSON as it went in")
-    return value
+    return carried  # equal, and the caller's no more: what is kept from here cannot be changed under it
 
 
 def _dump_resume(values: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -894,12 +894,14 @@ class ChatSession:
                     "A wake's trigger kind is a short lowercase identifier of what started the turn, not a user's turn "
                     f"({_TRIGGER_KIND.pattern}): {repr(kind)[:80]}."
                 )
+        owned = None
         if trigger and self._session_store is not None:
             # Stored with the wake: one a snapshot cannot hold would fail every save from now on. Refused here,
-            # to its caller, with nothing queued (as for resume()).
+            # to its caller, with nothing queued (as for resume()). Kept as JSON gave it back: the caller's dict
+            # (and what is nested in it) may change after this returns, and the queued wake must not.
             try:
-                _unchanged_by_json(trigger)
-                json.dumps(trigger, ensure_ascii=False).encode("utf-8")  # a lone surrogate is no UTF-8
+                owned = _unchanged_by_json(trigger)
+                json.dumps(owned, ensure_ascii=False).encode("utf-8")  # a lone surrogate is no UTF-8
             except (TypeError, UnicodeEncodeError) as error:
                 raise TypeError(
                     f"The wake's trigger cannot be stored ({error}): a durable session takes what JSON can carry."
@@ -915,17 +917,24 @@ class ChatSession:
         wake = _Wake(text=text, key=key, tool_policy=policy, silent_ok=bool(silent_ok), replaced=replaced)
         if trigger:
             # The caller's fields, then the wake's own, which no trigger renames (its kind may be the caller's).
+            # Its own copy (a session without a store: deep where it can be), never the caller's objects.
             wake.trigger = {
                 "kind": WAKE_KIND,
-                **trigger,
+                **(owned if owned is not None else _own_copy(trigger)),
                 "wake_id": wake.id,
                 "key": key,
                 "tool_policy": _describe_policy(policy),
             }
         self._wakes.append(wake)
         self.last_activity = time.monotonic()
+        # The log's own copy: whoever reads the log cannot change the queued wake.
         self._record(
-            "wake", wake_id=wake.id, text=text, key=key, tool_policy=_describe_policy(policy), trigger=wake.trigger
+            "wake",
+            wake_id=wake.id,
+            text=text,
+            key=key,
+            tool_policy=_describe_policy(policy),
+            trigger=_own_copy(wake.trigger),
         )
         wake.mark = self._changes
         self._work.set()
@@ -2078,7 +2087,10 @@ class ChatSession:
                         self.turns += 1
                         self._parked = False  # a resume took the answers: what is stored now is this turn
                         self._in_flight = in_flight
-                        self._record("turn_started", run_id=context.id, parent_id=context.parent_id, trigger=trigger)
+                        # (The log's own copy of the trigger: ``in_flight`` holds the one that is stored.)
+                        self._record(
+                            "turn_started", run_id=context.id, parent_id=context.parent_id, trigger=_own_copy(trigger)
+                        )
                         if followup is not None:
                             followup.started(context)  # (the trigger is on the root already: context.trigger)
                     self.log.put_nowait(event)

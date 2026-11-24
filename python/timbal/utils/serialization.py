@@ -10,6 +10,17 @@ from typing import Any
 from pydantic import BaseModel
 
 
+def json_response_carries(value: Any) -> bool:
+    """Whether a JSON response can carry ``value`` as the server writes one (Starlette's ``JSONResponse``: no
+    NaN or Infinity, UTF-8, so no lone surrogate). The JSON a request is parsed from lets both through
+    (``json.loads`` reads ``NaN`` and ``"\\ud800"``), so what a run echoes back must be checked before it starts."""
+    try:
+        json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, RecursionError):  # (UnicodeEncodeError is a ValueError)
+        return False
+    return True
+
+
 def safe_is_nan(value: Any) -> bool:
     """Utility function to check if a value is NaN or NA-like."""
     if value is None:

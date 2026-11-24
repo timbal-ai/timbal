@@ -26,7 +26,7 @@ from .. import __version__
 from ..core.tool_policy import READ_ONLY_POLICY
 from ..logs import setup_logging
 from ..state import RunContext, set_run_context
-from ..utils import ImportSpec, is_port_in_use
+from ..utils import ImportSpec, is_port_in_use, json_response_carries
 from .jobs import DEFAULT_READ_LIMIT, JobStore, RunIdInUse
 from .voice import merge_voice_config
 
@@ -136,6 +136,21 @@ def _policy_headers(run_context: RunContext | None) -> dict[str, str] | None:
     if policy == READ_ONLY_POLICY:
         return {"X-Timbal-Tool-Policy": READ_ONLY_POLICY}
     return {"X-Timbal-Tool-Policy": "custom" if callable(policy) else "names"}
+
+
+def _context_echoed_by_run(req_data: dict) -> dict:
+    """What ``/run``'s answer (the run's output event) holds of the request's context as it was sent: its ids,
+    tool policy and trigger (an object is stamped on the root, its metadata not dumped). Other context keys are
+    kept and never echoed. (The inputs are echoed dumped, NaN as null: they are not this check's.)"""
+    raw = req_data.get("context")
+    if raw is None:
+        raw = req_data.get("run_context")
+    if not isinstance(raw, dict):
+        return {}
+    echoed = {key: raw[key] for key in ("id", "parent_id", "tool_policy") if key in raw}
+    if isinstance(raw.get("trigger"), dict):
+        echoed["trigger"] = raw["trigger"]
+    return echoed
 
 
 def _tool_policy(value: Any) -> Any:
@@ -288,6 +303,14 @@ def create_app() -> FastAPI:
             raw = req_data.pop("run_context", None)
         if raw is None:
             return None, False
+        trigger = raw.get("trigger") if isinstance(raw, dict) else None
+        if isinstance(trigger, dict) and not json_response_carries(trigger):
+            # Stamped on the run's root, so it reaches the output: /run could not encode its answer (a 500 once the
+            # tools had acted, and a retry would act again). Refused before any job starts.
+            raise HTTPException(
+                status_code=400,
+                detail="'context.trigger' must be JSON a response can carry: no NaN or Infinity, no lone surrogate.",
+            )
         policy, policy_given, require_new = None, False, False
         if isinstance(raw, dict) and ("tool_policy" in raw or "require_new" in raw):
             raw = dict(raw)
@@ -306,6 +329,14 @@ def create_app() -> FastAPI:
     @app.post("/run")
     async def run(req: Request) -> Response:
         req_data = await req.json()
+        if not json_response_carries(_context_echoed_by_run(req_data)):
+            # The answer is the run's output, which holds the context's ids, tool policy and trigger: one it could
+            # not encode would be a 500 once the tools had acted, and a retry would act again. (/stream writes NaN
+            # and escapes lone surrogates, so it takes them as it always has.)
+            raise HTTPException(
+                status_code=400,
+                detail="'context' must be JSON a response can carry: no NaN or Infinity, no lone surrogate.",
+            )
         run_context, require_new = await _request_context(req_data)
         run_id = None
         if run_context is not None:

@@ -43,6 +43,52 @@ class TestSalience:
         assert root.metadata["memory"]["salient"] == ["User prefers replies in Spanish."]
         assert out.usage["memory:salient"] == 1
 
+    async def test_a_mark_stays_in_its_run(self):
+        """A span's metadata starts as a shallow copy of the runnable's own: a mark must not write into the
+        runnable's ``metadata["memory"]`` (another user's next run would carry this one's reason)."""
+        fresh()
+        static = {"memory": {"store": "notes", "salient": ["configured"]}}
+
+        def model(messages):
+            text = [m for m in messages if m.role == "user"][-1].collect_text()
+            if text == "mark" and messages[-1].role != "tool":
+                return call("mark_salient", why="User one's secret preference.")
+            return "ok"
+
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=model),
+            salience_tool=True,
+            metadata=static,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        first = await agent(prompt="mark").collect()
+        fresh()
+        second = await agent(prompt="nothing to mark").collect()
+        assert first.metadata["memory"] == {
+            "store": "notes",
+            "salient": ["configured", "User one's secret preference."],
+        }
+        assert second.metadata["memory"] == {"store": "notes", "salient": ["configured"]}
+        assert agent.metadata["memory"] == {"store": "notes", "salient": ["configured"]}
+
+    async def test_the_helper_leaves_a_tools_own_metadata_alone(self):
+        fresh()
+
+        def note() -> str:
+            mark_salient("seen")
+            return "noted"
+
+        tool = Tool(name="note", handler=note, metadata={"memory": {"salient": []}})
+        agent = Agent(
+            name="bot",
+            model=TestModel(responses=[call("note"), "done"]),
+            tools=[tool],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        await agent(prompt="go").collect()
+        assert tool.metadata["memory"] == {"salient": []}
+
     async def test_off_by_default(self):
         fresh()
         seen = []
@@ -457,7 +503,6 @@ class TestTheTurnsTrigger:
         import threading
 
         from timbal.core.chat_session import ChatSession
-
         from timbal.state import get_run_context
 
         fresh()
@@ -477,3 +522,183 @@ class TestTheTurnsTrigger:
             (started,) = await asyncio.wait_for(self._turns(session, 1), 10)
         assert started["kind"] == "routine" and seen and seen[0]["lock"] is lock
         assert started["ids"] == ["r1"]  # the session's record of the turn
+
+
+class TestAWakeOwnsItsTrigger:
+    """What ``wake()`` accepted is what the queued wake keeps: a caller who changes its dict afterwards, or a log
+    consumer who changes a record, changes neither the queued wake, nor what the session stores of it."""
+
+    async def test_the_caller_changes_its_dict_after_the_wake(self):
+        import datetime
+
+        from timbal.core.chat_session import ChatSession
+        from timbal.state.chat_store import InMemoryChatSessionStore
+
+        fresh()
+        hold = asyncio.Event()
+
+        async def look() -> str:
+            await hold.wait()
+            return "seen"
+
+        def model(messages):
+            return "NO_REPLY" if messages[-1].role == "tool" else call("look")
+
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=model),
+            tools=[Tool(name="look", handler=look, read_only=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        session = ChatSession(agent, session_store=InMemoryChatSessionStore())
+        try:
+            trigger = {"kind": "routine", "fires": [{"at": "08:00"}]}
+            session.wake("Daily check", trigger=trigger)
+            trigger["fires"].append(datetime.date(2026, 11, 25))  # not JSON: every save would fail
+            trigger["fires"][0]["at"] = "never"
+            trigger["routine_id"] = "added later"
+            await session.flush()  # the wake's own trigger is what the store gets
+            wake = session._wakes[0] if session._wakes else None
+            started = []
+            async for item in session.events():
+                if isinstance(item, dict) and item.get("kind") == "turn_started":
+                    started.append(item)
+                    break
+            await session.flush()
+            expected = {"kind": "routine", "fires": [{"at": "08:00"}]}
+            got = started[0]["trigger"]
+            assert {k: got[k] for k in expected} == expected and "routine_id" not in got
+            assert session._in_flight["trigger"] == got
+            assert wake is None or wake.trigger == got
+        finally:
+            hold.set()
+            await session.close()
+
+    async def test_a_log_consumer_changes_a_record(self):
+        from timbal.core.chat_session import ChatSession
+
+        fresh()
+        hold = asyncio.Event()
+
+        async def look() -> str:
+            await hold.wait()
+            return "seen"
+
+        def model(messages):
+            return "NO_REPLY" if messages[-1].role == "tool" else call("look")
+
+        agent = Agent(
+            name="bot",
+            model=TestModel(handler=model),
+            tools=[Tool(name="look", handler=look, read_only=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        session = ChatSession(agent)
+        try:
+            wake_id = session.wake("Daily check", trigger={"kind": "routine", "ids": ["r1"]})
+            (record,) = [r for r in session.log.peek()[0] if isinstance(r, dict) and r.get("kind") == "wake"]
+            record["trigger"]["ids"].append("from the log")
+            (wake,) = [w for w in session._wakes if w.id == wake_id]
+            assert wake.trigger["ids"] == ["r1"]
+            async for item in session.events():
+                if isinstance(item, dict) and item.get("kind") == "turn_started":
+                    item["trigger"]["ids"].append("from the log")
+                    break
+            assert session._in_flight["trigger"]["ids"] == ["r1"]
+        finally:
+            hold.set()
+            await session.close()
+
+
+class TestMarksStayWhole:
+    def test_marks_from_threads_on_one_span_are_all_kept(self):
+        """A tool run on a thread (``offload_blocking``) may mark the agent's span while another does."""
+        import sys
+        import threading
+
+        from timbal.state.tracing.span import Span
+
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+        span = Span(path="bot", call_id="c1", parent_call_id=None, t0=0, metadata={})
+        set_run_context(ctx)
+        switch = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+
+            def mark(n):
+                set_run_context(ctx)
+                for i in range(1500):
+                    mark_salient(f"{n}-{i}", span=span)
+
+            threads = [threading.Thread(target=mark, args=(n,)) for n in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        finally:
+            sys.setswitchinterval(switch)
+            fresh()
+        assert len(span.metadata["memory"]["salient"]) == 6000
+
+    def test_a_memory_that_is_not_a_mapping_is_left_as_it_is(self):
+        """Nothing to add a mark to: nothing is marked, and the span keeps what its runnable gave it."""
+        from timbal.state.tracing.span import Span
+
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx)
+        try:
+            span = Span(path="bot", call_id="c1", parent_call_id=None, t0=0, metadata={"memory": "long-term"})
+            assert mark_salient("why", span=span) is False
+            assert span.metadata["memory"] == "long-term"
+            kept = Span(path="bot", call_id="c2", parent_call_id=None, t0=0, metadata={"memory": {"salient": ("a",)}})
+            assert mark_salient("why", span=kept) is True
+            assert kept.metadata["memory"]["salient"] == ["a", "why"]
+        finally:
+            fresh()
+
+    def test_a_mapping_that_marks_again_does_not_block_marks(self):
+        """Code of the caller's runs inside the copy (a mapping subclass): a mark from there must not deadlock,
+        and no other mark, the event loop's included, may wait on it."""
+        import threading
+        from collections.abc import Mapping
+        from types import MappingProxyType
+
+        from timbal.state.tracing.span import Span
+
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+        inner = Span(path="bot", call_id="c2", parent_call_id=None, t0=0, metadata={})
+
+        class Marking(Mapping):
+            def __init__(self):
+                self._data = {"salient": []}
+
+            def __getitem__(self, key):
+                mark_salient("from inside", span=inner)
+                return self._data[key]
+
+            def __iter__(self):
+                return iter(self._data)
+
+            def __len__(self):
+                return len(self._data)
+
+        outer = Span(path="bot", call_id="c1", parent_call_id=None, t0=0, metadata={"memory": Marking()})
+        done = []
+
+        def mark():
+            set_run_context(ctx)
+            done.append(mark_salient("outer", span=outer))
+
+        thread = threading.Thread(target=mark, daemon=True)
+        thread.start()
+        thread.join(5)
+        assert done == [True] and inner.metadata["memory"]["salient"] == ["from inside"]
+        set_run_context(ctx)
+        try:
+            proxied = Span(
+                path="bot", call_id="c3", parent_call_id=None, t0=0, metadata={"memory": MappingProxyType({"k": 1})}
+            )
+            assert mark_salient("why", span=proxied) is True  # a mapping: copied, as the docstring says
+            assert proxied.metadata["memory"] == {"k": 1, "salient": ["why"]}
+        finally:
+            fresh()
