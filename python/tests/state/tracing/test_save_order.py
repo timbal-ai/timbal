@@ -1203,7 +1203,7 @@ class TestEachLoopKeepsItsOwnOrder:
         lower, upper = tmp_path / "t.db", tmp_path / "T.db"
         first, second = SqliteTracingProvider.configured(_path=lower), SqliteTracingProvider.configured(_path=upper)
         db = sqlite_module.database(lower)
-        if not os.path.samefile(lower, upper):
+        if not (upper.exists() and os.path.samefile(lower, upper)):
             pytest.skip("case-sensitive file system: two names are two files")
         lock = HeldLock(db, monkeypatch)
         lock.armed = True
