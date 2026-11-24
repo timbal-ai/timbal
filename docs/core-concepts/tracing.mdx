@@ -86,7 +86,7 @@ Saves of one run can be asked for while another is still being written: parallel
 
 A custom provider needs no ordering of its own, with two things to know. A `put()` that never returns holds back the run's later saves, so give its requests a timeout. And a write that goes on after its caller was cancelled (a worker thread, a shielded request) must not land over a later save: `SqliteTracingProvider` numbers its snapshots and drops one older than the newest it has committed.
 
-A provider that keeps that order itself sets `overlapping_saves = True` and receives `sync` saves as they come. `PlatformTracingProvider` does: one request per run at a time, the saves asked for meanwhile folded into the next, and every request, whether a retry, a resend or a shutdown flush, sends the newest save asked, read from the run when the request goes out and redacted then with the policy of the provider that accepted it (a subclass that overrides `_store` gets a redacted copy, and what it passes on to the built-in store is sent as it was handed, unless a newer save of the run was already asked). So does `InMemoryTracingProvider`, which stores the trace in the step that asks.
+A provider that keeps that order itself sets `overlapping_saves = True` and receives `sync` saves as they come. `PlatformTracingProvider` does (one request per run at a time, the saves asked for meanwhile folded into the next), and so does `InMemoryTracingProvider`, which stores the trace in the step that asks.
 
 ### When a save fails
 
