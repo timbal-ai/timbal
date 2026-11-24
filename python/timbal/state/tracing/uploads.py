@@ -322,7 +322,9 @@ async def flush_all(timeout: float | None = None) -> None:
         timeout = _flush_timeout()
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    runs = list(_RUNS.values())
+    # A run with nothing pending and no upload in flight has its latest state stored. One in flight may still fail
+    # (it then marks the run pending again): stored after it.
+    runs = [run for run in _RUNS.values() if run.pending or run.sending]
 
     async def flush(run: _RunUploads) -> None:
         try:

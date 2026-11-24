@@ -1817,8 +1817,9 @@ class TestOrderAcrossPaths:
                     entry.cancel()
 
     async def test_a_save_whose_body_cannot_be_made_records_nothing(self):
-        """A redactor raises while a PATCH body is being made: the save fails, nothing waits for a PATCH that never
-        went out (a read of the run would wait for it), and the run is still owed, not counted as sent."""
+        """A redactor raises while a PATCH body is being made: the save fails with that error, nothing waits for a
+        PATCH that never went out (a read of the run would wait for it), and the request is not kept owed (it would
+        fail the same way on every resend, and hold a place in ``_unsaved`` for good)."""
         server = FakePlatform(deltas=False)
 
         def broken(_value):
@@ -1831,7 +1832,7 @@ class TestOrderAcrossPaths:
             with pytest.raises(RuntimeError, match="redactor bug"):
                 await asyncio.wait_for(provider.put(ctx), 5)
         assert key not in PlatformTracingProvider._saving
-        assert not PlatformTracingProvider._unsaved[key].sent
+        assert key not in PlatformTracingProvider._unsaved  # dropped: it would fail the same way on every resend
         assert not server.patches
 
     async def test_a_read_through_other_credentials_is_not_answered_from_an_older_copy(self):
@@ -2259,11 +2260,11 @@ class TestHousekeeping:
         import sys
         import threading
 
-        lock_kind = type(platform_module._snapshot_lock)
+        from timbal.state.tracing.providers import base
+
+        lock_kind = type(base._CAPTURE_LOCK)
         monkeypatch.setattr(
-            platform_module,
-            "_snapshot_lock",
-            threading.RLock() if lock_kind is type(threading.RLock()) else threading.Lock(),
+            base, "_CAPTURE_LOCK", threading.RLock() if lock_kind is type(threading.RLock()) else threading.Lock()
         )
         monkeypatch.setattr(sys, "unraisablehook", lambda _info: None)  # "Task was destroyed but it is pending"
         never = []

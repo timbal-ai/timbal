@@ -385,11 +385,30 @@ SNAPSHOT_HEADER = "x-timbal-snapshot"
 APPLIED_HEADER = "x-timbal-snapshot-applied"
 SELECT_HEADER = "x-timbal-select"
 _last_snapshot = 0
-# Event loops in other threads save too: two equal numbers would make the platform drop the second as stale.
-# Also guards _unsaved and _LATEST, and a PATCH's number with the body it sends (see PlatformTracingProvider._save).
-# Re-entrant: it is held while a trace is serialized and redacted (allocations, a redactor's own code), and a
-# collection then may finish a save left suspended in a closed loop on this thread; nothing it runs may wait for it.
-_snapshot_lock = threading.RLock()
+
+
+class _SharedLock:
+    """``base._CAPTURE_LOCK``, under the name this module used. One re-entrant lock guards the snapshot counter, a
+    PATCH's number with the body it sends, every piece of the provider's shared state (``_unsaved``, ``_flights``,
+    ``_LATEST``, ``_ROW_OWNERS``, ``_saving``, ``_recent``, ``_own_snapshots``) and every capture of a trace: event
+    loops in other threads save too. With two locks, a collection that finished an abandoned save on a thread inside
+    a capture (holding one) waited for the other, held by a thread waiting for the first: one lock has no order to
+    invert. Re-entrant: a collection on a thread that holds it may finish a save that asks for it."""
+
+    def acquire(self, *args, **kwargs) -> bool:
+        return _base._CAPTURE_LOCK.acquire(*args, **kwargs)
+
+    def release(self) -> None:
+        _base._CAPTURE_LOCK.release()
+
+    def __enter__(self):
+        return _base._CAPTURE_LOCK.__enter__()
+
+    def __exit__(self, *exc) -> None:
+        _base._CAPTURE_LOCK.__exit__(*exc)
+
+
+_snapshot_lock = _SharedLock()
 # time_ns() - perf_counter_ns(), taken at an edge of the wall clock's tick (see _epoch_ns); None until first use.
 _epoch_offset_ns: int | None = None
 
@@ -420,7 +439,7 @@ def _next_snapshot() -> int:
     would restart below what the first process sent.
     """
     global _last_snapshot
-    with _snapshot_lock:
+    with _base._CAPTURE_LOCK:
         _last_snapshot = max(_last_snapshot + 1, _epoch_ns())
         return _last_snapshot
 
@@ -428,7 +447,7 @@ def _next_snapshot() -> int:
 def _observe_snapshot(stored: int) -> None:
     """The platform said it holds ``stored``: number later saves above it, whatever this clock says."""
     global _last_snapshot
-    with _snapshot_lock:
+    with _base._CAPTURE_LOCK:
         _last_snapshot = max(_last_snapshot, stored)
 
 
@@ -514,9 +533,9 @@ def _policy(write: _Write) -> tuple:
     view = write.source
     while isinstance(view, _RedactedRunContextView):
         redactor = view.__dict__.get("_redactor")
-        chain.append(None if redactor is None else id(redactor))
+        chain.append(redactor)
         view = view._original
-    return (*chain, "|", *(id(redactor) for redactor in write.redactors))
+    return (*chain, "|", *write.redactors)
 
 
 def _token(platform_config: PlatformConfig) -> str:
@@ -570,7 +589,7 @@ def _owe(target: tuple, run_context: RunContext, provider: type) -> _Write | Non
     made = run_context.__dict__.get("_made") if isinstance(run_context, _RedactedRunContextView) else None
     unsaved = PlatformTracingProvider._unsaved
     evicted = []
-    with _snapshot_lock:
+    with _base._CAPTURE_LOCK:
         own = context.__dict__
         use = own.get("_platform_use")
         if use is None:
@@ -623,7 +642,7 @@ def _landed(key: str, seq: int) -> None:
     settled if it is that request or an older one. A newer one (asked meanwhile, whose own save may have
     failed) stays owed."""
     unsaved = PlatformTracingProvider._unsaved
-    with _snapshot_lock:
+    with _base._CAPTURE_LOCK:
         write = unsaved.get(key)
         if write is not None and write.seq <= seq:
             del unsaved[key]
@@ -794,6 +813,7 @@ class PlatformTracingProvider(TracingProvider):
 
     @classmethod
     def _prune_recent(cls, now: float, capacity: int, ttl: float) -> None:
+        """Called with the shared lock held."""
         recent = PlatformTracingProvider._recent
         size = sum(len(entry[1]) for entry in recent.values())
         # Entries are ordered by their last successful save, oldest first.
@@ -812,6 +832,11 @@ class PlatformTracingProvider(TracingProvider):
         per destination, whatever credentials sent it: the newest snapshot there replaces it."""
         capacity, ttl = cls._recent_limits()
         now = time.monotonic()
+        with _base._CAPTURE_LOCK:  # other loops' saves register and settle here too
+            cls._settle_save(key, snapshot, body, token, now, capacity, ttl)
+
+    @classmethod
+    def _settle_save(cls, key, snapshot, body, token, now, capacity, ttl) -> None:
         newest = -1
         saves = PlatformTracingProvider._saving.get(key)
         if saves is not None:
@@ -833,8 +858,9 @@ class PlatformTracingProvider(TracingProvider):
     @classmethod
     def _recall(cls, key: str, token: str | None = None) -> Trace | None:
         capacity, ttl = cls._recent_limits()
-        cls._prune_recent(time.monotonic(), capacity, ttl)
-        entry = PlatformTracingProvider._recent.get(key)
+        with _base._CAPTURE_LOCK:
+            cls._prune_recent(time.monotonic(), capacity, ttl)
+            entry = PlatformTracingProvider._recent.get(key)
         if entry is None or entry[2] != token:
             return None  # not stored here, or stored by other credentials: the platform decides
         # Parsed afresh each time, so a reader can never change what the next one sees.
@@ -1043,7 +1069,11 @@ class PlatformTracingProvider(TracingProvider):
             # platform could answer 404, or an older snapshot. Only saves already asked for are awaited, so a
             # parent that keeps saving (background children) does not hold every read for the full bound.
             await asyncio.wait(waits, timeout=cls._save_wait_s)
-        recalled = cls._recall(key, _token(platform_config))
+        with _base._CAPTURE_LOCK:
+            unanswered = key in PlatformTracingProvider._saving
+        # While a save of the run is unanswered (on another loop, or past the wait), the platform may already hold
+        # it: what this process kept may be older. Ask the platform.
+        recalled = None if unanswered else cls._recall(key, _token(platform_config))
         if recalled is not None:
             return recalled
         caps = cls._family_caps(platform_config, run_path)
@@ -1110,7 +1140,7 @@ class PlatformTracingProvider(TracingProvider):
         cancelling the caller does not cancel the save."""
         loop = asyncio.get_running_loop()
         flights = PlatformTracingProvider._flights
-        with _snapshot_lock:  # other loops' drivers replace and remove flights too
+        with _base._CAPTURE_LOCK:  # other loops' drivers replace and remove flights too
             flight = flights.get(key)
             if flight is None or flight.loop is not loop:
                 flight = flights[key] = _Flight(key, loop)
@@ -1218,7 +1248,7 @@ class PlatformTracingProvider(TracingProvider):
             flight.driver = None
             if flight.next is not None and not flight.next.done():
                 flight.next.cancel()  # the driver itself was cancelled (loop shutting down)
-            with _snapshot_lock:  # another loop may be replacing it right now
+            with _base._CAPTURE_LOCK:  # another loop may be replacing it right now
                 if PlatformTracingProvider._flights.get(flight.key) is flight:
                     del PlatformTracingProvider._flights[flight.key]
 
@@ -1230,7 +1260,8 @@ class PlatformTracingProvider(TracingProvider):
         ``running`` until this process exits."""
         retries = PlatformTracingProvider._retries
         task = retries.get(key)
-        if (task is not None and not task.done()) or loop in PlatformTracingProvider._closing_loops or loop.is_closed():
+        running = task is not None and not task.done() and not task.get_loop().is_closed()
+        if running or loop in PlatformTracingProvider._closing_loops or loop.is_closed():
             return
         retries[key] = loop.create_task(PlatformTracingProvider._retry(key))
 
@@ -1295,7 +1326,7 @@ class PlatformTracingProvider(TracingProvider):
             for flight in list(flights.values()):
                 if flight.loop is loop and flight.arrival is not None and not flight.arrival.done():
                     flight.arrival.set_result(None)  # re-evaluate with _closing set
-            with _snapshot_lock:  # other event loops ask and settle saves meanwhile
+            with _base._CAPTURE_LOCK:  # other event loops ask and settle saves meanwhile
                 owed = list(PlatformTracingProvider._unsaved.items())
             # Every destination owed, also one with a round of this loop still out: a run's end that failed past a
             # stalled PATCH has no round queued, and nothing else would send it. A send joins a round queued.
@@ -1307,7 +1338,7 @@ class PlatformTracingProvider(TracingProvider):
             waits = [*resends, *(r for f in list(flights.values()) if f.loop is loop for r in f.waits())]
             if waits:
                 await asyncio.wait(waits, timeout=timeout)
-            with _snapshot_lock:
+            with _base._CAPTURE_LOCK:
                 left = [write.id for write in PlatformTracingProvider._unsaved.values()]
             if left:
                 logger.error("platform_trace_flush_incomplete", run_ids=left, timeout_s=timeout)
@@ -1319,14 +1350,15 @@ class PlatformTracingProvider(TracingProvider):
     @staticmethod
     def _own(key: str) -> deque[int]:
         owned = PlatformTracingProvider._own_snapshots
-        snapshots = owned.get(key)
-        if snapshots is None:
-            snapshots = owned[key] = deque(maxlen=64)
-            while len(owned) > _DELTA_RUNS_MAX:
-                owned.popitem(last=False)
-        else:
-            owned.move_to_end(key)
-        return snapshots
+        with _base._CAPTURE_LOCK:  # other loops' saves add theirs
+            snapshots = owned.get(key)
+            if snapshots is None:
+                snapshots = owned[key] = deque(maxlen=64)
+                while len(owned) > _DELTA_RUNS_MAX:
+                    owned.popitem(last=False)
+            else:
+                owned.move_to_end(key)
+            return snapshots
 
     @classmethod
     def _patch_timeout(cls):
@@ -1364,7 +1396,7 @@ class PlatformTracingProvider(TracingProvider):
         from ....platform.utils import _request
 
         while True:
-            with _snapshot_lock:
+            with _base._CAPTURE_LOCK:
                 write = PlatformTracingProvider._unsaved.get(key)
             if write is None:
                 return False
@@ -1379,7 +1411,7 @@ class PlatformTracingProvider(TracingProvider):
             deltas = not plain and not shrink and provider._sending_deltas(caps)
             compressed = not plain and provider._compressing(caps)
             token = _token(platform_config)
-            with _snapshot_lock:
+            with _base._CAPTURE_LOCK:
                 if PlatformTracingProvider._unsaved.get(key) is not write:
                     continue  # a newer save was asked meanwhile (another thread): that is the one to send
                 snapshot = _next_snapshot()
@@ -1404,9 +1436,9 @@ class PlatformTracingProvider(TracingProvider):
                 # agent's live memory list, which keeps growing while the PATCH is in flight, a PATCH numbered after
                 # this one must not carry an older state, and a copy captured before this is older than what it
                 # sends (_owe).
-                with _base._CAPTURE_LOCK:
-                    if write.source is write.context:
-                        own["_platform_noted"][key] = next(_COPIES)
+                # Taken before the run is read: a copy captured before it holds no newer state than this body.
+                stamp = next(_COPIES) if write.source is write.context else None
+                try:
                     sending = _redacted(write)
                     if delta:
                         body, cache_body, sent, root_stored = provider._delta_body(sending, rev, key, snapshot)
@@ -1425,8 +1457,17 @@ class PlatformTracingProvider(TracingProvider):
                             and root.get("t1") is None
                             and root.get("memory") is not None
                         )
-                # Only now, with a body to send: a serialization that raised (a redactor, a value JSON cannot carry)
-                # leaves nothing recorded of a PATCH that never existed.
+                except Exception as e:
+                    # A body that cannot be made (a redactor that raises, a value JSON cannot carry) will not be made
+                    # on a retry either: the request is dropped, not kept owed for good, and its caller gets the
+                    # error. Nothing is recorded of a PATCH that never existed. The run's next save tries again.
+                    if PlatformTracingProvider._unsaved.get(key) is write:
+                        del PlatformTracingProvider._unsaved[key]
+                    logger.error("platform_trace_unserializable", run_id=write.id, error=str(e))
+                    raise
+                # Only now, with a body to send.
+                if stamp is not None:
+                    own["_platform_noted"][key] = stamp
                 write.sent = True
                 write.out += 1
                 own.setdefault("_platform_owned", set()).add(key)
@@ -1530,6 +1571,12 @@ class PlatformTracingProvider(TracingProvider):
                     return True
                 logger.info("platform_trace_save_stale", run_id=write.id, sent=snapshot, stored=int(stored))
                 return await provider._save(key, plain=plain, resend=False)
+            if found.get(APPLIED_HEADER, "").strip().lower() == "false" and stored.isdigit() and int(stored) > snapshot:
+                # Dropped as older than a newer PATCH of ours the platform holds: that one carries this request's
+                # state and more, so this request is settled; its body is not what the platform holds: not kept.
+                provider._remember(key, snapshot, None, token)
+                _landed(key, write.seq)
+                return True
             if not delta:
                 # A whole trace of this context replaced the platform's span rows: its saves may go as deltas from now on.
                 write.context.__dict__.get("_platform_replacing", set()).discard(key)
@@ -1548,7 +1595,7 @@ class PlatformTracingProvider(TracingProvider):
             return True
 
         finally:
-            with _snapshot_lock:
+            with _base._CAPTURE_LOCK:
                 write.out -= 1  # this PATCH's answer is in (or never will be)
 
     @classmethod
@@ -1663,14 +1710,15 @@ _BUILTIN_STORE = PlatformTracingProvider._store.__func__
 
 def _new_locks_after_fork() -> None:
     """In a forked child: a lock another thread of the parent held is copied held, with no thread left to let
-    it go, and the child's first save or read would wait for it for good. And the parent's saves stay the
-    parent's: a child that inherited them would resend, at its exit or its flush, the runs as they were when it was
-    forked, numbered above what the parent sent since."""
-    global _CAPS_LOCK, _snapshot_lock
+    it go, and the child's first save or read would wait for it for good (``base`` replaces the shared lock). And
+    the parent's saves stay the parent's: a child that inherited them would resend, at its exit or its flush, the runs
+    as they were when it was forked, numbered above what the parent sent since; and would answer reads with what the
+    parent had stored then."""
+    global _CAPS_LOCK
     _CAPS_LOCK = threading.Lock()
-    _snapshot_lock = threading.RLock()
     provider = PlatformTracingProvider
     for state in (
+        provider._recent,
         provider._unsaved,
         provider._flights,
         provider._retries,
