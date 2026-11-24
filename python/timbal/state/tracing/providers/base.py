@@ -1,4 +1,6 @@
 import itertools
+import os
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
@@ -19,25 +21,54 @@ class _RedactedRunContextView:
     redaction operates on span copies, so agent memory, dumps, and outputs keep their
     raw content in-process while storage and export see the redacted view.
 
-    ``_redactor`` says which policy made it: a provider handed this view can then send the run itself through
-    the same policies (and its own) instead of a copy frozen when it was made. ``_made``: when it was made, on
-    ``_COPIES``, taken right after its trace was copied: a copy made earlier holds no newer state than one made
-    later, so a provider that is handed copies out of order can tell the older one.
+    ``_redactor`` says which policy made it, so a provider handed this view does not apply that policy twice.
+    ``_made``: when its trace was captured, on ``_COPIES`` (``_capture``): captures hold ``_CAPTURE_LOCK`` and take
+    the number before reading the run, so a copy with a lower number holds no newer state than one with a higher
+    number, and a provider handed copies out of order can tell the older one. A view made from another view keeps
+    that view's number (its trace comes from that capture); one made otherwise is numbered when it is made.
     """
 
-    def __init__(self, original: "RunContext", trace: Trace, redactor: Callable[[Any], Any] | None = None) -> None:
+    def __init__(
+        self,
+        original: "RunContext",
+        trace: Trace,
+        redactor: Callable[[Any], Any] | None = None,
+        made: int | None = None,
+    ) -> None:
         self._original = original
         self._trace = trace
         self._redactor = redactor
-        self._made = next(_COPIES)
+        if made is None and isinstance(original, _RedactedRunContextView):
+            made = original.__dict__.get("_made")
+        self._made = next(_COPIES) if made is None else made
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._original, name)
 
 
-# Redacted copies in the order they were made (_RedactedRunContextView._made); a provider that keeps the run itself
-# takes a number from it when it notes a save, to order those against copies.
+# Captures of a run's trace, in order (_RedactedRunContextView._made); a provider that keeps the run itself numbers
+# its own saves and serializations from it too, to order them against copies.
 _COPIES = itertools.count(1)
+# Held while a trace is captured (copied and redacted, or serialized), with its number taken first: two captures of
+# one run never overlap, so their numbers order their states. Re-entrant: a redactor runs inside it.
+_CAPTURE_LOCK = threading.RLock()
+
+
+def _capture(run_context: "RunContext", redactor: Callable[[Any], Any]) -> "_RedactedRunContextView":
+    """A redacted copy of the run as it is now, numbered when its capture began."""
+    with _CAPTURE_LOCK:
+        made = next(_COPIES)
+        trace = _redacted_trace(run_context._trace, redactor)
+    return _RedactedRunContextView(run_context, trace, redactor, made)
+
+
+def _new_capture_lock_after_fork() -> None:
+    global _CAPTURE_LOCK
+    _CAPTURE_LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_new_capture_lock_after_fork)
 
 
 _SPAN_DUMP_ATTRS = ("_input_dump", "_output_dump", "_memory_dump", "_prev_memory_dump", "_session_dump")
@@ -330,9 +361,7 @@ class TracingProvider(ABC):
                          keyed by ``run_context.id``.
         """
         if cls._trace_redactor is not None:
-            run_context = _RedactedRunContextView(
-                run_context, _redacted_trace(run_context._trace, cls._trace_redactor), cls._trace_redactor
-            )
+            run_context = _capture(run_context, cls._trace_redactor)
         await cls._store(run_context)
         for exporter in cls._exporters:
             try:

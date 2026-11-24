@@ -400,6 +400,15 @@ def pending_runs() -> list[str]:
     return [run.context.id for run in _RUNS.values() if run.pending or run.sending]
 
 
+def _forget_after_fork() -> None:
+    """A forked child does not store the parent's buffered runs (as they were when it was forked)."""
+    _RUNS.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_after_fork)
+
+
 def _reset_for_tests() -> dict[Any, Any]:
     previous = dict(_RUNS)
     _RUNS.clear()

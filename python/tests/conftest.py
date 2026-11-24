@@ -133,7 +133,7 @@ def clear_in_memory_tracing_storage():
         for task in PlatformTracingProvider._retries.values():
             task.cancel()
         PlatformTracingProvider._retries.clear()
-        PlatformTracingProvider._closing = False
+        PlatformTracingProvider._closing_loops.clear()
         platform_module._TRACE_POOLS.clear()
         PlatformTracingProvider._oversized.clear()
 
