@@ -310,6 +310,13 @@ class TestPlatformClaims:
         assert platform_read(meta_of(platform_context(rev=None)))["rev"] == "rev-42"
         assert platform_read(meta_of(platform_context(rev="main")))["rev"] == "main"  # the subject's comes first
         assert platform_read(meta_of(platform_context(rev=None, app_id="2001"))).get("rev") is None
+        # The same app however it is written, as the app_id claim reads it: the revision goes with it.
+        assert platform_read(meta_of(platform_context(rev=None, app_id="001829")))["rev"] == "rev-42"
+        monkeypatch.setenv("TIMBAL_APP_ID", "001829")
+        assert platform_read(meta_of(platform_context(rev=None)))["rev"] == "rev-42"
+        monkeypatch.setenv("TIMBAL_APP_ID", "not-an-app")  # no app this process can be said to be
+        assert platform_read(meta_of(platform_context(rev=None))).get("rev") is None
+        monkeypatch.setenv("TIMBAL_APP_ID", "1829")
         monkeypatch.delenv("TIMBAL_APP_ID")
         assert platform_read(meta_of(platform_context(rev=None))).get("rev") is None
         monkeypatch.setenv("TIMBAL_APP_ID", "1829")

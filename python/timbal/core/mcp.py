@@ -166,12 +166,14 @@ def _claim_app_id(value: Any) -> int | None:
 def _deployed_rev(subject: Any) -> Any:
     """The revision a run's code is: the subject's, else ``TIMBAL_PROJECT_REV``, which the platform's runtime sets
     (the config loader reads ``TIMBAL_REV`` only), for a run of the app this process was deployed for alone
-    (``TIMBAL_APP_ID``): another app's run is not this deployment's code."""
+    (``TIMBAL_APP_ID``): another app's run is not this deployment's code. Both ids are read as the ``app_id``
+    claim reads them (``_claim_app_id``: ``"001829"`` is app 1829), and neither may be one the claim would leave
+    out."""
     rev = getattr(subject, "rev", None)
     if rev:
         return rev
-    deployed_app = os.getenv("TIMBAL_APP_ID")
-    if deployed_app and str(getattr(subject, "app_id", None)) == deployed_app:
+    app = _claim_app_id(getattr(subject, "app_id", None))
+    if app is not None and app == _claim_app_id(os.getenv("TIMBAL_APP_ID")):
         return os.getenv("TIMBAL_PROJECT_REV")
     return None
 
