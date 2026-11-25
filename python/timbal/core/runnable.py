@@ -2,7 +2,6 @@ import ast
 import asyncio
 import contextlib
 import contextvars
-import copy
 import hashlib
 import inspect
 import json
@@ -47,13 +46,14 @@ from ..state import (
     set_parent_call_id,
     set_run_context,
 )
-from ..state.context import (
+from ..state.context import (  # noqa: F401  (_own_copy: chat_session imports it from here)
     _DETACHED_CALLS,
     _LIVE_CALLS,
     RunContext,
     _EmitSink,
     _left_behind,
     _note_abandoned_call,
+    _own_copy,
     _running_call,
 )
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
@@ -299,21 +299,6 @@ def _approval_id_for(path: str, input_dump: Any) -> str:
     """
     payload = {"path": path, "input": input_dump}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:32]
-
-
-def _own_copy(value: Any) -> Any:
-    """A deep copy of a trigger. Where it holds what cannot be copied (a caller's lock, a client), its dicts and
-    lists are still copied one by one, and only those objects are shared."""
-    try:
-        return copy.deepcopy(value)
-    except Exception:
-        if isinstance(value, dict):
-            return {key: _own_copy(item) for key, item in value.items()}
-        if type(value) is list:
-            return [_own_copy(item) for item in value]
-        if type(value) is tuple:
-            return tuple(_own_copy(item) for item in value)
-        return value
 
 
 ATTENDED_TRIGGER_KINDS = ("user_message", "resume")

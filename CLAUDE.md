@@ -648,7 +648,9 @@ ctx.trigger               # dict | None: stamped as the root span's metadata.tri
                           # top run's root through RunContext._invoker). An object trigger is stamped over the
                           # runnable's own static metadata["trigger"], as a copy; ctx.trigger is the run's own copy
                           # too (deep; what cannot be copied, a lock, is the one thing shared): a tool's write to it
-                          # changes nothing stored or logged. A wake keeps its own copy of the trigger it accepted (a
+                          # changes nothing stored or logged. RunContext(trigger=...) takes its copy when the context is
+                          # made (a field validator): a caller that goes on to change its dict, the next fire of a
+                          # routine, changes nothing of a run already given one. A wake keeps its own copy of the trigger it accepted (a
                           # durable session the JSON round trip it was checked with), and the log's records get copies
                           # of theirs: neither the caller nor a log reader can change queued or stored work.
                           # What a JSON answer cannot carry (NaN, Infinity, a lone surrogate, which the body parser

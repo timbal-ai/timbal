@@ -741,3 +741,30 @@ class TestMarksStayWhole:
             assert proxied.metadata["memory"] == {"k": 1, "salient": ["why"]}
         finally:
             fresh()
+
+
+class TestARunContextOwnsItsTrigger:
+    async def test_a_trigger_changed_after_its_context_was_made_is_not_the_runs(self):
+        """A routine fires twice with one dict it updates in between (and a nested part of it): each run records
+        the fire it was made for, taken when its context was created."""
+        fire = {"kind": "routine", "fire_id": "f1", "schedule": {"slot": "09:00"}}
+        first = RunContext(trigger=fire, tracing_provider=InMemoryTracingProvider)
+        fire["fire_id"] = "f2"
+        fire["schedule"]["slot"] = "10:00"
+        second = RunContext(trigger=fire, tracing_provider=InMemoryTracingProvider)
+        fire["fire_id"] = "f3"
+        recorded = []
+        for context in (first, second):
+            set_run_context(context)
+            set_call_id(None)
+            set_parent_call_id(None)
+            agent = Agent(name="bot", model=TestModel(responses=["ok"]), tracing_provider=InMemoryTracingProvider)
+            out = await agent(prompt="go").collect()
+            root = next(s for s in context._trace.values() if s.parent_call_id is None)
+            recorded.append(
+                (out.status.code, root.metadata["trigger"]["fire_id"], root.metadata["trigger"]["schedule"])
+            )
+        fresh()
+        assert recorded == [("success", "f1", {"slot": "09:00"}), ("success", "f2", {"slot": "10:00"})]
+        assert first.trigger["fire_id"] == "f1" and second.trigger["fire_id"] == "f2"
+        assert RunContext(trigger="not an object").trigger == "not an object"  # kept as given
