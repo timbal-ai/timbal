@@ -227,9 +227,9 @@ class TestAnApplicationsCallIsNotTakenByTheAgentsOwnTool:
         _, out = await run(agent, resume={approval.approval_id: True})
         memory, root = memory_of(out)
         assert any("this call was made for" in r for r in results(memory))
-        assert root.metadata["calls_not_resumed"] == [
-            {"tool_call_id": "c-get", "tool": "get_background_task", "made_for": "tool"}
-        ]
+        ((record),) = root.metadata["calls_not_resumed"]
+        assert record["tool_call_id"] == "c-get" and record["tool"] == "get_background_task"
+        assert record["made_for"].startswith("tool@")  # a tool set's tool, by its provider
 
 
 class TestTheAgentsOwnPausedCallKeepsItsTool:
@@ -382,7 +382,7 @@ class TestARunPausedBeforeTheRecord:
         from timbal.state import get_run_context
 
         root = next(s for s in get_run_context()._trace.values() if s.parent_call_id is None)
-        assert root.metadata.pop("tool_bindings") == {"c-refund": "tool"}
+        assert root.metadata.pop("paused_calls")["bindings"] == {"c-refund": "tool"}
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         assert out.status.code == "success" and ran == ["A-1"]
@@ -588,8 +588,143 @@ class TestASlashCommandThatPauses:
 
             root = next(s for s in get_run_context()._trace.values() if s.parent_call_id is None)
             assert root.status.reason == "approval_required"
-            (binding,) = root.metadata["tool_bindings"].values()
+            (binding,) = root.metadata["paused_calls"]["bindings"].values()
             assert binding == "tool"
         fresh(approval.run_id)
         _, out = await run(agent, prompt="/charge 5", resume={approval.approval_id: True})
         assert out.status.code == "success" and charged == ["5"] and model.call_count == 0
+
+
+# A second provider of tools, with a catalog of its own.
+OTHER: list = []
+
+
+class OtherCatalog(ToolSet):
+    async def resolve(self):
+        return list(OTHER)
+
+
+@pytest.fixture(autouse=True)
+def reset_other():
+    OTHER.clear()
+    yield
+    OTHER.clear()
+
+
+class TestAnotherProvidersToolOfTheSameName:
+    """Two tool sets offer a tool of one name. The call was made for the first one's: the second one's does not
+    run it, with the approval given for the first one's."""
+
+    @pytest.mark.parametrize("dispatch", [False, True], ids=["called", "dispatched"])
+    async def test_is_not_run_with_the_first_ones_approval(self, dispatch):
+        ran = []
+        first = Tool(name="lookup", handler=lambda key: f"first {key}", requires_approval=True)
+        second = Tool(name="lookup", handler=lambda key: ran.append(key) or "second", requires_approval=True)
+        if dispatch:
+            first.defer_loading = second.defer_loading = True
+            asked = call("call_tool", name="lookup", arguments={"key": "K"})
+        else:
+            asked = call("lookup", key="K")
+        CURRENT[:] = [first]
+        model = TestModel(responses=[asked, "done", "must not be requested"])
+        agent = Agent(
+            name="bot",
+            model=model,
+            tools=[Catalog(), OtherCatalog()],
+            tool_search="dispatch" if dispatch else "auto",
+            tracing_provider=InMemoryTracingProvider,
+        )
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        CURRENT.clear()
+        OTHER[:] = [second]
+        fresh(parked.run_id)
+        _, out = await run(agent, resume={approval.approval_id: True})
+        memory, _ = memory_of(out)
+        assert ran == []
+        assert any("this call was made for" in r for r in results(memory))
+
+    async def test_a_tool_two_sets_share_is_the_first_ones(self):
+        """One tool object offered by two sets is the first set's (the agent keeps that one), and it runs on the
+        resume while that set still offers it, whatever the second set does."""
+        ran = []
+        shared = Tool(name="lookup", handler=lambda key: ran.append(key) or "found", requires_approval=True)
+        CURRENT[:] = [shared]
+        OTHER[:] = [shared]
+        model = TestModel(responses=[call("lookup", key="K"), "done", "must not be requested"])
+        agent = Agent(
+            name="bot", model=model, tools=[Catalog(), OtherCatalog()], tracing_provider=InMemoryTracingProvider
+        )
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        OTHER.clear()
+        fresh(parked.run_id)
+        _, out = await run(agent, resume={approval.approval_id: True})
+        assert out.status.code == "success" and ran == ["K"]
+
+
+class TestAStopThatIsNotForThisRun:
+    async def test_a_cancel_for_another_card_does_not_end_the_run(self):
+        """The resume carries an approval for the waiting call (whose tool is gone) and a stale Cancel for a
+        card this run never waited on: the stale one is not the user's word about this turn."""
+        from timbal.types.approval import Cancel
+
+        CURRENT[:] = [Tool(name="refund", handler=lambda order: f"refunded {order}", requires_approval=True)]
+        model = TestModel(responses=[call("refund", order="A-1"), "done", "must not be requested"])
+        agent = Agent(name="bot", model=model, tools=[Catalog()], tracing_provider=InMemoryTracingProvider)
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        CURRENT.clear()
+        fresh(parked.run_id)
+        _, out = await run(agent, resume={approval.approval_id: True, "some-old-card": Cancel(reason="stale")})
+        assert out.status.code == "success" and model.call_count == 2
+
+
+class TestTheAgentsMetadata:
+    async def test_does_not_change_which_tools_a_turn_has(self):
+        """A span starts with the agent's own metadata: keys of that name there are the application's, not a
+        record of a paused turn, and a first turn keeps every tool it has."""
+        ran = []
+        lookup = Tool(name="lookup", handler=lambda key: ran.append(key) or "found")
+        model = TestModel(responses=[call("lookup", key="K"), "done", "must not be requested"])
+        agent = Agent(
+            name="bot",
+            model=model,
+            tools=[lookup],
+            tool_search="off",
+            metadata={
+                "tool_names": {"search_tools": "lookup"},
+                "paused_calls": {"tool_names": {"search_tools": "lookup"}, "bindings": {}, "waiting_on": []},
+            },
+            tracing_provider=InMemoryTracingProvider,
+        )
+        fresh()
+        _, out = await run(agent)
+        assert out.status.code == "success" and ran == ["K"]
+
+
+class TestARecordTheRunDidNotWrite:
+    async def test_a_pause_at_the_agents_own_gate_reads_none(self):
+        """The turn paused at the agent's own approval, before its handler ran: its span holds only what the
+        agent's metadata brought, which is not a record of a paused turn."""
+        ran = []
+        lookup = Tool(name="lookup", handler=lambda key: ran.append(key) or "found")
+        model = TestModel(responses=[call("lookup", key="K"), "done", "must not be requested"])
+        agent = Agent(
+            name="bot",
+            model=model,
+            tools=[lookup],
+            tool_search="off",
+            requires_approval=True,
+            metadata={"paused_calls": {"tool_names": {"search_tools": "lookup"}, "bindings": {}, "waiting_on": []}},
+            tracing_provider=InMemoryTracingProvider,
+        )
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        fresh(parked.run_id)
+        _, out = await run(agent, resume={approval.approval_id: True})
+        assert out.status.code == "success" and ran == ["K"]

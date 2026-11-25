@@ -35,3 +35,11 @@ class ToolSet(ABC, BaseModel):
             current context.
         """
         pass
+
+    def _provider_identity(self) -> tuple:
+        """What makes this set the same provider of tools in another process (a paused call is resumed only on
+        a tool of the provider it was made for, see ``Agent._note_pause``): its class, and its ``name`` when
+        it has one. A subclass whose instances differ otherwise says how (an MCP server: where it is reached).
+        """
+        name = getattr(self, "name", None)
+        return (type(self).__module__, type(self).__qualname__, name if isinstance(name, str) else None)

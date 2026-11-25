@@ -613,11 +613,31 @@ def _join(head: list, tail: list) -> list:
 
 # The events a turn pauses on (an approval, a question): see Agent._note_pause.
 _CARD_TYPES = frozenset({"APPROVAL", "INTERACTION"})
+# Agent span metadata: what a paused turn leaves for the run that resumes it (Agent._note_pause).
+_PAUSED_CALLS_KEY = "paused_calls"
 
 
-def _binding(tool: Any) -> str:
-    """Whose ``tool`` is: one of the agent's own (its kind, set where the agent builds it) or ``"tool"``."""
-    return getattr(tool, "_builtin", None) or "tool"
+def _card_id(event: Any) -> str:
+    """The id a resume answers a card by (an approval's, a question's)."""
+    return getattr(event, "approval_id", None) or getattr(event, "interaction_id", None) or ""
+
+
+def _binding(tool: Any, providers: Mapping[int, str]) -> str:
+    """Whose ``tool`` is: one of the agent's own (its kind, set where the agent builds it), one of a tool set's
+    (``"tool@<provider>"``, :func:`_provider_key`; ``providers``, from the step's resolution), or one the
+    application gave the agent itself (``"tool"``)."""
+    kind = getattr(tool, "_builtin", None)
+    if kind:
+        return kind
+    provider = providers.get(id(tool))
+    return f"tool@{provider}" if provider else "tool"
+
+
+def _provider_key(tool_set: Any) -> str:
+    """A tool set's identity as a provider (``ToolSet._provider_identity``), as a short digest: it is stored with
+    a paused call, and an MCP server's address may hold a key."""
+    identity = json.dumps(tool_set._provider_identity(), default=str, separators=(",", ":"))
+    return hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
 def _left_waiting(current_span: Any) -> bool:
@@ -920,6 +940,8 @@ def _cut_answer(message: Any) -> Message | None:
 
 
 _NO_NAMES: frozenset[str] = frozenset()
+# A step with no tool set's tools: no providers (read-only, shared).
+_NO_PROVIDERS: Mapping[int, str] = MappingProxyType({})
 # A turn that resumes none: no names of the agent's own tools to keep (read-only, shared).
 _NO_KEPT_NAMES: Mapping[str, str] = MappingProxyType({})
 
@@ -1830,8 +1852,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 for call in unanswered
             ]
 
-    async def resolve_memory(self) -> None:
-        """Resolve conversation memory from previous agent trace."""
+    async def resolve_memory(self) -> dict[str, Any] | None:
+        """Resolve conversation memory from previous agent trace.
+
+        Returns the record a paused turn left for the run that resumes it (``paused_calls``, see
+        :meth:`_note_pause`) when this run resumes one, else None. Read from the paused parent only: a span
+        starts with the agent's own metadata, and a key of that name there is the application's.
+        """
         run_context = get_run_context()
         assert run_context is not None, "Run context not found"
 
@@ -1886,6 +1913,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # re-executed by the agent loop (see _find_pending_tool_uses), so we must
         # NOT inject synthetic "tool failed" results for them.
         is_resume = _is_pause(previous_span.status)
+        paused_calls = None
         if is_resume and previous_span.metadata:
             # delivery="tool": the turn goes on in this run. What it sent before the pause still counts (a
             # draft is no longer its only answer), and so does an end_turn asked for in the paused batch.
@@ -1897,10 +1925,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 current_span.metadata["end_turn"] = True
                 if paused.get("silent"):
                     current_span.metadata["silent"] = True  # it ended its turn by staying silent
-            # Whose tool each waiting call was made for, and the names the agent's own tools had (_note_pause).
-            for key in ("tool_bindings", "tool_names"):
-                if isinstance(paused.get(key), dict):
-                    current_span.metadata[key] = dict(paused[key])
+            # Whose tool each waiting call was made for, the names the agent's own tools had, and what the turn
+            # waited on (_note_pause). Handed to the handler, never put in this run's metadata.
+            record = paused.get(_PAUSED_CALLS_KEY)
+            if isinstance(record, dict) and record.get("call_id") == previous_span.call_id:
+                paused_calls = record
         prepared = None
         if (
             self.memory_compaction is not None
@@ -1985,6 +2014,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     **measurement,
                     "messages": max(0, measurement["messages"] - removed),
                 }
+        return paused_calls
 
     async def _previous_memory(self, run_context: Any, trace: Any, span: Any) -> tuple[list[Message], Any]:
         """The messages the previous turn left, and the span they were read from.
@@ -2751,13 +2781,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
     async def _resolve_tools(self, i: int, tool_policy: Any = _UNSET_POLICY) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
-        tools, commands, _ = await self._resolve_step_tools(i, tool_policy)
+        tools, commands, _, _ = await self._resolve_step_tools(i, tool_policy)
         return tools, commands
 
     async def _resolve_step_tools(
         self, i: int, tool_policy: Any = _UNSET_POLICY
-    ) -> tuple[list[Tool], dict[str, Tool], set[str]]:
-        """:meth:`_resolve_tools`, plus the name of every tool the agent has at this step.
+    ) -> tuple[list[Tool], dict[str, Tool], set[str], Mapping[int, str]]:
+        """:meth:`_resolve_tools`, plus the name of every tool the agent has at this step, and the provider of
+        each tool a tool set gave it (by ``id`` of the tool, for this step: see :func:`_binding`).
 
         The names include the tools a tool policy then hides from the run: whatever the step adds
         (``search_tools``, ``call_tool``) must not take one of those either, and they are known only
@@ -2765,16 +2796,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         to come from this resolution: a second one would be another catalog (and another round trip).
         """
         if i >= self.max_iter:
-            return [], {}, set()
+            return [], {}, set(), _NO_PROVIDERS
 
         tools = []
         tools_names: set[str] = set()
         commands: dict[str, Tool] = {}
+        # Kept here, per step, not on the tool: one tool object may come from two sets, or serve two agents.
+        tool_providers: dict[int, str] = {}
 
-        def _register(tool: Tool) -> None:
+        def _register(tool: Tool) -> bool:
             if tool.name in tools_names:
                 logger.warning(f"Tool with name '{tool.name}' already exists. You can only add a tool once.")
-                return
+                return False
             tools.append(tool)
             tools_names.add(tool.name)
             if tool.command:
@@ -2782,13 +2815,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 stripped = tool.command.strip("/")
                 if stripped:
                     commands[stripped] = tool
+            return True
 
+        seen_keys: dict[str, int] = {}
         for t in self.tools:
             if isinstance(t, ToolSet):
+                # Who the set's tools are (see _note_pause): the same set in another process, and a second set
+                # that is the same by that measure told apart by its place among them.
+                key = _provider_key(t)
+                count = seen_keys[key] = seen_keys.get(key, 0) + 1
+                provider = key if count == 1 else f"{key}#{count}"
                 for tool in await t.resolve():
                     tool.nest(self._path)
                     self._wire_tool_guardrails(tool)
-                    _register(tool)
+                    if _register(tool):
+                        tool_providers[id(tool)] = provider
             else:
                 _register(t)
 
@@ -2828,7 +2869,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 tools = [tool for tool in tools if self._tool_allowed(tool, tool_policy)]
                 commands = {key: tool for key, tool in commands.items() if tool in tools}
                 self._record_allowed_tools(tools, tool_policy)
-        return tools, commands, tools_names
+        return tools, commands, tools_names, tool_providers
 
     async def _plan_tool_search(
         self, tools: list[Tool], model: Any, names: Collection[str], kept: Mapping[str, str] | None = None
@@ -3959,48 +4000,60 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             tool = self._read_offloaded
         return tool
 
-    def _call_binding(self, tools: list[Tool], tool_call: ToolUseContent) -> str | None:
+    def _call_binding(self, tools: list[Tool], providers: Mapping[int, str], tool_call: ToolUseContent) -> str | None:
         """Whose tool a call runs on: one of the agent's own (its kind: ``send_message``, ``read_offloaded``,
         ``get_background_task``, …), an application's (``"tool"``), or none (None). A dispatch (``call_tool``
         with ``tool_search="dispatch"``) is the dispatcher and the tool it runs: ``"call_tool>tool"``."""
         tool = self._tool_for_call(tools, tool_call)
         if tool is None:
             return None
-        binding = _binding(tool)
+        binding = _binding(tool, providers)
         if binding == CALL_TOOL_NAME and self.tool_search == "dispatch":
             target = self._dispatched(tools, tool_call)
             if target is not tool_call:
-                binding = f"{CALL_TOOL_NAME}>{_binding(self._tool_for_call(tools, target))}"
+                binding = f"{CALL_TOOL_NAME}>{_binding(self._tool_for_call(tools, target), providers)}"
         return binding
 
     def _note_pause(
         self,
         current_span: Any,
         tools: list[Tool],
+        providers: Mapping[int, str],
         calls: Sequence[ToolUseContent],
         send_name: str | None,
+        cards: Sequence[str] = (),
         bound: Mapping[str, str] | None = None,
     ) -> None:
-        """What a turn that pauses leaves for the run that resumes it (``resolve_memory`` carries both).
+        """What a turn that pauses leaves for the run that resumes it: ``metadata.paused_calls`` (``resolve_memory``
+        hands it to the resumed run's handler).
 
-        ``tool_bindings``: whose tool each waiting call was made for (:meth:`_call_binding`), by tool call id.
-        ``tool_names``: the names the agent's own tools had, by kind (those it picks at run time: the
-        delivery tool, the salience tool, ``search_tools`` / ``call_tool``). The resumed run keeps the names
-        and replays a call only on the tool it was made for: a name freed meanwhile (an application's tool
-        gone from its tool set) does not hand an application's call, with the answer given for it, to a tool
-        of the agent's own, nor the other way round. ``bound``: bindings known otherwise, by tool call id (a
-        slash command's, from the command's own tool: its name may be another tool's on this step).
+        ``bindings``: whose tool each waiting call was made for (:meth:`_call_binding`: one of the agent's own,
+        a tool set's by its provider, or the application's own), by tool call id. ``tool_names``: the names the
+        agent's own tools had, by kind (those it picks at run time: the delivery tool, the salience tool,
+        ``search_tools`` / ``call_tool``). ``waiting_on``: the ids of the cards (``cards``) the turn showed. The
+        resumed run keeps the names and replays a call only on the tool it was made for: a name freed meanwhile
+        (an application's tool gone from its tool set) does not hand an application's call, with the answer
+        given for it, to a tool of the agent's own or of another provider, nor the other way round. ``bound``:
+        bindings known otherwise, by tool call id (a slash command's, from the command's own tool: its name may
+        be another tool's on this step).
 
         Recorded as the approval or the question goes out, and again as the turn is left waiting.
         """
-        current_span.metadata["tool_bindings"] = {
-            call.id: bound[call.id] if bound and call.id in bound else self._call_binding(tools, call) for call in calls
-        }
         names = {kind: tool.name for tool in tools if (kind := getattr(tool, "_builtin", None)) in _PICKED_NAMES}
         if send_name is not None:
             names[SEND_MESSAGE_NAME] = send_name  # fixed for the turn, offered on this step or not
-        if names:
-            current_span.metadata["tool_names"] = names
+        # One key, written whole every time: whatever the agent's own metadata had under it is replaced.
+        current_span.metadata[_PAUSED_CALLS_KEY] = {
+            "bindings": {
+                call.id: bound[call.id] if bound and call.id in bound else self._call_binding(tools, providers, call)
+                for call in calls
+            },
+            "tool_names": names,
+            "waiting_on": list(cards),
+            # The span it was written on: a record the agent's own metadata brought (a span starts with a copy
+            # of it) is not one, and a turn that paused before its handler ran (the agent's own gate) has none.
+            "call_id": current_span.call_id,
+        }
 
     def _unbound_call_event(self, tool_call: ToolUseContent, binding: str | None) -> OutputEvent:
         """The result of a waiting call whose tool is gone at the resume (:meth:`_note_pause`): not run. A
@@ -4022,14 +4075,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         )
 
     @staticmethod
-    def _stop_answer(run_context: Any) -> str | None:
+    def _stop_answer(run_context: Any, waiting_on: Any) -> str | None:
         """The reason of a ``Cancel`` among the run's resume values ("" without one), or None: the caller said
-        stop. Its ids count as used (they ended the run, they were not ignored)."""
+        stop. Only one that answers what the paused turn waited on (``waiting_on``: its cards' ids): a Cancel
+        for another card is not about this turn. Its ids count as used (they ended the run, they were not
+        ignored)."""
         from ..types.approval import Cancel
 
+        if not isinstance(waiting_on, list | tuple) or not waiting_on:
+            return None
         stop = None
         for resume_id, value in run_context._resume_values.items():
-            if Cancel.matches(value):
+            if resume_id in waiting_on and Cancel.matches(value):
                 run_context._used_resume_ids.add(resume_id)
                 if stop is None:
                     reason = value.reason if isinstance(value, Cancel) else value.get("reason")
@@ -4419,7 +4476,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 del kwargs["delivery"]
                 delivering = False
 
-        await self.resolve_memory()
+        paused_calls = await self.resolve_memory()
         # Session BG caps (concurrent / depth) before tools can spawn this turn.
         self._apply_background_limits(run_context)
         # After memory is assembled (and before the dump): push any background
@@ -4441,7 +4498,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # salience_tool=True. The mark_salient tool's name, fixed at the first step that offers it.
         salience_name: str | None = None
         # The names the agent's own tools had when the turn this run resumes paused (_note_pause): kept.
-        kept_names = current_span.metadata.get("tool_names")
+        kept_names = paused_calls.get("tool_names") if paused_calls is not None else None
         # Those of tool search among them: the agent's for the turn, on a step that searches or not.
         reserved_names = _NO_NAMES
         if isinstance(kept_names, dict) and kept_names:  # (a resume only: nothing to do on any other turn)
@@ -4449,6 +4506,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             reserved_names = {kept_names[kind] for kind in (SEARCH_TOOLS_NAME, CALL_TOOL_NAME) if kind in kept_names}
         else:
             kept_names = _NO_KEPT_NAMES
+        # The approvals and questions this run's turn shows (their ids): what a pause records it waited on.
+        cards: list[str] = []
         # Whether the current step offers the tool: text from a step that could not send is not a draft.
         send_offered = False
         # The publishing order of a batch that holds two sends or more (None for any other batch).
@@ -4869,13 +4928,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         command_at = 0
         # And its tool (whose its call is, whatever has the tool's name on this step: _note_pause).
         command_tool: Tool | None = None
-        # The step's tools: what a turn that pauses records its waiting calls against (_note_pause).
+        # The step's tools, and the providers of a tool set's: what a turn that pauses records its waiting calls
+        # against (_note_pause).
         tools: list[Tool] = []
+        providers: Mapping[int, str] = _NO_PROVIDERS
         try:
             while True:
                 need_retry = False
                 # ? We could resolve the system prompt at each iteration
-                tools, commands, tool_names = await self._resolve_step_tools(i, tool_policy)
+                tools, commands, tool_names, providers = await self._resolve_step_tools(i, tool_policy)
                 # A retry of this same call (guardrail, validation, empty answer) keeps it tool-less.
                 withheld = withhold_tools
                 if withhold_tools:
@@ -5048,12 +5109,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                             command_output = self._deliver_command(current_span, command_run)
                                     if event.type in _CARD_TYPES:
                                         # Before the card goes out (see the batch's loop below).
+                                        cards.append(_card_id(event))
                                         self._note_pause(
                                             current_span,
                                             tools,
+                                            providers,
                                             [ToolUseContent(id=tool_use_id, name=tool.name, input=tool_input)],
                                             send_name,
-                                            {tool_use_id: _binding(tool)},
+                                            cards,
+                                            {tool_use_id: _binding(tool, providers)},
                                         )
                                     yield event
                                 if command_lost is not None:
@@ -5084,7 +5148,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     tool_calls = pending_tool_uses
                     first_pending: OutputEvent | None = None
                     lost_claim: OutputEvent | None = None
-                    bindings = current_span.metadata.get("tool_bindings")
+                    bindings = paused_calls.get("bindings") if paused_calls is not None else None
                     if isinstance(bindings, dict) and bindings:
                         # Each call runs only on the tool it was made for (_note_pause). One whose tool is gone
                         # (a name another tool has now, or none) is answered as such and not run: the answer
@@ -5092,9 +5156,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         unbound = [
                             call
                             for call in tool_calls
-                            if call.id in bindings and self._call_binding(tools, call) != bindings[call.id]
+                            if call.id in bindings and self._call_binding(tools, providers, call) != bindings[call.id]
                         ]
-                        stop = self._stop_answer(run_context) if unbound else None
+                        stop = self._stop_answer(run_context, paused_calls.get("waiting_on")) if unbound else None
                         if stop is not None:
                             # The caller said stop (a Cancel, by any of the ids the turn waits on), and a call it
                             # may have said it for cannot run: nothing of the batch runs, as a Cancel at the gate
@@ -5131,7 +5195,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         pending_guardrail_events.clear()
                         if event.type in _CARD_TYPES:
                             # Before the card goes out (see the batch's loop below).
-                            self._note_pause(current_span, tools, tool_calls, send_name)
+                            cards.append(_card_id(event))
+                            self._note_pause(current_span, tools, providers, tool_calls, send_name, cards)
                         yield event
                         if (
                             isinstance(event, OutputEvent)
@@ -5660,7 +5725,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if event.type in _CARD_TYPES:
                         # Before the card goes out: a caller may stop reading at it and resume at once, from a
                         # trace read before this turn is closed (and recorded on its way out, which is later).
-                        self._note_pause(current_span, tools, tool_calls, send_name)
+                        cards.append(_card_id(event))
+                        self._note_pause(current_span, tools, providers, tool_calls, send_name, cards)
                     yield event
                     if (
                         isinstance(event, OutputEvent)
@@ -5723,11 +5789,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # question leaves the run waiting too (GeneratorExit), and its resume must know the same.
                 pending = self._find_pending_tool_uses(current_span.memory)
                 bound = (
-                    {command_call["content"][0]["id"]: _binding(command_tool)}
+                    {command_call["content"][0]["id"]: _binding(command_tool, providers)}
                     if command_call is not None and command_tool is not None
                     else None
                 )
-                self._note_pause(current_span, tools, pending, send_name, bound)
+                self._note_pause(current_span, tools, providers, pending, send_name, cards, bound)
             raise
         finally:
             try:

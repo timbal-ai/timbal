@@ -535,6 +535,12 @@ class MCPServer(ToolSet):
     _inflight: dict[int, _InflightCall] = PrivateAttr(default_factory=dict)
     _inflight_seq: int = PrivateAttr(default=0)
 
+    def _provider_identity(self) -> tuple:
+        # A named server is its name (its tools carry it as their prefix); an unnamed one, where it is reached.
+        if self.name:
+            return ("mcp", self.name)
+        return ("mcp", self.transport, self.service, self.url, self.command, tuple(self.args))
+
     def _get_lock(self) -> asyncio.Lock:
         """Session lock: guards open/reset/close of the transport."""
         # Lazily create so model construction doesn't require a running loop.

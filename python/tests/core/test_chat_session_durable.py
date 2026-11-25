@@ -530,14 +530,15 @@ class TestThePlatformChatsPath:
 
     @staticmethod
     def _as_written_before_root_run_id(store, session_id):
-        """The stored snapshot as 54473c37 wrote it: its JSON object without ``root_run_id``."""
+        """The stored snapshot as 54473c37 wrote it: its JSON object without ``root_run_id`` (nor the
+        ``answer_format`` that came after it)."""
         import json
 
         stored, holder, until = store._rows[session_id]
         runtime = json.loads(stored.to_json())
         runtime.pop("version")
-        assert set(runtime) - {"root_run_id"} == set(FIELDS_BEFORE_ROOT_RUN_ID) - {"version"}
-        del runtime["root_run_id"]
+        assert set(runtime) - {"root_run_id", "answer_format"} == set(FIELDS_BEFORE_ROOT_RUN_ID) - {"version"}
+        del runtime["root_run_id"], runtime["answer_format"]
         older = SessionSnapshot.from_json(json.dumps(runtime))
         older.version = stored.version
         store._rows[session_id] = (older, holder, until)
@@ -4232,7 +4233,7 @@ class TestStoredAnswers:
         that key too: after a restart its answer must be the object, not a Cancel that would end the run."""
         import json
 
-        from timbal.core.chat_session import _dump_resume, _load_resume, _same_answer
+        from timbal.core.chat_session import ANSWER_FORMAT, _dump_resume, _load_resume, _same_answer
 
         answers = {
             "ask-1": {"$cancel": "a field of the survey"},
@@ -4241,8 +4242,30 @@ class TestStoredAnswers:
             "ask-4": {"x": 1},
             "approval-1": True,
         }
-        back = _load_resume(json.loads(json.dumps(_dump_resume(answers))))
+        back = _load_resume(json.loads(json.dumps(_dump_resume(answers))), ANSWER_FORMAT)
         assert back["ask-1"] == {"$cancel": "a field of the survey"} and back["ask-2"] == {"$answer": 1}
         assert isinstance(back["ask-3"], Cancel) and back["ask-3"].reason == "stop"
         assert back["ask-4"] == {"x": 1} and back["approval-1"] is True
         assert all(_same_answer(answers[key], back[key]) for key in answers)
+
+    def test_an_older_snapshots_answers_are_read_as_it_wrote_them(self):
+        """A snapshot written before answers were wrapped holds a question's answer as it was given, ``$answer``
+        key and all: it is read back as that object (the snapshot says which rules wrote it)."""
+        from timbal.core.chat_session import _load_resume
+        from timbal.state.chat_store import SessionSnapshot
+
+        written_before = (
+            '{"session_id": "s", "agent": "a", "config": {}, "head": null, "turns": 1, "last_status": null, '
+            '"parked": true, "last_prompt": null, "last_options": null, "in_flight": {"resume": '
+            '{"ask-1": {"$answer": "yes"}, "ask-2": {"$cancel": "stop"}}}, "pending": [], "wakes": [], '
+            '"resume": {"ask-1": {"$answer": "yes"}, "ask-2": {"$cancel": "stop"}}, "log_cursor": 0, '
+            '"closed": false, "version": 3}'
+        )
+        snapshot = SessionSnapshot.from_json(written_before)
+        for stored, written_by in (
+            (snapshot.resume, snapshot.answer_format),
+            (snapshot.in_flight["resume"], snapshot.in_flight.get("answer_format")),
+        ):
+            back = _load_resume(stored, written_by)
+            assert back["ask-1"] == {"$answer": "yes"}
+            assert isinstance(back["ask-2"], Cancel) and back["ask-2"].reason == "stop"

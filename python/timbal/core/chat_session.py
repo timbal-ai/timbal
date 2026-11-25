@@ -268,14 +268,17 @@ def _stored_answer(value: Any) -> Any:
 # How a snapshot holds a Cancel, and an answer that has one of these keys itself (see _stored_answer).
 _CANCEL_KEY = "$cancel"
 _ANSWER_KEY = "$answer"
+# The rules _stored_answer writes by (SessionSnapshot.answer_format): 2 wraps an answer shaped like a stored form.
+ANSWER_FORMAT = 2
 
 
-def _load_answer(value: Any) -> Any:
-    """One resume value as a snapshot gives it back (the inverse of :func:`_stored_answer`)."""
+def _load_answer(value: Any, answer_format: int) -> Any:
+    """One resume value as a snapshot gives it back (the inverse of :func:`_stored_answer`), by the rules of the
+    format that wrote it: an older snapshot holds an answer with an ``$answer`` key of its own as it was."""
     if isinstance(value, dict):
         if _CANCEL_KEY in value:
             return Cancel(reason=value[_CANCEL_KEY])
-        if len(value) == 1 and _ANSWER_KEY in value:
+        if answer_format >= 2 and len(value) == 1 and _ANSWER_KEY in value:
             return value[_ANSWER_KEY]
     return value
 
@@ -349,10 +352,13 @@ async def _answered_within(call: Any, timeout: float) -> bool:
     return True
 
 
-def _load_resume(stored: dict[str, Any] | None) -> dict[str, Any] | None:
+def _load_resume(stored: dict[str, Any] | None, answer_format: Any) -> dict[str, Any] | None:
+    """Answers as a snapshot gives them back. ``answer_format``: the rules that wrote them (None, as in a snapshot
+    or an ``in_flight`` from before the field: 1)."""
     if stored is None:
         return None
-    return {key: _load_answer(value) for key, value in stored.items()}
+    answer_format = answer_format if isinstance(answer_format, int) else 1
+    return {key: _load_answer(value, answer_format) for key, value in stored.items()}
 
 
 def _same_answer(one: Any, other: Any) -> bool:
@@ -1414,7 +1420,7 @@ class ChatSession:
             session._last_prompt = _load_prompt(snapshot.last_prompt)
             session.log.restart_at(snapshot.log_cursor + _LOG_RESTART_GAP)
             session._wakes = [_Wake.from_dict(data) for data in snapshot.wakes]
-            session._resume = _load_resume(snapshot.resume)
+            session._resume = _load_resume(snapshot.resume, snapshot.answer_format)
             recovered = None
             if snapshot.in_flight is not None:
                 # First: the messages a dead turn took were sent before anything still pending, and go back
@@ -1961,6 +1967,7 @@ class ChatSession:
                 # Only a durable session reads these back (after a restart). One without a store takes any
                 # value its tools understand, storable or not.
                 in_flight["resume"] = _dump_resume(resume) if self._session_store is not None else {}
+                in_flight["answer_format"] = ANSWER_FORMAT
                 in_flight["approved"] = self._approved_calls(resume)
             # Stored from now, not from the turn's first event: what it took (messages, a wake, answers) is no
             # longer pending, and a restart before that event would lose it. A turn that never started is put
@@ -2324,6 +2331,7 @@ class ChatSession:
             ],
             wakes=[wake.to_dict() for wake in self._wakes],
             resume=_dump_resume(self._resume),
+            answer_format=ANSWER_FORMAT,
             log_cursor=self.log.cursor_end,
             closed=self.closed and not self._keep,
         )
@@ -2672,7 +2680,7 @@ class ChatSession:
                     # the turn and the question is abandoned, as a stop on a parked session abandons it.
                     self._abandon_parked = "The user moved on before answering."
                 else:
-                    self._resume = _load_resume(in_flight["resume"])
+                    self._resume = _load_resume(in_flight["resume"], in_flight.get("answer_format"))
             return "requeued"
         if root is None:
             # It may have acted and no trace of it is stored (a provider that saves at the end of a run, or
