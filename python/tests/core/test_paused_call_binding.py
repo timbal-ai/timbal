@@ -16,7 +16,7 @@ from timbal.core.tool_set import ToolSet
 from timbal.state import set_call_id, set_parent_call_id, set_run_context, suspend
 from timbal.state.context import RunContext
 from timbal.state.tracing.providers import InMemoryTracingProvider
-from timbal.types.content import ToolResultContent, ToolUseContent
+from timbal.types.content import TextContent, ToolResultContent, ToolUseContent
 from timbal.types.events import ApprovalEvent, DeltaEvent, InteractionEvent, OutputEvent
 from timbal.types.message import Message
 
@@ -1275,3 +1275,53 @@ class TestAProvidersIdentityFollowsItsConfiguration:
             Auth({"region": "eu", "tenant": "a"})
         )
         assert _auth_identity(Auth({"tenant": "a"})) != _auth_identity(Auth({"tenant": "b"}))
+
+
+class TestReview6065154730:
+    """Review of d5e1eaae."""
+
+    async def test_a_structured_output_turn_is_not_offered_the_salience_tool(self):
+        """A turn with an ``output_model`` ends on the model's first answer, before any tool of it runs: a mark
+        it chose would be neither recorded nor the declared output. Like the delivery tool, it is not offered."""
+        from pydantic import BaseModel
+        from timbal.state import get_run_context
+
+        class Answer(BaseModel):
+            text: str
+
+        model = TestModel(responses=['{"text": "ok"}'])
+        agent = Agent(
+            name="bot", model=model, salience_tool=True, output_model=Answer, tracing_provider=InMemoryTracingProvider
+        )
+        fresh()
+        _, out = await run(agent)
+        llm = next(s for s in get_run_context()._trace.values() if s.path == "bot.llm")
+        names = [t["name"] if isinstance(t, dict) else t.name for t in (llm.input or {}).get("tools") or ()]
+        assert "mark_salient" not in names
+        assert isinstance(out.output, Answer)
+
+    async def test_a_callers_history_with_no_answers_runs_its_calls_with_tracing_off(self):
+        """With tracing off, a caller keeps the history: a turn that ends in a tool call it wants run (no
+        approval, no answers given) runs it, as before. The check is for answers given to a paused turn."""
+        ran = []
+
+        def multiply(a: int, b: int) -> int:
+            ran.append((a, b))
+            return a * b
+
+        model = TestModel(responses=["done", "must not be requested"])
+        agent = Agent(name="bot", model=model, tools=[multiply], tracing_provider=None)
+        history = [
+            Message(role="user", content=[TextContent(text="6 times 7?")]),
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="c-mul", name="multiply", input={"a": 6, "b": 7})],
+                stop_reason="tool_use",
+            ),
+        ]
+        set_run_context(RunContext(parent_id="an-earlier-turn", tracing_provider=None))
+        set_call_id(None)
+        set_parent_call_id(None)
+        events = [e async for e in agent(messages=history)]
+        out = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == agent.name)
+        assert out.status.code == "success" and ran == [(6, 7)]

@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import inspect
 import itertools
+import os
 import re
 import string
 import types
@@ -170,7 +171,10 @@ def _platform_claims(run_context: Any, call_id: str | None) -> dict[str, Any]:
     span = run_context._trace.get(call_id) if call_id else None
     return {
         PROVENANCE_APP_KEY: _claim_app_id(getattr(subject, "app_id", None)),
-        PROVENANCE_REV_KEY: _claim_text(getattr(subject, "rev", None), _CLAIM_REV_MAX),
+        # The subject's, else where the platform's runtime sets it (the config loader reads TIMBAL_REV only).
+        PROVENANCE_REV_KEY: _claim_text(
+            getattr(subject, "rev", None) or os.getenv("TIMBAL_PROJECT_REV"), _CLAIM_REV_MAX
+        ),
         PROVENANCE_PATH_KEY: _claim_text(getattr(span, "path", None), _CLAIM_PATH_MAX),
     }
 

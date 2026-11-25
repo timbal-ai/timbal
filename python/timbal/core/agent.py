@@ -1937,11 +1937,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span.memory = loaded
             if run_context.parent_id and self._find_pending_tool_uses(loaded):
                 # The history is the caller's; what its waiting calls were made for is the paused parent's. One
-                # that cannot be read (not stored, or a storage error) says nothing: the calls are not run on the
-                # answers given. One that was read and has no record (an earlier version's) replays by name.
+                # that cannot be read (not stored, a storage error, tracing off) says nothing: with answers given
+                # (a resume), the calls are not run on them. With none, the caller's calls run as they always did
+                # (a gated one asks). One that was read and has no record (an earlier version's) replays by name.
                 parent_trace = await run_context._get_parent_trace()
                 if parent_trace is None:
-                    return {"unverified": True}
+                    return {"unverified": True} if run_context._resume_values else None
                 return _paused_record(self._own_span(parent_trace))
             return None
 
@@ -4946,8 +4947,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         may_defer = self.tool_search != "off" and any(
             isinstance(t, ToolSet) or getattr(t, "defer_loading", False) for t in self.tools
         )
-        # Fixed for the turn; checked on every step.
-        offer_salience = self.salience_tool and current_span.parent_call_id is None
+        # Fixed for the turn; checked on every step. Not with an output_model: that turn ends on the model's first
+        # answer, before any tool of it runs (a mark it chose would be neither recorded nor the declared output).
+        offer_salience = self.salience_tool and current_span.parent_call_id is None and self.output_model is None
         # Fixed for the turn; checked after every tool batch.
         denial_window_on = self.max_denials_window is not None
         denial_limit = self.max_consecutive_denials

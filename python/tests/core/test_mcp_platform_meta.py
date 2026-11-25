@@ -301,6 +301,15 @@ class TestPlatformClaims:
         assert TOKEN not in json.dumps(meta)
         assert "timbal.ai/tool_call_id" not in meta  # the platform reads call_id, not this
 
+    def test_the_deployed_revision_is_read_where_the_runtime_sets_it(self, monkeypatch):
+        """The platform's runtime sets ``TIMBAL_PROJECT_REV`` (the config loader reads ``TIMBAL_REV``): with no
+        revision on the subject, the claim takes it from there, so the platform can attribute the call."""
+        monkeypatch.setenv("TIMBAL_PROJECT_REV", "rev-42")
+        assert platform_read(meta_of(platform_context(rev=None)))["rev"] == "rev-42"
+        assert platform_read(meta_of(platform_context(rev="main")))["rev"] == "main"  # the subject's comes first
+        monkeypatch.delenv("TIMBAL_PROJECT_REV")
+        assert platform_read(meta_of(platform_context(rev=None))).get("rev") is None
+
     def test_the_per_run_connection_to_the_platform_sends_them(self):
         """``service="api"`` calls through a connection it opens per run: that one sends the claims."""
         server = MCPServer(transport="http", url="https://api.example.test/mcp", provenance=True)
