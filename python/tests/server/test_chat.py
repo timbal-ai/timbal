@@ -368,6 +368,10 @@ def test_a_wakes_silent_ok_is_taken_as_before(client):
         ({"approval-1": {"approved": True, "override_input": {"amount": float("inf")}}}, False),
         ({"approval-1": {"approved": True, "comment": "ok \ud800"}}, False),  # no UTF-8 answer carries it
         ({"ask-1": "a\udc80"}, False),
+        # A question's answer is whatever the tool asked for, an "approved" field included: it is told from an
+        # approval's by the id it answers, not by its shape.
+        ({"ask-1": {"approved": True, "metadata": {"score": float("nan")}}}, True),
+        ({"approval-1": {"metadata": {"ratio": float("nan")}}}, False),  # an approval's, whatever it holds
     ],
     ids=[
         "nan answer",
@@ -378,12 +382,95 @@ def test_a_wakes_silent_ok_is_taken_as_before(client):
         "infinity override",
         "surrogate comment",
         "surrogate",
+        "a question's answer with an approved field",
+        "an approval's answer without one",
     ],
 )
 def test_which_answers_a_session_can_carry(values, carried):
     from timbal.server.chat import _answers_carried
 
-    assert _answers_carried(values) is carried
+    assert _answers_carried(values, {"approval-1"}) is carried
+
+
+def test_answers_to_an_unknown_question_are_checked_as_approvals():
+    """While the session does not know what its turn waits for (it is still reading the run it continues),
+    every answer may be an approval's."""
+    from timbal.server.chat import _answers_carried
+
+    assert _answers_carried({"ask-1": {"metadata": {"score": float("nan")}}}, None) is False
+    assert _answers_carried({"ask-1": {"score": float("nan")}}, None) is True
+
+
+SURVEY_AGENT = '''
+from timbal import Agent, Tool
+from timbal.core.test_model import TestModel
+from timbal.state import suspend
+from timbal.state.tracing.providers import InMemoryTracingProvider
+from timbal.types.content import ToolUseContent
+from timbal.types.message import Message
+
+
+def survey() -> str:
+    """Ask the user to rate the answer."""
+    return f"rated {suspend({'question': 'How was it?'})!r}"
+
+
+def refund(order: str) -> str:
+    """Refund an order."""
+    return f"refunded {order}"
+
+
+def handler(messages):
+    last = messages[-1]
+    if last.role == "tool":
+        return "thanks"
+    name = "refund" if last.collect_text() == "refund" else "survey"
+    return Message(
+        role="assistant",
+        content=[ToolUseContent(id=f"c-{len(messages)}", name=name, input={"order": "A-1"} if name == "refund" else {})],
+        stop_reason="tool_use",
+    )
+
+
+agent = Agent(
+    name="agent",
+    model=TestModel(handler=handler),
+    tools=[survey, Tool(name="refund", handler=refund, requires_approval=True)],
+    tracing_provider=InMemoryTracingProvider,
+)
+'''
+
+
+def test_a_questions_answer_is_not_checked_as_an_approval(tmp_path, monkeypatch):
+    """The reported case: a survey (``suspend()``) asks for an object of its own, one with an ``approved``
+    field. Its answer, NaN in its ``metadata`` included, reaches the tool (202); an approval's answer with the
+    same body is refused (400), since its metadata is stamped on the span as given."""
+    (tmp_path / "agent.py").write_text(SURVEY_AGENT)
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    answer = '{"approved": true, "metadata": {"score": NaN}}'
+    with TestClient(create_app()) as client:
+        for prompt, expected in (("rate", 202), ("refund", 400)):
+            session_id = open_session(client)
+            sent = client.post(f"/chat/sessions/{session_id}/messages", json={"text": prompt})
+            assert sent.status_code == 202
+            read_log(client, session_id, until_kind="turn_finished", count=1)
+            state = client.get(f"/chat/sessions/{session_id}").json()
+            assert state["parked"], state
+            (pending,) = state.get("pending_interactions") or state.get("pending_approvals")
+            pending_id = pending.get("interaction_id") or pending.get("approval_id")
+            resumed = client.post(
+                f"/chat/sessions/{session_id}/resume",
+                content=f'{{"resume": {{"{pending_id}": {answer}}}}}',
+                headers={"content-type": "application/json"},
+            )
+            assert resumed.status_code == expected, resumed.text
+            if expected == 202:
+                items = read_log(client, session_id, until_kind="turn_finished", count=2)
+                finished = [item for _, item in items if item.get("kind") == "turn_finished"]
+                assert finished[-1]["status"]["code"] == "success" and not finished[-1]["parked"]
+            else:
+                assert client.get(f"/chat/sessions/{session_id}").json()["parked"]
 
 
 def test_errors(client):

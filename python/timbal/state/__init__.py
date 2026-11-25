@@ -103,6 +103,8 @@ def emit(data: Any) -> None:
 
 
 MAX_SALIENT_CHARS = 500
+# How many times a mark copies a span's memory that the copy itself keeps changing (see mark_salient).
+_SALIENT_COPIES = 8
 # Re-entrant: the copy runs code of the caller's (a mapping subclass), which may mark again on the same thread.
 _SALIENT_LOCK = threading.RLock()
 
@@ -122,7 +124,8 @@ def mark_salient(why: str, *, span: Any = None) -> bool:
     For memory consolidation (monolith#565's dreams read marked spans first); it writes nothing to a
     memory store and costs no model call. ``span`` defaults to the current span. Returns False (and
     marks nothing) outside a run, for an empty reason, or when the span's ``memory`` is not a mapping (the
-    runnable's own metadata keeps something else there); reasons are capped at
+    runnable's own metadata keeps something else there) or one that copying it replaces every time (code
+    of a mapping subclass that writes the span's ``memory``; tried 8 times); reasons are capped at
     :data:`MAX_SALIENT_CHARS` characters. Counted in usage as ``memory:salient``.
     """
     run_context = get_run_context()
@@ -136,16 +139,25 @@ def mark_salient(why: str, *, span: Any = None) -> bool:
             return False
     # Copied, never written in place: a span's metadata starts as a shallow copy of its runnable's own, so a
     # ``memory`` dict there may be the runnable's configuration, which every later run of it starts from. Under
-    # a lock: a tool run on a thread may mark the same span (read, copy and assign would lose a mark).
+    # a lock: a tool run on a thread may mark the same span (read, copy and assign would lose a mark), and the
+    # count is a read, an increment and a write too.
     with _SALIENT_LOCK:
-        memory = span.metadata.get("memory")
-        if memory is not None and not isinstance(memory, Mapping):
-            return False  # the runnable keeps something else under that key: nowhere to put the mark
-        memory = dict(memory) if memory is not None else {}
-        salient = memory.get("salient")
-        memory["salient"] = [*(salient if isinstance(salient, list | tuple) else ()), why[:MAX_SALIENT_CHARS]]
-        span.metadata["memory"] = memory
-    run_context.update_usage("memory:salient", 1)
+        for _ in range(_SALIENT_COPIES):
+            memory = span.metadata.get("memory")
+            if memory is not None and not isinstance(memory, Mapping):
+                return False  # the runnable keeps something else under that key: nowhere to put the mark
+            copy = dict(memory) if memory is not None else {}
+            salient = copy.get("salient")
+            marks = [*(salient if isinstance(salient, list | tuple) else ()), why[:MAX_SALIENT_CHARS]]
+            if span.metadata.get("memory") is memory:
+                break
+            # The copy ran code of the caller's (a mapping or list subclass) that marked this span: what it
+            # stored is the latest, so copy that. (It is a plain dict and list now, and runs nothing.)
+        else:
+            return False  # the copy changes the span's memory every time: nothing settles to add the mark to
+        copy["salient"] = marks
+        span.metadata["memory"] = copy
+        run_context.update_usage("memory:salient", 1)
     return True
 
 

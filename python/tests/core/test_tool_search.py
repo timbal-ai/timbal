@@ -777,8 +777,8 @@ class TestChatSession:
         a = agent(TestModel(handler=handler))
         original = a._plan_tool_search
 
-        async def spy(tools, model, names):
-            planned = await original(tools, model, names)
+        async def spy(tools, model, names, *kept):
+            planned = await original(tools, model, names, *kept)
             offered.append([t.name for t in planned[0]])
             return planned
 
@@ -820,8 +820,8 @@ class TestChatSession:
         offered = []
         original = a._plan_tool_search
 
-        async def spy(tools, model, names):
-            planned = await original(tools, model, names)
+        async def spy(tools, model, names, *kept):
+            planned = await original(tools, model, names, *kept)
             offered.append([t.name for t in planned[0]])
             return planned
 
@@ -870,8 +870,8 @@ class TestChatSession:
         offered = []
         original = a._plan_tool_search
 
-        async def spy(tools, model, names):
-            planned = await original(tools, model, names)
+        async def spy(tools, model, names, *kept):
+            planned = await original(tools, model, names, *kept)
             offered.append(planned)
             return planned
 

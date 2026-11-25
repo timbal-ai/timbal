@@ -612,7 +612,8 @@ class TestAWakeOwnsItsTrigger:
 
 class TestMarksStayWhole:
     def test_marks_from_threads_on_one_span_are_all_kept(self):
-        """A tool run on a thread (``offload_blocking``) may mark the agent's span while another does."""
+        """A tool run on a thread (``offload_blocking``) may mark the agent's span while another does. Every
+        reason is kept, and every mark counted: the span is the run's root, so the count is its usage."""
         import sys
         import threading
 
@@ -620,6 +621,7 @@ class TestMarksStayWhole:
 
         ctx = RunContext(tracing_provider=InMemoryTracingProvider)
         span = Span(path="bot", call_id="c1", parent_call_id=None, t0=0, metadata={})
+        ctx._trace[span.call_id] = span
         set_run_context(ctx)
         switch = sys.getswitchinterval()
         sys.setswitchinterval(1e-6)
@@ -639,6 +641,43 @@ class TestMarksStayWhole:
             sys.setswitchinterval(switch)
             fresh()
         assert len(span.metadata["memory"]["salient"]) == 6000
+        assert span.usage["memory:salient"] == 6000
+
+    def test_a_mark_made_while_copying_the_same_span_is_kept(self):
+        """Copying a mapping subclass runs its code, which may mark the very span being marked (on the same
+        thread: the lock lets it in). Both reasons are kept, and both marks counted."""
+        from collections.abc import Mapping
+
+        from timbal.state.tracing.span import Span
+
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+
+        class Marking(Mapping):
+            def __init__(self):
+                self._data = {"salient": []}
+                self.marked = False
+
+            def __getitem__(self, key):
+                if not self.marked:
+                    self.marked = True
+                    assert mark_salient("from inside", span=span) is True
+                return self._data[key]
+
+            def __iter__(self):
+                return iter(self._data)
+
+            def __len__(self):
+                return len(self._data)
+
+        span = Span(path="bot", call_id="c1", parent_call_id=None, t0=0, metadata={"memory": Marking()})
+        ctx._trace[span.call_id] = span
+        set_run_context(ctx)
+        try:
+            assert mark_salient("outer", span=span) is True
+        finally:
+            fresh()
+        assert span.metadata["memory"]["salient"] == ["from inside", "outer"]
+        assert span.usage["memory:salient"] == 2
 
     def test_a_memory_that_is_not_a_mapping_is_left_as_it_is(self):
         """Nothing to add a mark to: nothing is marked, and the span keeps what its runnable gave it."""

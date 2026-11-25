@@ -252,12 +252,32 @@ def _stored_answer(value: Any) -> Any:
     call would silently not run.
     """
     if isinstance(value, Cancel):
-        return {"$cancel": value.reason}
+        return {_CANCEL_KEY: value.reason}
     if isinstance(value, ApprovalResolution):
         # Its fields as they are, checked like any other answer below. Not pydantic's JSON mode: that writes
         # NaN and Infinity as null (an input override silently changed) and a set as a list.
         value = value.model_dump()
-    return _unchanged_by_json(value)
+    stored = _unchanged_by_json(value)
+    if isinstance(stored, dict) and (_CANCEL_KEY in stored or _ANSWER_KEY in stored):
+        # An answer shaped like the snapshot's own forms (a question may ask for any object): kept as itself,
+        # never read back as a Cancel.
+        return {_ANSWER_KEY: stored}
+    return stored
+
+
+# How a snapshot holds a Cancel, and an answer that has one of these keys itself (see _stored_answer).
+_CANCEL_KEY = "$cancel"
+_ANSWER_KEY = "$answer"
+
+
+def _load_answer(value: Any) -> Any:
+    """One resume value as a snapshot gives it back (the inverse of :func:`_stored_answer`)."""
+    if isinstance(value, dict):
+        if _CANCEL_KEY in value:
+            return Cancel(reason=value[_CANCEL_KEY])
+        if len(value) == 1 and _ANSWER_KEY in value:
+            return value[_ANSWER_KEY]
+    return value
 
 
 # A wake trigger's kind: what started the turn, shown to an approval reviewer (Runnable._review_gate).
@@ -332,10 +352,7 @@ async def _answered_within(call: Any, timeout: float) -> bool:
 def _load_resume(stored: dict[str, Any] | None) -> dict[str, Any] | None:
     if stored is None:
         return None
-    return {
-        key: Cancel(reason=value["$cancel"]) if isinstance(value, dict) and "$cancel" in value else value
-        for key, value in stored.items()
-    }
+    return {key: _load_answer(value) for key, value in stored.items()}
 
 
 def _same_answer(one: Any, other: Any) -> bool:
@@ -1122,6 +1139,16 @@ class ChatSession:
         context = self._last_context
         # The session's head: while a call has the session, the call's, not the one this channel last saw.
         return self._parked and context is not None and self._scheduler.session_head == context.id
+
+    def awaited_approvals(self) -> frozenset[str] | None:
+        """The ids of the approvals the parked turn waits for (none when it waits for nothing), which tell an
+        approval's answer from a question's whatever either looks like. None while the session does not know
+        yet (it is still reading the run it continues)."""
+        if self._restore_pending():
+            return None
+        if not self.parked or self._last_context is None:
+            return frozenset()
+        return frozenset(approval["approval_id"] for approval in self._last_context.pending_approvals())
 
     def resume(self, values: dict[str, Any]) -> None:
         """Answer the parked turn: ``{approval_id: ...}`` / ``{interaction_id: value}``, as for ``resume=``.

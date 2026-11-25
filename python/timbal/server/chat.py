@@ -15,7 +15,7 @@ import json
 import math
 import os
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Collection
 from pathlib import Path
 from typing import Any
 
@@ -562,19 +562,24 @@ def _answerable(body: dict[str, Any], what: str, keys: tuple[str, ...]) -> None:
         )
 
 
-def _answers_carried(values: dict[str, Any]) -> bool:
+def _answers_carried(values: dict[str, Any], approvals: Collection[str] | None) -> bool:
     """Whether a session's answers about a resume could carry ``values``. A lone surrogate anywhere: no UTF-8
     answer (nor a durable session's store) can. NaN and Infinity only in an approval's ``metadata`` and
     ``override_input``, which the tool's span keeps as given (an interaction's answer reaches its tool, and
-    nothing echoes it raw). A durable session refuses what it cannot store by itself (``ChatSession.resume``)."""
+    nothing echoes it raw). A durable session refuses what it cannot store by itself (``ChatSession.resume``).
+
+    ``approvals``: the ids of the approvals the parked turn waits for (``ChatSession.awaited_approvals``). An
+    answer is an approval's by the id it answers, not by its shape: a question may ask for an object with an
+    ``approved`` field of its own. None while the session does not know: every answer may be an approval's.
+    """
     try:
         json.dumps(values, ensure_ascii=False).encode("utf-8")
     except (TypeError, ValueError, RecursionError):  # (UnicodeEncodeError is a ValueError)
         return False
     return all(
         json_response_carries([value.get("metadata"), value.get("override_input")])
-        for value in values.values()
-        if isinstance(value, dict) and "approved" in value
+        for key, value in values.items()
+        if isinstance(value, dict) and (approvals is None or key in approvals)
     )
 
 
@@ -773,7 +778,7 @@ async def resume_session(request: Request, session_id: str) -> JSONResponse:
     values = body.get("resume")
     if not isinstance(values, dict) or not values:
         raise HTTPException(status_code=400, detail="'resume' must be a non-empty object.")
-    if not _answers_carried(values):
+    if not _answers_carried(values, session.awaited_approvals()):
         raise HTTPException(
             status_code=400,
             detail="The answers cannot be stored or sent back: no lone surrogate, and no NaN or Infinity in an "

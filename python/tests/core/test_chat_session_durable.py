@@ -4224,3 +4224,25 @@ class TestAStoreThatHangs:
         if saver is not None and not saver.done():
             saver.cancel()
             await asyncio.gather(saver, return_exceptions=True)
+
+
+class TestStoredAnswers:
+    def test_an_answer_shaped_like_a_stored_cancel_comes_back_as_itself(self):
+        """A snapshot holds a Cancel as ``{"$cancel": reason}``. A question may ask for any object, one with
+        that key too: after a restart its answer must be the object, not a Cancel that would end the run."""
+        import json
+
+        from timbal.core.chat_session import _dump_resume, _load_resume, _same_answer
+
+        answers = {
+            "ask-1": {"$cancel": "a field of the survey"},
+            "ask-2": {"$answer": 1},
+            "ask-3": Cancel(reason="stop"),
+            "ask-4": {"x": 1},
+            "approval-1": True,
+        }
+        back = _load_resume(json.loads(json.dumps(_dump_resume(answers))))
+        assert back["ask-1"] == {"$cancel": "a field of the survey"} and back["ask-2"] == {"$answer": 1}
+        assert isinstance(back["ask-3"], Cancel) and back["ask-3"].reason == "stop"
+        assert back["ask-4"] == {"x": 1} and back["approval-1"] is True
+        assert all(_same_answer(answers[key], back[key]) for key in answers)
