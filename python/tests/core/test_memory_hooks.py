@@ -768,3 +768,24 @@ class TestARunContextOwnsItsTrigger:
         assert recorded == [("success", "f1", {"slot": "09:00"}), ("success", "f2", {"slot": "10:00"})]
         assert first.trigger["fire_id"] == "f1" and second.trigger["fire_id"] == "f2"
         assert RunContext(trigger="not an object").trigger == "not an object"  # kept as given
+
+
+class TestAFollowupsTrigger:
+    def test_one_that_cannot_be_deep_copied_does_not_fail_the_turn(self):
+        """A run's own copy of its trigger is taken as everywhere else (``_own_copy``): what cannot be copied (a
+        lock) is shared, and the dicts around it are the run's."""
+        import threading
+
+        from timbal.core.session_scheduler import Followup
+
+        lock = threading.Lock()
+
+        class Holding(Followup):
+            @property
+            def trigger(self):
+                return {"kind": "session_event", "task_ids": [], "lock": lock, "fire": {"id": "f1"}}
+
+        followup = Holding(prompt=Message(role="user", content=[]), store=None, completions=[], events=[])
+        context = RunContext(tracing_provider=InMemoryTracingProvider)
+        followup.started(context)
+        assert context.trigger["lock"] is lock and context.trigger["fire"] == {"id": "f1"}

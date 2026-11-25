@@ -303,10 +303,16 @@ class TestPlatformClaims:
 
     def test_the_deployed_revision_is_read_where_the_runtime_sets_it(self, monkeypatch):
         """The platform's runtime sets ``TIMBAL_PROJECT_REV`` (the config loader reads ``TIMBAL_REV``): with no
-        revision on the subject, the claim takes it from there, so the platform can attribute the call."""
+        revision on the subject, the claim takes it from there, for a run of the app this process was deployed
+        for (``TIMBAL_APP_ID``) only: another app's run would be attributed to this deployment's code."""
+        monkeypatch.setenv("TIMBAL_APP_ID", "1829")
         monkeypatch.setenv("TIMBAL_PROJECT_REV", "rev-42")
         assert platform_read(meta_of(platform_context(rev=None)))["rev"] == "rev-42"
         assert platform_read(meta_of(platform_context(rev="main")))["rev"] == "main"  # the subject's comes first
+        assert platform_read(meta_of(platform_context(rev=None, app_id="2001"))).get("rev") is None
+        monkeypatch.delenv("TIMBAL_APP_ID")
+        assert platform_read(meta_of(platform_context(rev=None))).get("rev") is None
+        monkeypatch.setenv("TIMBAL_APP_ID", "1829")
         monkeypatch.delenv("TIMBAL_PROJECT_REV")
         assert platform_read(meta_of(platform_context(rev=None))).get("rev") is None
 

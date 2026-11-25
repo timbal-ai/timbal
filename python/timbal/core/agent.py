@@ -3022,15 +3022,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             dispatch.append(search)
         return offered, dispatch, None, {tool.name for tool in hidden}
 
-    def _yield_names(self, tools: list[Tool], names: Collection[str]) -> list[Tool]:
-        """``tools`` without those named in ``names``: names the agent's own tools keep for the turn."""
+    def _yield_names(self, tools: list[Tool], names: Collection[str], warned: set[str] | None = None) -> list[Tool]:
+        """``tools`` without those named in ``names``: names the agent's own tools keep for the turn. Said in the
+        log once a turn for each name (``warned``: the names said already)."""
         if not names:
             return tools
-        logger.warning(
-            "A tool has the name of one of the agent's own for this turn; it is not offered.",
-            path=self._path,
-            tools=sorted(names),
-        )
+        new = [name for name in names if warned is None or name not in warned]
+        if new:
+            logger.warning(
+                "A tool has the name of one of the agent's own for this turn; it is not offered.",
+                path=self._path,
+                tools=sorted(new),
+            )
+            if warned is not None:
+                warned.update(new)
         return [tool for tool in tools if tool.name not in names]
 
     async def _load_tools(self, names: list[str], span: Any, query: str | None = None) -> None:
@@ -3431,7 +3436,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         return tool
 
     def _with_salience_tool(
-        self, tools: list[Tool], names: Collection[str], name: str | None, offered: bool, kept: str | None = None
+        self,
+        tools: list[Tool],
+        names: Collection[str],
+        name: str | None,
+        offered: bool,
+        kept: str | None = None,
+        warned: set[str] | None = None,
     ) -> tuple[list[Tool], str | None]:
         """A step's tools with the ``mark_salient`` tool (``salience_tool=True``), and the tool's name.
 
@@ -3447,9 +3458,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             name = kept or _unused_name(MARK_SALIENT_NAME, _MARK_SALIENT_FALLBACKS, set(names))
         if name in names:
             # A tool set that changed its catalog inside the turn, or since the turn paused: the name is the mark's.
-            logger.warning(
-                "A tool took the name of the salience tool mid-turn; it is not offered.", path=self._path, tool=name
-            )
+            # (Said once a turn: ``warned``.)
+            if warned is None or name not in warned:
+                logger.warning(
+                    "A tool took the name of the salience tool mid-turn; it is not offered.", path=self._path, tool=name
+                )
+                if warned is not None:
+                    warned.add(name)
             tools = [tool for tool in tools if tool.name != name]
         return [*tools, self._mark_salient_tool(name)], name
 
@@ -3508,6 +3523,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         system_prompt: str | None,
         offered: bool,
         kept: str | None = None,
+        warned: set[str] | None = None,
     ) -> tuple[list[Tool], str, str | None]:
         """A step's tools with the delivery tool (``delivery="tool"``), the tool's name, and the system prompt.
 
@@ -3523,9 +3539,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             system_prompt = f"{system_prompt}\n\n{note}" if system_prompt else note
         if offered and name in names:
             # A tool set that changed its catalog inside the turn, or since the turn paused: the name is the reply's.
-            logger.warning(
-                "A tool took the name of the delivery tool mid-turn; it is not offered.", path=self._path, tool=name
-            )
+            # (Said once a turn: ``warned``.)
+            if warned is None or name not in warned:
+                logger.warning(
+                    "A tool took the name of the delivery tool mid-turn; it is not offered.", path=self._path, tool=name
+                )
+                if warned is not None:
+                    warned.add(name)
             tools = [tool for tool in tools if tool.name != name]
         if offered:
             tools = [*tools, self._send_message_tool(name)]
@@ -4671,6 +4691,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             kept_names = _NO_KEPT_NAMES
         # The approvals and questions this run's turn shows (their ids): what a pause records it waited on.
         cards: dict[str, list[str]] = {}
+        # The agent's own names an application's tool held on some step of this turn, said in the log already.
+        warned_names: set[str] = set()
         # Whether the current step offers the tool: text from a step that could not send is not a draft.
         send_offered = False
         # The publishing order of a batch that holds two sends or more (None for any other batch).
@@ -5109,7 +5131,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     # Not with the tools withheld (a denial limit) nor past the budget: that step answers in text.
                     send_offered = not withheld and i < self.max_iter
                     tools, send_name, system_prompt = self._with_send_tool(
-                        tools, tool_names, send_name, system_prompt, send_offered, kept_names.get(SEND_MESSAGE_NAME)
+                        tools,
+                        tool_names,
+                        send_name,
+                        system_prompt,
+                        send_offered,
+                        kept_names.get(SEND_MESSAGE_NAME),
+                        warned_names,
                     )
                 if offer_salience:
                     tools, salience_name = self._with_salience_tool(
@@ -5118,9 +5146,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         salience_name,
                         not withheld and i < self.max_iter,
                         kept_names.get(MARK_SALIENT_NAME),
+                        warned_names,
                     )
                 if reserved_names:
-                    tools = self._yield_names(tools, reserved_names.intersection(tool.name for tool in tools))
+                    tools = self._yield_names(
+                        tools, reserved_names.intersection(tool.name for tool in tools), warned_names
+                    )
                 # `tools` stays what the model may call: a deferred tool called by name runs (and loads).
                 if not may_defer or not _has_deferred(tools):
                     llm_tools, deferred_tools, unloaded_tools = tools, None, _NO_NAMES

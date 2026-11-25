@@ -10,6 +10,7 @@ such and not run.
 """
 
 import pytest
+from pydantic import PrivateAttr
 from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
 from timbal.core.tool_set import ToolSet
@@ -20,15 +21,19 @@ from timbal.types.content import TextContent, ToolResultContent, ToolUseContent
 from timbal.types.events import ApprovalEvent, DeltaEvent, InteractionEvent, OutputEvent
 from timbal.types.message import Message
 
-# What the application's tool set offers right now (a module global: a field would be copied per instance).
-CURRENT: list = []
-
 
 class Catalog(ToolSet):
-    """An application's tools that may change between runs (an MCP server's, say)."""
+    """An application's tools that may change between runs (an MCP server's, say). Each catalog keeps its own
+    list (a private attribute, not a field: what it offers is not part of who it is)."""
+
+    _offered: list = PrivateAttr(default_factory=list)
+
+    @property
+    def offered(self) -> list:
+        return self._offered
 
     async def resolve(self):
-        return list(CURRENT)
+        return list(self._offered)
 
 
 def fresh(parent_id=None):
@@ -69,7 +74,6 @@ def memory_of(out):
 
 @pytest.fixture(autouse=True)
 def reset():
-    CURRENT.clear()
     yield
     set_run_context(None)
 
@@ -84,7 +88,7 @@ class TestAnApplicationsCallIsNotTakenByTheAgentsOwnTool:
             return f"annotated {note} with {suspend({'question': 'Which note?'})}"
 
         notes = Catalog()
-        CURRENT[:] = [Tool(name="mark_salient", handler=annotate)]
+        notes.offered[:] = [Tool(name="mark_salient", handler=annotate)]
         model = TestModel(responses=[call("mark_salient", note="draft"), "done", "must not be requested"])
         agent = Agent(
             name="bot", model=model, tools=[notes], salience_tool=True, tracing_provider=InMemoryTracingProvider
@@ -93,7 +97,7 @@ class TestAnApplicationsCallIsNotTakenByTheAgentsOwnTool:
         events, parked = await run(agent)
         assert parked.status.reason == "input_required"
         question = next(e for e in events if isinstance(e, InteractionEvent))
-        CURRENT.clear()  # gone from its tool set while the turn waited
+        notes.offered.clear()  # gone from its tool set while the turn waited
         fresh(parked.run_id)
         _, out = await run(agent, resume={question.interaction_id: "note 3"})
         memory, root = memory_of(out)
@@ -106,7 +110,7 @@ class TestAnApplicationsCallIsNotTakenByTheAgentsOwnTool:
         resume. The delivery tool, free to take the name, would have sent its text to the user."""
         posted = []
         channel = Catalog()
-        CURRENT[:] = [
+        channel.offered[:] = [
             Tool(name="send_message", handler=lambda text: posted.append(text) or "posted", requires_approval=True)
         ]
         model = TestModel(responses=[call("send_message", text="Internal: refund the customer"), "done", "x"])
@@ -117,7 +121,7 @@ class TestAnApplicationsCallIsNotTakenByTheAgentsOwnTool:
         events, parked = await run(agent)
         assert parked.status.reason == "approval_required"
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT.clear()
+        channel.offered.clear()
         fresh(parked.run_id)
         events, out = await run(agent, resume={approval.approval_id: True})
         delivered = [
@@ -137,7 +141,7 @@ class TestAnApplicationsCallIsNotTakenByTheAgentsOwnTool:
         name). That tool is gone at the resume: the dispatcher, under the name now, would have run its target."""
         charged = []
         catalog = Catalog()
-        CURRENT[:] = [
+        catalog.offered[:] = [
             Tool(
                 name="call_tool",
                 handler=lambda name, arguments: f"queued {name} with {arguments}",
@@ -155,7 +159,7 @@ class TestAnApplicationsCallIsNotTakenByTheAgentsOwnTool:
         events, parked = await run(agent)
         assert parked.status.reason == "approval_required"
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT[:] = [CURRENT[1]]  # the application's call_tool is gone
+        catalog.offered[:] = [catalog.offered[1]]  # the application's call_tool is gone
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         assert charged == []
@@ -167,7 +171,9 @@ class TestAnApplicationsCallIsNotTakenByTheAgentsOwnTool:
         from timbal.core import LocalOffloadStore, Spill, ToolResultLimit
 
         catalog = Catalog()
-        CURRENT[:] = [Tool(name="read_offloaded", handler=lambda handle: f"opened {handle}", requires_approval=True)]
+        catalog.offered[:] = [
+            Tool(name="read_offloaded", handler=lambda handle: f"opened {handle}", requires_approval=True)
+        ]
         model = TestModel(responses=[call("read_offloaded", handle="ticket-9"), "done", "must not be requested"])
         agent = Agent(
             name="bot",
@@ -180,7 +186,7 @@ class TestAnApplicationsCallIsNotTakenByTheAgentsOwnTool:
         events, parked = await run(agent)
         assert parked.status.reason == "approval_required"
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT.clear()
+        catalog.offered.clear()
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         memory, _ = memory_of(out)
@@ -195,7 +201,7 @@ class TestAnApplicationsCallIsNotTakenByTheAgentsOwnTool:
             return "built"
 
         catalog = Catalog()
-        CURRENT[:] = [
+        catalog.offered[:] = [
             Tool(name="get_background_task", handler=lambda task_id: f"ticket {task_id}", requires_approval=True)
         ]
         model = TestModel(
@@ -222,7 +228,7 @@ class TestAnApplicationsCallIsNotTakenByTheAgentsOwnTool:
         events, parked = await run(agent)
         assert parked.status.reason == "approval_required"
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT.clear()
+        catalog.offered.clear()
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         memory, root = memory_of(out)
@@ -256,7 +262,7 @@ class TestTheAgentsOwnPausedCallKeepsItsTool:
         events, parked = await run(agent)
         assert parked.status.reason == "approval_required"
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT[:] = [Tool(name="mark_salient", handler=lambda why: app_ran.append(why) or "app")]
+        catalog.offered[:] = [Tool(name="mark_salient", handler=lambda why: app_ran.append(why) or "app")]
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         _, root = memory_of(out)
@@ -285,7 +291,7 @@ class TestTheAgentsOwnPausedCallKeepsItsTool:
         events, parked = await run(agent)
         assert parked.status.reason == "approval_required"
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT[:] = [Tool(name="send_message", handler=lambda text: posted.append(text) or "posted")]
+        catalog.offered[:] = [Tool(name="send_message", handler=lambda text: posted.append(text) or "posted")]
         fresh(parked.run_id)
         events, out = await run(agent, resume={approval.approval_id: True})
         delivered = [
@@ -307,7 +313,7 @@ class TestTheAgentsOwnPausedCallKeepsItsTool:
             defer_loading=True,
             requires_approval=True,
         )
-        CURRENT[:] = [charge]
+        catalog.offered[:] = [charge]
         model = TestModel(
             responses=[call("call_tool", name="charge", arguments={"amount": 5}), "done", "must not be requested"]
         )
@@ -318,7 +324,7 @@ class TestTheAgentsOwnPausedCallKeepsItsTool:
         events, parked = await run(agent)
         assert parked.status.reason == "approval_required"
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT[:] = [
+        catalog.offered[:] = [
             charge,
             Tool(name="call_tool", handler=lambda name, arguments: app_ran.append((name, arguments)) or "app"),
         ]
@@ -334,7 +340,7 @@ class TestTheAgentsOwnPausedCallKeepsItsTool:
         app_ran = []
         catalog = Catalog()
         deferred = Tool(name="refund", description="Refund an order", handler=lambda order: order, defer_loading=True)
-        CURRENT[:] = [deferred, Tool(name="hold", handler=lambda: "held", requires_approval=True)]
+        catalog.offered[:] = [deferred, Tool(name="hold", handler=lambda: "held", requires_approval=True)]
         model = TestModel(
             responses=[
                 Message(
@@ -357,7 +363,7 @@ class TestTheAgentsOwnPausedCallKeepsItsTool:
         events, parked = await run(agent)
         assert parked.status.reason == "approval_required"
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT.append(Tool(name="search_tools", handler=lambda query: app_ran.append(query) or "app"))
+        catalog.offered.append(Tool(name="search_tools", handler=lambda query: app_ran.append(query) or "app"))
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         memory, _ = memory_of(out)
@@ -407,19 +413,21 @@ class TestACallerThatStopsAtTheCard:
     """The pause is the same when the caller stops reading at the card instead of reading to the end."""
 
     async def test_a_question_that_lost_its_tool_is_not_taken(self):
+        catalog = Catalog()
+
         def annotate(note: str) -> str:
             return f"annotated {note} with {suspend({'question': 'Which note?'})}"
 
-        CURRENT[:] = [Tool(name="mark_salient", handler=annotate)]
+        catalog.offered[:] = [Tool(name="mark_salient", handler=annotate)]
         model = TestModel(responses=[call("mark_salient", note="draft"), "done", "must not be requested"])
         agent = Agent(
-            name="bot", model=model, tools=[Catalog()], salience_tool=True, tracing_provider=InMemoryTracingProvider
+            name="bot", model=model, tools=[catalog], salience_tool=True, tracing_provider=InMemoryTracingProvider
         )
         fresh()
         events = await stop_at_the_card(agent)
         question = events[-1]
         assert isinstance(question, InteractionEvent)
-        CURRENT.clear()
+        catalog.offered.clear()
         fresh(question.run_id)
         _, out = await run(agent, resume={question.interaction_id: "note 3"})
         memory, root = memory_of(out)
@@ -430,18 +438,19 @@ class TestACallerThatStopsAtTheCard:
     async def test_a_resume_right_after_a_plain_break_finds_the_record(self):
         """The stream is not closed yet when the resume reads the run (the same process, a live trace): the
         record was made as the card went out, not on the way out of the turn."""
+        catalog = Catalog()
 
         def annotate(note: str) -> str:
             return f"annotated {note} with {suspend({'question': 'Which note?'})}"
 
-        CURRENT[:] = [Tool(name="mark_salient", handler=annotate)]
+        catalog.offered[:] = [Tool(name="mark_salient", handler=annotate)]
         model = TestModel(responses=[call("mark_salient", note="draft"), "done", "must not be requested"])
         agent = Agent(
-            name="bot", model=model, tools=[Catalog()], salience_tool=True, tracing_provider=InMemoryTracingProvider
+            name="bot", model=model, tools=[catalog], salience_tool=True, tracing_provider=InMemoryTracingProvider
         )
         fresh()
         question = (await stop_at_the_card(agent, close=False))[-1]
-        CURRENT.clear()
+        catalog.offered.clear()
         fresh(question.run_id)
         _, out = await run(agent, resume={question.interaction_id: "note 3"})
         memory, root = memory_of(out)
@@ -450,17 +459,18 @@ class TestACallerThatStopsAtTheCard:
         assert "this call was made for" in result
 
     async def test_an_application_send_is_not_delivered(self):
+        catalog = Catalog()
         posted = []
-        CURRENT[:] = [
+        catalog.offered[:] = [
             Tool(name="send_message", handler=lambda text: posted.append(text) or "posted", requires_approval=True)
         ]
         model = TestModel(responses=[call("send_message", text="Internal: refund the customer"), "done", "x"])
         agent = Agent(
-            name="bot", model=model, tools=[Catalog()], delivery="tool", tracing_provider=InMemoryTracingProvider
+            name="bot", model=model, tools=[catalog], delivery="tool", tracing_provider=InMemoryTracingProvider
         )
         fresh()
         approval = (await stop_at_the_card(agent))[-1]
-        CURRENT.clear()
+        catalog.offered.clear()
         fresh(approval.run_id)
         events, _ = await run(agent, resume={approval.approval_id: True})
         delivered = [
@@ -471,6 +481,7 @@ class TestACallerThatStopsAtTheCard:
         assert not any("refund" in text for text in delivered) and posted == []
 
     async def test_the_agents_own_mark_keeps_its_tool(self):
+        catalog = Catalog()
         from timbal.guardrails import Verdict, guardrail
 
         def ask(_text, ctx):
@@ -481,14 +492,14 @@ class TestACallerThatStopsAtTheCard:
         agent = Agent(
             name="bot",
             model=model,
-            tools=[Catalog()],
+            tools=[catalog],
             salience_tool=True,
             guardrails=[guardrail(ask, stages=["tool_args"], name="ask")],
             tracing_provider=InMemoryTracingProvider,
         )
         fresh()
         approval = (await stop_at_the_card(agent))[-1]
-        CURRENT[:] = [Tool(name="mark_salient", handler=lambda why: app_ran.append(why) or "app")]
+        catalog.offered[:] = [Tool(name="mark_salient", handler=lambda why: app_ran.append(why) or "app")]
         fresh(approval.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         _, root = memory_of(out)
@@ -499,13 +510,14 @@ class TestARefusedCall:
     async def test_a_stop_for_it_ends_the_run(self):
         """The user stopped the question (a Cancel, as ``ChatSession.interrupt()`` sends) whose tool is gone:
         the run ends cancelled, and the model is not called again (it might call tools after the stop)."""
-        CURRENT[:] = [Tool(name="refund", handler=lambda order: f"refunded {order}", requires_approval=True)]
+        catalog = Catalog()
+        catalog.offered[:] = [Tool(name="refund", handler=lambda order: f"refunded {order}", requires_approval=True)]
         model = TestModel(responses=[call("refund", order="A-1"), "must not be requested"])
-        agent = Agent(name="bot", model=model, tools=[Catalog()], tracing_provider=InMemoryTracingProvider)
+        agent = Agent(name="bot", model=model, tools=[catalog], tracing_provider=InMemoryTracingProvider)
         fresh()
         events, parked = await run(agent)
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT.clear()
+        catalog.offered.clear()
         fresh(parked.run_id)
         from timbal.types.approval import Cancel
 
@@ -515,19 +527,20 @@ class TestARefusedCall:
     async def test_a_dispatch_names_the_tool_it_was_to_run(self):
         """The dispatcher is still there (other deferred tools): the refusal names the tool that is gone, not
         ``call_tool``, which the model may go on using."""
+        catalog = Catalog()
         charge = Tool(name="charge", handler=lambda amount: amount, defer_loading=True, requires_approval=True)
         refund = Tool(name="refund", handler=lambda order: order, defer_loading=True)
-        CURRENT[:] = [charge, refund]
+        catalog.offered[:] = [charge, refund]
         model = TestModel(
             responses=[call("call_tool", name="charge", arguments={"amount": 5}), "done", "must not be requested"]
         )
         agent = Agent(
-            name="bot", model=model, tools=[Catalog()], tool_search="dispatch", tracing_provider=InMemoryTracingProvider
+            name="bot", model=model, tools=[catalog], tool_search="dispatch", tracing_provider=InMemoryTracingProvider
         )
         fresh()
         events, parked = await run(agent)
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT[:] = [refund]
+        catalog.offered[:] = [refund]
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         memory, _ = memory_of(out)
@@ -538,8 +551,11 @@ class TestARefusedCall:
         """At the resume nothing is deferred (no dispatcher on any step), and an application's tool has the
         dispatcher's name: it is not offered for the rest of the turn, where the history's calls of that name
         are the dispatcher's."""
+        catalog = Catalog()
         app_ran = []
-        CURRENT[:] = [Tool(name="charge", handler=lambda amount: amount, defer_loading=True, requires_approval=True)]
+        catalog.offered[:] = [
+            Tool(name="charge", handler=lambda amount: amount, defer_loading=True, requires_approval=True)
+        ]
         model = TestModel(
             responses=[
                 call("call_tool", name="charge", arguments={"amount": 5}),
@@ -553,12 +569,12 @@ class TestARefusedCall:
             ]
         )
         agent = Agent(
-            name="bot", model=model, tools=[Catalog()], tool_search="dispatch", tracing_provider=InMemoryTracingProvider
+            name="bot", model=model, tools=[catalog], tool_search="dispatch", tracing_provider=InMemoryTracingProvider
         )
         fresh()
         events, parked = await run(agent)
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT[:] = [Tool(name="call_tool", handler=lambda name, arguments: app_ran.append((name, arguments)))]
+        catalog.offered[:] = [Tool(name="call_tool", handler=lambda name, arguments: app_ran.append((name, arguments)))]
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         memory, _ = memory_of(out)
@@ -595,20 +611,8 @@ class TestASlashCommandThatPauses:
         assert out.status.code == "success" and charged == ["5"] and model.call_count == 0
 
 
-# A second provider of tools, with a catalog of its own.
-OTHER: list = []
-
-
-class OtherCatalog(ToolSet):
-    async def resolve(self):
-        return list(OTHER)
-
-
-@pytest.fixture(autouse=True)
-def reset_other():
-    OTHER.clear()
-    yield
-    OTHER.clear()
+class OtherCatalog(Catalog):
+    """A second provider of tools: another class, so another identity."""
 
 
 class TestAnotherProvidersToolOfTheSameName:
@@ -617,6 +621,8 @@ class TestAnotherProvidersToolOfTheSameName:
 
     @pytest.mark.parametrize("dispatch", [False, True], ids=["called", "dispatched"])
     async def test_is_not_run_with_the_first_ones_approval(self, dispatch):
+        catalog = Catalog()
+        other = OtherCatalog()
         ran = []
         first = Tool(name="lookup", handler=lambda key: f"first {key}", requires_approval=True)
         second = Tool(name="lookup", handler=lambda key: ran.append(key) or "second", requires_approval=True)
@@ -625,20 +631,20 @@ class TestAnotherProvidersToolOfTheSameName:
             asked = call("call_tool", name="lookup", arguments={"key": "K"})
         else:
             asked = call("lookup", key="K")
-        CURRENT[:] = [first]
+        catalog.offered[:] = [first]
         model = TestModel(responses=[asked, "done", "must not be requested"])
         agent = Agent(
             name="bot",
             model=model,
-            tools=[Catalog(), OtherCatalog()],
+            tools=[catalog, other],
             tool_search="dispatch" if dispatch else "auto",
             tracing_provider=InMemoryTracingProvider,
         )
         fresh()
         events, parked = await run(agent)
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT.clear()
-        OTHER[:] = [second]
+        catalog.offered.clear()
+        other.offered[:] = [second]
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         memory, _ = memory_of(out)
@@ -648,18 +654,18 @@ class TestAnotherProvidersToolOfTheSameName:
     async def test_a_tool_two_sets_share_is_the_first_ones(self):
         """One tool object offered by two sets is the first set's (the agent keeps that one), and it runs on the
         resume while that set still offers it, whatever the second set does."""
+        catalog = Catalog()
+        other = OtherCatalog()
         ran = []
         shared = Tool(name="lookup", handler=lambda key: ran.append(key) or "found", requires_approval=True)
-        CURRENT[:] = [shared]
-        OTHER[:] = [shared]
+        catalog.offered[:] = [shared]
+        other.offered[:] = [shared]
         model = TestModel(responses=[call("lookup", key="K"), "done", "must not be requested"])
-        agent = Agent(
-            name="bot", model=model, tools=[Catalog(), OtherCatalog()], tracing_provider=InMemoryTracingProvider
-        )
+        agent = Agent(name="bot", model=model, tools=[catalog, other], tracing_provider=InMemoryTracingProvider)
         fresh()
         events, parked = await run(agent)
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        OTHER.clear()
+        other.offered.clear()
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         assert out.status.code == "success" and ran == ["K"]
@@ -669,15 +675,16 @@ class TestAStopThatIsNotForThisRun:
     async def test_a_cancel_for_another_card_does_not_end_the_run(self):
         """The resume carries an approval for the waiting call (whose tool is gone) and a stale Cancel for a
         card this run never waited on: the stale one is not the user's word about this turn."""
+        catalog = Catalog()
         from timbal.types.approval import Cancel
 
-        CURRENT[:] = [Tool(name="refund", handler=lambda order: f"refunded {order}", requires_approval=True)]
+        catalog.offered[:] = [Tool(name="refund", handler=lambda order: f"refunded {order}", requires_approval=True)]
         model = TestModel(responses=[call("refund", order="A-1"), "done", "must not be requested"])
-        agent = Agent(name="bot", model=model, tools=[Catalog()], tracing_provider=InMemoryTracingProvider)
+        agent = Agent(name="bot", model=model, tools=[catalog], tracing_provider=InMemoryTracingProvider)
         fresh()
         events, parked = await run(agent)
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT.clear()
+        catalog.offered.clear()
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True, "some-old-card": Cancel(reason="stale")})
         assert out.status.code == "success" and model.call_count == 2
@@ -735,21 +742,21 @@ class TestTheProviderOfAResumedCall:
     provider whose identity changed or cannot be told apart."""
 
     async def test_a_slash_command_is_not_run_by_another_providers_tool(self):
+        catalog = Catalog()
+        other = OtherCatalog()
         ran = []
         first = Tool(name="charge", handler=lambda amount: f"first {amount}", requires_approval=True)
         first.command = "charge"
         second = Tool(name="charge", handler=lambda amount: ran.append(amount) or "second", requires_approval=True)
         second.command = "charge"
-        CURRENT[:] = [first]
+        catalog.offered[:] = [first]
         model = TestModel(responses=["done", "must not be requested"])
-        agent = Agent(
-            name="bot", model=model, tools=[Catalog(), OtherCatalog()], tracing_provider=InMemoryTracingProvider
-        )
+        agent = Agent(name="bot", model=model, tools=[catalog, other], tracing_provider=InMemoryTracingProvider)
         fresh()
         events, parked = await run(agent, prompt="/charge 5")
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT.clear()
-        OTHER[:] = [second]
+        catalog.offered.clear()
+        other.offered[:] = [second]
         fresh(parked.run_id)
         _, out = await run(agent, prompt="/charge 5", resume={approval.approval_id: True})
         memory, _ = memory_of(out)
@@ -757,20 +764,20 @@ class TestTheProviderOfAResumedCall:
         assert any("this call was made for" in r for r in results(memory))
 
     async def test_a_resume_with_the_callers_history_is_checked_too(self):
+        catalog = Catalog()
+        other = OtherCatalog()
         ran = []
         first = Tool(name="lookup", handler=lambda key: f"first {key}", requires_approval=True)
         second = Tool(name="lookup", handler=lambda key: ran.append(key) or "second", requires_approval=True)
-        CURRENT[:] = [first]
+        catalog.offered[:] = [first]
         model = TestModel(responses=[call("lookup", key="K"), "done", "must not be requested"])
-        agent = Agent(
-            name="bot", model=model, tools=[Catalog(), OtherCatalog()], tracing_provider=InMemoryTracingProvider
-        )
+        agent = Agent(name="bot", model=model, tools=[catalog, other], tracing_provider=InMemoryTracingProvider)
         fresh()
         events, parked = await run(agent)
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
         history, _ = memory_of(parked)
-        CURRENT.clear()
-        OTHER[:] = [second]
+        catalog.offered.clear()
+        other.offered[:] = [second]
         fresh(parked.run_id)
         events = [e async for e in agent(messages=list(history), resume={approval.approval_id: True})]
         out = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == agent.name)
@@ -1145,19 +1152,19 @@ class TestARefusedCallsAnswer:
         """The call was refused (another provider has the tool now). The model makes it again, with the same
         input: that is a new decision on the provider there now, not the old answer (whose approval id, the path
         and the input, is the same)."""
+        catalog = Catalog()
+        other = OtherCatalog()
         ran = []
         first = Tool(name="lookup", handler=lambda key: f"first {key}", requires_approval=True)
         second = Tool(name="lookup", handler=lambda key: ran.append(key) or "second", requires_approval=True)
-        CURRENT[:] = [first]
+        catalog.offered[:] = [first]
         model = TestModel(responses=[call("lookup", key="K"), call("lookup", key="K"), "done", "must not be requested"])
-        agent = Agent(
-            name="bot", model=model, tools=[Catalog(), OtherCatalog()], tracing_provider=InMemoryTracingProvider
-        )
+        agent = Agent(name="bot", model=model, tools=[catalog, other], tracing_provider=InMemoryTracingProvider)
         fresh()
         events, parked = await run(agent)
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
-        CURRENT.clear()
-        OTHER[:] = [second]
+        catalog.offered.clear()
+        other.offered[:] = [second]
         fresh(parked.run_id)
         events, out = await run(agent, resume={approval.approval_id: True})
         assert ran == []
@@ -1167,11 +1174,12 @@ class TestARefusedCallsAnswer:
     async def test_a_history_whose_turn_cannot_be_read_is_not_replayed(self):
         """The caller passes the history (``messages=``) and the run it continues cannot be read: nothing says
         what its waiting calls were made for, so none runs on the answers given."""
+        catalog = Catalog()
         ran = []
         lookup = Tool(name="lookup", handler=lambda key: ran.append(key) or "found", requires_approval=True)
-        CURRENT[:] = [lookup]
+        catalog.offered[:] = [lookup]
         model = TestModel(responses=[call("lookup", key="K"), "done", "must not be requested"])
-        agent = Agent(name="bot", model=model, tools=[Catalog()], tracing_provider=InMemoryTracingProvider)
+        agent = Agent(name="bot", model=model, tools=[catalog], tracing_provider=InMemoryTracingProvider)
         fresh()
         events, parked = await run(agent)
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
@@ -1187,13 +1195,14 @@ class TestARefusedCallsAnswer:
         """The run it continues cannot be read, so which card a Cancel answers is not known either: the caller
         said stop, and the run ends there (no model call, no tool), rather than the Cancel being set aside with
         the other answers while the turn goes on."""
+        catalog = Catalog()
         from timbal.types.approval import Cancel
 
         ran = []
         lookup = Tool(name="lookup", handler=lambda key: ran.append(key) or "found", requires_approval=True)
-        CURRENT[:] = [lookup]
+        catalog.offered[:] = [lookup]
         model = TestModel(responses=[call("lookup", key="K"), "must not be requested"])
-        agent = Agent(name="bot", model=model, tools=[Catalog()], tracing_provider=InMemoryTracingProvider)
+        agent = Agent(name="bot", model=model, tools=[catalog], tracing_provider=InMemoryTracingProvider)
         fresh()
         events, parked = await run(agent)
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
@@ -1206,11 +1215,12 @@ class TestARefusedCallsAnswer:
     async def test_a_history_call_the_paused_turn_did_not_record_is_not_replayed(self):
         """The caller's history holds a waiting call the paused turn has no record of (another id): it is not
         one the answers were given for."""
+        catalog = Catalog()
         ran = []
         lookup = Tool(name="lookup", handler=lambda key: ran.append(key) or "found", requires_approval=True)
-        CURRENT[:] = [lookup]
+        catalog.offered[:] = [lookup]
         model = TestModel(responses=[call("lookup", key="K"), "done", "must not be requested"])
-        agent = Agent(name="bot", model=model, tools=[Catalog()], tracing_provider=InMemoryTracingProvider)
+        agent = Agent(name="bot", model=model, tools=[catalog], tracing_provider=InMemoryTracingProvider)
         fresh()
         events, parked = await run(agent)
         approval = next(e for e in events if isinstance(e, ApprovalEvent))
@@ -1325,3 +1335,82 @@ class TestReview6065154730:
         events = [e async for e in agent(messages=history)]
         out = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == agent.name)
         assert out.status.code == "success" and ran == [(6, 7)]
+
+
+class TestAKeptNamesClash:
+    """An application's tool that holds one of the agent's kept names is not offered on any step of the turn, and
+    the log says so once a turn, not on every step."""
+
+    @staticmethod
+    def clashes(logs, start):
+        return [log for log in logs if log.get("event", "").startswith(start)]
+
+    async def test_the_dispatchers_name_is_warned_about_once(self):
+        import structlog
+
+        app = Catalog()
+        app.offered[:] = [
+            Tool(name="charge", handler=lambda amount: amount, defer_loading=True, requires_approval=True)
+        ]
+        model = TestModel(
+            responses=[
+                call("call_tool", name="charge", arguments={"amount": 5}),
+                call("lookup", key="a"),
+                call("lookup", key="b"),
+                "done",
+                "must not be requested",
+            ]
+        )
+        agent = Agent(
+            name="bot", model=model, tools=[app], tool_search="dispatch", tracing_provider=InMemoryTracingProvider
+        )
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        app.offered[:] = [
+            Tool(name="call_tool", handler=lambda name, arguments: f"app {name} {arguments}"),
+            Tool(name="lookup", handler=lambda key: key),
+        ]
+        fresh(parked.run_id)
+        with structlog.testing.capture_logs() as logs:
+            _, out = await run(agent, resume={approval.approval_id: True})
+        assert out.status.code == "success" and model.call_count == 4
+        assert len(self.clashes(logs, "A tool has the name of one of the agent's own")) == 1
+
+    async def test_the_salience_tools_name_is_warned_about_once(self):
+        import structlog
+        from timbal.guardrails import Verdict, guardrail
+
+        def ask(_text, ctx):
+            return Verdict.escalate("a person checks marks") if ctx.tool_name == "mark_salient" else True
+
+        app = Catalog()
+        model = TestModel(
+            responses=[
+                call("mark_salient", why="User is vegetarian."),
+                call("lookup", key="a"),
+                call("lookup", key="b"),
+                "done",
+                "must not be requested",
+            ]
+        )
+        agent = Agent(
+            name="bot",
+            model=model,
+            tools=[app],
+            salience_tool=True,
+            guardrails=[guardrail(ask, stages=["tool_args"], name="ask")],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        app.offered[:] = [
+            Tool(name="mark_salient", handler=lambda why: f"app {why}"),
+            Tool(name="lookup", handler=lambda key: key),
+        ]
+        fresh(parked.run_id)
+        with structlog.testing.capture_logs() as logs:
+            _, out = await run(agent, resume={approval.approval_id: True})
+        assert out.status.code == "success"
+        assert len(self.clashes(logs, "A tool took the name of the salience tool")) == 1

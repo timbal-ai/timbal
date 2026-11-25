@@ -10,7 +10,6 @@ of the owner's turns is in flight, otherwise let through.
 
 import asyncio
 import contextlib
-import copy
 import inspect
 import weakref
 from collections.abc import Awaitable, Callable, Iterator
@@ -27,6 +26,7 @@ from ..state.background import (
     format_session_notice,
     format_user_message,
 )
+from ..state.context import _own_copy
 
 if TYPE_CHECKING:
     from ..state.context import RunContext
@@ -99,7 +99,7 @@ class Followup:
             # started the run is its context's from here, before any of its tools runs. (ChatSession sets it
             # as it builds the context, so the root is stamped as it is made.) Its own copy: a tool's write to
             # it does not change the root's.
-            run_context.trigger = copy.deepcopy(trigger)
+            run_context.trigger = _own_copy(trigger)
         root = run_context.root_span()
         if root is not None:
             root.metadata["trigger"] = trigger

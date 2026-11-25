@@ -163,6 +163,19 @@ def _claim_app_id(value: Any) -> int | None:
     return None
 
 
+def _deployed_rev(subject: Any) -> Any:
+    """The revision a run's code is: the subject's, else ``TIMBAL_PROJECT_REV``, which the platform's runtime sets
+    (the config loader reads ``TIMBAL_REV`` only), for a run of the app this process was deployed for alone
+    (``TIMBAL_APP_ID``): another app's run is not this deployment's code."""
+    rev = getattr(subject, "rev", None)
+    if rev:
+        return rev
+    deployed_app = os.getenv("TIMBAL_APP_ID")
+    if deployed_app and str(getattr(subject, "app_id", None)) == deployed_app:
+        return os.getenv("TIMBAL_PROJECT_REV")
+    return None
+
+
 def _platform_claims(run_context: Any, call_id: str | None) -> dict[str, Any]:
     """The ``_meta`` claims for the platform's server only: the app and revision the run belongs to
     (``platform_config.subject``), and the calling tool span's path (the agent that made the call is the
@@ -171,10 +184,7 @@ def _platform_claims(run_context: Any, call_id: str | None) -> dict[str, Any]:
     span = run_context._trace.get(call_id) if call_id else None
     return {
         PROVENANCE_APP_KEY: _claim_app_id(getattr(subject, "app_id", None)),
-        # The subject's, else where the platform's runtime sets it (the config loader reads TIMBAL_REV only).
-        PROVENANCE_REV_KEY: _claim_text(
-            getattr(subject, "rev", None) or os.getenv("TIMBAL_PROJECT_REV"), _CLAIM_REV_MAX
-        ),
+        PROVENANCE_REV_KEY: _claim_text(_deployed_rev(subject), _CLAIM_REV_MAX),
         PROVENANCE_PATH_KEY: _claim_text(getattr(span, "path", None), _CLAIM_PATH_MAX),
     }
 
