@@ -1183,6 +1183,26 @@ class TestARefusedCallsAnswer:
         assert ran == []
         assert any("could not be checked" in r for r in results(memory))
 
+    async def test_a_stop_with_a_history_that_cannot_be_checked_ends_the_run(self):
+        """The run it continues cannot be read, so which card a Cancel answers is not known either: the caller
+        said stop, and the run ends there (no model call, no tool), rather than the Cancel being set aside with
+        the other answers while the turn goes on."""
+        from timbal.types.approval import Cancel
+
+        ran = []
+        lookup = Tool(name="lookup", handler=lambda key: ran.append(key) or "found", requires_approval=True)
+        CURRENT[:] = [lookup]
+        model = TestModel(responses=[call("lookup", key="K"), "must not be requested"])
+        agent = Agent(name="bot", model=model, tools=[Catalog()], tracing_provider=InMemoryTracingProvider)
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        history, _ = memory_of(parked)
+        fresh("a-run-nobody-stored")
+        events = [e async for e in agent(messages=list(history), resume={approval.approval_id: Cancel(reason="stop")})]
+        out = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == agent.name)
+        assert out.status.code == "cancelled" and ran == [] and model.call_count == 1
+
     async def test_a_history_call_the_paused_turn_did_not_record_is_not_replayed(self):
         """The caller's history holds a waiting call the paused turn has no record of (another id): it is not
         one the answers were given for."""

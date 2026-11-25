@@ -4188,19 +4188,19 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         return call_id in bindings and bindings[call_id] == _binding(tool, providers)
 
     @staticmethod
-    def _stop_answer(run_context: Any, waiting_on: Any) -> str | None:
+    def _stop_answer(run_context: Any, answering: Collection[str]) -> str | None:
         """The reason of a ``Cancel`` among the run's resume values ("" without one), or None: the caller said
-        stop. Only one that answers what the paused turn waited on (``waiting_on``: its cards' ids): a Cancel
-        for another card is not about this turn. Its ids count as used (they ended the run, they were not
+        stop. Only one keyed by an id in ``answering``: what the paused turn waited on, and the answers that may
+        be for a call refused without a record of its cards (see :meth:`_answers_of_refused`). A Cancel for
+        another card is not about this turn. Its ids count as used (they ended the run, they were not
         ignored)."""
         from ..types.approval import Cancel
 
-        waiting = _card_ids(waiting_on)
-        if not waiting:
+        if not answering:
             return None
         stop = None
         for resume_id, value in run_context._resume_values.items():
-            if resume_id in waiting and Cancel.matches(value):
+            if resume_id in answering and Cancel.matches(value):
                 run_context._used_resume_ids.add(resume_id)
                 if stop is None:
                     reason = value.reason if isinstance(value, Cancel) else value.get("reason")
@@ -4208,26 +4208,31 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         return stop
 
     @staticmethod
-    def _retire_answers(
+    def _answers_of_refused(
         run_context: Any, waiting_on: Any, refused: Sequence[ToolUseContent], running: Sequence[ToolUseContent]
-    ) -> None:
-        """Take out of this run the answers given for calls that were not run (an approval is keyed by the
-        call's path and input, so the same call made again, on whatever has the tool now, would get the answer
-        given for the one refused). The answers of each refused call's own cards; when a refused call has no record
-        of its cards (it could not be checked), every answer but those of the calls that do run. They count as
-        used: they were not unrecognised, they were set aside."""
+    ) -> set[str]:
+        """The resume ids that may answer calls the resume refused: each refused call's own cards; when a refused
+        call has no record of its cards (it could not be checked), every answer but those of the calls that do
+        run, since which card any of them answers is not known."""
         values = run_context._resume_values
         if not values:
-            return
+            return set()
         if isinstance(waiting_on, dict) and all(call.id in waiting_on for call in refused):
-            retired = _card_ids({call.id: waiting_on[call.id] for call in refused})
-        else:
-            kept = (
-                _card_ids({call.id: waiting_on[call.id] for call in running if call.id in waiting_on})
-                if isinstance(waiting_on, dict)
-                else set()
-            )
-            retired = {resume_id for resume_id in values if resume_id not in kept}
+            return _card_ids({call.id: waiting_on[call.id] for call in refused}) & set(values)
+        kept = (
+            _card_ids({call.id: waiting_on[call.id] for call in running if call.id in waiting_on})
+            if isinstance(waiting_on, dict)
+            else set()
+        )
+        return {resume_id for resume_id in values if resume_id not in kept}
+
+    @staticmethod
+    def _retire_answers(run_context: Any, retired: set[str]) -> None:
+        """Take the answers given for calls that were not run (:meth:`_answers_of_refused`) out of this run: an
+        approval is keyed by the call's path and input, so the same call made again, on whatever has the tool now,
+        would get the answer given for the one refused. They count as used: they were not unrecognised, they were
+        set aside."""
+        values = run_context._resume_values
         retired &= set(values)
         if retired:
             run_context.__dict__["_resume_values"] = MappingProxyType(
@@ -5328,20 +5333,28 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             or self._call_binding(tools, providers, call) != bindings[call.id]
                         ]
                         waiting_on = paused_calls.get("waiting_on")
-                        stop = self._stop_answer(run_context, waiting_on) if unbound else None
-                        if stop is not None:
-                            # The caller said stop (a Cancel, by any of the ids the turn waits on), and a call it
-                            # may have said it for cannot run: nothing of the batch runs, as a Cancel at the gate
-                            # it answers would have ended the run there.
-                            raise RunCancelled(stop or "Run cancelled by user.")
-                        if unbound:
-                            unbound_ids = {call.id for call in unbound}
-                            self._retire_answers(
+                        unbound_ids = {call.id for call in unbound}
+                        refused_answers = (
+                            self._answers_of_refused(
                                 run_context,
                                 waiting_on,
                                 unbound,
                                 [call for call in tool_calls if call.id not in unbound_ids],
                             )
+                            if unbound
+                            else set()
+                        )
+                        stop = (
+                            self._stop_answer(run_context, _card_ids(waiting_on) | refused_answers) if unbound else None
+                        )
+                        if stop is not None:
+                            # The caller said stop (a Cancel, by any of the ids the turn waits on, or one that
+                            # may be for a call refused without a record of its cards), and a call it may have
+                            # said it for cannot run: nothing of the batch runs, as a Cancel at the gate it
+                            # answers would have ended the run there.
+                            raise RunCancelled(stop or "Run cancelled by user.")
+                        if unbound:
+                            self._retire_answers(run_context, refused_answers)
                         for call in unbound:
                             made_for = None if unverified else bindings.get(call.id)
                             event = (
