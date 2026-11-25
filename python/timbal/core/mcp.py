@@ -1,10 +1,12 @@
 import asyncio
 import contextvars
 import inspect
+import itertools
 import re
 import string
+import types
 import unicodedata
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import cached_property
@@ -23,7 +25,7 @@ from mcp import types as mcp_types
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
-from pydantic import Field, PrivateAttr, computed_field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, computed_field, model_validator
 
 from ..errors import RunCancelled
 from ..state import _suspension_id_for, get_call_id, get_run_context, suspend
@@ -397,24 +399,136 @@ class MCPTool(Tool):
         return schema
 
 
+# How far _auth_identity looks into what an auth keeps, how many values it takes from there, and the largest set
+# it reads (a set has no order every process agrees on: it is read whole, sorted, or not at all).
+_AUTH_DEPTH = 4
+_AUTH_VALUES = 64
+_AUTH_SET = 256
+# How many entries of a mapping or a list it reads at most (in their order, which every process agrees on).
+_AUTH_SCAN = 4096
+_PRIMITIVE_KEYS = (str, int, float, bool, bytes)
+
+
 def _auth_identity(auth: Any) -> tuple | None:
-    """Who an ``httpx.Auth`` reaches a server as (see ``MCPServer._provider_identity``): its class and the text it
-    holds (a header, a token, a user and a password). Not its numbers or objects: those are what it does as it runs
-    (a digest's nonce count, its last challenge), not who it is."""
+    """Who an ``httpx.Auth`` reaches a server as (see ``MCPServer._provider_identity``).
+
+    An auth that says so itself (a ``_provider_identity()`` of its own, as ``SnowflakeAuth`` has: what it was
+    configured with, not what it resolved as it ran) is taken at its word. Any other: its class and the text it
+    holds (a header, a token, a user and a password, a secret's value), also inside what it keeps (an object of
+    its own, a dict, a list), at most ``_AUTH_DEPTH`` deep and ``_AUTH_VALUES`` values, in an order every process
+    agrees on. Not its numbers: those are what it does as it runs (a digest's nonce count), not who it is. What
+    cannot be read is left out (a proxy outside its context, a property that raises), and objects that answer
+    attribute lookups themselves (proxies, lazy objects) are not looked into: a look would run their code.
+    """
     if auth is None:
         return None
-    state = dict(getattr(auth, "__dict__", None) or {})
-    for cls in type(auth).__mro__:  # slots a base class declares too
-        slots = cls.__dict__.get("__slots__", ())
-        for slot in (slots,) if isinstance(slots, str) else slots:  # one name, written as a string
-            if isinstance(slot, str) and slot not in state and hasattr(auth, slot):
-                state[slot] = getattr(auth, slot)
-    held = sorted(
-        (name, value.hex() if isinstance(value, bytes) else value)
-        for name, value in state.items()
-        if isinstance(value, str | bytes)
-    )
+    own = _safe_get(type(auth), "_provider_identity")
+    if callable(own):
+        try:
+            return (type(auth).__module__, type(auth).__qualname__, own(auth))
+        except Exception:
+            pass
+    held: list[tuple[str, str]] = []
+    _held_text(auth, "", 0, held, set())
     return (type(auth).__module__, type(auth).__qualname__, held)
+
+
+def _safe_get(value: Any, name: str) -> Any:
+    try:
+        return getattr(value, name, None)
+    except Exception:
+        return None
+
+
+def _looked_into(value: Any) -> bool:
+    """Whether the walk may read an object's attributes: not one that answers lookups itself (its own class chain
+    defines ``__getattr__`` or another ``__getattribute__``; a metaclass's lookups are the class's, not its
+    instances'). A pydantic model is read by its fields (:func:`_attributes`)."""
+    if isinstance(value, BaseModel):
+        return True
+    mro = type(value).__mro__
+    return not any(
+        "__getattr__" in cls.__dict__ or ("__getattribute__" in cls.__dict__ and cls is not object) for cls in mro
+    )
+
+
+def _held_text(value: Any, path: str, depth: int, held: list[tuple[str, str]], seen: set[int]) -> None:
+    if len(held) >= _AUTH_VALUES:
+        return
+    if isinstance(value, str):
+        held.append((path, value))
+        return
+    if isinstance(value, bytes | bytearray):
+        held.append((path, bytes(value).hex()))
+        return
+    if (
+        depth >= _AUTH_DEPTH
+        or value is None
+        or isinstance(value, int | float | complex)
+        or isinstance(
+            value, type | types.ModuleType | types.FunctionType | types.MethodType | types.BuiltinFunctionType
+        )
+        or id(value) in seen
+    ):
+        return
+    seen.add(id(value))
+    try:
+        if isinstance(value, Mapping):
+            # Keys that are plain values name their entry; an object's key would name it by its address.
+            items = (
+                (f"{key!r}", item)
+                for key, item in itertools.islice(value.items(), _AUTH_SCAN)
+                if isinstance(key, _PRIMITIVE_KEYS)
+            )
+        elif isinstance(value, list | tuple):
+            items = ((str(index), item) for index, item in enumerate(itertools.islice(value, _AUTH_SCAN)))
+        elif isinstance(value, set | frozenset):
+            if len(value) > _AUTH_SET:
+                return
+            texts = sorted(
+                item if isinstance(item, str) else bytes(item).hex()
+                for item in value
+                if isinstance(item, str | bytes | bytearray)
+            )
+            items = (("*", text) for text in texts)
+        elif _looked_into(value):
+            items = _attributes(value)
+        else:
+            return
+        for name, item in items:
+            if len(held) >= _AUTH_VALUES:
+                return
+            _held_text(item, f"{path}.{name}", depth + 1, held, seen)
+    except Exception:
+        return  # what cannot be read is left out
+
+
+def _attributes(value: Any) -> list[tuple[str, Any]]:
+    """An object's own attributes: its ``__dict__`` and its slots (a base class's too), each read on its own. A
+    pydantic model's: its fields and extras only (its private attributes are what it does as it runs, and may be
+    made per instance)."""
+    if isinstance(value, BaseModel):
+        try:
+            fields = [(name, getattr(value, name)) for name in type(value).model_fields]
+            return fields + list((value.__pydantic_extra__ or {}).items())
+        except Exception:
+            return []
+    items = []
+    try:
+        own = vars(value)
+    except Exception:
+        own = {}
+    items.extend(own.items())
+    for cls in type(value).__mro__:
+        slots = cls.__dict__.get("__slots__", ())
+        for slot in (slots,) if isinstance(slots, str) else slots:
+            if not isinstance(slot, str) or slot in ("__dict__", "__weakref__") or slot in own:
+                continue
+            try:
+                items.append((slot, getattr(value, slot)))
+            except Exception:
+                continue
+    return items
 
 
 class MCPServer(ToolSet):

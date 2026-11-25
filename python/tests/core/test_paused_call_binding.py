@@ -838,6 +838,141 @@ class TestTheProviderOfAResumedCall:
         assert identity(OneSlot("a")) != identity(OneSlot("b"))
         assert identity(Child("a")) != identity(Child("b"))
 
+    def test_credentials_an_auth_keeps_inside_other_objects_count_too(self):
+        """``SnowflakeAuth`` (the auth documented for ``MCPServer``) keeps its account, user, keys and integration
+        inside an object of its own: two tenants of one endpoint are told apart by them, and the same
+        configuration built again is the same."""
+        import httpx
+        from pydantic import SecretStr
+        from timbal.core import MCPServer
+        from timbal.tools.snowflake import SnowflakeAuth
+
+        def identity(auth):
+            return MCPServer(name="sf", transport="http", url="https://x.example/mcp", auth=auth)._provider_identity()
+
+        assert identity(SnowflakeAuth(account="a", user="u", token="t")) != identity(
+            SnowflakeAuth(account="b", user="u", token="t")
+        )
+        assert identity(SnowflakeAuth(integration="int-1")) != identity(SnowflakeAuth(integration="int-2"))
+        assert identity(SnowflakeAuth(account="a", private_key=SecretStr("k1"))) != identity(
+            SnowflakeAuth(account="a", private_key=SecretStr("k2"))
+        )
+        assert identity(SnowflakeAuth(account="a", user="u", token="t")) == identity(
+            SnowflakeAuth(account="a", user="u", token="t")
+        )
+
+        class Nested(httpx.Auth):
+            def __init__(self, tenant):
+                self.config = {"tenant": {"id": tenant}, "retries": 3}
+                self.me = self  # a cycle
+
+        assert identity(Nested("a")) != identity(Nested("b"))
+        assert identity(Nested("a")) == identity(Nested("a"))
+
+        # What SnowflakeAuth resolves as it runs (prepare()) is not who it is.
+        prepared = SnowflakeAuth(account="a", user="u", token="t")
+        before = identity(prepared)
+        prepared._settings = {"account": "a", "token": "minted-at-run-time"}
+        assert identity(prepared) == before
+
+    def test_an_auths_identity_is_the_same_in_every_process(self):
+        """Taken from what it holds in an order every process agrees on: not a set's iteration order (it follows
+        the hash seed), not an object's ``str()`` (it holds an address)."""
+        import os
+        import subprocess
+        import sys
+
+        script = (
+            "import hashlib, json, uuid, httpx\n"
+            "from pydantic import BaseModel, PrivateAttr\n"
+            "from timbal.core.mcp import _auth_identity\n"
+            "class Tag: pass\n"
+            "class Settings(BaseModel):\n"
+            "    api_key: str\n"
+            "    _session: str = PrivateAttr(default_factory=lambda: uuid.uuid4().hex)\n"
+            "class Auth(httpx.Auth):\n"
+            "    def __init__(self):\n"
+            "        self.settings = Settings(api_key='tenant-A')\n"
+            "        self.by_tag = {Tag(): 'x', 'tenant': 'a'}\n"
+            "        self.scopes = {f'scope:{i}' for i in range(100)}\n"
+            "print(hashlib.sha256(json.dumps(_auth_identity(Auth()), default=str).encode()).hexdigest())\n"
+        )
+        digests = {
+            subprocess.run(
+                [sys.executable, "-c", script],
+                env={**os.environ, "PYTHONHASHSEED": seed},
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            ).stdout.strip()
+            for seed in ("1", "2", "3")
+        }
+        assert len(digests) == 1
+
+    def test_an_auth_that_raises_when_looked_at_does_not_stop_the_agent(self):
+        """A proxy whose ``__dict__`` raises outside its context, a property that raises, a key whose ``str()``
+        raises: what cannot be read is left out, and the identity is still taken."""
+        import httpx
+        from timbal.core.mcp import _auth_identity
+
+        class Proxy:
+            @property
+            def __dict__(self):
+                raise RuntimeError("working outside of application context")
+
+        class Slotted:
+            __slots__ = ("token",)
+
+        class Loud(Slotted):
+            @property
+            def token(self):
+                raise RuntimeError("no token here")
+
+        class BadKey:
+            def __str__(self):
+                raise RuntimeError("no str")
+
+        class Auth(httpx.Auth):
+            def __init__(self):
+                self.proxy = Proxy()
+                self.loud = Loud()
+                self.keyed = {BadKey(): "x"}
+                self.tenant = "a"
+
+        held = _auth_identity(Auth())[2]
+        assert (".tenant", "a") in held
+
+    def test_a_models_fields_count_and_its_private_state_does_not(self):
+        import httpx
+        from pydantic import BaseModel, PrivateAttr
+        from timbal.core.mcp import _auth_identity
+
+        class Settings(BaseModel):
+            api_key: str
+            _calls: list = PrivateAttr(default_factory=list)
+
+        class Meta(type):
+            def __getattr__(cls, name):
+                raise AttributeError(name)
+
+        class Holder(metaclass=Meta):
+            def __init__(self, token):
+                self.token = token
+
+        class Auth(httpx.Auth):
+            def __init__(self, key, token="t"):
+                self.settings = Settings(api_key=key)
+                self.holder = Holder(token)
+
+        assert _auth_identity(Auth("tenant-A")) != _auth_identity(Auth("tenant-B"))
+        used = Auth("tenant-A")
+        before = _auth_identity(used)
+        used.settings._calls.append("ran")
+        assert _auth_identity(used) == before
+        # A class whose metaclass answers lookups is still read (only the instance's own lookups count).
+        assert _auth_identity(Auth("tenant-A", "t1")) != _auth_identity(Auth("tenant-A", "t2"))
+
     async def test_sets_of_one_class_with_another_configuration_are_two_providers(self):
         """``SqlTools(db="a")`` and ``SqlTools(db="b")``: their configuration tells them apart, so their swapping
         places is a provider change, and a call that paused on the first is not run on the second."""
