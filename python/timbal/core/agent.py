@@ -625,6 +625,15 @@ def _alike(binding: Any) -> bool:
     return isinstance(binding, str) and _LAYOUT in binding
 
 
+def _card_ids(waiting_on: Any) -> set[str]:
+    """Every card id a pause record waited on (by call; a list in a record of an earlier commit of this PR)."""
+    if isinstance(waiting_on, dict):
+        return {card for cards in waiting_on.values() if isinstance(cards, list | tuple) for card in cards}
+    if isinstance(waiting_on, list | tuple):
+        return set(waiting_on)
+    return set()
+
+
 def _card_id(event: Any) -> str:
     """The id a resume answers a card by (an approval's, a question's)."""
     return getattr(event, "approval_id", None) or getattr(event, "interaction_id", None) or ""
@@ -650,14 +659,21 @@ def _provider_key(tool_set: Any) -> str:
     """A tool set's identity as a provider (``ToolSet._provider_identity``), as a short digest: it is stored with
     a paused call, and an MCP server's address may hold a key.
 
-    Taken the first time the agent sees the set, and kept for that object: a set may keep what it does in its
-    fields (a skill the references it read), and the call that waited for an answer is still that set's when it
+    A set that says who it is (a ``_provider_identity`` of its own: an MCP server, a skill) is asked every time:
+    that is its configuration as it is now, and an MCP server reconfigured while it runs is another backend. One
+    read by the default (its JSON fields) is taken the first time the agent sees it and kept for that object: such
+    a set may keep what it does in its fields, and the call that waited for an answer is still that set's when it
     resumes. A new process takes it again from the set as it is configured, before it has done anything."""
-    entry = _PROVIDER_KEYS.get(id(tool_set))
-    if entry is not None and entry[0]() is tool_set:
-        return entry[1]
+    own = type(tool_set)._provider_identity is not ToolSet._provider_identity
+    if not own:
+        entry = _PROVIDER_KEYS.get(id(tool_set))
+        if entry is not None and entry[0]() is tool_set:
+            return entry[1]
     identity = json.dumps(tool_set._provider_identity(), default=str, separators=(",", ":"))
     key = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    if own:
+        # Its configuration, read as it is now (an MCP server reconfigured while running is another backend).
+        return key
     try:
         ref = weakref.ref(tool_set, partial(_forget_provider_key, id(tool_set)))
     except TypeError:  # not weakly referable: taken again each time
@@ -1920,10 +1936,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if loaded is not None:
             current_span.memory = loaded
             if run_context.parent_id and self._find_pending_tool_uses(loaded):
-                # The history is the caller's; what its waiting calls were made for is the paused parent's.
+                # The history is the caller's; what its waiting calls were made for is the paused parent's. One
+                # that cannot be read (not stored, or a storage error) says nothing: the calls are not run on the
+                # answers given. One that was read and has no record (an earlier version's) replays by name.
                 parent_trace = await run_context._get_parent_trace()
-                previous_span = self._own_span(parent_trace) if parent_trace is not None else None
-                return _paused_record(previous_span)
+                if parent_trace is None:
+                    return {"unverified": True}
+                return _paused_record(self._own_span(parent_trace))
             return None
 
         # Memory stays unset until it holds the previous turns: a turn cancelled while loading
@@ -4094,7 +4113,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         providers: Mapping[int, str],
         calls: Sequence[ToolUseContent],
         send_name: str | None,
-        cards: Sequence[str] = (),
+        cards: Mapping[str, Sequence[str]] | None = None,
         bound: Mapping[str, str] | None = None,
     ) -> None:
         """What a turn that pauses leaves for the run that resumes it: ``metadata.paused_calls`` (``resolve_memory``
@@ -4103,7 +4122,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         ``bindings``: whose tool each waiting call was made for (:meth:`_call_binding`: one of the agent's own,
         a tool set's by its provider, or the application's own), by tool call id. ``tool_names``: the names the
         agent's own tools had, by kind (those it picks at run time: the delivery tool, the salience tool,
-        ``search_tools`` / ``call_tool``). ``waiting_on``: the ids of the cards (``cards``) the turn showed. The
+        ``search_tools`` / ``call_tool``). ``waiting_on``: the ids of the cards (``cards``) the turn showed, by the call that showed them. The
         resumed run keeps the names and replays a call only on the tool it was made for: a name freed meanwhile
         (an application's tool gone from its tool set) does not hand an application's call, with the answer
         given for it, to a tool of the agent's own or of another provider, nor the other way round. ``bound``:
@@ -4122,7 +4141,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 for call in calls
             },
             "tool_names": names,
-            "waiting_on": list(cards),
+            "waiting_on": {call_id: list(ids) for call_id, ids in (cards or {}).items()},
             # The span it was written on: a record the agent's own metadata brought (a span starts with a copy
             # of it) is not one, and a turn that paused before its handler ran (the agent's own gate) has none.
             "call_id": current_span.call_id,
@@ -4156,12 +4175,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
     @staticmethod
     def _still_bound(paused_calls: Any, call_id: str, tool: Any, providers: Mapping[int, str]) -> bool:
-        """Whether a waiting call (``call_id``) runs on ``tool``: the binding its pause recorded is this tool's
-        (no record, or none for the call: as before, by name)."""
-        bindings = paused_calls.get("bindings") if isinstance(paused_calls, dict) else None
-        if not isinstance(bindings, dict) or call_id not in bindings:
+        """Whether a waiting call (``call_id``) runs on ``tool``: the binding its pause recorded is this tool's. No
+        record at all (a run an earlier version paused): as before, by name. A record that could not be read, or
+        that has none for the call: no (the replay check below answers the call as not run)."""
+        if not isinstance(paused_calls, dict):
             return True
-        return bindings[call_id] == _binding(tool, providers)
+        if paused_calls.get("unverified") is True:
+            return False
+        bindings = paused_calls.get("bindings")
+        if not isinstance(bindings, dict) or not bindings:
+            return True
+        return call_id in bindings and bindings[call_id] == _binding(tool, providers)
 
     @staticmethod
     def _stop_answer(run_context: Any, waiting_on: Any) -> str | None:
@@ -4171,16 +4195,60 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         ignored)."""
         from ..types.approval import Cancel
 
-        if not isinstance(waiting_on, list | tuple) or not waiting_on:
+        waiting = _card_ids(waiting_on)
+        if not waiting:
             return None
         stop = None
         for resume_id, value in run_context._resume_values.items():
-            if resume_id in waiting_on and Cancel.matches(value):
+            if resume_id in waiting and Cancel.matches(value):
                 run_context._used_resume_ids.add(resume_id)
                 if stop is None:
                     reason = value.reason if isinstance(value, Cancel) else value.get("reason")
                     stop = reason if isinstance(reason, str) else ""
         return stop
+
+    @staticmethod
+    def _retire_answers(
+        run_context: Any, waiting_on: Any, refused: Sequence[ToolUseContent], running: Sequence[ToolUseContent]
+    ) -> None:
+        """Take out of this run the answers given for calls that were not run (an approval is keyed by the
+        call's path and input, so the same call made again, on whatever has the tool now, would get the answer
+        given for the one refused). The answers of each refused call's own cards; when a refused call has no record
+        of its cards (it could not be checked), every answer but those of the calls that do run. They count as
+        used: they were not unrecognised, they were set aside."""
+        values = run_context._resume_values
+        if not values:
+            return
+        if isinstance(waiting_on, dict) and all(call.id in waiting_on for call in refused):
+            retired = _card_ids({call.id: waiting_on[call.id] for call in refused})
+        else:
+            kept = (
+                _card_ids({call.id: waiting_on[call.id] for call in running if call.id in waiting_on})
+                if isinstance(waiting_on, dict)
+                else set()
+            )
+            retired = {resume_id for resume_id in values if resume_id not in kept}
+        retired &= set(values)
+        if retired:
+            run_context.__dict__["_resume_values"] = MappingProxyType(
+                {resume_id: value for resume_id, value in values.items() if resume_id not in retired}
+            )
+            run_context._used_resume_ids.update(retired)
+
+    def _unverified_call_event(self, tool_call: ToolUseContent) -> OutputEvent:
+        """The result of a waiting call nothing says the answers were given for (the run it continues could not
+        be read, or has no record of the call): not run, decided on again if made again."""
+        message = (
+            f"The call of '{tool_call.name}' could not be checked against the turn that paused it, so it was not run "
+            "(an approval or an answer given for it was not used): call it again if it is still needed."
+        )
+        return self._synthetic_event(
+            tool_call.name,
+            RunStatus(code="error", reason="tool_not_found", message=message),
+            input=tool_call.input,
+            error=message,
+            metadata={"tool_not_found": True, "requested_tool": tool_call.name, "made_for": None},
+        )
 
     def _resolve_tool_for_call(self, tools: list[Tool], tool_call: ToolUseContent) -> Tool | None:
         """Find the tool for a call, logging when the LLM asked for an unknown one."""
@@ -4596,7 +4664,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         else:
             kept_names = _NO_KEPT_NAMES
         # The approvals and questions this run's turn shows (their ids): what a pause records it waited on.
-        cards: list[str] = []
+        cards: dict[str, list[str]] = {}
         # Whether the current step offers the tool: text from a step that could not send is not a draft.
         send_offered = False
         # The publishing order of a batch that holds two sends or more (None for any other batch).
@@ -5206,7 +5274,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                             command_output = self._deliver_command(current_span, command_run)
                                     if event.type in _CARD_TYPES:
                                         # Before the card goes out (see the batch's loop below).
-                                        cards.append(_card_id(event))
+                                        cards.setdefault(tool_use_id, []).append(_card_id(event))
                                         self._note_pause(
                                             current_span,
                                             tools,
@@ -5246,27 +5314,45 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     first_pending: OutputEvent | None = None
                     lost_claim: OutputEvent | None = None
                     bindings = paused_calls.get("bindings") if paused_calls is not None else None
-                    if isinstance(bindings, dict) and bindings:
+                    unverified = paused_calls is not None and paused_calls.get("unverified") is True
+                    if unverified or (isinstance(bindings, dict) and bindings):
                         # Each call runs only on the tool it was made for (_note_pause). One whose tool is gone
                         # (a name another tool has now, or none) is answered as such and not run: the answer
-                        # the caller gave for it is not handed to another tool.
+                        # the caller gave for it is not handed to another tool. Nor does one nothing says the
+                        # answers were for: the run it continues could not be read, or has no record of it.
                         unbound = [
                             call
                             for call in tool_calls
-                            if call.id in bindings and self._call_binding(tools, providers, call) != bindings[call.id]
+                            if unverified
+                            or call.id not in bindings
+                            or self._call_binding(tools, providers, call) != bindings[call.id]
                         ]
-                        stop = self._stop_answer(run_context, paused_calls.get("waiting_on")) if unbound else None
+                        waiting_on = paused_calls.get("waiting_on")
+                        stop = self._stop_answer(run_context, waiting_on) if unbound else None
                         if stop is not None:
                             # The caller said stop (a Cancel, by any of the ids the turn waits on), and a call it
                             # may have said it for cannot run: nothing of the batch runs, as a Cancel at the gate
                             # it answers would have ended the run there.
                             raise RunCancelled(stop or "Run cancelled by user.")
+                        if unbound:
+                            unbound_ids = {call.id for call in unbound}
+                            self._retire_answers(
+                                run_context,
+                                waiting_on,
+                                unbound,
+                                [call for call in tool_calls if call.id not in unbound_ids],
+                            )
                         for call in unbound:
-                            event = self._unbound_call_event(call, bindings[call.id])
+                            made_for = None if unverified else bindings.get(call.id)
+                            event = (
+                                self._unverified_call_event(call)
+                                if unverified or call.id not in bindings
+                                else self._unbound_call_event(call, made_for)
+                            )
                             # A new list each time: the span's metadata starts as a copy of the agent's own.
                             current_span.metadata["calls_not_resumed"] = [
                                 *(current_span.metadata.get("calls_not_resumed") or ()),
-                                {"tool_call_id": call.id, "tool": call.name, "made_for": bindings[call.id]},
+                                {"tool_call_id": call.id, "tool": call.name, "made_for": made_for},
                             ]
                             await _process_tool_event(event, call.id, append_to_messages=True)
                             for pending_event in pending_guardrail_events:
@@ -5292,7 +5378,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         pending_guardrail_events.clear()
                         if event.type in _CARD_TYPES:
                             # Before the card goes out (see the batch's loop below).
-                            cards.append(_card_id(event))
+                            cards.setdefault(tool_call.id, []).append(_card_id(event))
                             self._note_pause(current_span, tools, providers, tool_calls, send_name, cards)
                         yield event
                         if (
@@ -5822,7 +5908,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if event.type in _CARD_TYPES:
                         # Before the card goes out: a caller may stop reading at it and resume at once, from a
                         # trace read before this turn is closed (and recorded on its way out, which is later).
-                        cards.append(_card_id(event))
+                        cards.setdefault(tool_call.id, []).append(_card_id(event))
                         self._note_pause(current_span, tools, providers, tool_calls, send_name, cards)
                     yield event
                     if (

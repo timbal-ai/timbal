@@ -6,10 +6,11 @@ import re
 import string
 import types
 import unicodedata
+import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, partial
 from typing import Any, Literal, TypeVar
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
@@ -404,9 +405,35 @@ class MCPTool(Tool):
 _AUTH_DEPTH = 4
 _AUTH_VALUES = 64
 _AUTH_SET = 256
-# How many entries of a mapping or a list it reads at most (in their order, which every process agrees on).
+# How many entries of a list it reads at most (in their order), and the largest mapping it reads (sorted).
 _AUTH_SCAN = 4096
 _PRIMITIVE_KEYS = (str, int, float, bool, bytes)
+
+
+# Each auth object's identity, taken the first time it is seen (by id, with a weak reference that removes the
+# entry when the auth goes): an auth keeps what it does as it runs (a digest's last challenge, an OAuth provider's
+# tokens), which is not who it is. A new auth object is another identity.
+_AUTH_IDENTITIES: dict[int, tuple[Any, tuple]] = {}
+
+
+def _seen_auth_identity(auth: Any) -> tuple | None:
+    """:func:`_auth_identity`, taken the first time this auth object is seen and kept for it."""
+    if auth is None:
+        return None
+    entry = _AUTH_IDENTITIES.get(id(auth))
+    if entry is not None and entry[0]() is auth:
+        return entry[1]
+    identity = _auth_identity(auth)
+    try:
+        ref = weakref.ref(auth, partial(_forget_auth_identity, id(auth)))
+    except TypeError:  # not weakly referable: read each time
+        return identity
+    _AUTH_IDENTITIES[id(auth)] = (ref, identity)
+    return identity
+
+
+def _forget_auth_identity(auth_id: int, _ref: Any) -> None:
+    _AUTH_IDENTITIES.pop(auth_id, None)
 
 
 def _auth_identity(auth: Any) -> tuple | None:
@@ -474,11 +501,14 @@ def _held_text(value: Any, path: str, depth: int, held: list[tuple[str, str]], s
     seen.add(id(value))
     try:
         if isinstance(value, Mapping):
-            # Keys that are plain values name their entry; an object's key would name it by its address.
-            items = (
-                (f"{key!r}", item)
-                for key, item in itertools.islice(value.items(), _AUTH_SCAN)
-                if isinstance(key, _PRIMITIVE_KEYS)
+            # Keys that are plain values name their entry (an object's key would name it by its address), in
+            # sorted order: two equal mappings built in another order are one identity. A mapping too large to
+            # sort cheaply is left out whole, which every process agrees on.
+            if len(value) > _AUTH_SCAN:
+                return
+            items = sorted(
+                ((f"{key!r}", item) for key, item in value.items() if isinstance(key, _PRIMITIVE_KEYS)),
+                key=lambda entry: entry[0],
             )
         elif isinstance(value, list | tuple):
             items = ((str(index), item) for index, item in enumerate(itertools.islice(value, _AUTH_SCAN)))
@@ -510,7 +540,7 @@ def _attributes(value: Any) -> list[tuple[str, Any]]:
     if isinstance(value, BaseModel):
         try:
             fields = [(name, getattr(value, name)) for name in type(value).model_fields]
-            return fields + list((value.__pydantic_extra__ or {}).items())
+            return sorted(fields + list((value.__pydantic_extra__ or {}).items()), key=lambda entry: entry[0])
         except Exception:
             return []
     items = []
@@ -528,7 +558,8 @@ def _attributes(value: Any) -> list[tuple[str, Any]]:
                 items.append((slot, getattr(value, slot)))
             except Exception:
                 continue
-    return items
+    # By name: two equal objects whose attributes were set in another order are one identity.
+    return sorted(items, key=lambda entry: entry[0])
 
 
 class MCPServer(ToolSet):
@@ -685,7 +716,9 @@ class MCPServer(ToolSet):
             tuple(self.args),
             sorted(self.headers.items()),
             sorted(self.env.items()),
-            _auth_identity(self.auth),
+            # Who it reaches the server as: read the first time this auth object is seen (what an auth keeps as it
+            # runs, a challenge or a token it refreshed, is not who it is); a new auth object is another identity.
+            _seen_auth_identity(self.auth),
         )
 
     def _get_lock(self) -> asyncio.Lock:

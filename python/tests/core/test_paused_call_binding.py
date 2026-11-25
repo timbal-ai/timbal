@@ -1136,3 +1136,122 @@ class TestAProvidersIdentityHoldsWhileItRuns:
         fresh(parked.run_id)
         _, out = await run(agent, resume={question.interaction_id: "Ada"})
         assert out.status.code == "success" and got == ["Ada"]
+
+
+class TestARefusedCallsAnswer:
+    """Review of 3e93f2f5: what the refusal of a paused call leaves behind, and when a resume can be checked."""
+
+    async def test_is_not_used_by_the_same_call_made_again(self):
+        """The call was refused (another provider has the tool now). The model makes it again, with the same
+        input: that is a new decision on the provider there now, not the old answer (whose approval id, the path
+        and the input, is the same)."""
+        ran = []
+        first = Tool(name="lookup", handler=lambda key: f"first {key}", requires_approval=True)
+        second = Tool(name="lookup", handler=lambda key: ran.append(key) or "second", requires_approval=True)
+        CURRENT[:] = [first]
+        model = TestModel(responses=[call("lookup", key="K"), call("lookup", key="K"), "done", "must not be requested"])
+        agent = Agent(
+            name="bot", model=model, tools=[Catalog(), OtherCatalog()], tracing_provider=InMemoryTracingProvider
+        )
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        CURRENT.clear()
+        OTHER[:] = [second]
+        fresh(parked.run_id)
+        events, out = await run(agent, resume={approval.approval_id: True})
+        assert ran == []
+        assert out.status.reason == "approval_required"  # asked again, for the provider there now
+        assert any(isinstance(e, ApprovalEvent) for e in events)
+
+    async def test_a_history_whose_turn_cannot_be_read_is_not_replayed(self):
+        """The caller passes the history (``messages=``) and the run it continues cannot be read: nothing says
+        what its waiting calls were made for, so none runs on the answers given."""
+        ran = []
+        lookup = Tool(name="lookup", handler=lambda key: ran.append(key) or "found", requires_approval=True)
+        CURRENT[:] = [lookup]
+        model = TestModel(responses=[call("lookup", key="K"), "done", "must not be requested"])
+        agent = Agent(name="bot", model=model, tools=[Catalog()], tracing_provider=InMemoryTracingProvider)
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        history, _ = memory_of(parked)
+        fresh("a-run-nobody-stored")
+        events = [e async for e in agent(messages=list(history), resume={approval.approval_id: True})]
+        out = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == agent.name)
+        memory, _ = memory_of(out)
+        assert ran == []
+        assert any("could not be checked" in r for r in results(memory))
+
+    async def test_a_history_call_the_paused_turn_did_not_record_is_not_replayed(self):
+        """The caller's history holds a waiting call the paused turn has no record of (another id): it is not
+        one the answers were given for."""
+        ran = []
+        lookup = Tool(name="lookup", handler=lambda key: ran.append(key) or "found", requires_approval=True)
+        CURRENT[:] = [lookup]
+        model = TestModel(responses=[call("lookup", key="K"), "done", "must not be requested"])
+        agent = Agent(name="bot", model=model, tools=[Catalog()], tracing_provider=InMemoryTracingProvider)
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        history, _ = memory_of(parked)
+        edited = [
+            *history[:-1],
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="c-other", name="lookup", input={"key": "K"})],
+                stop_reason="tool_use",
+            ),
+        ]
+        fresh(parked.run_id)
+        events = [e async for e in agent(messages=edited, resume={approval.approval_id: True})]
+        out = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == agent.name)
+        memory, _ = memory_of(out)
+        assert ran == []
+        assert any("could not be checked" in r for r in results(memory))
+
+
+class TestAProvidersIdentityFollowsItsConfiguration:
+    def test_a_mcp_server_reconfigured_while_running_is_another_provider(self):
+        """An MCP server's identity is all configuration: one whose address or credentials change while the
+        process runs is another backend from then on (it is not kept from the first time the agent saw it)."""
+        from timbal.core import MCPServer
+        from timbal.core.agent import _provider_key
+
+        server = MCPServer(name="crm", transport="http", url="https://a.example/mcp")
+        before = _provider_key(server)
+        server.url = "https://b.example/mcp"
+        assert _provider_key(server) != before
+        server.url = "https://a.example/mcp"
+        assert _provider_key(server) == before
+
+    def test_what_a_servers_auth_does_as_it_runs_does_not_change_it(self):
+        """The server's own fields are read as they are now; its auth is read the first time it is seen (a digest
+        auth keeps the server's last challenge, an OAuth provider its tokens: what it does, not who it is). A new
+        auth object is a reconfiguration, and another identity."""
+        import httpx
+        from timbal.core import MCPServer
+        from timbal.core.agent import _provider_key
+
+        auth = httpx.DigestAuth("user", "pass")
+        server = MCPServer(name="crm", transport="http", url="https://a.example/mcp", auth=auth)
+        before = _provider_key(server)
+        auth._last_challenge = ("realm", "nonce-1")  # a first 401
+        assert _provider_key(server) == before
+        auth._last_challenge = ("realm", "nonce-2")  # a new nonce
+        assert _provider_key(server) == before
+        server.auth = httpx.DigestAuth("other", "pass")
+        assert _provider_key(server) != before
+
+    def test_equal_auth_mappings_are_one_identity_whatever_their_order(self):
+        import httpx
+        from timbal.core.mcp import _auth_identity
+
+        class Auth(httpx.Auth):
+            def __init__(self, config):
+                self.config = config
+
+        assert _auth_identity(Auth({"tenant": "a", "region": "eu"})) == _auth_identity(
+            Auth({"region": "eu", "tenant": "a"})
+        )
+        assert _auth_identity(Auth({"tenant": "a"})) != _auth_identity(Auth({"tenant": "b"}))
