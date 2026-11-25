@@ -536,10 +536,22 @@ class MCPServer(ToolSet):
     _inflight_seq: int = PrivateAttr(default=0)
 
     def _provider_identity(self) -> tuple:
-        # A named server is its name (its tools carry it as their prefix); an unnamed one, where it is reached.
-        if self.name:
-            return ("mcp", self.name)
-        return ("mcp", self.transport, self.service, self.url, self.command, tuple(self.args))
+        # Its name, where it is reached and who it is reached as (headers, env: two tenants of one endpoint are two
+        # backends). A server that keeps its name and moves to another endpoint is another backend, and a call that
+        # paused on the first one is not run on the second on the answer given then. Kept as a digest (the agent's
+        # _provider_key): the credentials among these are never stored. A rotated token changes it too, and a call
+        # paused before is then decided on again.
+        return (
+            "mcp",
+            self.name,
+            self.transport,
+            self.service,
+            self.url,
+            self.command,
+            tuple(self.args),
+            sorted(self.headers.items()),
+            sorted(self.env.items()),
+        )
 
     def _get_lock(self) -> asyncio.Lock:
         """Session lock: guards open/reset/close of the transport."""

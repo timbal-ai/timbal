@@ -13,9 +13,10 @@ import secrets
 import threading
 import time
 import traceback
+import weakref
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import cached_property
+from functools import cached_property, partial
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -615,6 +616,13 @@ def _join(head: list, tail: list) -> list:
 _CARD_TYPES = frozenset({"APPROVAL", "INTERACTION"})
 # Agent span metadata: what a paused turn leaves for the run that resumes it (Agent._note_pause).
 _PAUSED_CALLS_KEY = "paused_calls"
+# In the provider of a tool of two sets that are alike: what follows is their layout (Agent._tell_alike_sets_apart).
+_LAYOUT = "~"
+
+
+def _alike(binding: Any) -> bool:
+    """Whether a recorded binding is to one of two tool sets that are alike (bound to their layout)."""
+    return isinstance(binding, str) and _LAYOUT in binding
 
 
 def _card_id(event: Any) -> str:
@@ -633,11 +641,43 @@ def _binding(tool: Any, providers: Mapping[int, str]) -> str:
     return f"tool@{provider}" if provider else "tool"
 
 
+# Each tool set's provider key, taken the first time the agent saw it: by id, with a weak reference to the set
+# (a model of it is not hashable) that removes the entry when the set goes.
+_PROVIDER_KEYS: dict[int, tuple[Any, str]] = {}
+
+
 def _provider_key(tool_set: Any) -> str:
     """A tool set's identity as a provider (``ToolSet._provider_identity``), as a short digest: it is stored with
-    a paused call, and an MCP server's address may hold a key."""
+    a paused call, and an MCP server's address may hold a key.
+
+    Taken the first time the agent sees the set, and kept for that object: a set may keep what it does in its
+    fields (a skill the references it read), and the call that waited for an answer is still that set's when it
+    resumes. A new process takes it again from the set as it is configured, before it has done anything."""
+    entry = _PROVIDER_KEYS.get(id(tool_set))
+    if entry is not None and entry[0]() is tool_set:
+        return entry[1]
     identity = json.dumps(tool_set._provider_identity(), default=str, separators=(",", ":"))
-    return hashlib.sha256(identity.encode()).hexdigest()[:16]
+    key = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    try:
+        ref = weakref.ref(tool_set, partial(_forget_provider_key, id(tool_set)))
+    except TypeError:  # not weakly referable: taken again each time
+        return key
+    _PROVIDER_KEYS[id(tool_set)] = (ref, key)
+    return key
+
+
+def _forget_provider_key(set_id: int, _ref: Any) -> None:
+    _PROVIDER_KEYS.pop(set_id, None)
+
+
+def _paused_record(span: Any) -> dict[str, Any] | None:
+    """What a paused turn left for the run that resumes it (``paused_calls``, see Agent._note_pause), from its span:
+    only from a paused span that wrote it (stamped with its ``call_id``). Never put in the resumed run's metadata:
+    a span starts with the agent's own, and a key of that name there is the application's."""
+    if span is None or not _is_pause(span.status) or not span.metadata:
+        return None
+    record = span.metadata.get(_PAUSED_CALLS_KEY)
+    return record if isinstance(record, dict) and record.get("call_id") == span.call_id else None
 
 
 def _left_waiting(current_span: Any) -> bool:
@@ -1879,7 +1919,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         loaded = self._turn_messages(current_span.input)
         if loaded is not None:
             current_span.memory = loaded
-            return
+            if run_context.parent_id and self._find_pending_tool_uses(loaded):
+                # The history is the caller's; what its waiting calls were made for is the paused parent's.
+                parent_trace = await run_context._get_parent_trace()
+                previous_span = self._own_span(parent_trace) if parent_trace is not None else None
+                return _paused_record(previous_span)
+            return None
 
         # Memory stays unset until it holds the previous turns: a turn cancelled while loading
         # them must store no memory, which the next turn rebuilds (see _previous_memory), rather
@@ -1913,7 +1958,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # re-executed by the agent loop (see _find_pending_tool_uses), so we must
         # NOT inject synthetic "tool failed" results for them.
         is_resume = _is_pause(previous_span.status)
-        paused_calls = None
+        paused_calls = _paused_record(previous_span)
         if is_resume and previous_span.metadata:
             # delivery="tool": the turn goes on in this run. What it sent before the pause still counts (a
             # draft is no longer its only answer), and so does an end_turn asked for in the paused batch.
@@ -1925,11 +1970,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 current_span.metadata["end_turn"] = True
                 if paused.get("silent"):
                     current_span.metadata["silent"] = True  # it ended its turn by staying silent
-            # Whose tool each waiting call was made for, the names the agent's own tools had, and what the turn
-            # waited on (_note_pause). Handed to the handler, never put in this run's metadata.
-            record = paused.get(_PAUSED_CALLS_KEY)
-            if isinstance(record, dict) and record.get("call_id") == previous_span.call_id:
-                paused_calls = record
         prepared = None
         if (
             self.memory_compaction is not None
@@ -2817,21 +2857,25 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     commands[stripped] = tool
             return True
 
-        seen_keys: dict[str, int] = {}
+        # Each set: its provider key, the names of the tools it offered, and the ids of those the agent kept.
+        sets: list[tuple[str, list[str], list[int]]] = []
         for t in self.tools:
             if isinstance(t, ToolSet):
-                # Who the set's tools are (see _note_pause): the same set in another process, and a second set
-                # that is the same by that measure told apart by its place among them.
+                # Who the set's tools are (see _note_pause): the same set in another process.
                 key = _provider_key(t)
-                count = seen_keys[key] = seen_keys.get(key, 0) + 1
-                provider = key if count == 1 else f"{key}#{count}"
+                offered, kept = [], []
                 for tool in await t.resolve():
                     tool.nest(self._path)
                     self._wire_tool_guardrails(tool)
+                    offered.append(tool.name)
                     if _register(tool):
-                        tool_providers[id(tool)] = provider
+                        tool_providers[id(tool)] = key
+                        kept.append(id(tool))
+                sets.append((key, offered, kept))
             else:
                 _register(t)
+        if len(sets) > 1 and len({key for key, _, _ in sets}) < len(sets):
+            self._tell_alike_sets_apart(sets, tool_providers)
 
         if self._read_offloaded is not None:
             _register(self._read_offloaded)
@@ -2870,6 +2914,35 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 commands = {key: tool for key, tool in commands.items() if tool in tools}
                 self._record_allowed_tools(tools, tool_policy)
         return tools, commands, tools_names, tool_providers
+
+    def _tell_alike_sets_apart(self, sets: list[tuple[str, list[str], list[int]]], providers: dict[int, str]) -> None:
+        """Two tool sets the same by every measure the agent has (``ToolSet._provider_identity``: the same class
+        and configuration, an MCP server's endpoint and credentials): which is which rests on their order. Each
+        one's tools are bound to its place among them and to the names of the tools it offers: a call of theirs
+        that paused runs on the answer given then while its set is in that place with those tools, and is not
+        run once that changed (another order, another catalog), which a fresh call then decides on again.
+        Descriptions do not count (a set may say something new in one on every resolve), and neither does another
+        set's catalog. Two such sets that offer the same names are not told apart by anything the agent has: a
+        reorder of those between a pause and its resume goes unnoticed. Giving the sets a ``name`` tells them
+        apart for good."""
+        counts: dict[str, int] = {}
+        for key, _, _ in sets:
+            counts[key] = counts.get(key, 0) + 1
+        places: dict[str, int] = {}
+        for key, offered, kept in sets:
+            if counts[key] < 2:
+                continue
+            place = places[key] = places.get(key, 0) + 1
+            layout = hashlib.sha256(json.dumps(sorted(offered)).encode()).hexdigest()[:8]
+            for tool_id in kept:
+                providers[tool_id] = f"{key}#{place}{_LAYOUT}{layout}"
+        if not getattr(self, "_alike_sets_warned", False):
+            self._alike_sets_warned = True
+            logger.warning(
+                "Two tool sets of this agent cannot be told apart (the same class and configuration): a call of "
+                "theirs that waits for an answer is bound to their order. Give them a name.",
+                path=self._path,
+            )
 
     async def _plan_tool_search(
         self, tools: list[Tool], model: Any, names: Collection[str], kept: Mapping[str, str] | None = None
@@ -4062,10 +4135,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if isinstance(binding, str) and binding.startswith(f"{CALL_TOOL_NAME}>") and isinstance(tool_call.input, dict):
             target = tool_call.input.get("name")
             name = target if isinstance(target, str) and target else name
-        message = (
-            f"The tool '{name}' this call was made for is no longer available, so the call was not run "
-            "(an approval or an answer given for it was not used)."
-        )
+        if not _alike(binding):
+            message = (
+                f"The tool '{name}' this call was made for is no longer available, so the call was not run "
+                "(an approval or an answer given for it was not used)."
+            )
+        else:
+            message = (
+                f"The tool '{name}' offered now may not be the one this call was made for (tool sets of the same "
+                "kind changed), so the call was not run (an approval or an answer given for it was not used): call "
+                "it again if it is still needed."
+            )
         return self._synthetic_event(
             tool_call.name,
             RunStatus(code="error", reason="tool_not_found", message=message),
@@ -4073,6 +4153,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             error=message,
             metadata={"tool_not_found": True, "requested_tool": tool_call.name, "made_for": binding},
         )
+
+    @staticmethod
+    def _still_bound(paused_calls: Any, call_id: str, tool: Any, providers: Mapping[int, str]) -> bool:
+        """Whether a waiting call (``call_id``) runs on ``tool``: the binding its pause recorded is this tool's
+        (no record, or none for the call: as before, by name)."""
+        bindings = paused_calls.get("bindings") if isinstance(paused_calls, dict) else None
+        if not isinstance(bindings, dict) or call_id not in bindings:
+            return True
+        return bindings[call_id] == _binding(tool, providers)
 
     @staticmethod
     def _stop_answer(run_context: Any, waiting_on: Any) -> str | None:
@@ -5008,7 +5097,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             # If no command is found, we'll simply let the message pass through the LLM
                             # (A call taken back out is run again only by the command of the tool it names.)
                             if command in commands and (
-                                reopened is None or commands[command].name == reopened[0].content[0].name
+                                reopened is None
+                                or (
+                                    commands[command].name == reopened[0].content[0].name
+                                    # The provider it was made for (_note_pause): else it goes back as the
+                                    # pending call it was stored as, which the check below answers as such.
+                                    and self._still_bound(
+                                        paused_calls, reopened[0].content[0].id, commands[command], providers
+                                    )
+                                )
                             ):
                                 tool = commands[command]
                                 tool_input = {}

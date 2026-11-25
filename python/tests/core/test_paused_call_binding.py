@@ -728,3 +728,228 @@ class TestARecordTheRunDidNotWrite:
         fresh(parked.run_id)
         _, out = await run(agent, resume={approval.approval_id: True})
         assert out.status.code == "success" and ran == ["K"]
+
+
+class TestTheProviderOfAResumedCall:
+    """The rest of the provider check: a slash command run again, a resume given its history by the caller, and a
+    provider whose identity changed or cannot be told apart."""
+
+    async def test_a_slash_command_is_not_run_by_another_providers_tool(self):
+        ran = []
+        first = Tool(name="charge", handler=lambda amount: f"first {amount}", requires_approval=True)
+        first.command = "charge"
+        second = Tool(name="charge", handler=lambda amount: ran.append(amount) or "second", requires_approval=True)
+        second.command = "charge"
+        CURRENT[:] = [first]
+        model = TestModel(responses=["done", "must not be requested"])
+        agent = Agent(
+            name="bot", model=model, tools=[Catalog(), OtherCatalog()], tracing_provider=InMemoryTracingProvider
+        )
+        fresh()
+        events, parked = await run(agent, prompt="/charge 5")
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        CURRENT.clear()
+        OTHER[:] = [second]
+        fresh(parked.run_id)
+        _, out = await run(agent, prompt="/charge 5", resume={approval.approval_id: True})
+        memory, _ = memory_of(out)
+        assert ran == []
+        assert any("this call was made for" in r for r in results(memory))
+
+    async def test_a_resume_with_the_callers_history_is_checked_too(self):
+        ran = []
+        first = Tool(name="lookup", handler=lambda key: f"first {key}", requires_approval=True)
+        second = Tool(name="lookup", handler=lambda key: ran.append(key) or "second", requires_approval=True)
+        CURRENT[:] = [first]
+        model = TestModel(responses=[call("lookup", key="K"), "done", "must not be requested"])
+        agent = Agent(
+            name="bot", model=model, tools=[Catalog(), OtherCatalog()], tracing_provider=InMemoryTracingProvider
+        )
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        history, _ = memory_of(parked)
+        CURRENT.clear()
+        OTHER[:] = [second]
+        fresh(parked.run_id)
+        events = [e async for e in agent(messages=list(history), resume={approval.approval_id: True})]
+        out = next(e for e in reversed(events) if isinstance(e, OutputEvent) and e.path == agent.name)
+        memory, _ = memory_of(out)
+        assert ran == []
+        assert any("this call was made for" in r for r in results(memory))
+
+    def test_a_named_mcp_server_is_its_endpoint_too(self):
+        from timbal.core import MCPServer
+
+        def identity(**kwargs):
+            return MCPServer(name="crm", transport="http", **kwargs)._provider_identity()
+
+        assert identity(url="https://a.example/mcp") != identity(url="https://b.example/mcp")
+        assert identity(url="https://a.example/mcp") == identity(url="https://a.example/mcp")
+        # Two tenants of one endpoint are two backends.
+        tenant = {"url": "https://a.example/mcp"}
+        assert identity(**tenant, headers={"X-Tenant": "a"}) != identity(**tenant, headers={"X-Tenant": "b"})
+
+    async def test_sets_of_one_class_with_another_configuration_are_two_providers(self):
+        """``SqlTools(db="a")`` and ``SqlTools(db="b")``: their configuration tells them apart, so their swapping
+        places is a provider change, and a call that paused on the first is not run on the second."""
+        ran = []
+
+        class SqlTools(ToolSet):
+            db: str
+            offered: list
+
+            async def resolve(self):
+                return list(self.offered)
+
+        def query(db):
+            return Tool(name="query", handler=lambda q: ran.append((db, q)) or db, requires_approval=True)
+
+        a, b = SqlTools(db="a", offered=[query("a")]), SqlTools(db="b", offered=[query("b")])
+        assert a._provider_identity() != b._provider_identity()
+        model = TestModel(responses=[call("query", q="drop"), "done", "must not be requested"])
+        agent = Agent(name="bot", model=model, tools=[a, b], tracing_provider=InMemoryTracingProvider)
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        agent.tools[:] = [b, a]
+        fresh(parked.run_id)
+        _, out = await run(agent, resume={approval.approval_id: True})
+        memory, _ = memory_of(out)
+        assert ran == [] and any("this call was made for" in r for r in results(memory))
+
+    async def test_sets_alike_resume_while_nothing_changed(self):
+        """Two sets that are the same by every measure the agent has (the same class, no name) are told apart by
+        their order. Nothing changed between the pause and the resume: the question gets its answer (a refusal
+        here would ask again, and refuse again, for ever)."""
+        got = []
+
+        def ask(note: str) -> str:
+            answer = suspend({"question": "Which?"})
+            got.append(answer)
+            return f"{note}: {answer}"
+
+        class Static(ToolSet):
+            offered: list
+
+            async def resolve(self):
+                return list(self.offered)
+
+        agent = Agent(
+            name="bot",
+            model=TestModel(responses=[call("ask_user", note="n"), "done", "must not be requested"]),
+            tools=[
+                Static(offered=[Tool(name="ask_user", handler=ask)]),
+                Static(offered=[Tool(name="refund", handler=lambda o: o)]),
+            ],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        fresh()
+        events, parked = await run(agent)
+        question = next(e for e in events if isinstance(e, InteractionEvent))
+        fresh(parked.run_id)
+        _, out = await run(agent, resume={question.interaction_id: "Ada"})
+        assert out.status.code == "success" and got == ["Ada"]
+
+    async def test_sets_alike_whose_layout_changed_need_a_fresh_decision(self):
+        """The two sets (alike: the same class and configuration) swapped places between the pause and the resume,
+        and both offer the tool: the call is not run on the old answer. The model calls again; that call is bound
+        to the layout as it is now, and runs once approved (a fresh decision that sticks)."""
+        ran = []
+
+        class Static(ToolSet):
+            offered: list
+
+            async def resolve(self):
+                return list(self.offered)
+
+        def lookup(where):
+            return Tool(name="lookup", handler=lambda key: ran.append((where, key)) or where, requires_approval=True)
+
+        def only(where):
+            return Tool(name=f"{where}_only", handler=lambda: where)
+
+        first = Static(offered=[lookup("first"), only("first")])
+        second = Static(offered=[lookup("second"), only("second")])
+        model = TestModel(
+            responses=[call("lookup", key="K"), call("lookup", key="K2"), "done", "must not be requested"]
+        )
+        agent = Agent(name="bot", model=model, tools=[first, second], tracing_provider=InMemoryTracingProvider)
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        agent.tools[:] = [second, first]
+        fresh(parked.run_id)
+        events, parked = await run(agent, resume={approval.approval_id: True})
+        assert parked.status.reason == "approval_required" and ran == []
+        memory, _ = memory_of(parked)
+        assert any("may not be the one" in r for r in results(memory))
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        fresh(parked.run_id)
+        _, out = await run(agent, resume={approval.approval_id: True})
+        assert out.status.code == "success" and ran == [("second", "K2")]
+
+
+class TestAProvidersIdentityHoldsWhileItRuns:
+    async def test_state_a_set_keeps_in_its_fields_does_not_change_it(self):
+        """A set may keep what it does in its fields (a skill the references it read): the identity is taken the
+        first time the agent sees the set, so the call that waited is still the set's when it resumes."""
+        ran = []
+
+        class Remembering(ToolSet):
+            seen: list = []
+
+            async def resolve(self):
+                self.seen = [*self.seen, len(self.seen)]
+                return [Tool(name="refund", handler=lambda order: ran.append(order) or "ok", requires_approval=True)]
+
+        model = TestModel(responses=[call("refund", order="A-1"), "done", "must not be requested"])
+        agent = Agent(name="bot", model=model, tools=[Remembering()], tracing_provider=InMemoryTracingProvider)
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        fresh(parked.run_id)
+        _, out = await run(agent, resume={approval.approval_id: True})
+        assert out.status.code == "success" and ran == ["A-1"]
+
+    def test_a_skill_is_not_its_references(self, tmp_path):
+        from timbal.core.skill import Skill
+
+        (tmp_path / "SKILL.md").write_text("---\nname: billing\ndescription: Billing.\n---\nRefunds.\n")
+        skill = Skill(path=tmp_path)
+        before = skill._provider_identity()
+        skill.references["policy.md"] = "Refund within 30 days."
+        assert skill._provider_identity() == before
+
+    async def test_a_siblings_changing_description_does_not_move_a_call(self):
+        """Two sets alike (the same class and configuration); the second's tool says something new on every
+        resolve. The first one's question still gets its answer."""
+        got, n = [], [0]
+
+        def ask(note: str) -> str:
+            got.append(suspend({"question": "Which?"}))
+            return note
+
+        class Static(ToolSet):
+            which: int = 0
+
+            async def resolve(self):
+                if self.__dict__.get("_asks"):
+                    return [Tool(name="ask_user", handler=ask)]
+                n[0] += 1
+                return [Tool(name="status", description=f"Open tickets: {n[0]}", handler=lambda: "ok")]
+
+        first, second = Static(), Static()
+        first.__dict__["_asks"] = True
+        agent = Agent(
+            name="bot",
+            model=TestModel(responses=[call("ask_user", note="n"), "done", "must not be requested"]),
+            tools=[first, second],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        fresh()
+        events, parked = await run(agent)
+        question = next(e for e in events if isinstance(e, InteractionEvent))
+        fresh(parked.run_id)
+        _, out = await run(agent, resume={question.interaction_id: "Ada"})
+        assert out.status.code == "success" and got == ["Ada"]

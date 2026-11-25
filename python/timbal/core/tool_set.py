@@ -1,3 +1,4 @@
+import json
 from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, ConfigDict
@@ -38,8 +39,18 @@ class ToolSet(ABC, BaseModel):
 
     def _provider_identity(self) -> tuple:
         """What makes this set the same provider of tools in another process (a paused call is resumed only on
-        a tool of the provider it was made for, see ``Agent._note_pause``): its class, and its ``name`` when
-        it has one. A subclass whose instances differ otherwise says how (an MCP server: where it is reached).
+        a tool of the provider it was made for, see ``Agent._note_pause``): its class, and its configuration,
+        the fields (declared or extra, ``name`` among them) whose values are plain JSON. Kept as a digest, so a
+        secret among them is not stored. A field holding anything else (a client, a list of tools) is left out:
+        its ``str()`` may differ in every process. A subclass whose instances differ otherwise says how.
         """
-        name = getattr(self, "name", None)
-        return (type(self).__module__, type(self).__qualname__, name if isinstance(name, str) else None)
+        fields = {}
+        for name, value in (
+            *((name, getattr(self, name, None)) for name in type(self).model_fields),
+            *(self.__pydantic_extra__ or {}).items(),
+        ):
+            try:
+                fields[name] = json.loads(json.dumps(value, sort_keys=True))
+            except (TypeError, ValueError, RecursionError):
+                continue
+        return (type(self).__module__, type(self).__qualname__, fields)
