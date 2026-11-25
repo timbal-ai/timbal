@@ -790,6 +790,54 @@ class TestTheProviderOfAResumedCall:
         tenant = {"url": "https://a.example/mcp"}
         assert identity(**tenant, headers={"X-Tenant": "a"}) != identity(**tenant, headers={"X-Tenant": "b"})
 
+    def test_a_mcp_servers_auth_is_who_it_reaches_the_server_as(self):
+        """``auth`` (an ``httpx.Auth``) is a credential like a header: two tenants that differ only by it are two
+        backends. What it does as it runs (a digest's nonce count) is not who it is."""
+        import httpx
+        from timbal.core import MCPServer
+
+        def identity(auth):
+            return MCPServer(name="crm", transport="http", url="https://a.example/mcp", auth=auth)._provider_identity()
+
+        assert identity(httpx.BasicAuth("a", "x")) != identity(httpx.BasicAuth("b", "y"))
+        assert identity(httpx.BasicAuth("a", "x")) == identity(httpx.BasicAuth("a", "x"))
+        assert identity(httpx.DigestAuth("a", "x")) != identity(httpx.DigestAuth("b", "y"))
+        assert identity(httpx.BasicAuth("a", "x")) != identity(None)
+
+        class Bearer(httpx.Auth):
+            def __init__(self, token):
+                self.token = token
+                self.calls = 0
+
+            def auth_flow(self, request):
+                self.calls += 1
+                request.headers["Authorization"] = f"Bearer {self.token}"
+                yield request
+
+        used = Bearer("t-1")
+        before = identity(used)
+        used.calls = 7
+        assert identity(used) == before and identity(Bearer("t-2")) != before
+
+        # Credentials kept in slots: written as one name, or declared by a base class.
+        class OneSlot(httpx.Auth):
+            __slots__ = "token"
+
+            def __init__(self, token):
+                self.token = token
+
+        class Base(httpx.Auth):
+            __slots__ = ("token",)
+
+            def __init__(self, token):
+                self.token = token
+
+        class Child(Base):
+            __slots__ = ("extra",)
+
+        assert identity(OneSlot("a")) != identity(OneSlot("b"))
+        assert identity(Child("a")) != identity(Child("b"))
+
     async def test_sets_of_one_class_with_another_configuration_are_two_providers(self):
         """``SqlTools(db="a")`` and ``SqlTools(db="b")``: their configuration tells them apart, so their swapping
         places is a provider change, and a call that paused on the first is not run on the second."""

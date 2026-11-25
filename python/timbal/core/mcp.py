@@ -397,6 +397,26 @@ class MCPTool(Tool):
         return schema
 
 
+def _auth_identity(auth: Any) -> tuple | None:
+    """Who an ``httpx.Auth`` reaches a server as (see ``MCPServer._provider_identity``): its class and the text it
+    holds (a header, a token, a user and a password). Not its numbers or objects: those are what it does as it runs
+    (a digest's nonce count, its last challenge), not who it is."""
+    if auth is None:
+        return None
+    state = dict(getattr(auth, "__dict__", None) or {})
+    for cls in type(auth).__mro__:  # slots a base class declares too
+        slots = cls.__dict__.get("__slots__", ())
+        for slot in (slots,) if isinstance(slots, str) else slots:  # one name, written as a string
+            if isinstance(slot, str) and slot not in state and hasattr(auth, slot):
+                state[slot] = getattr(auth, slot)
+    held = sorted(
+        (name, value.hex() if isinstance(value, bytes) else value)
+        for name, value in state.items()
+        if isinstance(value, str | bytes)
+    )
+    return (type(auth).__module__, type(auth).__qualname__, held)
+
+
 class MCPServer(ToolSet):
     """A single MCP server connection that resolves its tools at runtime.
 
@@ -536,11 +556,11 @@ class MCPServer(ToolSet):
     _inflight_seq: int = PrivateAttr(default=0)
 
     def _provider_identity(self) -> tuple:
-        # Its name, where it is reached and who it is reached as (headers, env: two tenants of one endpoint are two
-        # backends). A server that keeps its name and moves to another endpoint is another backend, and a call that
-        # paused on the first one is not run on the second on the answer given then. Kept as a digest (the agent's
-        # _provider_key): the credentials among these are never stored. A rotated token changes it too, and a call
-        # paused before is then decided on again.
+        # Its name, where it is reached and who it is reached as (headers, env, auth: two tenants of one endpoint are
+        # two backends). A server that keeps its name and moves to another endpoint is another backend, and a call
+        # that paused on the first one is not run on the second on the answer given then. Kept as a digest (the
+        # agent's _provider_key): the credentials among these are never stored. A rotated token changes it too, and
+        # a call paused before is then decided on again.
         return (
             "mcp",
             self.name,
@@ -551,6 +571,7 @@ class MCPServer(ToolSet):
             tuple(self.args),
             sorted(self.headers.items()),
             sorted(self.env.items()),
+            _auth_identity(self.auth),
         )
 
     def _get_lock(self) -> asyncio.Lock:
