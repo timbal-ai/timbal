@@ -2198,12 +2198,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # and events are the call's to speak (SessionScheduler.takes), so they stay pending for it.
             return
         notifications = store.drain_completions()
-        if run_context._steering is False:
-            # A wake (the application's turn: a routine, a heartbeat, a recovery turn) leaves messages from other
-            # agents for a turn of their own, with the session's tools: under the wake's tool policy the send may
-            # be hidden, or named so that the policy reaches another tool (one of the agent's own called
-            # send_to_agent), and the turn would take a message it cannot answer. Whether or not the session is in
-            # a directory now: a restored one is in none until it joins again, and its recovery turn runs first.
+        if channel is None or run_context._steering is False:
+            # Messages from other agents are for a turn the session starts itself, with its tools and its send. Not
+            # a turn it did not start (another client's, chained onto one of its runs and admitted into it: no
+            # send), nor a wake (the application's turn: a routine, a heartbeat, a recovery turn), under whose tool
+            # policy the send may be hidden, or named so that the policy reaches another tool (one of the agent's
+            # own called send_to_agent). Whether or not the session is in a directory now: a restored one is in
+            # none until it joins again, and its recovery turn runs first. They start a turn of their own after it.
             events = store.drain_events(settle=False, where=lambda event: event.source not in ("user", "agent"))
         else:
             events = store.drain_events(settle=False, where=lambda event: event.source != "user")
@@ -2278,8 +2279,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 settle=False, where=lambda event: event.lane == "next" and channel.takes(event, store)
             )
         else:
+            # Not a turn of the session's own: messages from other agents wait for one (see
+            # _inject_background_completions).
             events = store.drain_events(
-                settle=False, where=lambda event: event.lane == "next" and event.kept_for is None
+                settle=False,
+                where=lambda event: event.lane == "next" and event.kept_for is None and event.source != "agent",
             )
         if not events:
             return []

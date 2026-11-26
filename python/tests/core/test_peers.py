@@ -903,6 +903,7 @@ class TestReviewRoundOne:
         assert event.state == "pending" and app_ran == []
         context = fresh(peer=membership)  # a turn of the session's own
         adopt_background_store(context, b._store)
+        b._scheduler.mark_own(context)
         await run(bob)
         assert event.state == "delivered" and not b._store.pending_events()
         await b.close()
@@ -1149,3 +1150,80 @@ class TestBugbotRoundOne:
         thread.join(10)
         assert not thread.is_alive() and session.closed
         assert dict.get(directory._members, "bob") is None and session._peer is None
+
+    async def test_a_turn_another_client_chains_into_the_session_leaves_agent_messages(self):
+        """Found reviewing the fix above: a plain `agent(parent_id=<a run of the chat>)` (or `/run` with it) is
+        admitted into the chat's session. It has no send (only a ChatSession's turns are in the directory) and
+        is not a wake, so it took the pending agent message, and nobody answered it."""
+        from timbal.state import get_run_context
+
+        gate, started = asyncio.Event(), {}
+
+        async def work() -> str:
+            started["run"] = get_run_context().id
+            await gate.wait()
+            return "worked"
+
+        def bob(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            return call("work") if messages[-1].collect_text() == "start" else "NO_REPLY"
+
+        async def from_the_app(**kwargs):
+            set_run_context(None)
+            set_call_id(None)
+            set_parent_call_id(None)
+            return await agent(**kwargs).collect()
+
+        agent = make_agent("bob", bob, tools=[Tool(name="work", handler=work)])
+        async with ChatSession(agent) as b:
+            AgentDirectory().join(b, "bob")
+            b.send("start")
+            await until(lambda: "run" in started)
+            receipt = await b.receive_agent_message("hello?", sender="alice", message_id="am_x3")
+            foreign = asyncio.create_task(from_the_app(prompt="from the app", parent_id=started["run"]))
+            await until(lambda: b._scheduler._others_waiting > 0)
+            gate.set()
+            out = await asyncio.wait_for(foreign, 10)
+            event = b._agent_message("alice", receipt["message_id"])
+            await until(lambda: event.state == "delivered" and not b.busy, timeout=10)
+            assert event.run_id != out.run_id
+            context = await b._load_run(event.run_id)
+            assert (context.root_span().metadata.get("trigger") or {}).get("kind") == "session_event"
+
+    async def test_a_turn_another_client_chains_into_the_session_does_not_steer_agent_messages_in(self):
+        """The same between steps: an agent with steering=True steers in another client's turn too, which took an
+        urgent agent message after its tool batch."""
+        from timbal.state import get_run_context
+
+        gate, started = asyncio.Event(), {}
+
+        async def work() -> str:
+            started["run"] = get_run_context().id
+            await gate.wait()
+            return "worked"
+
+        def bob(messages):
+            if messages[-1].role == "tool":
+                return "done"
+            return call("work") if messages[-1].collect_text() == "start" else "NO_REPLY"
+
+        async def from_the_app(**kwargs):
+            set_run_context(None)
+            set_call_id(None)
+            set_parent_call_id(None)
+            return await agent(**kwargs).collect()
+
+        agent = make_agent("bob", bob, tools=[Tool(name="work", handler=work)], steering=True)
+        async with ChatSession(agent) as b:
+            AgentDirectory().join(b, "bob")
+            b.send("hi")
+            await until(lambda: b.turns == 1 and not b.busy)
+            foreign = asyncio.create_task(from_the_app(prompt="start", parent_id=b.head))
+            await until(lambda: "run" in started)
+            receipt = await b.receive_agent_message("stop", sender="alice", message_id="am_u1", priority="urgent")
+            gate.set()
+            out = await asyncio.wait_for(foreign, 10)
+            event = b._agent_message("alice", receipt["message_id"])
+            await until(lambda: event.state == "delivered" and not b.busy, timeout=10)
+            assert event.run_id != out.run_id
