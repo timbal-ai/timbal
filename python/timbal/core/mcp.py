@@ -1,10 +1,17 @@
 import asyncio
 import contextvars
 import inspect
-from collections.abc import Awaitable, Callable
+import itertools
+import os
+import re
+import string
+import types
+import unicodedata
+import weakref
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, partial
 from typing import Any, Literal, TypeVar
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
@@ -20,10 +27,10 @@ from mcp import types as mcp_types
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
-from pydantic import Field, PrivateAttr, computed_field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, computed_field, model_validator
 
 from ..errors import RunCancelled
-from ..state import _suspension_id_for, get_run_context, suspend
+from ..state import _suspension_id_for, get_call_id, get_run_context, suspend
 from ..types.approval import Cancel
 from ..types.content import FileContent, TextContent
 from ..types.file import File
@@ -37,6 +44,27 @@ logger = structlog.get_logger("timbal.core.mcp")
 
 ELICITATION_KIND = "mcp_elicitation"
 """``InteractionEvent.kind`` used when an MCP server elicits input mid tool call."""
+
+# ``tools/call`` ``_meta`` keys naming the calling run and the tool's span (``MCPServer.provenance``).
+PROVENANCE_RUN_KEY = "timbal.ai/run_id"
+PROVENANCE_CALL_KEY = "timbal.ai/call_id"
+PROVENANCE_PARENT_KEY = "timbal.ai/parent_run_id"
+PROVENANCE_SESSION_KEY = "timbal.ai/session_id"
+# The platform's server only: the app and revision the run belongs to, and the calling tool span's path.
+PROVENANCE_APP_KEY = "timbal.ai/app_id"
+PROVENANCE_REV_KEY = "timbal.ai/rev"
+PROVENANCE_PATH_KEY = "timbal.ai/path"
+
+# What the platform's ``_meta`` reader takes (monolith ``src/mcp/meta.rs``). It refuses the whole tool call (a
+# 400) for a claim it cannot read and for any value shaped like a credential, so a value that would not pass is
+# left out here instead: a call never fails because of its provenance, it goes through unlinked.
+_CLAIM_ID_MAX = 128
+_CLAIM_ID_CHARS = frozenset(string.ascii_letters + string.digits + "-_.:")
+_CLAIM_REV_MAX = 255
+_CLAIM_PATH_MAX = 512
+_CLAIM_APP_ID_MAX = 2**63 - 1  # the platform reads it as an i64
+_API_KEY_PREFIX = re.compile(r"t\+?[0-9]+_")
+_JWT_CHARS = frozenset(string.ascii_letters + string.digits + "-_=")
 
 _ELICIT_ACTIONS = frozenset({"accept", "decline", "cancel"})
 
@@ -81,6 +109,86 @@ _JSON_TYPE_CHECKS: dict[str, Callable[[Any], bool]] = {
     "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
     "number": lambda v: isinstance(v, int | float) and not isinstance(v, bool),
 }
+
+
+def _looks_like_a_credential(value: str) -> bool:
+    """A value the platform takes for a credential in ``_meta``: an ``Authorization`` value (``Bearer`` /
+    ``Basic``), a Timbal API key (``t<n>_`` with a random tail of 32 or more letters and digits) or a JWT."""
+    value = value.strip()
+    if value[:7].lower() == "bearer " or value[:6].lower() == "basic ":
+        return True
+    tail = value.rsplit("_", 1)[-1]
+    if len(tail) >= 32 and tail.isascii() and tail.isalnum() and _API_KEY_PREFIX.match(value):
+        return True
+    parts = value.split(".")
+    return len(parts) == 3 and value.startswith("eyJ") and all(part and set(part) <= _JWT_CHARS for part in parts)
+
+
+def _claim_id(value: Any) -> str | None:
+    """``value`` if the platform reads it as an id (1 to 128 letters, digits, ``-``, ``_``, ``.``, ``:``)."""
+    if (
+        isinstance(value, str)
+        and 0 < len(value) <= _CLAIM_ID_MAX
+        and set(value) <= _CLAIM_ID_CHARS
+        and not _looks_like_a_credential(value)
+    ):
+        return value
+    return None
+
+
+def _claim_text(value: Any, limit: int) -> str | None:
+    """``value`` if the platform reads it as free text (``rev``, ``path``): not blank, at most ``limit``
+    characters, no control character. Spaces and any other Unicode are fine: agent names are free text. Not a
+    lone surrogate (a ``str`` can hold one, read with ``surrogateescape``): no UTF-8 request can carry it."""
+    if (
+        isinstance(value, str)
+        and value.strip()
+        and len(value) <= limit
+        and not any(unicodedata.category(c) in ("Cc", "Cs") for c in value)
+        and not _looks_like_a_credential(value)
+    ):
+        return value
+    return None
+
+
+def _claim_app_id(value: Any) -> int | None:
+    """``value`` as the positive integer the platform reads for ``app_id`` (sent as a JSON number)."""
+    if isinstance(value, str):
+        digits = value.lstrip("0")
+        if not (value.isascii() and value.isdigit()) or len(digits) > 19:
+            return None  # (and int() parses no more than 4,300 digits from text)
+        value = int(digits or "0")
+    if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= _CLAIM_APP_ID_MAX:
+        return value
+    return None
+
+
+def _deployed_rev(subject: Any) -> Any:
+    """The revision a run's code is: the subject's, else ``TIMBAL_PROJECT_REV``, which the platform's runtime sets
+    (the config loader reads ``TIMBAL_REV`` only), for a run of the app this process was deployed for alone
+    (``TIMBAL_APP_ID``): another app's run is not this deployment's code. Both ids are read as the ``app_id``
+    claim reads them (``_claim_app_id``: ``"001829"`` is app 1829), and neither may be one the claim would leave
+    out."""
+    rev = getattr(subject, "rev", None)
+    if rev:
+        return rev
+    app = _claim_app_id(getattr(subject, "app_id", None))
+    if app is not None and app == _claim_app_id(os.getenv("TIMBAL_APP_ID")):
+        return os.getenv("TIMBAL_PROJECT_REV")
+    return None
+
+
+def _platform_claims(run_context: Any, call_id: str | None) -> dict[str, Any]:
+    """The ``_meta`` claims for the platform's server only: the app and revision the run belongs to
+    (``platform_config.subject``), and the calling tool span's path (the agent that made the call is the
+    path without its last segment). Each is None when the platform would refuse its value."""
+    subject = getattr(run_context.platform_config, "subject", None)
+    span = run_context._trace.get(call_id) if call_id else None
+    return {
+        PROVENANCE_APP_KEY: _claim_app_id(getattr(subject, "app_id", None)),
+        PROVENANCE_REV_KEY: _claim_text(_deployed_rev(subject), _CLAIM_REV_MAX),
+        PROVENANCE_PATH_KEY: _claim_text(getattr(span, "path", None), _CLAIM_PATH_MAX),
+    }
 
 
 def _convert_call_tool_result(tool_name: str, result: mcp_types.CallToolResult) -> Any:
@@ -308,6 +416,168 @@ class MCPTool(Tool):
         return schema
 
 
+# How far _auth_identity looks into what an auth keeps, how many values it takes from there, and the largest set
+# it reads (a set has no order every process agrees on: it is read whole, sorted, or not at all).
+_AUTH_DEPTH = 4
+_AUTH_VALUES = 64
+_AUTH_SET = 256
+# How many entries of a list it reads at most (in their order), and the largest mapping it reads (sorted).
+_AUTH_SCAN = 4096
+_PRIMITIVE_KEYS = (str, int, float, bool, bytes)
+
+
+# Each auth object's identity, taken the first time it is seen (by id, with a weak reference that removes the
+# entry when the auth goes): an auth keeps what it does as it runs (a digest's last challenge, an OAuth provider's
+# tokens), which is not who it is. A new auth object is another identity.
+_AUTH_IDENTITIES: dict[int, tuple[Any, tuple]] = {}
+
+
+def _seen_auth_identity(auth: Any) -> tuple | None:
+    """:func:`_auth_identity`, taken the first time this auth object is seen and kept for it."""
+    if auth is None:
+        return None
+    entry = _AUTH_IDENTITIES.get(id(auth))
+    if entry is not None and entry[0]() is auth:
+        return entry[1]
+    identity = _auth_identity(auth)
+    try:
+        ref = weakref.ref(auth, partial(_forget_auth_identity, id(auth)))
+    except TypeError:  # not weakly referable: read each time
+        return identity
+    _AUTH_IDENTITIES[id(auth)] = (ref, identity)
+    return identity
+
+
+def _forget_auth_identity(auth_id: int, _ref: Any) -> None:
+    _AUTH_IDENTITIES.pop(auth_id, None)
+
+
+def _auth_identity(auth: Any) -> tuple | None:
+    """Who an ``httpx.Auth`` reaches a server as (see ``MCPServer._provider_identity``).
+
+    An auth that says so itself (a ``_provider_identity()`` of its own, as ``SnowflakeAuth`` has: what it was
+    configured with, not what it resolved as it ran) is taken at its word. Any other: its class and the text it
+    holds (a header, a token, a user and a password, a secret's value), also inside what it keeps (an object of
+    its own, a dict, a list), at most ``_AUTH_DEPTH`` deep and ``_AUTH_VALUES`` values, in an order every process
+    agrees on. Not its numbers: those are what it does as it runs (a digest's nonce count), not who it is. What
+    cannot be read is left out (a proxy outside its context, a property that raises), and objects that answer
+    attribute lookups themselves (proxies, lazy objects) are not looked into: a look would run their code.
+    """
+    if auth is None:
+        return None
+    own = _safe_get(type(auth), "_provider_identity")
+    if callable(own):
+        try:
+            return (type(auth).__module__, type(auth).__qualname__, own(auth))
+        except Exception:
+            pass
+    held: list[tuple[str, str]] = []
+    _held_text(auth, "", 0, held, set())
+    return (type(auth).__module__, type(auth).__qualname__, held)
+
+
+def _safe_get(value: Any, name: str) -> Any:
+    try:
+        return getattr(value, name, None)
+    except Exception:
+        return None
+
+
+def _looked_into(value: Any) -> bool:
+    """Whether the walk may read an object's attributes: not one that answers lookups itself (its own class chain
+    defines ``__getattr__`` or another ``__getattribute__``; a metaclass's lookups are the class's, not its
+    instances'). A pydantic model is read by its fields (:func:`_attributes`)."""
+    if isinstance(value, BaseModel):
+        return True
+    mro = type(value).__mro__
+    return not any(
+        "__getattr__" in cls.__dict__ or ("__getattribute__" in cls.__dict__ and cls is not object) for cls in mro
+    )
+
+
+def _held_text(value: Any, path: str, depth: int, held: list[tuple[str, str]], seen: set[int]) -> None:
+    if len(held) >= _AUTH_VALUES:
+        return
+    if isinstance(value, str):
+        held.append((path, value))
+        return
+    if isinstance(value, bytes | bytearray):
+        held.append((path, bytes(value).hex()))
+        return
+    if (
+        depth >= _AUTH_DEPTH
+        or value is None
+        or isinstance(value, int | float | complex)
+        or isinstance(
+            value, type | types.ModuleType | types.FunctionType | types.MethodType | types.BuiltinFunctionType
+        )
+        or id(value) in seen
+    ):
+        return
+    seen.add(id(value))
+    try:
+        if isinstance(value, Mapping):
+            # Keys that are plain values name their entry (an object's key would name it by its address), in
+            # sorted order: two equal mappings built in another order are one identity. A mapping too large to
+            # sort cheaply is left out whole, which every process agrees on.
+            if len(value) > _AUTH_SCAN:
+                return
+            items = sorted(
+                ((f"{key!r}", item) for key, item in value.items() if isinstance(key, _PRIMITIVE_KEYS)),
+                key=lambda entry: entry[0],
+            )
+        elif isinstance(value, list | tuple):
+            items = ((str(index), item) for index, item in enumerate(itertools.islice(value, _AUTH_SCAN)))
+        elif isinstance(value, set | frozenset):
+            if len(value) > _AUTH_SET:
+                return
+            texts = sorted(
+                item if isinstance(item, str) else bytes(item).hex()
+                for item in value
+                if isinstance(item, str | bytes | bytearray)
+            )
+            items = (("*", text) for text in texts)
+        elif _looked_into(value):
+            items = _attributes(value)
+        else:
+            return
+        for name, item in items:
+            if len(held) >= _AUTH_VALUES:
+                return
+            _held_text(item, f"{path}.{name}", depth + 1, held, seen)
+    except Exception:
+        return  # what cannot be read is left out
+
+
+def _attributes(value: Any) -> list[tuple[str, Any]]:
+    """An object's own attributes: its ``__dict__`` and its slots (a base class's too), each read on its own. A
+    pydantic model's: its fields and extras only (its private attributes are what it does as it runs, and may be
+    made per instance)."""
+    if isinstance(value, BaseModel):
+        try:
+            fields = [(name, getattr(value, name)) for name in type(value).model_fields]
+            return sorted(fields + list((value.__pydantic_extra__ or {}).items()), key=lambda entry: entry[0])
+        except Exception:
+            return []
+    items = []
+    try:
+        own = vars(value)
+    except Exception:
+        own = {}
+    items.extend(own.items())
+    for cls in type(value).__mro__:
+        slots = cls.__dict__.get("__slots__", ())
+        for slot in (slots,) if isinstance(slots, str) else slots:
+            if not isinstance(slot, str) or slot in ("__dict__", "__weakref__") or slot in own:
+                continue
+            try:
+                items.append((slot, getattr(value, slot)))
+            except Exception:
+                continue
+    # By name: two equal objects whose attributes were set in another order are one identity.
+    return sorted(items, key=lambda entry: entry[0])
+
+
 class MCPServer(ToolSet):
     """A single MCP server connection that resolves its tools at runtime.
 
@@ -414,6 +684,18 @@ class MCPServer(ToolSet):
     """Mark every tool of this server ``defer_loading``: the model finds them through tool
     search (``Agent.tool_search``) instead of carrying all their schemas on every call."""
 
+    provenance: bool | None = None
+    """Send the calling run's id and the tool span's call id in each ``tools/call``'s ``_meta``
+    (``timbal.ai/run_id``, ``timbal.ai/call_id``), so the server can attribute what the call did
+    to the exact span (monolith#565). Per-call ids cannot ride on HTTP headers: those are fixed
+    per connection, which runs share. ``None`` (default): on for ``service="api"`` (the platform's
+    own server) only, so third-party servers never see run ids.
+
+    Also ``timbal.ai/parent_run_id`` and ``timbal.ai/session_id`` when known; for the platform's
+    server only, ``timbal.ai/app_id`` (a JSON integer), ``timbal.ai/rev`` (``platform_config.subject``)
+    and ``timbal.ai/path`` (the tool span's). A value the platform would refuse is left out, never
+    sent, so a call never fails because of its provenance (see ``_claim_id``)."""
+
     sampling_model: Any = None
     """Timbal model string (e.g. ``"anthropic/claude-haiku-4-5"``) or a ``TestModel`` used
     to answer the server's ``sampling/createMessage`` requests. ``None`` leaves sampling
@@ -421,6 +703,8 @@ class MCPServer(ToolSet):
     loop, so other traffic on this session waits while the LLM call runs."""
 
     _session: Any | None = PrivateAttr(default=None)
+    # The per-run connection a ``service="api"`` server opens to the platform: it sends the platform's claims.
+    _first_party: bool = PrivateAttr(default=False)
     _session_task: asyncio.Task | None = PrivateAttr(default=None)
     _session_closed: asyncio.Event | None = PrivateAttr(default=None)
     _get_session_id: Callable[[], str | None] | None = PrivateAttr(default=None)
@@ -431,6 +715,27 @@ class MCPServer(ToolSet):
     _tools_lock: asyncio.Lock | None = PrivateAttr(default=None)
     _inflight: dict[int, _InflightCall] = PrivateAttr(default_factory=dict)
     _inflight_seq: int = PrivateAttr(default=0)
+
+    def _provider_identity(self) -> tuple:
+        # Its name, where it is reached and who it is reached as (headers, env, auth: two tenants of one endpoint are
+        # two backends). A server that keeps its name and moves to another endpoint is another backend, and a call
+        # that paused on the first one is not run on the second on the answer given then. Kept as a digest (the
+        # agent's _provider_key): the credentials among these are never stored. A rotated token changes it too, and
+        # a call paused before is then decided on again.
+        return (
+            "mcp",
+            self.name,
+            self.transport,
+            self.service,
+            self.url,
+            self.command,
+            tuple(self.args),
+            sorted(self.headers.items()),
+            sorted(self.env.items()),
+            # Who it reaches the server as: read the first time this auth object is seen (what an auth keeps as it
+            # runs, a challenge or a token it refreshed, is not who it is); a new auth object is another identity.
+            _seen_auth_identity(self.auth),
+        )
 
     def _get_lock(self) -> asyncio.Lock:
         """Session lock: guards open/reset/close of the transport."""
@@ -466,6 +771,8 @@ class MCPServer(ToolSet):
     async def _project_connection(self):
         # Resolve BEFORE opening the transport's fresh-context owner task. It
         # must inherit the caller's identity, never a process service secret.
+        # Never pool these across runs: the platform takes each call's principal and party from this
+        # connection's credential (monolith#565), so a shared connection would act as the wrong caller.
         from ..platform.utils import _resolve_url_and_headers
 
         url, headers = _resolve_url_and_headers("api", "mcp", {})
@@ -479,7 +786,9 @@ class MCPServer(ToolSet):
             connect_timeout=self.connect_timeout,
             elicitation=self.elicitation,
             sampling_model=self.sampling_model,
+            provenance=self._sends_provenance(),
         )
+        server._first_party = True
         try:
             yield server
         finally:
@@ -1023,6 +1332,33 @@ class MCPServer(ToolSet):
 
         return _per_call
 
+    def _sends_provenance(self) -> bool:
+        return self.provenance if self.provenance is not None else self.service == "api"
+
+    def _provenance_meta(self) -> dict[str, Any] | None:
+        """``tools/call`` ``_meta`` naming the calling run and the tool's span, when enabled (see ``provenance``).
+
+        Also the parent run (when chained: the server derives the thread from it before the run is stored) and
+        the session (a hint, see ``ChatSession.root_run_id``); for the platform's server, the app, revision and
+        tool span path. Claims for linking only: identity is the request's own credential, never anything in
+        ``_meta``. A value the platform would refuse is left out (see ``_claim_id``), never sent.
+        """
+        if not self._sends_provenance():
+            return None
+        run_context = get_run_context()
+        if run_context is None:
+            return None
+        call_id = get_call_id()
+        claims = {
+            PROVENANCE_RUN_KEY: _claim_id(run_context.id),
+            PROVENANCE_CALL_KEY: _claim_id(call_id),
+            PROVENANCE_PARENT_KEY: _claim_id(run_context.parent_id),
+            PROVENANCE_SESSION_KEY: _claim_id(getattr(run_context, "_session_id", None)),
+        }
+        if self._first_party or self.service == "api":
+            claims.update(_platform_claims(run_context, call_id))
+        return {key: value for key, value in claims.items() if value is not None} or None
+
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
         # Bare name for the wire call; qualified name for the agent registry.
         bare_name = mcp_tool.name
@@ -1042,10 +1378,12 @@ class MCPServer(ToolSet):
                     # Approval lives on this public tool; invoke the bound
                     # handler directly so it is not requested a second time.
                     return await server._make_tool(mcp_tool).handler(**kwargs)
+            # Taken here, in the calling task: the session's owner task does not see the caller's context.
+            meta = self._provenance_meta()
             call = self._begin_call(bare_name)
             try:
                 result = await self._request(
-                    lambda session: session.call_tool(bare_name, arguments=kwargs),
+                    lambda session: session.call_tool(bare_name, arguments=kwargs, meta=meta),
                     what=f"tools/call {bare_name}",
                     abort=call.abort,
                     timeout=self._tool_timeout(bare_name),

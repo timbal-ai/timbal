@@ -7,6 +7,7 @@ Public API:
     - get_run_context(): Retrieves the current run context.
     - get_or_create_run_context(): Retrieves the current run context, creating a new one if necessary.
     - emit(): Fire-and-forget custom DELTA event on the current call's stream.
+    - mark_salient(): mark a moment worth remembering (span ``metadata.memory.salient``).
     - get_background_task / list_background_tasks / cancel_background_task /
       read_background_transcript / wait_for_background: session-scoped background children.
     - message_background_task: a message a running background agent reads after its current step.
@@ -20,7 +21,10 @@ See the function docstrings for usage details and warnings.
 
 import hashlib
 import json
+import os
 import re
+import threading
+from collections.abc import Mapping
 from contextvars import ContextVar
 from typing import Any
 
@@ -96,6 +100,65 @@ def emit(data: Any) -> None:
     if run_context is None:
         return
     run_context.emit(data)
+
+
+MAX_SALIENT_CHARS = 500
+# How many times a mark copies a span's memory that the copy itself keeps changing (see mark_salient).
+_SALIENT_COPIES = 8
+# Re-entrant: the copy runs code of the caller's (a mapping subclass), which may mark again on the same thread.
+_SALIENT_LOCK = threading.RLock()
+
+
+def _new_salient_lock() -> None:
+    global _SALIENT_LOCK
+    _SALIENT_LOCK = threading.RLock()  # a forked child starts with none held, whatever the parent was doing
+
+
+if hasattr(os, "register_at_fork"):  # (not on Windows)
+    os.register_at_fork(after_in_child=_new_salient_lock)
+
+
+def mark_salient(why: str, *, span: Any = None) -> bool:
+    """Mark a moment as worth remembering: appends ``why`` to ``span.metadata["memory"]["salient"]``.
+
+    For memory consolidation (monolith#565's dreams read marked spans first); it writes nothing to a
+    memory store and costs no model call. ``span`` defaults to the current span. Returns False (and
+    marks nothing) outside a run, for an empty reason, or when the span's ``memory`` is not a mapping (the
+    runnable's own metadata keeps something else there) or one that copying it replaces every time (code
+    of a mapping subclass that writes the span's ``memory``; tried 8 times); reasons are capped at
+    :data:`MAX_SALIENT_CHARS` characters. Counted in usage as ``memory:salient``.
+    """
+    run_context = get_run_context()
+    why = why.strip() if isinstance(why, str) else ""
+    if run_context is None or not why:
+        return False
+    if span is None:
+        try:
+            span = run_context.current_span()
+        except RuntimeError:
+            return False
+    # Copied, never written in place: a span's metadata starts as a shallow copy of its runnable's own, so a
+    # ``memory`` dict there may be the runnable's configuration, which every later run of it starts from. Under
+    # a lock: a tool run on a thread may mark the same span (read, copy and assign would lose a mark), and the
+    # count is a read, an increment and a write too.
+    with _SALIENT_LOCK:
+        for _ in range(_SALIENT_COPIES):
+            memory = span.metadata.get("memory")
+            if memory is not None and not isinstance(memory, Mapping):
+                return False  # the runnable keeps something else under that key: nowhere to put the mark
+            copy = dict(memory) if memory is not None else {}
+            salient = copy.get("salient")
+            marks = [*(salient if isinstance(salient, list | tuple) else ()), why[:MAX_SALIENT_CHARS]]
+            if span.metadata.get("memory") is memory:
+                break
+            # The copy ran code of the caller's (a mapping or list subclass) that marked this span: what it
+            # stored is the latest, so copy that. (It is a plain dict and list now, and runs nothing.)
+        else:
+            return False  # the copy changes the span's memory every time: nothing settles to add the mark to
+        copy["salient"] = marks
+        span.metadata["memory"] = copy
+        run_context.update_usage("memory:salient", 1)
+    return True
 
 
 # INTERNAL: This variables hold the call ids. Do not access directly.

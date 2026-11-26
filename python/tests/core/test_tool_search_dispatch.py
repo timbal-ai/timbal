@@ -248,7 +248,7 @@ class TestDispatch:
         ctx = context()
 
         async def offered():
-            tools, _, every_name = await a._resolve_step_tools(0)
+            tools, _, every_name, _ = await a._resolve_step_tools(0)
             return [tool.name for tool in (await a._plan_tool_search(tools, a.model, every_name))[0]]
 
         usual = await offered()

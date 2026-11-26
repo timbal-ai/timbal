@@ -656,6 +656,39 @@ def test_an_answer_json_cannot_carry_is_a_400_and_the_question_stays_open(client
     assert not state["parked"] and state["last_status"]["code"] == "success"
 
 
+def test_a_wake_trigger_json_cannot_carry_is_a_400(client):
+    """The body parser lets ``NaN`` through, and a snapshot cannot hold it: refused to its sender, not a 500,
+    and not queued (every save after it would fail)."""
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    refused = client.post(
+        f"/chat/sessions/{session_id}/wake",
+        content='{"text": "heartbeat", "trigger": {"kind": "routine", "ratio": NaN}}',
+        headers={"content-type": "application/json"},
+    )
+    # (Refused at the route, whether or not the session has a store: no answer could carry it.)
+    assert refused.status_code == 400 and "NaN" in refused.json()["detail"]
+    assert client.get(f"/chat/sessions/{session_id}").json()["wakes"] == []
+    woke = client.post(f"/chat/sessions/{session_id}/wake", json={"text": "heartbeat", "trigger": {"kind": "routine"}})
+    assert woke.status_code == 202
+
+
+def test_an_answer_with_a_lone_surrogate_is_a_400_and_nothing_runs(client):
+    """JSON in Python, not UTF-8: the store cannot write it (every save would fail) and the session's log could
+    not carry the approval it ends up in. Refused before the gated tool runs."""
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "charge"})
+    _until(lambda: client.get(f"/chat/sessions/{session_id}").json()["parked"], "the turn to ask for approval")
+    (approval,) = client.get(f"/chat/sessions/{session_id}").json()["pending_approvals"]
+    refused = client.post(
+        f"/chat/sessions/{session_id}/resume",
+        content=f'{{"resume": {{"{approval["approval_id"]}": {{"approved": true, "comment": "ok \\ud800"}}}}}}',
+        headers={"content-type": "application/json"},
+    )
+    assert refused.status_code == 400, refused.text
+    assert client.get(f"/chat/sessions/{session_id}").json()["parked"]
+    assert client.get(f"/chat/sessions/{session_id}/log", params={"after": 0}).status_code == 200
+
+
 def test_a_wake_key_that_is_not_text_is_a_400(client):
     session_id = client.post("/chat/sessions", json={}).json()["session_id"]
     for key in (5, ["a"], {"k": 1}):

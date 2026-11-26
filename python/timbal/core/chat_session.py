@@ -7,6 +7,7 @@ import functools
 import json
 import math
 import os
+import re
 import time
 import weakref
 from collections.abc import AsyncIterator, Callable, Collection
@@ -42,6 +43,7 @@ from ..types.approval import ApprovalResolution, Cancel
 from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.message import RUNTIME_SOURCE, Message
+from .runnable import ATTENDED_TRIGGER_KINDS, _own_copy
 from .session_scheduler import Followup, SessionScheduler, is_parked, pending_user_batch
 from .tool_policy import ReadOnlyWithin, read_only_within, restore_tool_policy
 from .tool_policy import ToolPaths as _ToolPaths  # noqa: F401 — re-exported for callers and tests
@@ -250,11 +252,56 @@ def _stored_answer(value: Any) -> Any:
     call would silently not run.
     """
     if isinstance(value, Cancel):
-        return {"$cancel": value.reason}
+        return {_CANCEL_KEY: value.reason}
     if isinstance(value, ApprovalResolution):
         # Its fields as they are, checked like any other answer below. Not pydantic's JSON mode: that writes
         # NaN and Infinity as null (an input override silently changed) and a set as a list.
         value = value.model_dump()
+    stored = _unchanged_by_json(value)
+    if isinstance(stored, dict) and (_CANCEL_KEY in stored or _ANSWER_KEY in stored):
+        # An answer shaped like the snapshot's own forms (a question may ask for any object): kept as itself,
+        # never read back as a Cancel.
+        return {_ANSWER_KEY: stored}
+    return stored
+
+
+# How a snapshot holds a Cancel, and an answer that has one of these keys itself (see _stored_answer).
+_CANCEL_KEY = "$cancel"
+_ANSWER_KEY = "$answer"
+# The rules _stored_answer writes by (SessionSnapshot.answer_format): 2 wraps an answer shaped like a stored form.
+ANSWER_FORMAT = 2
+
+
+def _load_answer(value: Any, answer_format: int) -> Any:
+    """One resume value as a snapshot gives it back (the inverse of :func:`_stored_answer`), by the rules of the
+    format that wrote it: an older snapshot holds an answer with an ``$answer`` key of its own as it was."""
+    if isinstance(value, dict):
+        if _CANCEL_KEY in value:
+            return Cancel(reason=value[_CANCEL_KEY])
+        if answer_format >= 2 and len(value) == 1 and _ANSWER_KEY in value:
+            return value[_ANSWER_KEY]
+    return value
+
+
+# A wake trigger's kind: what started the turn, shown to an approval reviewer (Runnable._review_gate).
+_TRIGGER_KIND = re.compile(r"[a-z][a-z0-9_.:-]{0,63}")
+# What the runtime writes on a turn's trigger (a wake's own fields, a session event's, a recovery's): an
+# application's wake trigger may not say them (the playground reads event_ids to mark the messages a turn took).
+_RESERVED_TRIGGER_KEYS = (
+    "wake_id",
+    "key",
+    "tool_policy",
+    "task_ids",
+    "event_ids",
+    "announce",
+    "continuation_index",
+    "dead_run_id",
+    "cut",
+)
+
+
+def _unchanged_by_json(value: Any) -> Any:
+    """What JSON gives back of ``value`` (a copy), if it gives it back unchanged. TypeError otherwise."""
     try:
         # allow_nan=False: NaN and Infinity are not JSON (Python writes and reads them all the same).
         carried = json.loads(json.dumps(value, allow_nan=False))
@@ -263,7 +310,7 @@ def _stored_answer(value: Any) -> Any:
     if carried != value:
         # JSON takes it and hands back something else (a tuple as a list, a number key as text).
         raise TypeError(f"{type(value).__name__} does not come back from JSON as it went in")
-    return value
+    return carried  # equal, and the caller's no more: what is kept from here cannot be changed under it
 
 
 def _dump_resume(values: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -305,13 +352,13 @@ async def _answered_within(call: Any, timeout: float) -> bool:
     return True
 
 
-def _load_resume(stored: dict[str, Any] | None) -> dict[str, Any] | None:
+def _load_resume(stored: dict[str, Any] | None, answer_format: Any) -> dict[str, Any] | None:
+    """Answers as a snapshot gives them back. ``answer_format``: the rules that wrote them (None, as in a snapshot
+    or an ``in_flight`` from before the field: 1)."""
     if stored is None:
         return None
-    return {
-        key: Cancel(reason=value["$cancel"]) if isinstance(value, dict) and "$cancel" in value else value
-        for key, value in stored.items()
-    }
+    answer_format = answer_format if isinstance(answer_format, int) else 1
+    return {key: _load_answer(value, answer_format) for key, value in stored.items()}
 
 
 def _same_answer(one: Any, other: Any) -> bool:
@@ -645,6 +692,19 @@ class ChatSession:
                 "answer a parked turn with resume(), and continue a conversation with parent_id=."
             )
         self.id: str = session_id or uuid7(as_type="hex")  # type: ignore[assignment]
+        # A caller's session_id is its own key and may be reused for the same conversation: running a turn under it
+        # would collide with the earlier thread's root run. Only an id generated here doubles as a run id: in this
+        # object, for its first attempt at a first turn (_run_turn). A restored session (from_store) never runs
+        # under its id (its first turn may have started under it and died).
+        self._generated_id = not session_id
+        self.root_run_id: str | None = self.id if session_id and parent_id is None else None
+        """The thread's root run as the platform knows it, sent with every MCP call of the session's turns as the
+        session hint (``timbal.ai/session_id``, monolith#565). A session opened with its own ``session_id`` and
+        no ``parent_id``: that id, which the platform's chat reserves as the thread's root run (no turn runs
+        under it here: the first turn gets a run id of its own, stored with no parent). A generated id: the run
+        that started the thread, once one has (the first turn runs under the session's id, so it is
+        ``session.id``). None while unknown: continued from ``parent_id``, or restored from a snapshot written
+        before the field existed (the first turn of one that had none sets it). Stored in the snapshot."""
         self.busy_mode: SendMode = busy_mode
         self.on_dead_turn: OnDeadTurn = on_dead_turn
         # As what they mean, whatever number or truth value the caller passed: a snapshot holds them.
@@ -817,6 +877,7 @@ class ChatSession:
         key: str | None = None,
         tool_policy: ToolPolicy | None = "read_only",
         silent_ok: bool = True,
+        trigger: dict[str, Any] | None = None,
     ) -> str:
         """Start a turn for the application (a routine, a heartbeat): returns the wake's id.
 
@@ -827,6 +888,9 @@ class ChatSession:
         (and ``allow_silence``) it may answer :data:`SILENT_REPLY` to say
         nothing. A pending wake with the same ``key`` is replaced. The text is
         trusted application text: input guardrails do not screen it.
+        ``trigger`` is merged over the turn's root ``metadata.trigger``
+        (``{kind: "wake", wake_id, key, tool_policy}``); a routine fire passes
+        ``{"kind": "routine", "routine_id": ..., "fire_id": ..., "scheduled_at": ...}``.
         """
         if self.closed:
             raise RuntimeError("The chat session is closed.")
@@ -837,6 +901,34 @@ class ChatSession:
             raise TypeError("key must be a string or None")
         policy = _check_tool_policy(tool_policy)
         key = (key or "").strip() or None
+        if trigger is not None and not isinstance(trigger, dict):
+            raise TypeError("trigger must be a dict")
+        if trigger:
+            reserved = [name for name in _RESERVED_TRIGGER_KEYS if name in trigger]
+            if reserved:
+                raise ValueError(
+                    f"A wake's trigger cannot set what the runtime says of the turn: {', '.join(reserved)}."
+                )
+            kind = trigger.get("kind", WAKE_KIND)
+            if not isinstance(kind, str) or not _TRIGGER_KIND.fullmatch(kind) or kind in ATTENDED_TRIGGER_KINDS:
+                # An approval reviewer reads it (Runnable._review_gate), and shows it to a model reviewer: a short
+                # identifier of what started the turn, never a person's turn.
+                raise ValueError(
+                    "A wake's trigger kind is a short lowercase identifier of what started the turn, not a user's turn "
+                    f"({_TRIGGER_KIND.pattern}): {repr(kind)[:80]}."
+                )
+        owned = None
+        if trigger and self._session_store is not None:
+            # Stored with the wake: one a snapshot cannot hold would fail every save from now on. Refused here,
+            # to its caller, with nothing queued (as for resume()). Kept as JSON gave it back: the caller's dict
+            # (and what is nested in it) may change after this returns, and the queued wake must not.
+            try:
+                owned = _unchanged_by_json(trigger)
+                json.dumps(owned, ensure_ascii=False).encode("utf-8")  # a lone surrogate is no UTF-8
+            except (TypeError, UnicodeEncodeError) as error:
+                raise TypeError(
+                    f"The wake's trigger cannot be stored ({error}): a durable session takes what JSON can carry."
+                ) from None
         replaced = [wake for wake in self._wakes if wake.key == key] if key is not None else []
         for old in replaced:
             self._wakes.remove(old)
@@ -846,9 +938,27 @@ class ChatSession:
             # so the last stored wake of the key survives however many replacements of it fail.
             self._record("wake_superseded", wake_id=old.id, key=key)
         wake = _Wake(text=text, key=key, tool_policy=policy, silent_ok=bool(silent_ok), replaced=replaced)
+        if trigger:
+            # The caller's fields, then the wake's own, which no trigger renames (its kind may be the caller's).
+            # Its own copy (a session without a store: deep where it can be), never the caller's objects.
+            wake.trigger = {
+                "kind": WAKE_KIND,
+                **(owned if owned is not None else _own_copy(trigger)),
+                "wake_id": wake.id,
+                "key": key,
+                "tool_policy": _describe_policy(policy),
+            }
         self._wakes.append(wake)
         self.last_activity = time.monotonic()
-        self._record("wake", wake_id=wake.id, text=text, key=key, tool_policy=_describe_policy(policy))
+        # The log's own copy: whoever reads the log cannot change the queued wake.
+        self._record(
+            "wake",
+            wake_id=wake.id,
+            text=text,
+            key=key,
+            tool_policy=_describe_policy(policy),
+            trigger=_own_copy(wake.trigger),
+        )
         wake.mark = self._changes
         self._work.set()
         self._ensure_worker()
@@ -1035,6 +1145,16 @@ class ChatSession:
         context = self._last_context
         # The session's head: while a call has the session, the call's, not the one this channel last saw.
         return self._parked and context is not None and self._scheduler.session_head == context.id
+
+    def awaited_approvals(self) -> frozenset[str] | None:
+        """The ids of the approvals the parked turn waits for (none when it waits for nothing), which tell an
+        approval's answer from a question's whatever either looks like. None while the session does not know
+        yet (it is still reading the run it continues)."""
+        if self._restore_pending():
+            return None
+        if not self.parked or self._last_context is None:
+            return frozenset()
+        return frozenset(approval["approval_id"] for approval in self._last_context.pending_approvals())
 
     def resume(self, values: dict[str, Any]) -> None:
         """Answer the parked turn: ``{approval_id: ...}`` / ``{interaction_id: value}``, as for ``resume=``.
@@ -1295,11 +1415,12 @@ class ChatSession:
                 event.id for event in session._kept_events.values() if event.kept_for == session_id
             )
             session._version, session._leased, session._lease_from = snapshot.version, True, leased_at
+            session.root_run_id = snapshot.root_run_id
             session.turns, session.last_status, session._parked = snapshot.turns, snapshot.last_status, snapshot.parked
             session._last_prompt = _load_prompt(snapshot.last_prompt)
             session.log.restart_at(snapshot.log_cursor + _LOG_RESTART_GAP)
             session._wakes = [_Wake.from_dict(data) for data in snapshot.wakes]
-            session._resume = _load_resume(snapshot.resume)
+            session._resume = _load_resume(snapshot.resume, snapshot.answer_format)
             recovered = None
             if snapshot.in_flight is not None:
                 # First: the messages a dead turn took were sent before anything still pending, and go back
@@ -1802,9 +1923,27 @@ class ChatSession:
         stopping = False
         try:
             kwargs, trigger, options = self._turn_inputs(followup, resume, wake)
-            context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
+            if scheduler.head is None:
+                # A new thread: this turn is its root.
+                if self._generated_id:
+                    # Once: a turn cut or failed before it started hands its work back, and the turn that takes
+                    # it is another run, with an id of its own (and the thread's root if it is the one to start).
+                    self._generated_id = False
+                    context = RunContext(id=self.id, tracing_provider=self._agent.tracing_provider)
+                else:
+                    context = RunContext(tracing_provider=self._agent.tracing_provider)
+            else:
+                context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
+            # What started the turn is the run's from its start: stamped on the root span as it is made (before
+            # any save), read by a tool as ``ctx.trigger`` and by an approval reviewer from the root. Its own copy:
+            # the session stores ``trigger`` (in_flight, the log), and a tool's write to it must change neither (deep
+            # where it can be: a session without a store takes any trigger).
+            context.trigger = _own_copy(trigger)
             context._tracing_provider = self._turn_provider(context._tracing_provider)
             context._steering = options.steer
+            # The session hint: the thread's root run, or this turn when it starts the thread and the session
+            # has none (it becomes the root once it is the head, see _pump).
+            context._session_id = self.root_run_id or (context.id if context.parent_id is None else None)
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
             context._cut = asyncio.Event()
@@ -1816,6 +1955,8 @@ class ChatSession:
             in_flight = {
                 "run_id": context.id,
                 "parent_id": context.parent_id,
+                # It starts the thread and the session knows no root: recovery may make it the root (_root_at).
+                "starts_thread": context.parent_id is None and self.root_run_id is None,
                 "trigger": trigger,
                 "events": [event.to_dict() for event in followup.events] if followup is not None else [],
                 "wake": wake.to_dict() if wake is not None else None,
@@ -1826,6 +1967,7 @@ class ChatSession:
                 # Only a durable session reads these back (after a restart). One without a store takes any
                 # value its tools understand, storable or not.
                 in_flight["resume"] = _dump_resume(resume) if self._session_store is not None else {}
+                in_flight["answer_format"] = ANSWER_FORMAT
                 in_flight["approved"] = self._approved_calls(resume)
             # Stored from now, not from the turn's first event: what it took (messages, a wake, answers) is no
             # longer pending, and a restart before that event would lose it. A turn that never started is put
@@ -1974,16 +2116,17 @@ class ChatSession:
                     if not started:
                         started = True
                         self._scheduler.note_run(context.id)
+                        if self.root_run_id is None and context.parent_id is None:
+                            self.root_run_id = context.id  # it started the thread
                         self.turns += 1
                         self._parked = False  # a resume took the answers: what is stored now is this turn
                         self._in_flight = in_flight
-                        self._record("turn_started", run_id=context.id, parent_id=context.parent_id, trigger=trigger)
+                        # (The log's own copy of the trigger: ``in_flight`` holds the one that is stored.)
+                        self._record(
+                            "turn_started", run_id=context.id, parent_id=context.parent_id, trigger=_own_copy(trigger)
+                        )
                         if followup is not None:
-                            followup.started(context)
-                        elif (root := context.root_span()) is not None:
-                            # Wakes, recovery turns and resumes too: who started the turn is in its trace
-                            # (an approval reviewer reads it: nobody is there to ask on a wake).
-                            root.metadata["trigger"] = trigger
+                            followup.started(context)  # (the trigger is on the root already: context.trigger)
                     self.log.put_nowait(event)
                     if isinstance(event, OutputEvent) and event.run_id == context.id and event.parent_call_id is None:
                         output = event
@@ -2169,6 +2312,7 @@ class ChatSession:
                 "kwargs_unstored": self._unstored_kwargs,
             },
             head=self.head,
+            root_run_id=self.root_run_id,
             turns=self.turns,
             last_status=self.last_status,
             parked=self.parked,
@@ -2187,6 +2331,7 @@ class ChatSession:
             ],
             wakes=[wake.to_dict() for wake in self._wakes],
             resume=_dump_resume(self._resume),
+            answer_format=ANSWER_FORMAT,
             log_cursor=self.log.cursor_end,
             closed=self.closed and not self._keep,
         )
@@ -2457,6 +2602,18 @@ class ChatSession:
         loaded._trace = trace
         return loaded
 
+    def _root_at(self, head: str | None, in_flight: dict[str, Any]) -> None:
+        """Keep :attr:`root_run_id` right as recovery settles a dead turn: ``head``, the run it is left on (None:
+        it goes back to the run before it, and is run again under another id)."""
+        if in_flight.get("parent_id") is not None:
+            return  # not the thread's first run
+        if head is not None and self.root_run_id is None and in_flight.get("starts_thread"):
+            # It started the thread. (Stored before the field existed, a first run is no proof of the root: for
+            # the platform's chat that is its session id. No hint then, as before.)
+            self.root_run_id = head
+        elif head is None and self.root_run_id == in_flight["run_id"]:
+            self.root_run_id = None  # it did not: the turn that runs its input again does
+
     async def _recover(
         self,
         in_flight: dict[str, Any],
@@ -2476,6 +2633,7 @@ class ChatSession:
             # as cut: a run that ended by itself (answered, parked on a question) was not cut, and treating
             # it as one would chain a recovery turn onto a run that waits for its user.
             self._scheduler.head = run_id
+            self._root_at(run_id, in_flight)
             self._parked = is_parked(root.status)
             self.last_status = _status_dict(root.status)
             self._last_context = context if self._parked else None
@@ -2502,6 +2660,7 @@ class ChatSession:
             # model call (a shutdown, most often) stores a trace whose memory need not hold its prompt,
             # and the message would be answered by nobody.
             self._scheduler.head = in_flight.get("parent_id")
+            self._root_at(None, in_flight)
             wake = in_flight.get("wake")
             if stopped and not resumed and (events or wake is not None):
                 # Not run again. Messages run after the stop would be acted on as the user's latest words (the
@@ -2521,13 +2680,14 @@ class ChatSession:
                     # the turn and the question is abandoned, as a stop on a parked session abandons it.
                     self._abandon_parked = "The user moved on before answering."
                 else:
-                    self._resume = _load_resume(in_flight["resume"])
+                    self._resume = _load_resume(in_flight["resume"], in_flight.get("answer_format"))
             return "requeued"
         if root is None:
             # It may have acted and no trace of it is stored (a provider that saves at the end of a run, or
             # in the background). Nothing is run again: the recovery turn is told what it was answering (no
             # stored run holds that) and which calls it had started.
             self._scheduler.head = in_flight.get("parent_id")
+            self._root_at(None, in_flight)
             asked = [event.get("text") or "" for event in events]
             if in_flight.get("wake") is not None:
                 asked.append(in_flight["wake"].get("text") or "")
@@ -2545,6 +2705,7 @@ class ChatSession:
             )
         else:
             self._scheduler.head = run_id
+            self._root_at(run_id, in_flight)
             self._parked = False
             # What its stored memory shows it took, by event id (every message built from session events
             # carries them). A steered one it does not show would be lost with the run: back in the queue.

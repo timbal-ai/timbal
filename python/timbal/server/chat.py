@@ -15,7 +15,7 @@ import json
 import math
 import os
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Collection
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from ..core.chat_session import SEND_MODES, ChatSession
 from ..state.background import BACKGROUND_LOG_GAPPED
 from ..state.chat_store import ChatSessionStore, SessionLeased, SessionNotStored, SqliteChatSessionStore
+from ..utils import json_response_carries
 
 logger = structlog.get_logger("timbal.server.chat")
 
@@ -547,6 +548,41 @@ async def _body(request: Request) -> dict[str, Any]:
     return body
 
 
+def _answerable(body: dict[str, Any], what: str, keys: tuple[str, ...]) -> None:
+    """400 for a body whose ``keys`` (what the route reads) the session's answers could not carry
+    (``json_response_carries``: NaN, Infinity, a lone surrogate, all of which the body parser takes): what they
+    say reaches the session's log, its state and its runs' output, and one accepted would be a 500 on every
+    answer about the session from then on (and a durable session could store none of it). Keys no route reads
+    are taken as before."""
+    if not json_response_carries({key: body[key] for key in keys if key in body}):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{what} cannot be stored or sent back: send JSON a response can carry (no NaN or Infinity, "
+            "no lone surrogate).",
+        )
+
+
+def _answers_carried(values: dict[str, Any], approvals: Collection[str] | None) -> bool:
+    """Whether a session's answers about a resume could carry ``values``. A lone surrogate anywhere: no UTF-8
+    answer (nor a durable session's store) can. NaN and Infinity only in an approval's ``metadata`` and
+    ``override_input``, which the tool's span keeps as given (an interaction's answer reaches its tool, and
+    nothing echoes it raw). A durable session refuses what it cannot store by itself (``ChatSession.resume``).
+
+    ``approvals``: the ids of the approvals the parked turn waits for (``ChatSession.awaited_approvals``). An
+    answer is an approval's by the id it answers, not by its shape: a question may ask for an object with an
+    ``approved`` field of its own. None while the session does not know: every answer may be an approval's.
+    """
+    try:
+        json.dumps(values, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError, RecursionError):  # (UnicodeEncodeError is a ValueError)
+        return False
+    return all(
+        json_response_carries([value.get("metadata"), value.get("override_input")])
+        for key, value in values.items()
+        if isinstance(value, dict) and (approvals is None or key in approvals)
+    )
+
+
 @router.get("/")
 async def chat_page() -> HTMLResponse:
     return HTMLResponse(_HTML_PATH.read_text(encoding="utf-8"))
@@ -579,6 +615,7 @@ async def create_session(request: Request) -> JSONResponse:
     """Open a session: ``{"parent_id"?, "busy_mode"?, "collect_window"?}``."""
     agent = _agent(request)
     body = await _body(request)
+    _answerable(body, "The session", ("parent_id", "busy_mode", "collect_window"))
     sessions = _sessions(request)
     await _reap(sessions)
     try:
@@ -657,6 +694,7 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
     """Send a user message: ``{"text", "mode"?}`` (``steer`` | ``followup`` | ``collect`` | ``interrupt``)."""
     session = await _session(request, session_id)
     body = await _body(request)
+    _answerable(body, "The message", ("text", "mode"))
     text = body.get("text")
     mode = body.get("mode") or None
     if not isinstance(text, str):
@@ -681,14 +719,16 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
 
 @router.post("/sessions/{session_id}/wake")
 async def wake_session(request: Request, session_id: str) -> JSONResponse:
-    """Start a turn for the application: ``{"text", "key"?, "tool_policy"?, "silent_ok"?}``.
+    """Start a turn for the application: ``{"text", "key"?, "tool_policy"?, "silent_ok"?, "trigger"?}``.
 
     ``tool_policy`` defaults to ``"read_only"``; ``null`` gives the turn every
     tool, a list of names only those. The wake runs once the user has nothing
-    pending, as a turn of its own, and may stay silent.
+    pending, as a turn of its own, and may stay silent. ``trigger`` (an object)
+    is merged into the turn's root ``metadata.trigger`` (a routine fire's ids).
     """
     session = await _session(request, session_id)
     body = await _body(request)
+    _answerable(body, "The wake", ("text", "key", "tool_policy", "trigger"))  # (silent_ok: made a bool)
     text = body.get("text")
     if not isinstance(text, str):
         raise HTTPException(status_code=400, detail="'text' must be a string.")
@@ -697,11 +737,19 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
     policy = body.get("tool_policy", "read_only")
     if policy is not None and not (policy == "read_only" or isinstance(policy, list)):
         raise HTTPException(status_code=400, detail="'tool_policy' must be 'read_only', a list of tool names, or null.")
+    trigger = body.get("trigger")
+    if trigger is not None and not isinstance(trigger, dict):
+        raise HTTPException(status_code=400, detail="'trigger' must be an object.")
     try:
         wake_id = session.wake(
-            text, key=body.get("key"), tool_policy=policy, silent_ok=bool(body.get("silent_ok", True))
+            text,
+            key=body.get("key"),
+            tool_policy=policy,
+            silent_ok=bool(body.get("silent_ok", True)),
+            trigger=trigger,
         )
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
+        # TypeError: a trigger a durable session cannot store (the body parser lets NaN through).
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
@@ -730,6 +778,12 @@ async def resume_session(request: Request, session_id: str) -> JSONResponse:
     values = body.get("resume")
     if not isinstance(values, dict) or not values:
         raise HTTPException(status_code=400, detail="'resume' must be a non-empty object.")
+    if not _answers_carried(values, session.awaited_approvals()):
+        raise HTTPException(
+            status_code=400,
+            detail="The answers cannot be stored or sent back: no lone surrogate, and no NaN or Infinity in an "
+            "approval's metadata.",
+        )
     try:
         session.resume(values)
     except TypeError as e:

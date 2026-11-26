@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import os
 import time
 import weakref
@@ -8,7 +9,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from uuid_extensions import uuid7
 
 from ..errors import SpanNotFound
@@ -218,6 +219,21 @@ class _EarlierRunLookup:
         return getattr(self._original, name)
 
 
+def _own_copy(value: Any) -> Any:
+    """A deep copy of a trigger. Where it holds what cannot be copied (a caller's lock, a client), its dicts and
+    lists are still copied one by one, and only those objects are shared."""
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        if isinstance(value, dict):
+            return {key: _own_copy(item) for key, item in value.items()}
+        if type(value) is list:
+            return [_own_copy(item) for item in value]
+        if type(value) is tuple:
+            return tuple(_own_copy(item) for item in value)
+        return value
+
+
 class RunContext(BaseModel):
     """Runtime execution context shared across all components in a run.
 
@@ -249,6 +265,22 @@ class RunContext(BaseModel):
         default=None,
         description="Platform configuration for the run.",
     )
+
+    trigger: Any = Field(
+        default=None,
+        description=(
+            "What started this run: an object is stamped as the root span's metadata.trigger when it has none "
+            '(e.g. {"kind": "routine", "routine_id": ..., "fire_id": ..., "scheduled_at": ...}). Any value is '
+            "kept as given, as any key of a run context was before this field existed; anything but an object "
+            "is not used. An object is the context's own copy, taken when the context is made: a caller that "
+            "goes on to change its dict (the next fire of a routine) changes nothing of this run."
+        ),
+    )
+
+    @field_validator("trigger")
+    @classmethod
+    def _own_trigger(cls, value: Any) -> Any:
+        return _own_copy(value) if isinstance(value, dict) else value
 
     tracing_provider: Any = Field(
         default=TRACING_UNSET,
@@ -439,6 +471,8 @@ class RunContext(BaseModel):
             _continuation_owner=None,
             _foreign_turn_of=None,
             _steering=None,
+            # The ChatSession this run belongs to (its id), for MCP provenance (``timbal.ai/session_id``).
+            _session_id=None,
             _tool_policy=None,
             _tool_policy_origin=None,
             _silence_token=None,

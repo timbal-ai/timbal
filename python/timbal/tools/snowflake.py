@@ -675,6 +675,27 @@ class SnowflakeAuth(httpx.Auth):
         )
         self._settings: dict[str, str | None] | None = None
 
+    def _provider_identity(self) -> tuple:
+        """Who it reaches a server as (``MCPServer``'s provider identity, kept as a digest): what it was configured
+        with, never what ``prepare()`` resolved as it ran, which may differ from one process to the next."""
+        source = self._source
+        integration = source.integration
+        return (
+            (integration.provider, integration._org_integration_id) if integration is not None else None,
+            *(
+                value.get_secret_value() if isinstance(value, SecretStr) else value
+                for value in (
+                    source.account,
+                    source.user,
+                    source.private_key,
+                    source.private_key_passphrase,
+                    source.token,
+                    source.programmatic_access_token,
+                    source.host,
+                )
+            ),
+        )
+
     async def prepare(self) -> None:
         """Resolve credentials in the caller's run context. ``MCPServer`` awaits this before every request."""
         settings = await _resolve_settings(self._source)

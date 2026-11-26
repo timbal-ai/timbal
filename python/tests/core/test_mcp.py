@@ -7,7 +7,13 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 from timbal import Agent
-from timbal.core.mcp import MCPServer, MCPTool, _convert_call_tool_result
+from timbal.core.mcp import (
+    PROVENANCE_PARENT_KEY,
+    PROVENANCE_RUN_KEY,
+    MCPServer,
+    MCPTool,
+    _convert_call_tool_result,
+)
 from timbal.types.content import FileContent, TextContent, ToolUseContent
 from timbal.types.message import Message
 
@@ -98,6 +104,123 @@ class TestMCPServerResolve:
         await stdio_server.close()
         assert stdio_server._tools_cache is None
         assert stdio_server._session is None
+
+
+META_SERVER_SCRIPT = """
+import json
+from mcp.server.fastmcp import Context, FastMCP
+
+mcp = FastMCP("meta-server")
+
+
+@mcp.tool()
+def echo_meta(ctx: Context) -> str:
+    \"\"\"Return the request's _meta.\"\"\"
+    meta = ctx.request_context.meta
+    return json.dumps(meta.model_dump(exclude_none=True) if meta is not None else {})
+
+
+mcp.run()
+"""
+
+
+class TestProvenance:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provenance", [True, None])
+    async def test_run_and_call_ids_ride_in_meta_when_enabled(self, tmp_path, provenance):
+        import json
+
+        from timbal.core.mcp import PROVENANCE_CALL_KEY, PROVENANCE_RUN_KEY
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        script = tmp_path / "meta_server.py"
+        script.write_text(META_SERVER_SCRIPT)
+        server = MCPServer(transport="stdio", command=sys.executable, args=[str(script)], provenance=provenance)
+        call = Message(
+            role="assistant", content=[ToolUseContent(id="m1", name="echo_meta", input={})], stop_reason="tool_use"
+        )
+        agent = Agent(name="agent", model=TestModel(responses=[call, "done"]), tools=[server])
+        try:
+            events = [event async for event in agent(prompt="go")]
+        finally:
+            await server.close()
+        tool_out = next(e for e in events if getattr(e, "type", "") == "OUTPUT" and e.path == "agent.echo_meta")
+        meta = json.loads(tool_out.output)
+        if provenance:
+            assert meta[PROVENANCE_RUN_KEY] == tool_out.run_id
+            assert meta[PROVENANCE_CALL_KEY] == tool_out.call_id  # the tool's own span
+        else:
+            assert PROVENANCE_RUN_KEY not in meta  # third-party servers never see run ids by default
+
+    @pytest.mark.asyncio
+    async def test_a_chat_session_run_sends_its_session_id_but_no_credential_to_a_third_party(self, tmp_path):
+        import json
+
+        from timbal.core.chat_session import ChatSession
+        from timbal.core.mcp import PROVENANCE_SESSION_KEY
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        script = tmp_path / "meta_server.py"
+        script.write_text(META_SERVER_SCRIPT)
+        server = MCPServer(transport="stdio", command=sys.executable, args=[str(script)], provenance=True)
+        seen = []
+
+        def handler(messages):
+            results = [m for m in messages if m.role == "tool"]
+            if results:
+                seen.append(results[-1].content[0].content[0].text)
+                return "done"
+            return Message(
+                role="assistant", content=[ToolUseContent(id="m1", name="echo_meta", input={})], stop_reason="tool_use"
+            )
+
+        agent = Agent(name="agent", model=TestModel(handler=handler), tools=[server])
+        try:
+            async with ChatSession(agent, session_id="chat-123") as session:
+                session.send("go")
+                async for item in session.events():
+                    if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                        break
+        finally:
+            await server.close()
+        meta = json.loads(seen[0])
+        # A caller's session id is its key, never a run id: the first turn runs under one of its own, and the
+        # hint is the caller's id (the platform's chat reserves it as the thread's root run).
+        assert meta[PROVENANCE_RUN_KEY] not in ("chat-123", None)
+        assert meta[PROVENANCE_SESSION_KEY] == "chat-123" == session.root_run_id
+        assert PROVENANCE_PARENT_KEY not in meta  # the root has no parent
+        assert not any("token" in key for key in meta)  # identity is the request's credential, never _meta
+
+    def test_a_chained_run_names_its_parent_and_no_credential(self):
+        from timbal.state import set_run_context
+        from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+        from timbal.state.context import RunContext
+
+        ctx = RunContext(parent_id="run-parent")
+        ctx.platform_config = PlatformConfig(
+            host="api.example.test",
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="secret-credential"),
+            subject=PlatformSubject(org_id="1", app_id="2"),
+        )
+        set_run_context(ctx)
+        try:
+            meta = MCPServer(transport="http", url="https://api.example.test/mcp", provenance=True)._provenance_meta()
+        finally:
+            set_run_context(None)
+        assert meta[PROVENANCE_PARENT_KEY] == "run-parent" and meta[PROVENANCE_RUN_KEY] == ctx.id
+        assert "secret-credential" not in str(meta)
+
+    def test_on_by_default_only_for_the_platform_server(self):
+        assert MCPServer(transport="http", service="api")._sends_provenance()
+        assert not MCPServer(transport="http", url="https://example.com/mcp")._sends_provenance()
 
 
 class TestMCPToolNamespacing:
@@ -405,9 +528,7 @@ class TestTimbalPlatformMCP:
             assert final.status.code == "success"
             assert final.output.collect_text() == "done"
 
-            tool_events = [
-                e for e in events if isinstance(e, OutputEvent) and e.path == "timbal_mcp_agent.whoami"
-            ]
+            tool_events = [e for e in events if isinstance(e, OutputEvent) and e.path == "timbal_mcp_agent.whoami"]
             assert len(tool_events) == 1
             assert tool_events[0].status.code == "success"
             assert tool_events[0].output
@@ -462,10 +583,7 @@ class TestConvertCallToolResult:
 
     def test_image_content_becomes_message_with_file(self):
         # 1x1 transparent PNG
-        png_b64 = (
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
-            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
-        )
+        png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
         result = mcp_types.CallToolResult(
             content=[
                 mcp_types.TextContent(type="text", text="here is your image"),

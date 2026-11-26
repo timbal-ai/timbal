@@ -174,6 +174,14 @@ class SessionSnapshot:
     log_cursor: int = 0
     closed: bool = False
     version: int = 0
+    root_run_id: str | None = None
+    """The thread's root run, once known (:attr:`ChatSession.root_run_id`); absent from older snapshots. Last, so
+    a snapshot built by position means what it did before the field."""
+    answer_format: int = 1
+    """How ``resume`` (and ``in_flight["resume"]``, which says so itself as ``in_flight["answer_format"]``) hold
+    their answers. 1, what a snapshot without the field holds: as given, a ``Cancel`` as ``{"$cancel": reason}``.
+    2: the same, and an answer that has a ``$cancel`` or ``$answer`` key of its own as ``{"$answer": answer}``, so
+    that it is never read back as a ``Cancel``. Read by the rules of the format that wrote it. Last, as above."""
 
     def to_json(self) -> str:
         """Raises for a value JSON cannot carry (TypeError; ValueError for NaN and Infinity, which Python would

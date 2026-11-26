@@ -181,6 +181,31 @@ class TestEventTurn:
         trigger = session._last_run_context.root_span().metadata["trigger"]
         assert trigger == {"kind": "session_event", "task_ids": [], "event_ids": [event.id]}
 
+    async def test_a_tool_in_the_event_turn_reads_what_started_it(self) -> None:
+        """The event turn's trigger is its run context's (``ctx.trigger``) before any tool runs, as on its root."""
+        from timbal import Tool
+        from timbal.state import get_run_context
+
+        seen = []
+
+        def look() -> str:
+            seen.append(get_run_context().trigger)
+            return "seen"
+
+        model = _Model(_tool_call("look"), REPLY)
+        session, stt, _ = _session(model, tools=[Tool(name="look", handler=look)])
+        receipts = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            receipts.append(await session.notify(NOTE, key="task:inversiones"))
+            await _until(lambda: REPLY in _texts(events))
+
+        await _run(session, stt, drive)
+        [event] = receipts
+        trigger = {"kind": "session_event", "task_ids": [], "event_ids": [event.id]}
+        assert seen == [trigger]
+        assert session._last_run_context.trigger == session._last_run_context.root_span().metadata["trigger"]
+
     async def test_later_turns_still_see_the_event(self) -> None:
         model = _Model(REPLY, "Claro: sube un 4%.")
         session, stt, _tts = _session(model)

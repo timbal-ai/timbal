@@ -255,6 +255,332 @@ def after_restore(session):
     return session.log.forgotten_through
 
 
+async def stored_answer(provider, run_id):
+    from timbal.state import RunContext
+
+    trace = await provider.get(RunContext(parent_id=run_id, tracing_provider=provider))
+    return trace.get_path("agent")[0].output["content"][0]["text"]
+
+
+async def one_turn(session, text):
+    after = session.log.cursor_end
+    session.send(text)
+    await records(session, "turn_finished", 1, after=after)
+    return session.head
+
+
+class TestRootRunId:
+    """``root_run_id`` is the thread's root run as the platform knows it, sent as the MCP session hint
+    (``RunContext._session_id``): a caller's ``session_id`` (the platform's chat reserves it as the root and
+    files the first run under it), else the run that started the thread. Never a run id taken from a caller."""
+
+    async def test_a_generated_id_is_the_first_turns_run_id(self, db):
+        provider, _ = db
+        async with ChatSession(make_agent(provider, Gate(released=True))) as session:
+            assert session.root_run_id is None  # no thread yet
+            assert await one_turn(session, "hi") == session.id
+            assert session.root_run_id == session.id == session._last_context._session_id
+            second = await one_turn(session, "again")
+            assert session._last_context._session_id == session.id
+        assert second != session.id and session.root_run_id == session.id
+
+    async def test_a_caller_session_id_is_the_hint_and_never_a_run_id(self, db):
+        provider, _ = db
+        async with ChatSession(make_agent(provider, Gate(released=True)), session_id="conv-42") as first:
+            assert first.root_run_id == "conv-42"
+            run_1 = await one_turn(first, "one")
+            assert run_1 != "conv-42" and first._last_context.parent_id is None
+            assert first._last_context._session_id == "conv-42"
+            await one_turn(first, "again")
+            assert first._last_context._session_id == first.root_run_id == "conv-42"
+        # The same conversation key again, without from_store(): a new first run, never the old one's id.
+        async with ChatSession(make_agent(provider, Gate(released=True)), session_id="conv-42") as second:
+            run_2 = await one_turn(second, "two")
+        assert run_2 not in (run_1, "conv-42") and second.root_run_id == "conv-42"
+        assert await stored_answer(provider, run_1) == "echo: one"  # the first thread's root is untouched
+
+    async def test_continuing_from_a_parent_leaves_the_root_unknown(self, db):
+        provider, _ = db
+        async with ChatSession(make_agent(provider, Gate(released=True))) as first:
+            head = await one_turn(first, "one")
+        for session_id in (None, "conv-9"):
+            agent = make_agent(provider, Gate(released=True))
+            async with ChatSession(agent, parent_id=head, session_id=session_id) as session:
+                assert session.root_run_id is None
+                await one_turn(session, "two")
+                assert session.root_run_id is None and session._last_context._session_id is None
+
+    async def test_restore_keeps_the_root_and_an_older_snapshot_claims_none(self, db):
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_id="conv-7", session_store=store)
+        await one_turn(session, "one")
+        await session.close(keep=True)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, "conv-7")
+        assert restored.root_run_id == "conv-7"
+        await one_turn(restored, "two")
+        assert restored._last_context._session_id == "conv-7"
+        await restored.close(keep=True)
+
+        snapshot = await store.load("conv-7")
+        snapshot.root_run_id = None  # written before snapshots recorded the root
+        await store.save(snapshot, expect_version=snapshot.version)
+        older = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, "conv-7")
+        assert older.root_run_id is None
+        await one_turn(older, "three")
+        assert older._last_context._session_id is None
+        await older.close()
+
+    async def test_a_generated_session_restored_before_its_first_turn(self, db):
+        """Restored, a session never runs under its id: the run that starts the thread is the root."""
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.persist()
+        await session.flush()
+        await session.close(keep=True)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
+        assert restored.root_run_id is None
+        first = await one_turn(restored, "hi")
+        assert first != session.id and restored.root_run_id == first == restored._last_context._session_id
+        assert (await store.load(session.id)).root_run_id == first
+        await restored.close()
+
+    @pytest.mark.parametrize("steps", range(16))
+    async def test_the_session_id_is_one_run_at_most(self, db, steps):
+        """Swept over where an interrupt lands in the first turn. A turn cut before it started hands its message
+        back, and the turn that answers it is another run: never a second run under the session's id (the
+        session's records of the cut attempt would name the run that answers). The run that did start the thread
+        is its root."""
+        provider, _ = db
+        session = ChatSession(make_agent(provider, Gate(released=True)))
+        session.send("hi")
+        for _ in range(steps):
+            await asyncio.sleep(0)
+        session.interrupt()
+        await until(lambda: not session.busy and not session.pending_messages())
+        log = [
+            r for r in session.log.peek()[0] if isinstance(r, dict) and r.get("kind") in ("turn_started", "interrupt")
+        ]
+        await session.close()
+        started = [r["run_id"] for r in log if r["kind"] == "turn_started"]
+        assert len(set(started)) == len(started)
+        for i, record in enumerate(log):
+            before = [r["run_id"] for r in log[:i] if r["kind"] == "turn_started"]
+            if record["kind"] == "interrupt" and record.get("run_id") and record["run_id"] not in before:
+                cut = record["run_id"]  # cut before it started
+                assert cut not in [r["run_id"] for r in log[i:] if r["kind"] == "turn_started"], f"{cut} ran again"
+        assert session.root_run_id == (started[0] if started else None)
+
+    async def test_an_older_snapshot_with_its_first_turn_in_flight_claims_no_root(self, db):
+        """Written before the root was recorded (the platform's chat at the upgrade: a rolling deploy cuts the
+        first turns still running), the dead first run recovery adopts is no proof of the thread's root: for the
+        platform's chat that is its session id. No hint, as before the field, not the dead run's id."""
+        provider, store = db
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_id="conv-old", session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 30)
+        await crash(session)
+        provider.crashed = False
+        gate.release.set()
+        snapshot = await store.load("conv-old")
+        assert snapshot.in_flight is not None and snapshot.in_flight["parent_id"] is None
+        snapshot.root_run_id = None  # neither field existed
+        snapshot.in_flight.pop("starts_thread", None)
+        await store.save(snapshot, expect_version=snapshot.version)
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, "conv-old")
+        await records(restored, "turn_finished", 1, after=after_restore(restored))  # the recovery turn
+        assert restored.root_run_id is None and restored._last_context._session_id is None
+        await one_turn(restored, "after")
+        assert restored._last_context._session_id is None
+        await restored.close()
+
+    async def test_a_first_turn_that_died_before_acting_does_not_name_the_thread(self, db):
+        """Cut while its model thought (nothing dispatched), its message runs again under another id: that run
+        starts the thread, and the hint follows it, not the id the dead run had."""
+        provider, store = db
+        model = ThinkingModel(slow={"first"})
+        agent = Agent(name="agent", model=model, tools=[], tracing_provider=provider)
+        session = ChatSession(agent, session_store=store)
+        session.send("first")
+        await asyncio.wait_for(model.thinking.wait(), 30)
+        await session.flush()  # (the snapshot of its start may still be on its way)
+        assert (await store.load(session.id)).root_run_id == session.id  # stored as it started
+        await crash(session)
+        provider.crashed = False
+        model.slow.clear()
+        restored = await ChatSession.from_store(agent, store, session.id)
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert model.answered == ["first"]
+        assert restored.head != session.id and restored._last_context.parent_id is None
+        assert restored.root_run_id == restored.head == restored._last_context._session_id
+        await restored.flush()
+        assert (await store.load(session.id)).root_run_id == restored.head
+        await restored.close()
+
+
+# What a snapshot held before root_run_id (timbal 54473c37, the version the platform's chat pins).
+FIELDS_BEFORE_ROOT_RUN_ID = (
+    "session_id",
+    "agent",
+    "config",
+    "head",
+    "turns",
+    "last_status",
+    "parked",
+    "last_prompt",
+    "last_options",
+    "in_flight",
+    "pending",
+    "wakes",
+    "resume",
+    "log_cursor",
+    "closed",
+    "version",
+)
+
+
+def test_a_snapshot_built_by_position_keeps_its_fields():
+    """``root_run_id`` is the last field: a snapshot built by position before it existed means the same."""
+    snapshot = SessionSnapshot("s", "agent", {}, "head", 3, {"code": "success"}, True)
+    assert (snapshot.head, snapshot.turns, snapshot.last_status, snapshot.parked) == (
+        "head",
+        3,
+        {"code": "success"},
+        True,
+    )
+    assert snapshot.root_run_id is None
+
+
+class TriggerRecordingSqlite(CrashableSqlite):
+    """Records, for every save it is asked for, the run and the trigger its root carries then."""
+
+    saves: list = []
+
+    @classmethod
+    async def _store(cls, run_context):
+        root = run_context.root_span()
+        if root is not None:
+            cls.saves.append((run_context.id, root.metadata.get("trigger")))
+        await super()._store(run_context)
+
+
+class TestEveryStoredTurnSaysWhatStartedIt:
+    @pytest.mark.parametrize("durability", ["sync", "buffered"])
+    async def test_every_save_of_every_turn_carries_its_trigger(self, tmp_path, durability):
+        """From a turn's first save to its last, recovery turns included: the trigger is on the root as it is
+        made, from the turn's run context (a store-before-acting provider saves before a tool batch)."""
+        provider = TriggerRecordingSqlite.configured(
+            _path=tmp_path / "timbal.db", crashed=False, saves=[], durability=durability, store_before_acting=True
+        )
+        store = SqliteChatSessionStore(tmp_path / "timbal.db")
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_id="conv-t", session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 30)
+        await crash(session)
+        provider.crashed = False
+        restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, "conv-t")
+        await records(restored, "turn_finished", 1, after=after_restore(restored))  # the recovery turn
+        await one_turn(restored, "after")
+        started = {
+            r["run_id"]: r["trigger"]
+            for r in restored.log.peek(after_restore(restored))[0]
+            if isinstance(r, dict) and r.get("kind") == "turn_started"
+        }
+        await restored.close()
+        assert [t["kind"] for t in started.values()] == ["recovery", "user_message"]
+        saves = [(run_id, trigger) for run_id, trigger in provider.saves if run_id in started]
+        assert {run_id for run_id, _ in saves} == set(started)
+        assert all(trigger == started[run_id] for run_id, trigger in saves), saves
+
+
+class TestThePlatformChatsPath:
+    """The platform's own chat (monolith ``services/chat``, pinned to timbal 54473c37) hosts a session exactly so
+    (``SessionHost._bring_in``): ``from_store``, else ``ChatSession(agent, session_id=<the platform's id>,
+    session_store=...)`` with no ``parent_id``, stored before its first turn; let go with ``close(keep=True)``
+    and brought back with ``from_store``. Its store keeps the snapshot as a JSON object and hands it back to
+    ``SessionSnapshot.from_json``; its trace provider is buffered and stores before acting.
+
+    Nothing it relied on changes, whether the snapshot it restores was written before this field or after: the
+    session's id is the platform's, the first turn runs under a run id of its own with no parent (the platform
+    files it under the session's reserved root run), and the next turn continues it."""
+
+    PLATFORM_ID = "06b04a1f3c2d7e5f8000a1b2c3d4e5f6"
+
+    @staticmethod
+    def _agent(provider):
+        return Agent(
+            name="chat",
+            model=TestModel(handler=handler),
+            system_prompt="You are a helpful assistant.",
+            tracing_provider=provider,
+        )
+
+    @staticmethod
+    async def _bring_in(agent, store, session_id):
+        try:
+            return await ChatSession.from_store(agent, store, session_id)
+        except LookupError:
+            pass
+        session = ChatSession(agent, session_id=session_id, session_store=store)
+        await session.restore()
+        session.persist()
+        await session.flush()
+        return session
+
+    @staticmethod
+    def _as_written_before_root_run_id(store, session_id):
+        """The stored snapshot as 54473c37 wrote it: its JSON object without ``root_run_id`` (nor the
+        ``answer_format`` that came after it)."""
+        import json
+
+        stored, holder, until = store._rows[session_id]
+        runtime = json.loads(stored.to_json())
+        runtime.pop("version")
+        assert set(runtime) - {"root_run_id", "answer_format"} == set(FIELDS_BEFORE_ROOT_RUN_ID) - {"version"}
+        del runtime["root_run_id"], runtime["answer_format"]
+        older = SessionSnapshot.from_json(json.dumps(runtime))
+        older.version = stored.version
+        store._rows[session_id] = (older, holder, until)
+
+    @staticmethod
+    async def _memory(provider, run_id):
+        trace = await provider.get(RunContext(parent_id=run_id, tracing_provider=provider))
+        return [
+            block["text"]
+            for message in trace.get_path("chat")[0].memory
+            for block in message["content"]
+            if block.get("type") == "text"
+        ]
+
+    @pytest.mark.parametrize("written", ["before root_run_id", "with root_run_id"])
+    async def test_open_a_turn_let_go_restore_a_turn(self, tmp_path, written):
+        provider = CrashableSqlite.configured(
+            _path=tmp_path / "timbal.db", crashed=False, durability="buffered", store_before_acting=True
+        )
+        store = InMemoryChatSessionStore()
+        session = await self._bring_in(self._agent(provider), store, self.PLATFORM_ID)
+        assert session.id == self.PLATFORM_ID and session.head is None
+        assert (await store.load(self.PLATFORM_ID)).head is None  # stored before its first turn
+        first = await one_turn(session, "one")
+        assert first != self.PLATFORM_ID and session._last_context.parent_id is None
+        assert session._last_context._session_id == self.PLATFORM_ID  # the hint: the platform's thread
+        await session.close(keep=True)
+        if written == "before root_run_id":
+            self._as_written_before_root_run_id(store, self.PLATFORM_ID)
+
+        restored = await self._bring_in(self._agent(provider), store, self.PLATFORM_ID)
+        assert restored.id == self.PLATFORM_ID and restored.head == first and restored.turns == 1
+        second = await one_turn(restored, "two")
+        assert second not in (first, self.PLATFORM_ID) and restored._last_context.parent_id == first
+        assert await self._memory(provider, second) == ["one", "echo: one", "two", "echo: two"]
+        # Before this field nothing was sent; restored from such a snapshot, still nothing (the root is unknown).
+        hint = None if written == "before root_run_id" else self.PLATFORM_ID
+        assert restored._last_context._session_id == hint
+        await restored.close(keep=True)
+        assert (await store.load(self.PLATFORM_ID)).head == second
+
+
 class TestEdges:
     async def test_a_queued_message_waits_for_the_recovery_turn(self, db):
         provider, store = db
@@ -3899,3 +4225,47 @@ class TestAStoreThatHangs:
         if saver is not None and not saver.done():
             saver.cancel()
             await asyncio.gather(saver, return_exceptions=True)
+
+
+class TestStoredAnswers:
+    def test_an_answer_shaped_like_a_stored_cancel_comes_back_as_itself(self):
+        """A snapshot holds a Cancel as ``{"$cancel": reason}``. A question may ask for any object, one with
+        that key too: after a restart its answer must be the object, not a Cancel that would end the run."""
+        import json
+
+        from timbal.core.chat_session import ANSWER_FORMAT, _dump_resume, _load_resume, _same_answer
+
+        answers = {
+            "ask-1": {"$cancel": "a field of the survey"},
+            "ask-2": {"$answer": 1},
+            "ask-3": Cancel(reason="stop"),
+            "ask-4": {"x": 1},
+            "approval-1": True,
+        }
+        back = _load_resume(json.loads(json.dumps(_dump_resume(answers))), ANSWER_FORMAT)
+        assert back["ask-1"] == {"$cancel": "a field of the survey"} and back["ask-2"] == {"$answer": 1}
+        assert isinstance(back["ask-3"], Cancel) and back["ask-3"].reason == "stop"
+        assert back["ask-4"] == {"x": 1} and back["approval-1"] is True
+        assert all(_same_answer(answers[key], back[key]) for key in answers)
+
+    def test_an_older_snapshots_answers_are_read_as_it_wrote_them(self):
+        """A snapshot written before answers were wrapped holds a question's answer as it was given, ``$answer``
+        key and all: it is read back as that object (the snapshot says which rules wrote it)."""
+        from timbal.core.chat_session import _load_resume
+        from timbal.state.chat_store import SessionSnapshot
+
+        written_before = (
+            '{"session_id": "s", "agent": "a", "config": {}, "head": null, "turns": 1, "last_status": null, '
+            '"parked": true, "last_prompt": null, "last_options": null, "in_flight": {"resume": '
+            '{"ask-1": {"$answer": "yes"}, "ask-2": {"$cancel": "stop"}}}, "pending": [], "wakes": [], '
+            '"resume": {"ask-1": {"$answer": "yes"}, "ask-2": {"$cancel": "stop"}}, "log_cursor": 0, '
+            '"closed": false, "version": 3}'
+        )
+        snapshot = SessionSnapshot.from_json(written_before)
+        for stored, written_by in (
+            (snapshot.resume, snapshot.answer_format),
+            (snapshot.in_flight["resume"], snapshot.in_flight.get("answer_format")),
+        ):
+            back = _load_resume(stored, written_by)
+            assert back["ask-1"] == {"$answer": "yes"}
+            assert isinstance(back["ask-2"], Cancel) and back["ask-2"].reason == "stop"

@@ -46,13 +46,14 @@ from ..state import (
     set_parent_call_id,
     set_run_context,
 )
-from ..state.context import (
+from ..state.context import (  # noqa: F401  (_own_copy: chat_session imports it from here)
     _DETACHED_CALLS,
     _LIVE_CALLS,
     RunContext,
     _EmitSink,
     _left_behind,
     _note_abandoned_call,
+    _own_copy,
     _running_call,
 )
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
@@ -298,6 +299,11 @@ def _approval_id_for(path: str, input_dump: Any) -> str:
     """
     payload = {"path": path, "input": input_dump}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:32]
+
+
+ATTENDED_TRIGGER_KINDS = ("user_message", "resume")
+"""Root ``metadata.trigger`` kinds an approval reviewer reads as a person's turn (``ApprovalRequest.attended``;
+no trigger at all counts too). What an application starts (a wake, a routine) must not use them."""
 
 
 class Runnable(ABC, BaseModel):
@@ -1828,7 +1834,7 @@ class Runnable(ABC, BaseModel):
         attended = (
             outermost is not None
             and posted_by_code is None
-            and (not isinstance(trigger, dict) or trigger.get("kind") in ("user_message", "resume"))
+            and (not isinstance(trigger, dict) or trigger.get("kind") in ATTENDED_TRIGGER_KINDS)
         )
         user_messages = user_messages[-reviewer.context_messages :] if reviewer.context_messages else []
         delegation = posted_by_code
@@ -2344,6 +2350,10 @@ class Runnable(ABC, BaseModel):
             if run_context._tool_policy is not None:
                 # What a run resuming this one restores when it does not say (see server/http.py).
                 metadata["tool_policy"] = describe_tool_policy(run_context._tool_policy)
+            if isinstance(run_context.trigger, dict):
+                # What started the run, over the runnable's own static metadata (an approval reviewer reads it). A
+                # copy: a tool's write to ``ctx.trigger`` changes nothing stored.
+                metadata["trigger"] = _own_copy(run_context.trigger)
         span = Span(
             path=self._path,
             call_id=_new_call_id,

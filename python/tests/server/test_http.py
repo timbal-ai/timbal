@@ -533,6 +533,73 @@ class TestServerLifecycle:
 
 
 
+class TestContextTrigger:
+    """``context.trigger`` on ``/run`` and ``/stream``: an object is stamped on the run's root, and so reaches the
+    output. What a JSON response cannot carry (NaN, Infinity, a lone surrogate) is a 400 before any job starts,
+    not a 500 once the tools have acted (a retry would act again)."""
+
+    @pytest.fixture
+    def app(self, monkeypatch):
+        import_spec = ImportSpec(
+            path=Path(__file__).parent / "fixtures" / "policy_agent_fixture.py", target="policy_agent"
+        )
+        monkeypatch.setenv("TIMBAL_RUNNABLE", f"{import_spec.path}::{import_spec.target}")
+        app = create_app()
+        app.state.runnable = import_spec.load()
+        app.state.job_store = JobStore()
+        fixture().WRITES.clear()
+        fixture().DONE.clear()
+        return app
+
+    @staticmethod
+    def _post(app, route, body):
+        return TestClient(app).post(route, content=body, headers={"content-type": "application/json"})
+
+    @pytest.mark.parametrize("route", ["/run", "/stream"])
+    @pytest.mark.parametrize(
+        "trigger",
+        ['{"kind": "routine", "ratio": NaN}', '{"kind": "routine", "at": [Infinity]}', '{"note": "\\ud800"}'],
+        ids=["nan", "infinity", "surrogate"],
+    )
+    def test_a_trigger_a_response_cannot_carry_is_refused_before_the_run(self, app, route, trigger):
+        response = self._post(app, route, '{"prompt": "go", "context": {"trigger": ' + trigger + "}}")
+        assert response.status_code == 400, response.text
+        assert "a response can carry" in response.json()["detail"]
+        assert fixture().WRITES == []  # no job ran
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            '{"prompt": "go", "context": {"id": "run-\\ud800"}}',
+            '{"prompt": "go", "context": {"tool_policy": ["write", "\\udc80"]}}',
+            '{"prompt": "go", "run_context": {"parent_id": "p\\ud800"}}',
+        ],
+        ids=["id", "policy", "legacy key"],
+    )
+    def test_what_runs_answer_cannot_carry_is_refused_before_the_run(self, app, body):
+        """/run answers with the run's output, which holds its ids and tool policy: before, a 500 after the
+        tools had acted."""
+        response = self._post(app, "/run", body)
+        assert response.status_code == 400, response.text
+        assert fixture().WRITES == []
+
+    def test_what_answers_do_not_echo_is_taken_as_before(self, app):
+        """A context key no answer holds, and /stream, which writes NaN and escapes a lone surrogate."""
+        ran = self._post(app, "/run", '{"prompt": "go", "context": {"client_hint": NaN}}')
+        assert ran.status_code == 200 and fixture().WRITES == ["write"]
+        # An input: its echo is dumped (NaN comes back as null), so the answer carries it, as on main.
+        dumped = self._post(app, "/run", '{"prompt": "go", "temperature": NaN}')
+        assert dumped.status_code == 200 and dumped.json()["input"]["temperature"] is None
+        streamed = self._post(app, "/stream", '{"prompt": "go \\ud800", "context": {"id": "run-\\ud800"}}')
+        assert streamed.status_code == 200 and fixture().WRITES == ["write", "write", "write"]
+
+    def test_a_trigger_is_on_the_output(self, app):
+        trigger = {"kind": "routine", "routine_id": "r1", "note": "ñ"}
+        response = TestClient(app).post("/run", json={"prompt": "go", "context": {"trigger": trigger}})
+        assert response.status_code == 200, response.text
+        assert response.json()["metadata"]["trigger"] == trigger
+
+
 class TestContextToolPolicy:
     """``context.tool_policy`` on ``/run`` and ``/stream``: the tools the run's agents offer their models."""
 
