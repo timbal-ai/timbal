@@ -1694,3 +1694,47 @@ class TestOwnerRoundOneReview:
         await run(alice, resume={approval.approval_id: True})
         assert [body["text"] for body in received] == ["refund order 7 (v1)", "refund order 7 (v2)"]
         assert received[0]["message_id"] == received[1]["message_id"]
+
+
+# -- Bugbot, round 2 ---------------------------------------------------------------------------------------------
+
+
+class TestBugbotRoundTwo:
+    async def test_a_loop_that_closes_as_the_message_is_handed_over_refuses_it(self):
+        """The recipient's loop was running at the check and closed before the receive reached it:
+        run_coroutine_threadsafe raised RuntimeError (a send ended "Interrupted" with no result, not "Not sent:
+        closed"), and the receive coroutine was never awaited."""
+        import gc
+        import warnings
+
+        class Closing(asyncio.SelectorEventLoop):
+            """Running at the check; closed by the time anything is handed to it."""
+
+            refusing = False
+
+            def is_running(self):
+                return self.refusing or super().is_running()
+
+            def call_soon_threadsafe(self, *args, **kwargs):
+                if self.refusing:
+                    raise RuntimeError("Event loop is closed")
+                return super().call_soon_threadsafe(*args, **kwargs)
+
+        b = ChatSession(make_agent("bob", lambda _: "NO_REPLY"))
+        b._hold_worker = True
+        closing = Closing()
+        closing.refusing = True
+        b._loop = closing
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                with pytest.raises(PeerRejected) as refused:
+                    await b.receive_agent_message("hello", sender="alice")
+                gc.collect()
+            assert refused.value.reason == "closed"
+            assert not [w for w in caught if "never awaited" in str(w.message)]
+        finally:
+            closing.refusing = False
+            closing.close()
+            b._loop = asyncio.get_running_loop()
+            await b.close()

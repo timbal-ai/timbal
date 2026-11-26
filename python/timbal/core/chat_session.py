@@ -1065,7 +1065,13 @@ class ChatSession:
                 text, sender=sender, message_id=message_id, reply_to=reply_to, priority=priority, hops=hops
             )
             try:
-                return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(receive, loop))
+                handed = asyncio.run_coroutine_threadsafe(receive, loop)
+            except RuntimeError:
+                # Closed between the check above and the hand-over: nothing reached it (and nothing will run this).
+                receive.close()
+                raise PeerRejected("closed", "The agent's session is not being served.") from None
+            try:
+                return await asyncio.wrap_future(handed)
             except asyncio.CancelledError:
                 task = asyncio.current_task()
                 if task is not None and task.cancelling():
