@@ -60,6 +60,14 @@ def prepare_chat_completions_request(
             ):
                 msg["content"] = "\n".join(item["text"] for item in content)
 
+    if config.omit_text_before_tool_calls:
+        chat_completions_messages = [
+            {k: v for k, v in msg.items() if k != "content"}
+            if msg.get("role") == "assistant" and msg.get("tool_calls")
+            else msg
+            for msg in chat_completions_messages
+        ]
+
     chat_completions_kwargs: dict[str, Any] = {
         "model": model_name,
         "messages": chat_completions_messages,

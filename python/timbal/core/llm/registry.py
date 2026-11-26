@@ -42,6 +42,11 @@ class _ProviderConfig:
     flatten_text_content: bool = False
     """Flatten text-only content arrays to plain strings for providers with incomplete Chat Completions support."""
 
+    omit_text_before_tool_calls: bool = False
+    """Drop the text of a replayed assistant message that also carries tool calls (request only; memory and traces
+    keep it). Gemini's OpenAI endpoint answers the step after the tool result with an empty message (0 output
+    tokens, ``stop``) in about a third of replays of «A ver, déjame mirarlo» + a tool call; without the text, 0 of 30."""
+
     supports_stream_options: bool = True
     """Whether the provider supports ``stream_options`` in Chat Completions."""
 
@@ -82,6 +87,7 @@ _PROVIDERS: dict[str, _ProviderConfig] = {
     "google": _ProviderConfig(
         env_key="GEMINI_API_KEY",
         default_base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        omit_text_before_tool_calls=True,
     ),
     "togetherai": _ProviderConfig(
         env_key="TOGETHER_API_KEY",
