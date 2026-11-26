@@ -733,20 +733,16 @@ def _resolve_waiter(waiter: asyncio.Future[None]) -> None:
 def _storable_records(records: list[Any]) -> list[dict[str, Any]]:
     """Screening records (``TriggerRecord``) as a snapshot holds them: JSON, a rail's own metadata left out where
     JSON cannot carry it (a snapshot that cannot be written stores nothing)."""
-    import json
+    from .chat_store import storable  # (the snapshot's own encoder decides: the check and the write agree)
 
     stored = []
     for record in records:
         data = record.as_dict() if hasattr(record, "as_dict") else None
         if not isinstance(data, dict):
             continue
-        try:
-            json.dumps(data, allow_nan=False)
-        except (TypeError, ValueError):
+        if not storable(data):
             data.pop("metadata", None)
-            try:
-                json.dumps(data, allow_nan=False)
-            except (TypeError, ValueError):
+            if not storable(data):
                 continue
         stored.append(data)
     return stored

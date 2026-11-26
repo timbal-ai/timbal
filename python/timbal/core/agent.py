@@ -92,7 +92,7 @@ from .attachment_limit import AttachmentSpills, apply_attachment_limit
 from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
 from .models import Model, base_usage_metric, get_context_window
-from .peers import _SEND_TO_AGENT_FALLBACKS, PEER_SENT_KEY, SEND_TO_AGENT_NAME
+from .peers import _SEND_TO_AGENT_FALLBACKS, PEER_SENT_KEY, SEND_TO_AGENT_NAME, _sent_ids
 from .runnable import Runnable, RunnableLike
 from .session_scheduler import record_delivery
 from .skill import ReadSkill, Skill
@@ -1991,11 +1991,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 current_span.metadata["end_turn"] = True
                 if paused.get("silent"):
                     current_span.metadata["silent"] = True  # it ended its turn by staying silent
-            peer_sent = paused.get(PEER_SENT_KEY)
-            if isinstance(peer_sent, dict) and peer_sent:
+            peer_sent = _sent_ids(previous_span)
+            if peer_sent:
                 # The ids the turn's sends to other agents used: a send cut before its answer came back runs
                 # again in this run, and must send the same message (peers._sent_message_id).
-                current_span.metadata[PEER_SENT_KEY] = dict(peer_sent)
+                current_span.metadata[PEER_SENT_KEY] = {"call_id": current_span.call_id, "ids": dict(peer_sent)}
         prepared = None
         if (
             self.memory_compaction is not None

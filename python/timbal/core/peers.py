@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import itertools
+import json
 import os
 import re
 import threading
@@ -136,15 +137,25 @@ _FALLBACK_MESSAGES = {
 _RECEIPT_STATES = frozenset({"pending", "delivered", "superseded", "withdrawn", "undelivered"})
 
 
-def _is_receipt(body: Any) -> bool:
-    """What the route answers for a message it queued (``SessionEvent.receipt``, plus ``duplicate``)."""
-    return (
-        isinstance(body, dict)
-        and isinstance(body.get("event_id"), str)
-        and bool(body["event_id"])
-        and body.get("state") in _RECEIPT_STATES
-        and isinstance(body.get("duplicate"), bool)
-    )
+def _receipt(body: Any) -> dict[str, Any] | None:
+    """What the route answers for a message it queued (``SessionEvent.receipt``, plus ``duplicate``), and only that:
+    the sender's model reads it, and a remote's other text (or a ``status`` of its own) must not reach it. Ids are
+    ids (``_MESSAGE_ID``), not free text. None: not a receipt."""
+    if not isinstance(body, dict) or body.get("state") not in _RECEIPT_STATES:
+        return None
+    if not isinstance(body.get("duplicate"), bool):
+        return None
+    receipt: dict[str, Any] = {"event_id": body.get("event_id"), "key": None, "state": body["state"]}
+    for name in ("event_id", "run_id", "message_id"):
+        value = body.get(name)
+        if value is None and name != "event_id":
+            receipt[name] = None
+        elif isinstance(value, str) and _MESSAGE_ID.fullmatch(value):
+            receipt[name] = value
+        else:
+            return None
+    receipt["duplicate"] = body["duplicate"]
+    return receipt
 
 
 def _not_sent() -> tuple[type[BaseException], ...]:
@@ -208,10 +219,11 @@ class RemotePeer:
             raise PeerRejected("unconfirmed", _UNCONFIRMED)
         if not response.is_success:
             raise PeerRejected("unreachable", f"The agent's server answered {response.status_code}.")
-        if not _is_receipt(body):
+        receipt = _receipt(body)
+        if receipt is None:
             # Taken by something, and nothing in its answer says a message was queued, nor which.
             raise PeerRejected("unconfirmed", _UNCONFIRMED)
-        return body
+        return receipt
 
 
 class PeerMembership:
@@ -285,7 +297,7 @@ class PeerMembership:
                 answered = membership.session._agent_message(to, reply_to)
                 if answered is not None:
                     hops = max(hops, (answered.peer.get("hops") or 0) + 1)
-            message_id = _sent_message_id(run_context)
+            message_id = _sent_message_id(run_context, (to, message, reply_to, priority))
             try:
                 return await membership.directory.send(
                     membership.name,
@@ -338,12 +350,15 @@ def _message_id(run_id: str, call_id: str) -> str:
     return "am_" + hashlib.sha256(f"{run_id}:{call_id}".encode()).hexdigest()[:24]
 
 
-def _sent_message_id(run_context: Any) -> str:
-    """The id of the message this ``send_to_agent`` call sends: the one an earlier attempt at the same tool call
-    used, else a new one, recorded on the agent's span before anything goes out.
+def _sent_message_id(run_context: Any, sent: tuple[Any, ...]) -> str:
+    """The id of the message this ``send_to_agent`` call sends: the one an earlier attempt at the same call used,
+    else a new one, recorded on the agent's span before anything goes out.
 
     A call cut before its answer came back (its caller stopped reading at another call's approval card) runs again
-    when the turn resumes, under another run and span: with the id it had, the peer takes it once."""
+    when the turn resumes, under another run and span: with the id it had, the peer takes it once. The same call is
+    its tool call id and what it sends (``sent``): a model whose ids repeat (a custom one) sends two messages under
+    one id, and those are two. The record is stamped with its span (``call_id``), as ``paused_calls`` is: a key of
+    that name in the agent's own ``metadata`` (which a span's starts as a copy of) is not a record."""
     if run_context is None:
         return _message_id("", get_call_id() or "")
     span = run_context.current_span()
@@ -352,12 +367,21 @@ def _sent_message_id(run_context: Any) -> str:
     agent_span = run_context.parent_span() if tool_call_id else None
     if agent_span is None:
         return message_id
-    sent = agent_span.metadata.get(PEER_SENT_KEY)
-    if isinstance(sent, dict) and isinstance(sent.get(tool_call_id), str):
-        return sent[tool_call_id]
+    key = tool_call_id + ":" + hashlib.sha256(json.dumps(sent, default=str).encode()).hexdigest()[:16]
+    ids = _sent_ids(agent_span)
+    if isinstance(ids.get(key), str):
+        return ids[key]
     # A copy, never written in place: a span's metadata starts as a shallow copy of the agent's own.
-    agent_span.metadata[PEER_SENT_KEY] = {**(sent if isinstance(sent, dict) else {}), tool_call_id: message_id}
+    agent_span.metadata[PEER_SENT_KEY] = {"call_id": agent_span.call_id, "ids": {**ids, key: message_id}}
     return message_id
+
+
+def _sent_ids(span: Any) -> dict[str, Any]:
+    """The ids a span's record holds (``PEER_SENT_KEY``), if it is that span's own record."""
+    record = span.metadata.get(PEER_SENT_KEY)
+    if isinstance(record, dict) and record.get("call_id") == span.call_id and isinstance(record.get("ids"), dict):
+        return record["ids"]
+    return {}
 
 
 class AgentDirectory:

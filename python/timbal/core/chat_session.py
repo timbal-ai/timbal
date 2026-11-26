@@ -1064,7 +1064,15 @@ class ChatSession:
             receive = self._receive_agent_message(
                 text, sender=sender, message_id=message_id, reply_to=reply_to, priority=priority, hops=hops
             )
-            return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(receive, loop))
+            try:
+                return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(receive, loop))
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise  # the caller's own cancellation
+                # The session's loop ended (or cancelled the receive) before the message was posted: nothing
+                # awaits between the post and the receipt, so a cancelled receive posted nothing.
+                raise PeerRejected("closed", "The agent's session stopped while it took the message.") from None
         return await self._receive_agent_message(
             text, sender=sender, message_id=message_id, reply_to=reply_to, priority=priority, hops=hops
         )
@@ -1191,7 +1199,8 @@ class ChatSession:
     async def _screen_agent_message(self, text: str, sender: str, peer: dict[str, Any]) -> tuple[str, list[Any]]:
         """The agent's input guardrails on a message from another agent (as on a user's prompt): the text they
         leave, and the rails that fired, for the guardrail report of the run that takes it. A rail gets the message
-        as ``ctx.payload``, as for a prompt: a runtime ``user`` message with the envelope (``metadata.peer``)."""
+        as ``ctx.payload``, as for a prompt: a ``user`` message from ``source="agent"`` with the envelope
+        (``metadata.peer``)."""
         from ..guardrails.types import GuardrailContext, GuardrailStage
         from ..types.message import SESSION_EVENT_KIND
         from .peers import PeerRejected
@@ -1199,10 +1208,12 @@ class ChatSession:
         runner = getattr(self._agent, "_guardrail_runner", None)
         if runner is None or not runner.has_stage(GuardrailStage.INPUT):
             return text, []
+        # Not marked as the runtime's own text (``is_runtime()``): a rail that lets the runtime's notices through
+        # must still screen another agent's words.
         payload = Message(
             role="user",
             content=[TextContent(text=text)],
-            metadata={"source": RUNTIME_SOURCE, "kind": SESSION_EVENT_KIND, "peer": dict(peer)},
+            metadata={"source": "agent", "kind": SESSION_EVENT_KIND, "peer": dict(peer)},
         )
         ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._agent._path, payload=payload)
         outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
@@ -1720,6 +1731,7 @@ class ChatSession:
         """Pick up the state of the run the session continues (``parent_id``): one parked on an approval or
         ``ask_user`` leaves the session parked, so messages wait and :meth:`resume` answers it (a turn chained
         onto it would resume it and drop its prompt). Once; ``async with`` and the first turn call it."""
+        self._loop = asyncio.get_running_loop()  # served from here (async with, the worker's first step)
         if self._restoring is None or (self._restoring.done() and self._restore_from is not None):
             self._restoring = asyncio.get_running_loop().create_task(self._restore_parked())
         await asyncio.shield(self._restoring)
@@ -1895,8 +1907,7 @@ class ChatSession:
             return
         if self._worker is None or self._worker.done():
             loop = asyncio.get_running_loop()
-            if self._loop is None:
-                self._loop = loop
+            self._loop = loop  # the loop that serves it is its worker's (the one it was made on is only a guess)
             self._worker = loop.create_task(self._serve())
 
     def _work_arrived(self) -> None:
