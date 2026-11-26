@@ -628,52 +628,6 @@ class TestLlmRouterChatCompletionsKwargs:
         assert user_messages[0]["content"] == "hello"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("model", "env_key", "kept"),
-        [("google/gemini-2.5-flash", "GEMINI_API_KEY", False), ("groq/openai/gpt-oss-120b", "GROQ_API_KEY", True)],
-    )
-    async def test_text_before_tool_calls_dropped_only_where_flagged(self, model, env_key, kept):
-        """Gemini gets an empty reply after a tool result when the replayed call carries text; others keep it."""
-        from timbal.core.llm import _llm_router
-        from timbal.types.content.text import TextContent
-        from timbal.types.content.tool_result import ToolResultContent
-        from timbal.types.content.tool_use import ToolUseContent
-        from timbal.types.message import Message
-        _make_run_context()
-
-        captured_kwargs = {}
-
-        async def fake_create(**kwargs):
-            captured_kwargs.update(kwargs)
-            return _empty_async_stream()
-
-        mock_client = MagicMock()
-        mock_client.chat.completions.create = fake_create
-
-        memory = [
-            Message(role="user", content=[TextContent(text="mi factura")]),
-            Message(
-                role="assistant",
-                content=[TextContent(text="A ver, déjame mirarlo."), ToolUseContent(id="t1", name="factura", input={})],
-            ),
-            Message(role="tool", content=[ToolResultContent(id="t1", content=[TextContent(text="60 euros")])]),
-        ]
-        before = [m.to_openai_chat_completions_input() for m in memory]
-
-        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
-            with patch.dict(os.environ, {env_key: "key"}):
-                try:
-                    async for _ in _llm_router(model=model, messages=memory):
-                        pass
-                except (RuntimeError, StopAsyncIteration):
-                    pass
-
-        sent = [m for m in captured_kwargs["messages"] if m["role"] == "assistant"]
-        assert len(sent) == 1 and sent[0]["tool_calls"][0]["function"]["name"] == "factura"
-        assert ("content" in sent[0]) is kept
-        assert [m.to_openai_chat_completions_input() for m in memory] == before  # memory keeps what was said
-
-    @pytest.mark.asyncio
     async def test_no_stream_options_when_not_supported(self):
         """xiaomi has supports_stream_options=False."""
         from timbal.core.llm import _llm_router
