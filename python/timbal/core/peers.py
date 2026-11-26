@@ -204,7 +204,7 @@ class RemotePeer:
             # Sent, or partly: the server may have taken it before the answer was lost.
             raise PeerRejected("unconfirmed", _UNCONFIRMED) from e
         body: Any = None
-        with contextlib.suppress(ValueError):
+        with contextlib.suppress(ValueError, RecursionError):  # (an answer nested past what json reads)
             body = response.json()
         if response.status_code in _REASON_BY_STATUS:
             said = body if isinstance(body, dict) else {}
@@ -392,13 +392,16 @@ def _sent_message_id(run_context: Any, sent: dict[str, Any]) -> str:
     return message_id
 
 
-def carry_sent_ids(current_span: Any, paused_span: Any, waiting: Collection[str] | None) -> None:
-    """For a run that resumes ``paused_span``: the ids its sends to agents used, for the calls that were waiting
-    (``waiting``, tool call ids; None: every one), for their replays (``_sent_message_id``). Also the ones it was
-    given itself and did not use (a pause before the replay ran)."""
-    sent = _sent_ids(paused_span)
-    ids = {key: value for key, value in sent.items() if waiting is None or key.split(":", 1)[0] in waiting}
-    ids = {**_sent_ids(paused_span, PEER_REPLAY_KEY), **ids}
+def carry_sent_ids(current_span: Any, paused_span: Any, waiting: Collection[str]) -> None:
+    """For a run that resumes ``paused_span``: the ids its sends to agents used, for the calls this run replays
+    (``waiting``: tool call ids, the calls still waiting in its memory that the pause recorded), for those replays
+    (``_sent_message_id``). Also the ones it was given itself and did not use (a pause before the replay ran), for
+    the same calls only: an id carried for a call that is not replayed would go to a later call that matches it."""
+    if not waiting:
+        return
+    carried = {**_sent_ids(paused_span, PEER_REPLAY_KEY), **_sent_ids(paused_span)}
+    # (The key is the tool call id, then ":" and a hash with no ":" in it: an id may have one, as Kimi's do.)
+    ids = {key: value for key, value in carried.items() if key.rsplit(":", 1)[0] in waiting}
     if ids:
         current_span.metadata[PEER_REPLAY_KEY] = {"call_id": current_span.call_id, "ids": ids}
 

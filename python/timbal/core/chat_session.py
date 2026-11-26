@@ -1,6 +1,7 @@
 """A text conversation that stays open: messages in at any time, one turn at a time, events out."""
 
 import asyncio
+import concurrent.futures
 import contextlib
 import copy
 import functools
@@ -1067,8 +1068,12 @@ class ChatSession:
         if loop is not None and loop is not _running_loop():
             if loop.is_closed() or not loop.is_running():
                 raise PeerRejected("closed", "The agent's session is not being served.")
-            receive = self._receive_agent_message(
-                text, sender=sender, message_id=message_id, reply_to=reply_to, priority=priority, hops=hops
+            # The receive says what became of the message itself, in the step that posts it: its result reaches the
+            # hand-over (run_coroutine_threadsafe) only in a callback one step later, which a loop that stops in
+            # that step and closes never runs, and the sender would be told "closed" for a message in the inbox.
+            outcome: concurrent.futures.Future = concurrent.futures.Future()
+            receive = self._receive_and_report(
+                outcome, text, sender=sender, message_id=message_id, reply_to=reply_to, priority=priority, hops=hops
             )
             try:
                 handed = asyncio.run_coroutine_threadsafe(receive, loop)
@@ -1076,31 +1081,49 @@ class ChatSession:
                 # Closed between the check above and the hand-over: nothing reached it (and nothing will run this).
                 receive.close()
                 raise PeerRejected("closed", "The agent's session is not being served.") from None
-            waiting = asyncio.wrap_future(handed)
+            waiting = asyncio.wrap_future(outcome)
             try:
                 while True:
                     done, _ = await asyncio.wait({waiting}, timeout=_HANDOVER_CHECK_S)
                     if done:
                         return waiting.result()
-                    if loop.is_closed() and not handed.done():
-                        # Closed after it took the receive and before it settled it (a loop that was stopping, or
-                        # closed with its tasks left as they were): nothing will settle this now. Nothing was posted:
-                        # a receive that posts completes in the same step.
-                        handed.cancel()
+                    if loop.is_closed() and not outcome.done():
+                        # Closed after it took the receive and before the receive said anything (a loop that was
+                        # stopping, or closed with its tasks left as they were): nothing will settle it now, and
+                        # nothing was posted (a receive that posts says so in the same step). No cancel either:
+                        # it would call back into the closed loop.
                         if inspect.getcoroutinestate(receive) == inspect.CORO_CREATED:
                             receive.close()  # never started: no "never awaited" left behind
                         raise PeerRejected("closed", "The agent's session stopped before the message reached it.")
             except asyncio.CancelledError:
                 task = asyncio.current_task()
                 if task is not None and task.cancelling():
-                    waiting.cancel()  # (and with it the receive on the session's loop)
+                    if not loop.is_closed():
+                        handed.cancel()  # (and with it the receive on the session's loop)
                     raise  # the caller's own cancellation
-                # The session's loop ended (or cancelled the receive) before the message was posted: nothing
-                # awaits between the post and the receipt, so a cancelled receive posted nothing.
                 raise PeerRejected("closed", "The agent's session stopped while it took the message.") from None
         return await self._receive_agent_message(
             text, sender=sender, message_id=message_id, reply_to=reply_to, priority=priority, hops=hops
         )
+
+    async def _receive_and_report(self, outcome: concurrent.futures.Future, text: str, **kwargs: Any) -> None:
+        """:meth:`_receive_agent_message` on the session's loop, for a sender on another one: what became of the
+        message is set on ``outcome`` in the step that decides it (a receipt, a refusal; a cancelled receive posted
+        nothing: ``closed``)."""
+        from .peers import PeerRejected
+
+        try:
+            receipt = await self._receive_agent_message(text, **kwargs)
+        except asyncio.CancelledError:
+            if not outcome.done():
+                outcome.set_exception(PeerRejected("closed", "The agent's session stopped while it took the message."))
+            raise
+        except Exception as error:  # (said to the sender, who raises it: nothing is left for the loop to log)
+            if not outcome.done():
+                outcome.set_exception(error)
+            return
+        if not outcome.done():
+            outcome.set_result(receipt)
 
     async def _receive_agent_message(
         self,

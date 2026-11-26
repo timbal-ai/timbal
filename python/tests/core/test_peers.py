@@ -18,7 +18,7 @@ from timbal.state import set_call_id, set_parent_call_id, set_run_context
 from timbal.state.chat_store import InMemoryChatSessionStore
 from timbal.state.context import RunContext
 from timbal.state.tracing.providers import InMemoryTracingProvider
-from timbal.types.content import ToolResultContent, ToolUseContent
+from timbal.types.content import TextContent, ToolResultContent, ToolUseContent
 from timbal.types.events import ApprovalEvent, OutputEvent
 from timbal.types.message import Message
 
@@ -1789,7 +1789,7 @@ class TestOwnerRoundTwo:
         await alice(messages=history, resume={approval.approval_id: True}).collect()
         assert len(received) == 2 and received[0]["message_id"] == received[1]["message_id"]
 
-    def test_a_recipient_loop_that_closes_before_running_the_receive_settles_the_sender(self):
+    def test_a_recipient_loop_that_closes_before_running_the_receive_settles_the_sender(self, caplog):
         """[P2] The hand-over succeeded while the recipient's loop was stopping, and the loop closed before its next
         callbacks: the receive never started, and the sender waited for good."""
 
@@ -1825,7 +1825,10 @@ class TestOwnerRoundTwo:
                 b._loop = asyncio.get_running_loop()
                 await b.close()
 
-        assert asyncio.run(sender()) == "closed"
+        with caplog.at_level("ERROR"):
+            assert asyncio.run(sender()) == "closed"
+        # Nothing calls back into the closed loop (a cancel there logs "exception calling callback").
+        assert not [record for record in caplog.records if record.levelname == "ERROR"]
 
     async def test_an_id_coalesced_by_its_text_survives_a_restore(self):
         """[P2] The alias lived only in memory: restored while A was pending, a retry of B once A was taken started
@@ -1894,3 +1897,161 @@ class TestOwnerRoundTwo:
         with pytest.raises(PeerRejected) as refused:
             await RemotePeer(url="https://bots.example", session_id="s").deliver({"from": "a", "text": "x"})
         assert refused.value.reason == reason
+
+
+class TestOwnerRoundTwoReview:
+    async def _cut_and_resume(self, monkeypatch, *, call_id="t-send", later=None, with_result=False):
+        """A send cut at a sibling's approval card (a remote peer that has it and answers slowly), then the resume.
+        ``later``: what the model does after the resumed batch. ``with_result``: resume with the caller's own
+        history, which holds a result for the send (so it is not replayed)."""
+        received, answer = [], asyncio.Event()
+        remote_bob(monkeypatch, received, answer)
+        send = ToolUseContent(id=call_id, name="send_to_agent", input={"to": "bob", "message": "refund order 7"})
+        pay = ToolUseContent(id="t-pay", name="pay", input={})
+        responses = [Message(role="assistant", content=[send, pay], stop_reason="tool_use")]
+        responses += [later] if later is not None else []
+        alice = Agent(
+            name="alice",
+            model=TestModel(responses=[*responses, "done"]),
+            tools=[Tool(name="pay", handler=lambda: "paid", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        directory = AgentDirectory()
+        directory.add_remote("bob", RemotePeer(url="https://bots.example", session_id="s"))
+        membership = directory.join(ChatSession(alice), "alice")
+        context = fresh(peer=membership)
+        stream = alice(prompt="go")
+        async for event in stream:
+            if isinstance(event, ApprovalEvent):
+                approval = event
+                await until(lambda: received)
+                break
+        await stream.aclose()
+        answer.set()
+        fresh(context.id, peer=membership)
+        if with_result:
+            history = list(next(s for s in context._trace.values() if s.parent_call_id is None).memory)
+            result = Message(
+                role="tool",
+                content=[ToolResultContent(id=call_id, content=[TextContent(text='{"status": "sent"}')])],
+            )
+            await alice(messages=[*history, result], resume={approval.approval_id: True}).collect()
+        else:
+            await run(alice, resume={approval.approval_id: True})
+        return received
+
+    async def test_a_tool_call_id_with_a_colon_keeps_its_id_on_the_replay(self, monkeypatch):
+        """The carried ids were matched to the waiting calls by the part of the key before its first ":": an id
+        with one (Kimi's are functions.name:0) never matched, and the replay got a new id."""
+        received = await self._cut_and_resume(monkeypatch, call_id="functions.send_to_agent:0")
+        assert len(received) == 2 and received[0]["message_id"] == received[1]["message_id"]
+
+    async def test_an_id_carried_for_a_call_that_is_not_replayed_goes_to_no_later_call(self, monkeypatch):
+        """The resume with the caller's history held a result for the send, so it was not replayed; its id was
+        carried all the same (the record listed the whole batch), and the same call made in the next step took it:
+        the peer dropped that new message as a duplicate."""
+        again = call("send_to_agent", call_id="t-send", to="bob", message="refund order 7")
+        received = await self._cut_and_resume(monkeypatch, later=again, with_result=True)
+        assert len(received) == 2 and received[0]["message_id"] != received[1]["message_id"]
+
+    async def test_an_id_carried_for_a_replay_is_dropped_once_the_replays_ran(self, monkeypatch):
+        """Once the resumed batch has run, a later call that matches a carried id is a new message."""
+        again = call("send_to_agent", call_id="t-send", to="bob", message="refund order 7")
+        received = await self._cut_and_resume(monkeypatch, later=again)
+        assert len(received) == 3
+        assert received[0]["message_id"] == received[1]["message_id"] != received[2]["message_id"]
+
+    async def test_an_id_carried_for_a_replay_a_rail_blocked_goes_to_no_later_call(self, monkeypatch):
+        """The replay did not run (a tool_args rail blocked it), so its carried id was not used up, and the same call
+        made in the next step took it: the peer dropped that new message as a duplicate."""
+        runs = []
+
+        def block_the_replay(_text, ctx):
+            if ctx.tool_name != "send_to_agent":
+                return True
+            runs.append(1)
+            return Verdict.block("not now") if len(runs) == 2 else True
+
+        received, answer = [], asyncio.Event()
+        remote_bob(monkeypatch, received, answer)
+        send = ToolUseContent(id="t-send", name="send_to_agent", input={"to": "bob", "message": "refund order 7"})
+        pay = ToolUseContent(id="t-pay", name="pay", input={})
+        again = call("send_to_agent", call_id="t-send", to="bob", message="refund order 7")
+        alice = Agent(
+            name="alice",
+            model=TestModel(
+                responses=[Message(role="assistant", content=[send, pay], stop_reason="tool_use"), again, "done"]
+            ),
+            tools=[Tool(name="pay", handler=lambda: "paid", requires_approval=True)],
+            guardrails=[guardrail(block_the_replay, stages=["tool_args"], name="once")],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        directory = AgentDirectory()
+        directory.add_remote("bob", RemotePeer(url="https://bots.example", session_id="s"))
+        membership = directory.join(ChatSession(alice), "alice")
+        context = fresh(peer=membership)
+        stream = alice(prompt="go")
+        async for event in stream:
+            if isinstance(event, ApprovalEvent):
+                approval = event
+                await until(lambda: received)
+                break
+        await stream.aclose()
+        answer.set()
+        fresh(context.id, peer=membership)
+        await run(alice, resume={approval.approval_id: True})
+        assert len(runs) == 3 and len(received) == 2  # the cut send, the blocked replay, the later call
+        assert received[0]["message_id"] != received[1]["message_id"]
+
+    def test_a_message_posted_as_its_loop_stops_is_sent(self, caplog):
+        """The receive posted the message in the step in which its loop stopped. Its result reaches the hand-over
+        in a callback one step later, which a stopped and closed loop never runs: the sender was told "closed" for
+        a message that was in the inbox."""
+        import threading
+
+        served, ready = {}, threading.Event()
+
+        def serve():
+            loop = asyncio.new_event_loop()
+
+            async def make():
+                session = ChatSession(make_agent("bob", lambda _: "NO_REPLY"))
+                session._hold_worker = True
+                session._loop = loop
+                session._ensure_worker = loop.stop  # the stop lands in the step that posts
+                served["session"] = session
+                ready.set()
+
+            loop.run_until_complete(make())
+            loop.run_forever()
+            loop.close()
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+
+        async def sender():
+            assert await asyncio.to_thread(ready.wait, 5)
+            return await asyncio.wait_for(served["session"].receive_agent_message("hello", sender="alice"), 5)
+
+        try:
+            with caplog.at_level("ERROR"):
+                receipt = asyncio.run(sender())
+        finally:
+            thread.join(10)
+        assert not [record for record in caplog.records if record.levelname == "ERROR"]
+        assert receipt["duplicate"] is False
+        assert [e.text for e in served["session"]._store.pending_events()] == ["hello"]
+
+    async def test_a_remote_answer_too_deep_for_json_is_unconfirmed(self, monkeypatch):
+        real = httpx.AsyncClient
+        deep = b"[" * 200_000 + b"]" * 200_000
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kwargs: real(
+                transport=httpx.MockTransport(lambda _request: httpx.Response(202, content=deep)), **kwargs
+            ),
+        )
+        with pytest.raises(PeerRejected) as refused:
+            await RemotePeer(url="https://bots.example", session_id="s").deliver({"from": "a", "text": "x"})
+        assert refused.value.reason == "unconfirmed"

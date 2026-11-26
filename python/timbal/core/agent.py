@@ -92,7 +92,7 @@ from .attachment_limit import AttachmentSpills, apply_attachment_limit
 from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
 from .models import Model, base_usage_metric, get_context_window
-from .peers import _SEND_TO_AGENT_FALLBACKS, SEND_TO_AGENT_NAME, carry_sent_ids
+from .peers import _SEND_TO_AGENT_FALLBACKS, PEER_REPLAY_KEY, SEND_TO_AGENT_NAME, carry_sent_ids
 from .runnable import Runnable, RunnableLike
 from .session_scheduler import record_delivery
 from .skill import ReadSkill, Skill
@@ -640,10 +640,14 @@ def _card_id(event: Any) -> str:
     return getattr(event, "approval_id", None) or getattr(event, "interaction_id", None) or ""
 
 
-def _waiting_ids(paused_calls: Any) -> set[str] | None:
-    """The tool call ids a paused turn's record says were waiting (``bindings``), or None when it says nothing."""
+def _waiting_ids(paused_calls: Any, pending: Sequence[Any]) -> set[str]:
+    """The tool call ids a resumed run replays: those still waiting in its memory (``pending``), among the ones
+    the paused turn's record says were waiting (``bindings``) when it has them."""
+    ids = {call.id for call in pending}
     bindings = paused_calls.get("bindings") if isinstance(paused_calls, dict) else None
-    return set(bindings) if isinstance(bindings, dict) and bindings else None
+    if isinstance(bindings, dict) and bindings:
+        ids &= set(bindings)
+    return ids
 
 
 def _binding(tool: Any, providers: Mapping[int, str]) -> str:
@@ -1954,7 +1958,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 paused_calls = _paused_record(paused_span)
                 if paused_span is not None and _is_pause(paused_span.status):
                     # As on the resume below: a send cut before its answer came back keeps its id.
-                    carry_sent_ids(current_span, paused_span, _waiting_ids(paused_calls))
+                    carry_sent_ids(
+                        current_span, paused_span, _waiting_ids(paused_calls, self._find_pending_tool_uses(loaded))
+                    )
                 return paused_calls
             return None
 
@@ -2004,7 +2010,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     current_span.metadata["silent"] = True  # it ended its turn by staying silent
             # The ids the turn's sends to other agents used: a send cut before its answer came back runs again in
             # this run, and must send the same message (peers._sent_message_id).
-            carry_sent_ids(current_span, previous_span, _waiting_ids(paused_calls))
+            carry_sent_ids(
+                current_span, previous_span, _waiting_ids(paused_calls, self._find_pending_tool_uses(memory))
+            )
         prepared = None
         if (
             self.memory_compaction is not None
@@ -5549,6 +5557,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if first_pending is not None:
                         await self._save_denials(run_context, consecutive_denials)
                         raise PauseRequired(first_pending)
+                    # The replays are done: the ids carried for them go to no later call (peers.carry_sent_ids).
+                    current_span.metadata.pop(PEER_REPLAY_KEY, None)
                     i += 1
                     if denial_window_on or consecutive_denials >= denial_limit:
                         await _check_denials()
