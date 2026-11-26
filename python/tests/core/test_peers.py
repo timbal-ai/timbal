@@ -866,24 +866,41 @@ class TestReviewRoundOne:
         send = next(t for t in membership._tools.values())[1]
         assert "reply_to" in send.description
 
-    async def test_a_turn_that_cannot_answer_agents_leaves_their_messages_for_one_that_can(self):
-        """A read-only turn (a wake, a recovery turn) has no send: it took the message and could not answer it,
-        and no later turn got it."""
+    @pytest.mark.parametrize("policy", ["read_only", ["send_to_agent"], None])
+    async def test_a_wake_leaves_agent_messages_for_a_turn_of_their_own(self, policy):
+        """A wake (the application's turn: a routine, a heartbeat, a recovery turn after a restart) runs under its
+        own tool policy, where the send may be hidden, or named so the policy does not reach it: with a tool of
+        the agent's own called send_to_agent, ["send_to_agent"] lets that one through and not the send
+        (message_agent). The wake took the message and its model answered through the application's tool.
+        Messages from agents wait for a turn of their own, with the session's tools."""
         from timbal.state.background import adopt_background_store
 
+        app_ran = []
+
+        def handler(messages):
+            found = [m for msg in messages for m in agent_messages(msg)]
+            if messages[-1].role != "tool" and found:
+                return call("send_to_agent", to="alice", message="4", reply_to=found[0][1])
+            return "NO_REPLY"
+
+        bob = Agent(
+            name="bob",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="send_to_agent", handler=lambda to, message, reply_to=None: app_ran.append(message))],  # noqa: ARG005 - the tool's parameters
+            tracing_provider=InMemoryTracingProvider,
+        )
         directory = AgentDirectory()
-        bob = make_agent("bob", lambda _: "NO_REPLY")
         b = ChatSession(bob)
         membership = directory.join(b, "bob")
         b._hold_worker = True
-        receipt = await directory.send("alice", "bob", "what is 2+2?")
+        await directory.send("alice", "bob", "what is 2+2?")
         context = fresh(peer=membership)
-        context._tool_policy = "read_only"
+        context._tool_policy, context._steering = policy, False  # as ChatSession runs a wake
         adopt_background_store(context, b._store)
         await run(bob)
         (event,) = b._store.pending_events()
-        assert event.state == "pending" and event.peer["message_id"] == receipt["message_id"]
-        context = fresh(peer=membership)
+        assert event.state == "pending" and app_ran == []
+        context = fresh(peer=membership)  # a turn of the session's own
         adopt_background_store(context, b._store)
         await run(bob)
         assert event.state == "delivered" and not b._store.pending_events()
@@ -967,7 +984,17 @@ class TestReviewRoundOne:
         def connect_error(request):
             raise httpx.ConnectError("refused", request=request)
 
+        def raises(error):
+            def answer(request):
+                raise error("refused", request=request)
+
+            return answer
+
         cases = [
+            (raises(httpx.UnsupportedProtocol), "unreachable"),
+            (raises(httpx.ProxyError), "unreachable"),
+            (raises(httpx.LocalProtocolError), "unreachable"),
+            (lambda _request: httpx.Response(502, json={"detail": "bad gateway"}), "unconfirmed"),
             (read_timeout, "unconfirmed"),
             (lambda _request: httpx.Response(503, json={"detail": "may be stored"}), "unconfirmed"),
             (lambda _request: httpx.Response(503, headers={"Retry-After": "1"}, json={"detail": "x"}), "unreachable"),

@@ -2198,9 +2198,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # and events are the call's to speak (SessionScheduler.takes), so they stay pending for it.
             return
         notifications = store.drain_completions()
-        if run_context._peer is not None and not self._answers_agents(run_context):
-            # A turn that cannot answer another agent (a read-only wake, a recovery turn): its messages wait for a
-            # turn that can (they start one of their own once this one is over).
+        if run_context._peer is not None and run_context._steering is False:
+            # A wake (the application's turn: a routine, a heartbeat, a recovery turn) leaves messages from other
+            # agents for a turn of their own, with the session's tools: under the wake's tool policy the send may
+            # be hidden, or named so that the policy reaches another tool (one of the agent's own called
+            # send_to_agent), and the turn would take a message it cannot answer.
             events = store.drain_events(settle=False, where=lambda event: event.source not in ("user", "agent"))
         else:
             events = store.drain_events(settle=False, where=lambda event: event.source != "user")
@@ -2217,16 +2219,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             memory.insert(-1, notice)
         else:
             memory.append(notice)
-
-    def _answers_agents(self, run_context: Any) -> bool:
-        """Whether this turn may message other agents: its tool policy does not hide the send (a read-only turn
-        has none). With no send to hide (an ``output_model``, a session that left the directory) messages are
-        taken all the same: no turn of this agent could answer them."""
-        policy = run_context._tool_policy
-        peer = run_context._peer
-        if policy is None or self.output_model is not None or not peer.current:
-            return True
-        return self._tool_allowed(peer.tool(self, SEND_TO_AGENT_NAME), policy)
 
     def _steers(self, run_context: Any, current_span: Any) -> bool:
         """Whether this turn takes ``lane="next"`` events between steps (see ``steering``)."""

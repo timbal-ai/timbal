@@ -134,6 +134,21 @@ _FALLBACK_MESSAGES = {
 }
 
 
+def _not_sent() -> tuple[type[BaseException], ...]:
+    import httpx
+
+    # Raised before any byte of the request went out: no connection, a bad URL or proxy, a request httpx refuses.
+    return (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.PoolTimeout,
+        httpx.ProxyError,
+        httpx.UnsupportedProtocol,
+        httpx.LocalProtocolError,
+        httpx.InvalidURL,
+    )
+
+
 @dataclass
 class RemotePeer:
     """A chat session served by another Timbal server: messages go to its ``agent_messages`` route.
@@ -152,13 +167,14 @@ class RemotePeer:
     async def deliver(self, envelope: dict[str, Any]) -> dict[str, Any]:
         import httpx
 
+        not_sent = _not_sent()
         url = f"{self.url.rstrip('/')}/chat/sessions/{quote(self.session_id, safe='')}/agent_messages"
         try:
             # No redirects: the headers are for this server, and a receipt comes from the route itself.
             async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
                 response = await client.post(url, json=envelope, headers=self.headers)
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
-            # No connection was made: nothing was sent.
+        except not_sent as e:
+            # Nothing was sent: no connection was made, or the request could not be made at all.
             raise PeerRejected("unreachable", f"Could not reach the agent: {type(e).__name__}.") from e
         except httpx.HTTPError as e:
             # Sent, or partly: the server may have taken it before the answer was lost.
@@ -172,9 +188,10 @@ class RemotePeer:
             detail = said.get("detail")
             message = detail if isinstance(detail, str) and detail else _FALLBACK_MESSAGES.get(reason, "Refused.")
             raise PeerRejected(reason, message)
-        if response.status_code >= 500 and "retry-after" not in response.headers:
+        if response.status_code >= 500 and not (response.status_code == 503 and "retry-after" in response.headers):
             # The route answers a 503 with Retry-After only when nothing was accepted: without it the message may be
-            # stored (or a turn may have it), and any other server error may have come after it was queued.
+            # stored (or a turn may have it), and any other server error (a gateway's 502 or 504 after it forwarded
+            # the request) may have come after it was queued.
             raise PeerRejected("unconfirmed", _UNCONFIRMED)
         if not response.is_success:
             raise PeerRejected("unreachable", f"The agent's server answered {response.status_code}.")
