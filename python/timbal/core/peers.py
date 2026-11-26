@@ -346,11 +346,10 @@ def _leave_on_close(session: ChatSession) -> None:
             membership.leave()
 
 
-#: The agent span's record of the ids its sends used, by tool call id (carried into the run that resumes a pause:
-#: ``Agent.resolve_memory``).
+#: The agent span's record of its sends to agents: ``{call_id, ids, replay?}``. ``ids`` are the ids its sends used,
+#: by call, and those a run that resumes a pause carried for the calls it replays (``carry_sent_ids``); ``replay``
+#: lists the carried ones its replays have not used yet (each is used once).
 PEER_SENT_KEY = "peer_sent"
-#: The ids a resumed run's replays of the paused calls send (``carry_sent_ids``): each used once.
-PEER_REPLAY_KEY = "peer_replay"
 
 
 def _message_id(run_id: str, call_id: str) -> str:
@@ -363,13 +362,13 @@ def _sent_message_id(run_context: Any, sent: dict[str, Any]) -> str:
 
     A call cut before its answer came back (its caller stopped reading at another call's approval card) runs again
     when the turn resumes, under another run and span: with the id it had, the peer takes it once. The run that
-    resumes gets the ids of the calls that were waiting (``PEER_REPLAY_KEY``, :func:`carry_sent_ids`), and each is
-    used once, by its replay: the same call made again in a later step (a model whose ids repeat, asking again) is
-    a new message. A call is its tool call id and the call as the model wrote it (in the agent's memory; ``sent``,
-    what it sends after the ``tool_args`` rails, only where memory has no such call): a rail that rewrites the
-    text differently on each run does not make the replay another message. The records are stamped with their span
-    (``call_id``), as ``paused_calls`` is: a key of that name in the agent's own ``metadata`` (which a span's starts
-    as a copy of) is not a record."""
+    resumes gets the ids of the calls that were waiting (:func:`carry_sent_ids`), and each is used once, by its
+    replay: the same call made again in a later step (a model whose ids repeat, asking again) is a new message. A
+    call is its tool call id and the call as the model wrote it (in the agent's memory; ``sent``, what it sends
+    after the ``tool_args`` rails, only where memory has no such call): a rail that rewrites the text differently
+    on each run does not make the replay another message. The record is stamped with its span (``call_id``), as
+    ``paused_calls`` is: a key of that name in the agent's own ``metadata`` (which a span's starts as a copy of) is
+    not a record. It is the one key the sends keep, so no other key of the agent's own is ever written over."""
     if run_context is None:
         return _message_id("", get_call_id() or "")
     span = run_context.current_span()
@@ -381,29 +380,43 @@ def _sent_message_id(run_context: Any, sent: dict[str, Any]) -> str:
     written = _model_call_input(agent_span, tool_call_id)
     call = written if written is not None else sent
     key = tool_call_id + ":" + hashlib.sha256(json.dumps(call, sort_keys=True, default=str).encode()).hexdigest()[:16]
-    replay = _sent_ids(agent_span, PEER_REPLAY_KEY)
-    if isinstance(replay.get(key), str):
-        message_id = replay[key]
-        rest = {other: value for other, value in replay.items() if other != key}
-        agent_span.metadata[PEER_REPLAY_KEY] = {"call_id": agent_span.call_id, "ids": rest}
-    # A copy, never written in place: a span's metadata starts as a shallow copy of the agent's own.
-    ids = _sent_ids(agent_span)
-    agent_span.metadata[PEER_SENT_KEY] = {"call_id": agent_span.call_id, "ids": {**ids, key: message_id}}
+    ids, replay = _sent_record(agent_span)
+    if key in replay and isinstance(ids.get(key), str):
+        message_id = ids[key]
+        replay = [other for other in replay if other != key]
+    _write_sent(agent_span, {**ids, key: message_id}, replay)
     return message_id
 
 
 def carry_sent_ids(current_span: Any, paused_span: Any, waiting: Collection[str]) -> None:
-    """For a run that resumes ``paused_span``: the ids its sends to agents used, for the calls this run replays
-    (``waiting``: tool call ids, the calls still waiting in its memory that the pause recorded), for those replays
-    (``_sent_message_id``). Also the ones it was given itself and did not use (a pause before the replay ran), for
-    the same calls only: an id carried for a call that is not replayed would go to a later call that matches it."""
+    """For a run that resumes ``paused_span``: the ids its sends to agents used (or that it carried itself and did
+    not use, a pause before the replay ran), for the calls this run replays (``waiting``: tool call ids, the calls
+    still waiting in its memory that the pause recorded), each for its replay (``_sent_message_id``). For those
+    calls only: an id carried for a call that is not replayed would go to a later call that matches it."""
     if not waiting:
         return
-    carried = {**_sent_ids(paused_span, PEER_REPLAY_KEY), **_sent_ids(paused_span)}
+    carried, _ = _sent_record(paused_span)
     # (The key is the tool call id, then ":" and a hash with no ":" in it: an id may have one, as Kimi's do.)
     ids = {key: value for key, value in carried.items() if key.rsplit(":", 1)[0] in waiting}
     if ids:
-        current_span.metadata[PEER_REPLAY_KEY] = {"call_id": current_span.call_id, "ids": ids}
+        _write_sent(current_span, ids, sorted(ids))
+
+
+def end_replays(span: Any) -> None:
+    """The resumed batch has run: the ids carried for its replays go to no later call (a replay a rail blocked, a
+    call refused before it ran). A batch cut on its way leaves them listed, which nothing reads: only a paused span
+    is carried from, and a carry takes the ids its waiting calls need, not the list."""
+    ids, replay = _sent_record(span)
+    if replay:
+        _write_sent(span, ids, [])
+
+
+def _write_sent(span: Any, ids: dict[str, Any], replay: list[str]) -> None:
+    # A copy, never written in place: a span's metadata starts as a shallow copy of the agent's own.
+    record: dict[str, Any] = {"call_id": span.call_id, "ids": ids}
+    if replay:
+        record["replay"] = replay
+    span.metadata[PEER_SENT_KEY] = record
 
 
 def _model_call_input(agent_span: Any, tool_call_id: str) -> Any:
@@ -420,12 +433,13 @@ def _model_call_input(agent_span: Any, tool_call_id: str) -> Any:
     return None
 
 
-def _sent_ids(span: Any, key: str | None = None) -> dict[str, Any]:
-    """The ids a span's record holds (``PEER_SENT_KEY``, or ``key``), if it is that span's own record."""
-    record = span.metadata.get(key or PEER_SENT_KEY)
+def _sent_record(span: Any) -> tuple[dict[str, Any], list[str]]:
+    """The ids a span's record holds and the carried ones not used yet, if it is that span's own record."""
+    record = span.metadata.get(PEER_SENT_KEY)
     if isinstance(record, dict) and record.get("call_id") == span.call_id and isinstance(record.get("ids"), dict):
-        return record["ids"]
-    return {}
+        replay = record.get("replay")
+        return record["ids"], [key for key in replay if isinstance(key, str)] if isinstance(replay, list) else []
+    return {}, []
 
 
 class AgentDirectory:

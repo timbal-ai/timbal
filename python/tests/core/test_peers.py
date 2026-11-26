@@ -2285,9 +2285,10 @@ class TestOwnerRoundThree:
         assert out.metadata["peer_replay"] == "app-value"
 
     @pytest.mark.parametrize("via", ["history", "messages"])
-    async def test_a_replay_in_a_directory_gives_back_an_agents_own_peer_replay(self, monkeypatch, via):
-        """In a directory the carried ids take the key's place while the replay runs, and were then dropped: the
-        run ended with neither the record nor the agent's own value. The agent's own value now comes back."""
+    async def test_a_replay_in_a_directory_leaves_an_agents_own_peer_replay(self, monkeypatch, via):
+        """In a directory the carried ids took the key's place while the replay ran, and were then dropped: the run
+        ended with neither the record nor the agent's own value. The replay's state is now in the sends' own record
+        (peer_sent), so the key is never taken."""
         received, answer = [], asyncio.Event()
         remote_bob(monkeypatch, received, answer)
         send = ToolUseContent(id="t-send", name="send_to_agent", input={"to": "bob", "message": "refund order 7"})
@@ -2315,6 +2316,47 @@ class TestOwnerRoundThree:
         resumed = fresh(context.id, peer=membership)
         kwargs = {"messages": history} if via == "messages" else {"prompt": "go"}
         out = await alice(resume={approval.approval_id: True}, **kwargs).collect()
+        assert len(received) == 2 and received[0]["message_id"] == received[1]["message_id"]  # replayed, same id
+        assert resumed.root_span().metadata["peer_replay"] == "app-value"
+        assert out.metadata["peer_replay"] == "app-value"
+
+    async def test_a_replay_cut_by_a_timeout_leaves_an_agents_own_peer_replay(self, monkeypatch):
+        """Found reviewing the fix above: the agent's own value came back only when the resumed batch ran to its
+        end. A batch cut on its way (a timeout, an interrupt, a lost claim) left the run with the replay's record in
+        its place. The replay's state no longer takes that key at all."""
+        received, answer = [], asyncio.Event()
+        remote_bob(monkeypatch, received, answer)
+        never = asyncio.Event()
+
+        async def pay() -> str:
+            await never.wait()  # cut by the agent's timeout
+            return "paid"
+
+        send = ToolUseContent(id="t-send", name="send_to_agent", input={"to": "bob", "message": "refund order 7"})
+        call_pay = ToolUseContent(id="t-pay", name="pay", input={})
+        alice = Agent(
+            name="alice",
+            model=TestModel(responses=[Message(role="assistant", content=[send, call_pay], stop_reason="tool_use")]),
+            tools=[Tool(name="pay", handler=pay, requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+            metadata={"peer_replay": "app-value"},
+            timeout=0.5,
+        )
+        directory = AgentDirectory()
+        directory.add_remote("bob", RemotePeer(url="https://bots.example", session_id="s"))
+        membership = directory.join(ChatSession(alice), "alice")
+        context = fresh(peer=membership)
+        stream = alice(prompt="go")
+        async for event in stream:
+            if isinstance(event, ApprovalEvent):
+                approval = event
+                await until(lambda: received)
+                break
+        await stream.aclose()
+        answer.set()
+        resumed = fresh(context.id, peer=membership)
+        out = await asyncio.wait_for(alice(prompt="go", resume={approval.approval_id: True}).collect(), 10)
+        assert out.status.code == "timeout"
         assert len(received) == 2 and received[0]["message_id"] == received[1]["message_id"]  # replayed, same id
         assert resumed.root_span().metadata["peer_replay"] == "app-value"
         assert out.metadata["peer_replay"] == "app-value"
