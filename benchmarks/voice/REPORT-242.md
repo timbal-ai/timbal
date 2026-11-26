@@ -9,7 +9,7 @@ uv sync --dev --extra voice
 uv run python benchmarks/voice/bench_242.py all --reps 5
 ```
 
-Raw rows: `benchmarks/voice/242-results/runs.jsonl`. Aggregates: `summary.json`, `summary.csv`.
+Aggregates: `summary.json`, `summary.csv`. Raw rows (`benchmarks/voice/242-results/runs*.jsonl`, written by `bench_242.py`) are not kept in git: rerun the commands below to regenerate them.
 
 The caller-facing clock is wall time from the last paced caller frame to the first emitted agent byte. Flux's `TurnMetrics` sum (`speech_end_to_transcript_ms + eou_to_first_audio_ms`) uses the last partial as the speech anchor, and that partial lands near `EndOfTurn`, so it hides the silence the caller already sat through. Both clocks are in the JSON. The table uses the wall clock.
 

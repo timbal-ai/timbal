@@ -60,3 +60,6 @@ planning/
 
 .claude/
 .cursor/
+
+# Raw voice benchmark rows (benchmarks/voice/bench_242.py writes and resumes them; summaries stay tracked)
+benchmarks/voice/242-results/*.jsonl

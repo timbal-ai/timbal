@@ -42,6 +42,7 @@ from .turn_detection import (
     CommitDecision,
     TurnState,
     _join_held,
+    _normalize_spoken,
 )
 
 # AssemblyAI's max_accuracy ``max_turn_silence`` is 2560 ms: how long an entity
@@ -209,7 +210,9 @@ def apply_entity_patience(
     if kind is None:
         return _release(decision, original, piece, held)
 
-    if provider_patience_live and not state.holding and decision.action is CommitAction.NEW_TURN:
+    # Flux already waited out its patient silence: that is the timeout, also for a follow-up of a parked
+    # fragment (``piece`` joins them). A hold the detector asked for stays one (its action is HOLD).
+    if provider_patience_live and decision.action is CommitAction.NEW_TURN:
         return CommitDecision(
             action=CommitAction.NEW_TURN,
             text=piece,
@@ -248,6 +251,32 @@ def _release(decision: CommitDecision, original: str, piece: str, held: str) -> 
         return CommitDecision(action=CommitAction.CONTINUE_TURN, text=piece, reason=decision.reason)
     reason = "entity_patience_done" if held and entity_capture(held) else decision.reason
     return CommitDecision(action=CommitAction.NEW_TURN, text=piece, reason=reason)
+
+
+def entity_capture_with_held(held: str | None, text: str) -> str | None:
+    """:func:`entity_capture` of ``text`` read after a parked fragment ``held``.
+
+    During a hold, Flux sends each new group as a turn of its own (``"seis"``, ``"Z"``): alone it is too
+    short to be an entity, but it continues the number or spelling the hold is keeping open.
+    """
+    held = (held or "").strip()
+    # Only a held entity is continued: after "my number is" (an unfinished-phrase hold) a lone "y" or "a" is
+    # the start of a sentence, not a spelled letter.
+    if not held or not text or _contains_held(held, text) or entity_capture(held) is None:
+        return entity_capture(text) if text else None
+    return entity_capture(_join_held(held, text.strip()))
+
+
+def repeats_held(held: str, partial: str) -> bool:
+    """Whether ``partial`` is a caption of the parked fragment again (the same words, or a prefix of them, up to
+    case, accents, punctuation and spacing), not new speech. After a Flux EndOfTurn the next group is a new, often shorter transcript: that is new."""
+    h = _normalize_spoken(held)
+    p = _normalize_spoken(partial)
+    if not p or p == h or h.startswith(p):
+        return True
+    # The same caption with its digit groups written together ("612 345" / "612345").
+    h, p = h.replace(" ", ""), p.replace(" ", "")
+    return p == h or h.startswith(p)
 
 
 def _contains_held(held: str, piece: str) -> bool:

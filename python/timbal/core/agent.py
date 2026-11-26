@@ -5559,6 +5559,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             if repinned is not None:
                                 sections_state = repinned
                                 system_prompt = self._sections_prompt(repinned, send_name)
+                                # Rebuilt as text from the pin: a call keeps its per-turn facts (caller, clock,
+                                # reply language) for the rest of the turn too.
+                                if CURRENT_VOICE_SESSION.get() is not None:
+                                    system_prompt = self._voice_system_prompt(system_prompt)
 
                 # Output-side guardrails: model_output rails run on the final assistant
                 # message; model_step rails run on EVERY assistant message (including

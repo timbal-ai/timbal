@@ -108,3 +108,65 @@ class TestPromptForTurn:
 async def _silent():
     if False:
         yield b""
+
+
+class TestRepinKeepsVoiceFacts:
+    @pytest.mark.asyncio
+    async def test_a_mid_turn_repin_keeps_the_per_turn_suffix(self, monkeypatch: pytest.MonkeyPatch):
+        """A compaction inside the turn re-pins the sections as text: the calls after it keep the voice facts."""
+        from timbal.core.agent import Agent as AgentCls
+        from timbal.core.memory_compaction import keep_last_n_messages
+        from timbal.types.content import ToolUseContent
+        from timbal.types.message import Message
+
+        def lookup(x: str) -> str:
+            return "ok"
+
+        model = TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="t1", name="lookup", input={"x": "a"})]),
+                "done",
+            ]
+        )
+        agent = Agent(
+            name="voice_assistant",
+            model=model,
+            tools=[lookup],
+            system_prompt={"role": "You are Ada."},
+            memory_compaction=keep_last_n_messages(2),
+        )
+
+        class _Session:
+            def __init__(self) -> None:
+                self.agent = agent
+
+            def prompt_for_turn(self, prompt):
+                return SystemPrompt(static=prompt, dynamic="VOICE-FACTS")
+
+        seen: list = []
+        llm_cls = type(agent._llm)
+        original = llm_cls._stream
+
+        def spy(self, *args, **kwargs):
+            if self is agent._llm:  # the LLM is a Tool, like the lookup tool
+                seen.append(kwargs.get("system_prompt"))
+            return original(self, *args, **kwargs)
+
+        async def boundary(self, span, run_context, prepared):
+            span.memory = list(span.memory)  # a compaction rewrote the history
+            return prepared
+
+        monkeypatch.setattr(llm_cls, "_stream", spy)
+        monkeypatch.setattr(AgentCls, "_compaction_boundary", boundary)
+        # The compaction took an update note: the sections are pinned again.
+        monkeypatch.setattr(AgentCls, "_repin_if_untold", lambda self, state, sections, span, rc: state)
+
+        token = _current_voice_session.set(_Session())
+        try:
+            result = await agent(prompt="hi").collect()
+        finally:
+            _current_voice_session.reset(token)
+
+        assert result.status.code == "success", result.error
+        assert len(seen) >= 2
+        assert all(isinstance(prompt, SystemPrompt) and prompt.dynamic == "VOICE-FACTS" for prompt in seen), seen

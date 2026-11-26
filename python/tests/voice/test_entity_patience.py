@@ -21,7 +21,12 @@ from timbal.voice import (
     VoiceSession,
     VoiceSessionEvent,
 )
-from timbal.voice.entity_patience import apply_entity_patience, entity_capture
+from timbal.voice.entity_patience import (
+    apply_entity_patience,
+    entity_capture,
+    entity_capture_with_held,
+    repeats_held,
+)
 
 from .test_session import DelayedMockSTT, MockTTS
 from .test_turn_detection import _state
@@ -192,6 +197,62 @@ class TestApplyEntityPatience:
         assert decision.action is CommitAction.NEW_TURN
         assert decision.reason == "entity_patience_provider_timeout"
 
+    def test_flux_patience_live_starts_a_followup_of_a_held_fragment(self) -> None:
+        """Flux waited out its patient silence for the follow-up too: not another local hold on top."""
+        decision = apply_entity_patience(
+            _new("seis siete ocho"),
+            "seis siete ocho",
+            _state(holding=True, active_user_text="mi telefono es 612 345"),
+            enabled=True,
+            hold_secs=2.5,
+            provider_patience_live=True,
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.reason == "entity_patience_provider_timeout"
+        assert decision.text == "mi telefono es 612 345 seis siete ocho"
+
+    def test_a_detector_hold_stays_a_hold_with_flux_patience_live(self) -> None:
+        held = CommitDecision(action=CommitAction.HOLD, text="415 555", reason="detector", hold_timeout_secs=1.0)
+        decision = apply_entity_patience(
+            held,
+            "415 555",
+            _state(holding=True, active_user_text="my number is"),
+            enabled=True,
+            hold_secs=2.5,
+            provider_patience_live=True,
+        )
+        assert decision.action is CommitAction.HOLD
+
+
+class TestHeldFragmentHelpers:
+    @pytest.mark.parametrize("partial", ["seis", "Z", "1", "678"])
+    def test_a_short_group_after_a_held_number_is_still_the_entity(self, partial: str) -> None:
+        assert entity_capture_with_held("mi telefono es 612 345", partial) is not None
+
+    @pytest.mark.parametrize(("held", "partial"), [("my number is", "y"), ("quiero hablar con", "J")])
+    def test_a_held_phrase_that_is_not_an_entity_is_not_continued(self, held: str, partial: str) -> None:
+        assert entity_capture_with_held(held, partial) == entity_capture(partial)
+
+    def test_without_a_hold_the_partial_is_read_alone(self) -> None:
+        assert entity_capture_with_held(None, "seis") == entity_capture("seis")
+        assert entity_capture_with_held("", "my number is 415 555") == entity_capture("my number is 415 555")
+
+    @pytest.mark.parametrize(
+        ("held", "partial", "repeat"),
+        [
+            ("mi telefono es 612 345", "mi telefono es 612 345", True),
+            ("mi telefono es 612 345", "Mi telefono es  612", True),  # a refinement of the same caption
+            ("mi telefono es 612 345", "678", False),  # Flux's next turn: shorter, and new
+            ("mi telefono es 612 345", "mi telefono es 612 345 678", False),
+            ("mi telefono es 612 345", "", True),
+            ("mi telefono es 612 345", "Mi teléfono es 612 345", True),
+            ("mi telefono es 612 345", "mi telefono es 612, 345.", True),
+            ("mi telefono es 612 345", "mi telefono es 612345", True),
+        ],
+    )
+    def test_repeats_held(self, held: str, partial: str, repeat: bool) -> None:
+        assert repeats_held(held, partial) is repeat
+
 
 # ---------------------------------------------------------------------------
 # Session
@@ -327,6 +388,25 @@ class TestEntityPatienceSession:
         assert stt.configure_calls[-1]["eot_threshold"] == 0.9
         assert stt.configure_calls[-1]["eot_timeout_ms"] == 7000
         assert stt.configure_calls[-1]["patient"] is False
+        await self._finish(stt)
+
+
+class TestHoldKeepsFluxPatient(TestEntityPatienceSession):
+    async def test_a_one_word_group_during_a_hold_does_not_flap_flux_patience(self) -> None:
+        stt = _RecordingSTT()
+        session = _session(stt, patience=True, secs=2.5)
+        await self._run(session)
+        await stt.inject(TranscriptEvent(type="partial", text="mi telefono es 612 345"))
+        await _until(lambda: stt.eager_suppressed, msg="patient")
+        await stt.inject(TranscriptEvent(type="committed", text="mi telefono es 612 345"))
+        await _until(lambda: session._held_user_text is not None, msg="hold")
+        sent = len(stt.configure_calls)
+        for text in ("seis", "seis siete", "Z"):
+            await stt.inject(TranscriptEvent(type="partial", text=text))
+            await _until(lambda t=text: session._latest_partial_text == t, msg=text)
+            await session._sync_entity_patience(text)  # settle this partial's sync before reading
+            assert stt.eager_suppressed, text
+        assert all(call["patient"] for call in stt.configure_calls[sent:])
         await self._finish(stt)
 
 

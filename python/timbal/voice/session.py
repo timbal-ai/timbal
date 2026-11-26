@@ -89,6 +89,8 @@ from .entity_patience import (
     FLUX_PATIENCE_EOT_THRESHOLD,
     apply_entity_patience,
     entity_capture,
+    entity_capture_with_held,
+    repeats_held,
 )
 from .events import (
     AgentApproval,
@@ -2519,7 +2521,9 @@ class VoiceSession:
         """
         if not self.entity_patience:
             return
-        kind = entity_capture(text) if text else None
+        # During a hold, a new group ("seis", "Z") is read after the parked fragment: alone it is too short
+        # to count, and patience would flap off and on in the middle of the number.
+        kind = entity_capture_with_held(self._held_user_text, text) if text else None
         self._entity_kind = kind
         if self._endpointer is not None:
             self._endpointer.patience_floor_secs = self.entity_patience_secs if kind else None
@@ -2610,8 +2614,9 @@ class VoiceSession:
         anchor = self._commit_event_at if self._commit_event_at > 0 else time.monotonic()
         # Flux has no local VAD, so the grace below would never see "the caller
         # resumed" and a dictation hold would expire between digit groups.
-        # A *longer* partial is new speech; a repeated caption of the same
-        # fragment is not, and must not pin the hold open.
+        # A partial that is not the held fragment captioned again is new speech
+        # (after a Flux EndOfTurn the next group is a new, shorter transcript);
+        # a repeated caption of the same fragment is not, and must not pin the hold open.
         entity_hold = self.entity_patience and entity_capture(text) is not None
         held_text = text
 
@@ -2628,7 +2633,9 @@ class VoiceSession:
                         if (
                             self._last_partial_at > anchor
                             and since_entity_partial < self.entity_patience_secs
-                            and len(partial) > len(held_text)
+                            and not repeats_held(held_text, partial)
+                            # The agent's own reply leaking back during playback is not the caller.
+                            and not _likely_stt_echo(partial, self._spoken_assistant_text())
                         ):
                             remaining = self.entity_patience_secs - since_entity_partial
                             logger.debug(
@@ -5841,7 +5848,8 @@ class VoiceSession:
                 # with their own lines, or pass it as a turn's ``system_prompt`` override.
                 resolved = _render_sections(resolved)
         except Exception as e:
-            logger.debug("greeting_system_prompt_unavailable", error=str(e))
+            # The turn that follows fails on the same prompt; the opener or idle line goes without it.
+            logger.warning("greeting_system_prompt_unavailable", error=str(e), error_type=type(e).__name__)
             return None
         return system_prompt_text(resolved)
 
