@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import os
 from typing import Any
 
@@ -86,6 +87,12 @@ def demo_voice_config(model: str | None = None) -> dict[str, Any]:
         "hangup_grace_secs": 1.2,
         "entity_patience": True,
     }
+    # Local experiments: ``TIMBAL_VOICE_DEMO_TUNING='{"voice": "...", "tts_tempo": 1.2}'``
+    # overrides any key above. Unset in tests and in the shipped demo.
+    tuning = os.environ.get("TIMBAL_VOICE_DEMO_TUNING")
+    if tuning:
+        config.update(json.loads(tuning))
+
     from timbal.voice import VoiceConfig
 
     VoiceConfig.model_validate(config)
