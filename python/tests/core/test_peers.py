@@ -2100,3 +2100,27 @@ class TestOwnerRoundTwoReview:
             thread.join(10)
         assert not [record for record in caplog.records if "never retrieved" in record.getMessage()]
         assert served["session"]._store.pending_events() == []
+
+
+# -- Bugbot, round 3 ---------------------------------------------------------------------------------------------
+
+
+class TestBugbotRoundThree:
+    @pytest.mark.parametrize("text", ["hello", "   "])  # a receipt to report, and a refusal
+    async def test_a_sender_that_gives_up_as_the_receive_reports_does_not_fail_the_receive(self, text):
+        """The sender's cancel of its wait cancels the outcome from its own thread, which can land between the
+        receive's check that the outcome is still open and its set_result: that raised InvalidStateError in the
+        receive's task, after the message was posted."""
+        import concurrent.futures
+
+        class Racing(concurrent.futures.Future):
+            def done(self):
+                return False  # the sender's cancel lands right after this check
+
+        b = ChatSession(make_agent("bob", lambda _: "NO_REPLY"))
+        b._hold_worker = True
+        outcome = Racing()
+        outcome.cancel()
+        await b._receive_and_report(outcome, text, sender="alice")  # nothing is raised in the session's loop
+        assert [e.text for e in b._store.pending_events()] == ([text] if text.strip() else [])
+        await b.close()

@@ -492,6 +492,16 @@ def _running_loop() -> asyncio.AbstractEventLoop | None:
         return None
 
 
+def _settle(outcome: concurrent.futures.Future, *, result: Any = None, error: BaseException | None = None) -> None:
+    """Set ``outcome`` unless it is settled already: a check and a set would race a cancel from another thread
+    (InvalidStateError), so the set is tried and its refusal taken as that."""
+    with contextlib.suppress(concurrent.futures.InvalidStateError):
+        if error is not None:
+            outcome.set_exception(error)
+        else:
+            outcome.set_result(result)
+
+
 def _peer_hops_of(context: RunContext | None) -> int | None:
     """How deep in a chain of agent messages a run was (``RunContext._peer_hops``): from the context while it lives,
     else from its root span (``metadata.peer_hops``, :func:`~timbal.core.session_scheduler.record_delivery`)."""
@@ -1112,21 +1122,19 @@ class ChatSession:
     async def _receive_and_report(self, outcome: concurrent.futures.Future, text: str, **kwargs: Any) -> None:
         """:meth:`_receive_agent_message` on the session's loop, for a sender on another one: what became of the
         message is set on ``outcome`` in the step that decides it (a receipt, a refusal; a cancelled receive posted
-        nothing: ``closed``)."""
+        nothing: ``closed``). A sender that gave up has cancelled ``outcome`` from its own thread, at any moment:
+        settling it is then a no-op, never an error in this task (_settle)."""
         from .peers import PeerRejected
 
         try:
             receipt = await self._receive_agent_message(text, **kwargs)
         except asyncio.CancelledError:
-            if not outcome.done():
-                outcome.set_exception(PeerRejected("closed", "The agent's session stopped while it took the message."))
+            _settle(outcome, error=PeerRejected("closed", "The agent's session stopped while it took the message."))
             raise
         except Exception as error:  # (said to the sender, who raises it: nothing is left for the loop to log)
-            if not outcome.done():
-                outcome.set_exception(error)
+            _settle(outcome, error=error)
             return
-        if not outcome.done():
-            outcome.set_result(receipt)
+        _settle(outcome, result=receipt)
 
     async def _receive_agent_message(
         self,
