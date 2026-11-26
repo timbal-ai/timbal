@@ -753,6 +753,16 @@ class ChatSession:
         self.last_status: dict[str, Any] | None = None
         self.last_activity = time.monotonic()
         self._agent = agent
+        # Messages from other agents (core/peers.py): the directory membership, and the last messages
+        # received, by sender and id, for dedupe and for the hops of a reply.
+        self._peer: PeerMembership | None = None
+        self._agent_messages: OrderedDict[tuple[str, str], SessionEvent] = OrderedDict()
+        # The loop that serves the session (its worker's): a message from another agent is taken there, whichever
+        # thread or loop sends it (receive_agent_message). Known once the session runs on one; set here, before
+        # anything below can start the worker.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        with contextlib.suppress(RuntimeError):
+            self._loop = asyncio.get_running_loop()
         self._kwargs = kwargs
         self._stored_kwargs, self._unstored_kwargs = _split_kwargs(kwargs)
         self._durability = durability
@@ -840,15 +850,6 @@ class ChatSession:
         self._queued_events: tuple[str, ...] = ()
         # App and client events still queued that the session follows until a turn takes them (_work_arrived).
         self._followed_events: set[str] = set()
-        # Messages from other agents (core/peers.py): the directory membership, and the last messages
-        # received, by sender and id, for dedupe and for the hops of a reply.
-        self._peer: PeerMembership | None = None
-        # The loop that serves the session (its worker's): a message from another agent is taken there, whichever
-        # thread or loop sends it (receive_agent_message). Known once the session runs on one.
-        self._loop: asyncio.AbstractEventLoop | None = None
-        with contextlib.suppress(RuntimeError):
-            self._loop = asyncio.get_running_loop()
-        self._agent_messages: OrderedDict[tuple[str, str], SessionEvent] = OrderedDict()
 
     # -- Public API -------------------------------------------------------------
 
