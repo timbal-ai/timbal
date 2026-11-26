@@ -392,6 +392,9 @@ def client_call_direction(config: dict[str, Any]) -> str | None:
 # Munsit, on-prem Deepgram or a residency endpoint.
 _OPENAI_STT_EXTRA = frozenset({"prompt", "threshold", "prefix_padding_ms", "silence_duration_ms", "noise_reduction"})
 _OPENAI_TTS_EXTRA = frozenset({"instructions"})
+# Gemini TTS reads one free-text line for the accent of its director's brief. The only way to get an Andalusian or a
+# Rioplatense voice out of a Gemini voice, so the playground has to be able to set it.
+_GEMINI_TTS_EXTRA = frozenset({"accent"})
 CLIENT_TUNING_STT_EXTRA = _OPENAI_STT_EXTRA | frozenset(
     {
         # Deepgram Flux / Nova
@@ -413,23 +416,30 @@ CLIENT_TUNING_STT_EXTRA = _OPENAI_STT_EXTRA | frozenset(
         "channels",
     }
 )
-CLIENT_TUNING_TTS_EXTRA = _OPENAI_TTS_EXTRA | frozenset(
-    {
-        # ElevenLabs
-        "output_format",
-        "audio_format",
-        "auto_mode",
-        "inactivity_timeout",
-        "tts_keepalive_interval",
-        "apply_text_normalization",
-        # Munsit / Fish
-        "stability",
-        "speed",
-        "dialect",
-        "latency",
-        "volume",
-        "condition_on_previous_chunks",
-    }
+CLIENT_TUNING_TTS_EXTRA = (
+    _OPENAI_TTS_EXTRA
+    | _GEMINI_TTS_EXTRA
+    | frozenset(
+        {
+            # ElevenLabs (``speed`` / ``stability`` below are shared with Munsit / Fish)
+            "output_format",
+            "audio_format",
+            "auto_mode",
+            "similarity_boost",
+            "style",
+            "use_speaker_boost",
+            "inactivity_timeout",
+            "tts_keepalive_interval",
+            "apply_text_normalization",
+            # Munsit / Fish
+            "stability",
+            "speed",
+            "dialect",
+            "latency",
+            "volume",
+            "condition_on_previous_chunks",
+        }
+    )
 )
 
 _CLIENT_TUNING_EXTRA = {"stt_extra": CLIENT_TUNING_STT_EXTRA, "tts_extra": CLIENT_TUNING_TTS_EXTRA}
@@ -1208,6 +1218,12 @@ def build_voice_session(
         for key in _OPENAI_TTS_EXTRA:
             tts_extra.pop(key, None)
             if defaults.tts_provider != "openai" and isinstance(defaults.tts_extra, dict) and key in defaults.tts_extra:
+                tts_extra[key] = defaults.tts_extra[key]
+    if tts_provider != "gemini":
+        # ElevenLabs and Deepgram forward unknown keys into their query string: ``accent`` must not reach them.
+        for key in _GEMINI_TTS_EXTRA:
+            tts_extra.pop(key, None)
+            if defaults.tts_provider != "gemini" and isinstance(defaults.tts_extra, dict) and key in defaults.tts_extra:
                 tts_extra[key] = defaults.tts_extra[key]
     if stt_native_eou:
         # Scribe-tuned VAD knobs don't apply to a provider-side turn machine
