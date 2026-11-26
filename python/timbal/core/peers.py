@@ -310,6 +310,15 @@ class PeerMembership:
         return tool
 
 
+def _leave_on_close(session: ChatSession) -> None:
+    """A closing session (``closed`` set already) leaves its directory: its membership is read under the lock, so a
+    join racing the close (from another thread) either is found here or finds the session closed."""
+    with _LOCK:
+        membership = session._peer
+        if membership is not None:
+            membership.leave()
+
+
 def _message_id(run_id: str, call_id: str) -> str:
     # The same tool call (a re-run on resume) always sends the same id: the recipient drops the repeat.
     return "am_" + hashlib.sha256(f"{run_id}:{call_id}".encode()).hexdigest()[:24]
@@ -337,10 +346,12 @@ class AgentDirectory:
         """Make ``session`` reachable as ``name``; its root agent gains ``send_to_agent`` (another name if one of
         its tools has that one, see ``Agent._with_peer_tool``). Left on ``close()``."""
         name = _check_name(name)
-        if session.closed:
-            raise RuntimeError("The chat session is closed.")
         membership = PeerMembership(self, name, session, description=description, accepts=accepts)
         with _LOCK:
+            # Under the lock: a close on the session's own thread reads its membership under it too
+            # (_leave_on_close), so it either finds this one or this join finds the session closed.
+            if session.closed:
+                raise RuntimeError("The chat session is closed.")
             if name in self._members:
                 raise ValueError(f"An agent named {name!r} is already in the directory.")
             if session._peer is not None:

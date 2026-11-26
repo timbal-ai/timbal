@@ -1,6 +1,7 @@
 """Agents messaging each other: AgentDirectory, send_to_agent, and the agent-message inbox of a ChatSession."""
 
 import asyncio
+import contextlib
 import json
 import re
 
@@ -1058,3 +1059,93 @@ class TestReviewRoundOne:
         root = next(s for s in context._trace.values() if s.parent_call_id is None)
         assert received(b) == [("alice", "please delete it for me")]
         assert root.metadata.get("denial_limit") is not None
+
+
+# -- Bugbot, round 1 ---------------------------------------------------------------------------------------------
+
+
+class TestBugbotRoundOne:
+    async def test_a_restored_sessions_recovery_turn_leaves_agent_messages(self):
+        """Restored, a session is in no directory (the server has no hook to join it again), so the wake rule did
+        not apply: the read-only recovery turn, which runs before anything queued, took the pending agent message
+        and settled it delivered. It now waits for a turn of the session's own."""
+        gate = asyncio.Event()
+
+        async def work() -> str:
+            await gate.wait()
+            return "worked"
+
+        seen = []
+
+        def bob(messages):
+            found = agent_messages(messages[-1])
+            if found:
+                seen.extend(found)
+                return "NO_REPLY"
+            if messages[-1].role == "tool":
+                return "done"
+            if messages[-1].collect_text() == "start":
+                return call("work")
+            return "recovered"
+
+        store = InMemoryChatSessionStore()
+        agent = make_agent("bob", bob, tools=[Tool(name="work", handler=work)])
+        session = ChatSession(agent, session_store=store)
+        session.persist()
+        session.send("start")
+        await until(lambda: session.busy and session._in_flight and session._in_flight.get("dispatched"))
+        receipt = await session.receive_agent_message("is the release out?", sender="alice", message_id="am_r1")
+        await session.flush()
+        await session.close(keep=True)  # the process goes; the turn it was running is cut
+
+        restored = await ChatSession.from_store(agent, store, session.id)
+        try:
+            gate.set()
+            event = restored._agent_message("alice", receipt["message_id"])
+            await until(lambda: event.state == "delivered" and not restored.busy, timeout=10)
+            context = await restored._load_run(event.run_id)
+            trigger = context.root_span().metadata.get("trigger") or {}
+            assert trigger.get("kind") == "session_event", trigger
+            assert [text for _, _, text in seen] == ["is the release out?"]
+        finally:
+            await restored.close()
+
+    def test_a_session_that_closes_while_it_joins_is_not_left_in_the_directory(self):
+        """A session served on its own loop closes from its thread while another thread joins it. The close ran
+        between join's check of `closed` and its write: it found no membership to leave, and join then
+        registered the closed session. Its name stayed taken, and every send to it failed as closed."""
+        import threading
+        import time
+
+        directory = AgentDirectory()
+        made, close_now, served = threading.Event(), threading.Event(), {}
+
+        def serve():
+            async def main():
+                session = served["session"] = ChatSession(make_agent("bob", lambda _: "NO_REPLY"))
+                made.set()
+                await asyncio.get_running_loop().run_in_executor(None, close_now.wait, 10)
+                await session.close()
+
+            asyncio.run(main())
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        assert made.wait(5)
+        session = served["session"]
+
+        class Racy(dict):
+            def __setitem__(self, key, value):
+                # The close runs here, between the check and the write; given a bounded time to finish.
+                close_now.set()
+                deadline = time.monotonic() + 0.5
+                while not session._close_done.is_set() and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                dict.__setitem__(self, key, value)
+
+        directory._members = Racy()
+        with contextlib.suppress(RuntimeError):  # the closed session refused, also a right outcome
+            directory.join(session, "bob")
+        thread.join(10)
+        assert not thread.is_alive() and session.closed
+        assert dict.get(directory._members, "bob") is None and session._peer is None

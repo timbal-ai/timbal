@@ -45,6 +45,7 @@ from ..types.approval import ApprovalResolution, Cancel
 from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.message import RUNTIME_SOURCE, Message
+from .peers import _leave_on_close
 from .runnable import ATTENDED_TRIGGER_KINDS, _own_copy
 from .session_scheduler import Followup, SessionScheduler, is_parked, pending_user_batch
 from .tool_policy import ReadOnlyWithin, read_only_within, restore_tool_policy
@@ -1449,8 +1450,7 @@ class ChatSession:
         cut = self._in_flight if keep and self.busy else None
         self.closed = True
         self._keep = keep
-        if self._peer is not None:
-            self._peer.leave()
+        _leave_on_close(self)  # under the directories' lock, whether it has joined one yet or not
         try:
             worker, self._worker = self._worker, None
             if worker is not None and not worker.done():
