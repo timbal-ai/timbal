@@ -181,6 +181,26 @@ def _contains_spoken_words(text: str, words: str) -> bool:
     return bool(inner) and f" {inner} " in f" {outer} "
 
 
+def _without_spoken_words(text: str, words: str) -> str:
+    """``text`` without its last run of ``words`` (same words, any case or punctuation), and the
+    punctuation that closed that run. ``text`` unchanged when the words are not in it."""
+    needle = [w.lower() for w in _SPOKEN_WORD_RE.findall(words)]
+    tokens = list(_SPOKEN_WORD_RE.finditer(text))
+    if not needle or len(needle) > len(tokens):
+        return text
+    lowered = [m.group(0).lower() for m in tokens]
+    for start in range(len(tokens) - len(needle), -1, -1):
+        if lowered[start : start + len(needle)] == needle:
+            begin = tokens[start].start()
+            end = tokens[start + len(needle) - 1].end()
+            # The run's own closing punctuation goes with it, up to the next word.
+            nxt = tokens[start + len(needle)].start() if start + len(needle) < len(tokens) else len(text)
+            tail = text[end:nxt]
+            end += len(tail) - len(tail.lstrip(".,;:!?…¿¡\"'»”"))
+            return f"{text[:begin].rstrip()} {text[end:].lstrip()}".strip()
+    return text
+
+
 # Wall-clock cap on a single agent turn (LLM stream + in-turn TTS drains).
 # Without this a hung provider leaves the caller in silence forever.
 DEFAULT_TURN_TIMEOUT_SECS = 60.0
@@ -2293,7 +2313,7 @@ class VoiceSession:
         # The caller's EndOfTurn brings the whole utterance, deferred again if the tool still runs.
         deferred = self._deferred_user_text
         if deferred and _contains_spoken_words(deferred, text):
-            self._deferred_user_text = "" if _same_spoken_words(deferred, text) else deferred.replace(text, "").strip()
+            self._deferred_user_text = _without_spoken_words(deferred, text)
         logger.info("flux_eager_cancelled")
         await self.interrupt()
         retracted = False

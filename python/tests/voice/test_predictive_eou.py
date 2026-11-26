@@ -924,3 +924,37 @@ class TestEagerGateOwnership:
         assert session._deferred_user_text == ""
         assert session._eager_gate is None
         assert ran == []
+
+    async def test_turn_resumed_drops_the_eager_words_from_a_longer_buffer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Earlier parked words stay; the cancelled ones go, whatever their case or punctuation."""
+        ran: list[str] = []
+        session = self._session(monkeypatch, ran)
+        self._protect(session)
+        session._deferred_user_text = "Also check my invoice."
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="cancel my booking.", confidence=0.9)
+        )
+        session._deferred_user_text = "Also check my invoice. Cancel my Booking!"  # the buffer as STT wrote it
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="resumed", text="cancel my booking, no wait", confidence=0.1)
+        )
+        assert session._deferred_user_text == "Also check my invoice."
+        assert ran == []
+
+
+@pytest.mark.parametrize(
+    ("text", "words", "left"),
+    [
+        ("cancel my booking.", "cancel my booking.", ""),
+        ("Cancel My Booking", "cancel my booking.", ""),
+        ("I need help. cancel my booking!", "cancel my booking.", "I need help."),
+        ("nothing here", "cancel my booking", "nothing here"),
+        ("booking booking", "booking", "booking"),
+    ],
+)
+def test_without_spoken_words(text: str, words: str, left: str) -> None:
+    from timbal.voice.session import _without_spoken_words
+
+    assert _without_spoken_words(text, words) == left
