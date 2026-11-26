@@ -83,6 +83,7 @@ _MIN_COMMIT_GAP_SECS = 0.4
 DEFAULT_TURN_COMMIT_THRESHOLD = 0.75
 _UNSET: Any = object()
 _DEFAULT_TTS_MODEL = "eleven_v4_turbo"
+_DIALOGUE_MODEL_PREFIXES = ("eleven_v4", "eleven_v3")
 
 
 def _fit_scribe_keyterms(keyterms: list[str]) -> list[str]:
@@ -518,6 +519,12 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         self._receiver = None
 
 
+# ``voice_settings`` travel in a context's first message; ElevenLabs ignores
+# them on the WebSocket query string. Eleven v4 ignores ``speed`` entirely —
+# use ``VoiceConfig.tts_tempo`` there.
+_VOICE_SETTING_KEYS = ("stability", "similarity_boost", "style", "speed", "use_speaker_boost")
+
+
 class ElevenLabsStreamTTS(TextToSpeech):
     """ElevenLabs TTS via the **multi-context** WebSocket.
 
@@ -553,6 +560,7 @@ class ElevenLabsStreamTTS(TextToSpeech):
         self._preconnect_task: asyncio.Task[None] | None = None
         self._dialogue = False
         self._dialogue_contexts: set[str] = set()
+        self._settings_sent: set[str] = set()
         # Registration, keep-alive, and close must be ordered: messaging a
         # closing dialogue context can make the server close the whole socket.
         self._context_send_lock = asyncio.Lock()
@@ -562,7 +570,9 @@ class ElevenLabsStreamTTS(TextToSpeech):
         if not config.voice:
             raise ValueError("AudioOutputConfig.voice (ElevenLabs voice_id) is required.")
         self._out = config
-        self._dialogue = effective_tts_model(config).startswith("eleven_v4")
+        # v4 and v3 are served only by the text-to-dialogue socket: the
+        # per-voice multi-stream-input endpoint answers them with HTTP 400.
+        self._dialogue = effective_tts_model(config).startswith(_DIALOGUE_MODEL_PREFIXES)
         # Pre-open the multi-context WS in the background so the first
         # synthesize of the session doesn't pay the TCP+TLS+WS handshake
         # (~0.5-1s of the first reply's audio latency). Failures are logged
@@ -615,9 +625,8 @@ class ElevenLabsStreamTTS(TextToSpeech):
             keepalive_interval = min(keepalive_interval, _DIALOGUE_KEEPALIVE_INTERVAL_SEC)
         elif auto_mode:
             params["auto_mode"] = "true"
-        if self._dialogue:
-            extra.pop("stability", None)
-            extra.pop("similarity_boost", None)
+        for key in _VOICE_SETTING_KEYS:
+            extra.pop(key, None)
         for k, v in extra.items():
             if v is not None and not str(k).startswith("_"):
                 params[k] = v
@@ -664,6 +673,7 @@ class ElevenLabsStreamTTS(TextToSpeech):
         self._audio_queues.clear()
         self._active_contexts.clear()
         self._dialogue_contexts.clear()
+        self._settings_sent.clear()
 
     async def _send_text(self, context_id: str, text: str, *, flush: bool = False) -> None:
         async with self._context_send_lock:
@@ -693,6 +703,13 @@ class ElevenLabsStreamTTS(TextToSpeech):
                     msg["inputs"] = [{"text": text, "voice_id": self._out.voice}]
             else:
                 msg["text"] = text
+                if context_id not in self._settings_sent:
+                    settings = {
+                        key: self._out.extra[key] for key in _VOICE_SETTING_KEYS if self._out.extra.get(key) is not None
+                    }
+                    if settings:
+                        msg["voice_settings"] = settings
+                    self._settings_sent.add(context_id)
             if flush:
                 msg["flush"] = True
             await self._ws.send(json.dumps(msg))
@@ -700,6 +717,7 @@ class ElevenLabsStreamTTS(TextToSpeech):
     async def _close_context(self, context_id: str) -> None:
         async with self._context_send_lock:
             self._active_contexts.discard(context_id)
+            self._settings_sent.discard(context_id)
             if self._dialogue:
                 if context_id not in self._dialogue_contexts:
                     return
