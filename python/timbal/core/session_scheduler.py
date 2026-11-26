@@ -112,6 +112,16 @@ class Followup:
             self.store.requeue(self.completions, self.events)
 
 
+def note_peer_hops(run_context: Any, span: Any) -> None:
+    """Note on ``span`` how deep in a chain of agent messages its run is, where a run that resumes this turn after a
+    pause finds it (``ChatSession._run_turn``). Only for a run in an AgentDirectory (``RunContext._peer``), the one
+    kind that sends agent messages, and stamped with the span's ``call_id`` like ``paused_calls``: a key of that name
+    the agent's own ``metadata`` brought is never read as a count."""
+    if getattr(run_context, "_peer", None) is None or run_context._peer_hops is None:
+        return
+    span.metadata["peer_hops"] = {"call_id": span.call_id, "hops": run_context._peer_hops}
+
+
 def record_delivery(run_context: Any, span: Any, events: list[SessionEvent]) -> None:
     """Settle ``events`` as delivered to ``run_context``'s run and account for them on ``span``."""
     from_agents = False
@@ -126,8 +136,7 @@ def record_delivery(run_context: Any, span: Any, events: list[SessionEvent]) -> 
     if span is None or not events:
         return
     if from_agents:
-        # Where a run that resumes this turn after a pause finds it (ChatSession._run_turn).
-        span.metadata["peer_hops"] = run_context._peer_hops
+        note_peer_hops(run_context, span)
     span.usage["session_events:delivered"] = span.usage.get("session_events:delivered", 0) + len(events)
     records = [record for event in events for record in event.guardrails]
     if records:

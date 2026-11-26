@@ -504,13 +504,16 @@ def _settle(outcome: concurrent.futures.Future, *, result: Any = None, error: Ba
 
 def _peer_hops_of(context: RunContext | None) -> int | None:
     """How deep in a chain of agent messages a run was (``RunContext._peer_hops``): from the context while it lives,
-    else from its root span (``metadata.peer_hops``, :func:`~timbal.core.session_scheduler.record_delivery`)."""
+    else from its root span's record (``metadata.peer_hops``, :func:`~timbal.core.session_scheduler.note_peer_hops`)."""
     if context is None:
         return None
     if context._peer_hops is not None:
         return context._peer_hops
     root = context.root_span()
-    hops = root.metadata.get("peer_hops") if root is not None else None
+    record = root.metadata.get("peer_hops") if root is not None else None
+    if not isinstance(record, dict) or record.get("call_id") != root.call_id:
+        return None  # not the count's own record: the agent's own metadata, or none
+    hops = record.get("hops")
     return hops if isinstance(hops, int) and not isinstance(hops, bool) else None
 
 

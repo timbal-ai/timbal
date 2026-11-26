@@ -2165,3 +2165,85 @@ class TestOwnerRoundThree:
         for entry in (post_session_event, VoiceSession.notify):
             allowed = typing.get_args(typing.get_type_hints(entry)["source"])
             assert set(allowed) == {"app", "client", "user"}, entry.__qualname__
+
+    async def test_an_agents_own_peer_hops_metadata_is_not_a_hop_count(self):
+        """Found reviewing the fix above: the hop count a resumed turn gets back was read from its root span's
+        metadata["peer_hops"] unstamped, which starts as the agent's own metadata: with metadata={"peer_hops": 5}
+        the resumed turn's send went at hops 6 and was refused at the hop limit."""
+        results = []
+
+        def bob(messages):
+            last = messages[-1]
+            if last.role == "tool" and "charged" in tool_result_text(last):
+                return call("send_to_agent", call_id="s2", to="alice", message="charged it")
+            if last.role == "tool":
+                results.append(tool_result_text(last))
+                return "NO_REPLY"
+            return call("charge", call_id="c1")
+
+        charge = Tool(name="charge", handler=lambda: "charged", requires_approval=True)
+        directory = AgentDirectory()
+        async with (
+            ChatSession(make_agent("alice", lambda _: "NO_REPLY")) as a,
+            ChatSession(make_agent("bob", bob, tools=[charge], metadata={"peer_hops": 5})) as b,
+        ):
+            directory.join(a, "alice")
+            directory.join(b, "bob")
+            b.send("charge order 7")  # a user's turn: no agent message, so no hop count of its own
+            await until(lambda: b.parked)
+            (approval,) = b.state()["pending_approvals"]
+            b.resume({approval["approval_id"]: True})
+            await until(lambda: results)
+            await settle(a, b)
+        assert "back and forth" not in results[0] and received(a) == [("bob", "charged it")]
+
+    async def test_a_session_in_no_directory_leaves_an_agents_own_peer_hops_alone(self):
+        """The hop count was written over the root span's metadata["peer_hops"] for any agent message taken, also by
+        a session in no directory (the HTTP route takes them for any session), which cannot send one."""
+        async with ChatSession(make_agent("bob", lambda _: "NO_REPLY", metadata={"peer_hops": "the app's"})) as b:
+            receipt = await b.receive_agent_message("hello", sender="alice")
+            event = b._agent_message("alice", receipt["message_id"])
+            await until(lambda: event.state == "delivered" and not b.busy)
+            context = await b._load_run(event.run_id)
+        assert context.root_span().metadata["peer_hops"] == "the app's"
+
+    async def test_the_hops_of_a_parked_turn_hold_across_a_restore(self):
+        """A restored session reads the paused turn's hop count from the record on its root span (the live context is
+        gone): Bob got a message at hops 2 of 3 and parked; restored and resumed, its send is at the cap."""
+        results = []
+
+        def bob(messages):
+            last = messages[-1]
+            if last.role == "tool" and "charged" in tool_result_text(last):
+                return call("send_to_agent", call_id="s2", to="alice", message="done, charged")
+            if last.role == "tool":
+                results.append(tool_result_text(last))
+                return "NO_REPLY"
+            if agent_messages(last):
+                return call("charge", call_id="c1")
+            return "NO_REPLY"
+
+        charge = Tool(name="charge", handler=lambda: "charged", requires_approval=True)
+        store = InMemoryChatSessionStore()
+        agent = make_agent("bob", bob, tools=[charge])
+        directory = AgentDirectory(max_hops=3)
+        async with ChatSession(make_agent("alice", lambda _: "NO_REPLY")) as a:
+            directory.join(a, "alice")
+            session = ChatSession(agent, session_store=store)
+            session.persist()
+            directory.join(session, "bob")
+            await directory.send("alice", "bob", "charge it", hops=2)
+            await until(lambda: session.parked)
+            await session.flush()
+            await session.close(keep=True)
+
+            restored = await ChatSession.from_store(agent, store, session.id)
+            try:
+                directory.join(restored, "bob")
+                (approval,) = restored.state()["pending_approvals"]
+                restored.resume({approval["approval_id"]: True})
+                await until(lambda: results)
+                await settle(a, restored)
+            finally:
+                await restored.close()
+        assert "back and forth 3 times" in results[0] and received(a) == []

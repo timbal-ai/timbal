@@ -94,7 +94,7 @@ from .memory_compaction import MemoryCompactor
 from .models import Model, base_usage_metric, get_context_window
 from .peers import _SEND_TO_AGENT_FALLBACKS, PEER_REPLAY_KEY, SEND_TO_AGENT_NAME, carry_sent_ids
 from .runnable import Runnable, RunnableLike
-from .session_scheduler import record_delivery
+from .session_scheduler import note_peer_hops, record_delivery
 from .skill import ReadSkill, Skill
 from .tool import Tool
 from .tool_policy import READ_ONLY_POLICY, ReadOnlyWithin, describe_tool_policy
@@ -5061,9 +5061,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # The session's place in an AgentDirectory (core/peers.py), for its root agent: send_to_agent. Fixed for the
         # turn, like the salience tool (and not with an output_model, for the same reason).
         peer = run_context._peer if current_span.parent_call_id is None and self.output_model is None else None
-        if peer is not None and run_context._peer_hops is not None:
+        if peer is not None:
             # The hops a turn resumed after a pause carries (ChatSession): where a later resume finds them too.
-            current_span.metadata["peer_hops"] = run_context._peer_hops
+            note_peer_hops(run_context, current_span)
         # Fixed for the turn; checked after every tool batch.
         denial_window_on = self.max_denials_window is not None
         denial_limit = self.max_consecutive_denials
