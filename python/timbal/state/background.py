@@ -693,6 +693,9 @@ def format_user_message(events: Sequence[SessionEvent], *, steered: bool = False
 MAX_SESSION_EVENT_CHARS = 4_000
 
 SessionEventSource = Literal["app", "client", "user", "agent"]
+PostedEventSource = Literal["app", "client", "user"]
+"""What an application or a device posts (:func:`post_session_event`, ``VoiceSession.notify``): a message from
+another agent (``"agent"``) needs its envelope, which ``ChatSession.receive_agent_message`` gives it."""
 SessionEventState = Literal["pending", "delivered", "superseded", "withdrawn", "undelivered"]
 TaskMessageSource = Literal["parent", "app", "user"]
 """Who sent a running background agent a message (:meth:`BackgroundTaskStore.message_task`)."""
@@ -905,8 +908,9 @@ class SessionEvent:
             data["sent_by"] = self.sent_by  # kept across a restart: it must not come back as a person's
         if self.peer is not None:
             data["peer"] = self.peer  # a message from another agent: its envelope (only those have one)
-        if self.guardrails:
-            # What screened its text (a redaction): the run that takes it after a restore reports them too.
+        if self.guardrails and self.peer is not None:
+            # What screened a message from another agent (a redaction): the run that takes it after a restore
+            # reports them too. (Other events are stored as they always were.)
             data["guardrails"] = _storable_records(self.guardrails)
         return data
 
@@ -2134,7 +2138,7 @@ def post_session_event(
     text: str,
     *,
     key: str | None = None,
-    source: SessionEventSource = "app",
+    source: PostedEventSource = "app",
     announce: Announce | None = None,
     lane: SessionEventLane | None = None,
     mode: UserMessageMode | None = None,

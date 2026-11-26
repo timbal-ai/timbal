@@ -41,8 +41,8 @@ from ..state import get_run_context, set_run_context
 from ..state.background import (
     Announce,
     BackgroundTaskStore,
+    PostedEventSource,
     SessionEvent,
-    SessionEventSource,
     adopt_background_store,
     bind_background_store,
     ensure_background_store,
@@ -740,7 +740,7 @@ class VoiceSession:
         text: str,
         *,
         key: str | None = None,
-        source: SessionEventSource = "app",
+        source: PostedEventSource = "app",
         announce: Announce | None = None,
     ) -> SessionEvent:
         """Tell the agent something happened, so it can speak up without waiting for the caller.
@@ -2161,11 +2161,7 @@ class VoiceSession:
         runner = getattr(self.agent, "_guardrail_runner", None)
         if runner is None or not runner.has_stage(GuardrailStage.INPUT):
             return text, []
-        # The event as ``ctx.payload``, as a prompt's check gets its message: a rail may read it.
-        payload = Message(role="user", content=[TextContent(text=text)], metadata={"source": "client"})
-        ctx = GuardrailContext(
-            stage=GuardrailStage.INPUT, agent_path=getattr(self.agent, "_path", None), payload=payload
-        )
+        ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=getattr(self.agent, "_path", None))
         outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
         if outcome.verdict is not None:
             # No run exists yet to carry a guardrail report, so the log is the record.

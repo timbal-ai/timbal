@@ -1408,16 +1408,16 @@ class TestOwnerRoundOne:
         finally:
             await restored.close()
 
-    def test_any_events_screening_records_go_with_it_into_a_snapshot(self):
-        """The same for a client event (its screening records were lost the same way); a rail's own metadata that
-        JSON cannot carry is left out, so the snapshot can still be written."""
+    def test_only_a_message_from_an_agent_keeps_its_screening_records_in_a_snapshot(self):
+        """A client event is stored as on main, its screening records left out (the owner's scope: changing what is
+        stored for client events is for a PR of its own); a message from another agent keeps them. A rail's own
+        metadata that JSON cannot carry is left out, so the snapshot can still be written."""
         import json as _json
 
         from timbal.guardrails.runner import TriggerRecord
         from timbal.state.background import BackgroundTaskStore, SessionEvent
 
-        event = SessionEvent("door is open", key=None, source="client")
-        event.guardrails = [
+        records = [
             TriggerRecord(rail="pii", stage="input", action="replace", reason=None, latency_ms=1, shadow=False),
             TriggerRecord(
                 rail="odd",
@@ -1429,7 +1429,12 @@ class TestOwnerRoundOne:
                 metadata={"o": object()},
             ),
         ]
-        data = _json.loads(_json.dumps(event.to_dict(), allow_nan=False))
+        client = SessionEvent("door is open", key=None, source="client")
+        client.guardrails = list(records)
+        assert "guardrails" not in client.to_dict()
+        agent = SessionEvent("hi", key=None, source="agent", peer={"from": "alice", "message_id": "am_1"})
+        agent.guardrails = list(records)
+        data = _json.loads(_json.dumps(agent.to_dict(), allow_nan=False))
         restored = BackgroundTaskStore().restore_event(data)
         assert [(r.rail, r.action, r.metadata) for r in restored.guardrails] == [
             ("pii", "replace", {}),
@@ -1536,7 +1541,7 @@ class TestOwnerRoundOneReview:
         for _ in range(200_000):
             node["x"] = {}
             node = node["x"]
-        event = SessionEvent("hi", key=None, source="client")
+        event = SessionEvent("hi", key=None, source="agent", peer={"from": "alice", "message_id": "am_1"})
         event.guardrails = [
             TriggerRecord(
                 rail="r", stage="input", action="warn", reason=None, latency_ms=0, shadow=False, metadata=deep
@@ -2124,3 +2129,39 @@ class TestBugbotRoundThree:
         await b._receive_and_report(outcome, text, sender="alice")  # nothing is raised in the session's loop
         assert [e.text for e in b._store.pending_events()] == ([text] if text.strip() else [])
         await b.close()
+
+
+# -- Owner review, round 3 ---------------------------------------------------------------------------------------
+
+
+class TestOwnerRoundThree:
+    async def test_an_agents_own_metadata_survives_an_approval_resume(self):
+        """[P2] The resumed batch dropped the replay record by its key, on every agent: one that never joined a
+        directory lost an application's own metadata={"peer_replay": ...} from its resumed span and output."""
+        model = TestModel(responses=[call("pay"), "done", "x"])
+        agent = Agent(
+            name="shop",
+            model=model,
+            tools=[Tool(name="pay", handler=lambda: "paid", requires_approval=True)],
+            metadata={"peer_replay": "customer-value"},
+            tracing_provider=InMemoryTracingProvider,
+        )
+        fresh()
+        events, parked = await run(agent)
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        context = fresh(parked.run_id)
+        _, out = await run(agent, resume={approval.approval_id: True})
+        root = next(s for s in context._trace.values() if s.parent_call_id is None)
+        assert root.metadata["peer_replay"] == "customer-value" == out.metadata["peer_replay"]
+
+    def test_the_public_entry_points_do_not_take_an_agent_source(self):
+        """[P3] post_session_event and VoiceSession.notify typed source="agent" as valid, then raised: a message from
+        another agent needs its envelope, which only ChatSession.receive_agent_message posts."""
+        import typing
+
+        from timbal.state.background import post_session_event
+        from timbal.voice.session import VoiceSession
+
+        for entry in (post_session_event, VoiceSession.notify):
+            allowed = typing.get_args(typing.get_type_hints(entry)["source"])
+            assert set(allowed) == {"app", "client", "user"}, entry.__qualname__
