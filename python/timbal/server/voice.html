@@ -684,6 +684,124 @@
   #btn-reconnect { display: none; }
   #btn-reconnect.visible { display: inline-block; }
 
+  /* --- Playground lab controls (voices, pace, metrics) -------------------- */
+  .metrics-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem 0.85rem;
+    padding: 0.45rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: #fafafa;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .metrics-strip[hidden] { display: none !important; }
+  .metrics-strip .metric {
+    display: inline-flex;
+    gap: 0.3rem;
+    align-items: baseline;
+  }
+  .metrics-strip .metric b {
+    color: var(--text);
+    font-weight: 650;
+    font-size: 0.8125rem;
+  }
+  .metrics-strip .metric .unit { font-size: 0.625rem; }
+  .voice-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+  .voice-picker-row {
+    display: flex;
+    gap: 0.4rem;
+    align-items: flex-end;
+  }
+  .voice-picker-row .field { flex: 1; min-width: 0; }
+  .voice-picker-row button {
+    flex: 0 0 auto;
+    padding: 0.5rem 0.7rem;
+    white-space: nowrap;
+  }
+  .voice-meta {
+    font-size: 0.65625rem;
+    color: var(--text-muted);
+    line-height: 1.35;
+    min-height: 1.1em;
+  }
+  .voice-meta .pill {
+    display: inline-block;
+    padding: 0.1rem 0.4rem;
+    margin-right: 0.25rem;
+    border-radius: 999px;
+    background: #f4f4f5;
+    border: 1px solid var(--border);
+    font-size: 0.625rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .voice-meta .pill.region-castilian { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+  .voice-meta .pill.region-andalusian { background: #fef3c7; border-color: #fde68a; color: #b45309; }
+  .voice-meta .pill.region-canarian { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
+  .voice-meta .pill.region-catalan,
+  .voice-meta .pill.region-galician { background: #f5f3ff; border-color: #ddd6fe; color: #6d28d9; }
+  .voice-meta .pill.region-latam { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+  .range-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+  }
+  .range-row input[type="range"] { flex: 1; }
+  .range-value {
+    font-size: 0.75rem;
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+    min-width: 2.6rem;
+    text-align: right;
+    color: var(--text);
+  }
+  .preset-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .preset-row button {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    padding: 0.3rem 0.55rem;
+    border-radius: 999px;
+  }
+  .preset-row button.active {
+    background: var(--primary);
+    color: var(--primary-fg);
+    border-color: var(--primary);
+  }
+  .panel-tabs {
+    display: flex;
+    gap: 0.25rem;
+    flex-wrap: wrap;
+    margin: -0.15rem 0 0.15rem;
+  }
+  .panel-tabs button {
+    font-size: 0.6875rem;
+    font-weight: 650;
+    padding: 0.3rem 0.55rem;
+    border-radius: 999px;
+    color: var(--text-muted);
+  }
+  .panel-tabs button.active {
+    background: var(--primary);
+    color: var(--primary-fg);
+    border-color: var(--primary);
+  }
+  .panel-section[data-tab-panel][hidden] { display: none !important; }
+  .panel--session { flex-basis: 360px; }
+  @media (min-width: 1240px) {
+    .panel--session { flex-basis: 640px; }
+  }
+
 </style>
 </head>
 <body>
@@ -777,6 +895,13 @@
     </aside>
 
     <main id="card" class="card">
+      <div id="metrics-strip" class="metrics-strip" hidden aria-live="polite">
+        <span class="metric" title="Silence after you finish → first byte of agent audio">Latency <b id="m-eou">—</b><span class="unit">ms</span></span>
+        <span class="metric" title="Committed transcript → first LLM token">LLM <b id="m-llm">—</b><span class="unit">ms</span></span>
+        <span class="metric" title="Committed transcript → first TTS byte">TTS <b id="m-tts">—</b><span class="unit">ms</span></span>
+        <span class="metric" title="Turns this call">Turn <b id="m-turn">—</b></span>
+        <span class="metric" title="Interrupted / speculative / filler flags">Flags <b id="m-flags">—</b></span>
+      </div>
       <div class="transcript-wrap">
         <div id="voice-empty">
           <p class="empty-title">Listening</p>
@@ -830,10 +955,74 @@
           </select>
         </label>
       </div>
+      <div class="preset-row" id="preset-row" aria-label="Voice presets">
+        <button type="button" data-preset="pablo-v3" title="ElevenLabs v3 conversational · Pablo (Madrid, hombre)">Pablo v3</button>
+        <button type="button" data-preset="gemini-fenrir" title="Gemini 3.8 TTS · Fenrir (hombre)">Gemini 3.8</button>
+        <button type="button" data-preset="es-castilian" title="España · castellano · Carolina">Madrid</button>
+        <button type="button" data-preset="es-andalusian" title="España · andaluz · Cristina B · Flash v2.5">Andalucía</button>
+        <button type="button" data-preset="es-andalusian-m" title="España · andaluz · Ismael (Málaga) · Flash v2.5">Andalucía ♂</button>
+        <button type="button" data-preset="gemini-andaluz" title="Gemini 3.8 TTS · Fenrir con indicación de acento andaluz">Andaluz Gemini</button>
+        <button type="button" data-preset="ar-rioplatense" title="Argentina · Antonia · Deepgram Aura-2">Argentina</button>
+        <button type="button" data-preset="mx-aura" title="México · Estrella · Deepgram Aura-2">México</button>
+        <button type="button" data-preset="co-aura" title="Colombia · Celeste · Deepgram Aura-2">Colombia</button>
+        <button type="button" data-preset="cl-flash" title="Chile · Camila · ElevenLabs Flash v2.5">Chile</button>
+        <button type="button" data-preset="es-canarian" title="España · canario · Yaiza">Canarias</button>
+        <button type="button" data-preset="es-male" title="España · masculino · JeiJo">Madrid ♂</button>
+        <button type="button" data-preset="naturgy-pace" title="Pace ≈ Naturgy (~3.45 w/s)">Pace Naturgy</button>
+      </div>
+      <div class="panel-tabs" role="tablist" aria-label="Settings groups">
+        <button type="button" class="active" data-tab="voice" role="tab" aria-selected="true">Voice</button>
+        <button type="button" data-tab="turns" role="tab" aria-selected="false">Turns</button>
+        <button type="button" data-tab="behaviour" role="tab" aria-selected="false">Behaviour</button>
+        <button type="button" data-tab="advanced" role="tab" aria-selected="false">Advanced</button>
+      </div>
       <div class="panel-sections">
-        <section class="panel-section" aria-label="Pipeline">
-          <h3 class="panel-section-title">Pipeline</h3>
+        <section class="panel-section" data-tab-panel="voice" aria-label="Voice">
+          <h3 class="panel-section-title">Voice &amp; pace</h3>
           <div class="panel-grid">
+            <label class="field">
+              <span class="field-label">Language</span>
+              <input type="text" id="language-input" aria-label="Language" placeholder="auto" data-vc="language"
+                     title="ISO code passed to STT and TTS (en, es, ar…). Empty = server default; the agent's default is provider auto-detect.">
+            </label>
+            <label class="field">
+              <span class="field-label">LLM model</span>
+              <select id="llm-select" aria-label="LLM model" title="Per-call LLM override (provider/model). Empty = the agent's model. Applied on the next Start.">
+                <option value="">Server default</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">TTS provider</span>
+              <select id="tts-select" aria-label="TTS provider" title="Text-to-speech provider — applied on the next Start. OpenAI needs OPENAI_API_KEY; Gemini needs GEMINI_API_KEY; Deepgram needs DEEPGRAM_API_KEY, Munsit needs MUNSIT_API_KEY, Fish Audio needs FISH_API_KEY on the server.">
+                <option value="">Server default</option>
+                <option value="elevenlabs">ElevenLabs</option>
+                <option value="deepgram">Deepgram Aura</option>
+                <option value="openai">OpenAI</option>
+                <option value="gemini">Gemini TTS</option>
+                <option value="fishaudio">Fish Audio</option>
+                <option value="munsit">Munsit (Arabic)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">TTS model</span>
+              <select id="tts-model-select" aria-label="TTS model" title="Text-to-speech model — options follow the selected provider. Applied on the next Start. Flash/Turbo honour Speed; Eleven v4 does not (use Tempo instead).">
+                <option value="">Server default</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Region filter</span>
+              <select id="voice-region" aria-label="Voice region filter" title="Filters the voice catalog by region. Regional accents only come through on some TTS models (blind-judged): ElevenLabs Flash/Turbo v2.5 and Multilingual v2, Deepgram Aura-2 and Gemini (with an accent) keep them; Eleven v3, v3 conversational and v4 flatten them to a neutral Madrid accent.">
+                <option value="es-spain">España (all)</option>
+                <option value="castilian">Castellano / Madrid</option>
+                <option value="andalusian">Andalucía</option>
+                <option value="canarian">Canarias</option>
+                <option value="catalan">Cataluña / Valencia</option>
+                <option value="galician">Galicia</option>
+                <option value="account">My ElevenLabs voices</option>
+                <option value="all">All languages</option>
+                <option value="latam">Latinoamérica</option>
+              </select>
+            </label>
             <label class="field">
               <span class="field-label">Noise suppression</span>
               <select id="ns-select" aria-label="Noise suppression" title="Mic noise suppression — applied on the next Start. Echo cancellation stays on in every mode.">
@@ -842,6 +1031,44 @@
                 <option value="off">Off</option>
               </select>
             </label>
+          </div>
+          <div class="voice-picker">
+            <div class="voice-picker-row">
+              <label class="field">
+                <span class="field-label">Voice</span>
+                <select id="voice-select" aria-label="TTS voice" title="Catalog of Spain-Spanish voices for the selected provider. Applied on the next Start.">
+                  <option value="">Server default</option>
+                </select>
+              </label>
+              <button type="button" id="btn-voice-preview" title="Hear one line with the current voice, model and speed">Preview</button>
+            </div>
+            <p id="voice-meta" class="voice-meta"></p>
+            <label class="field">
+              <span class="field-label">Voice ID (override)</span>
+              <input type="text" id="voice-input" aria-label="TTS voice id" placeholder="Server default" data-vc="voice"
+                     title="Provider voice id. Picking from the list above fills this. For Deepgram, enter a full Aura voice model id.">
+            </label>
+            <label class="field">
+              <span class="field-label">Speed <span id="speed-hint" class="direction-tag"></span></span>
+              <div class="range-row">
+                <input type="range" id="tts-speed" min="0.7" max="1.2" step="0.05" value="1" aria-label="TTS speed"
+                       title="ElevenLabs Flash/Turbo native speed (0.7–1.2). Ignored by Eleven v4 — use Tempo below for that.">
+                <span id="tts-speed-value" class="range-value">1.00×</span>
+              </div>
+            </label>
+            <label class="field">
+              <span class="field-label">Tempo (FFmpeg)</span>
+              <div class="range-row">
+                <input type="range" id="tts-tempo" min="0.8" max="1.4" step="0.05" value="1" aria-label="TTS tempo"
+                       title="Pitch-preserving post-TTS speedup. Works with every model, including Eleven v4. 1.00 = off.">
+                <span id="tts-tempo-value" class="range-value">off</span>
+              </div>
+            </label>
+          </div>
+        </section>
+        <section class="panel-section" data-tab-panel="turns" aria-label="Turn taking" hidden>
+          <h3 class="panel-section-title">Turn taking</h3>
+          <div class="panel-grid">
             <label class="field">
               <span class="field-label">Speech-to-text</span>
               <select id="stt-select" aria-label="STT provider" title="Speech-to-text provider — applied on the next Start. Deepgram needs DEEPGRAM_API_KEY; OpenAI needs OPENAI_API_KEY on the server.">
@@ -852,7 +1079,7 @@
                 <option value="deepgram-nova">Deepgram Nova-3</option>
               </select>
             </label>
-            <label class="field field-wide">
+            <label class="field">
               <span class="field-label">Turn detection</span>
               <select id="td-select" aria-label="Turn detector" title="Turn detector — how the agent decides you finished speaking. Applied on the next Start.">
                 <option value="">Server default</option>
@@ -864,38 +1091,6 @@
               </select>
             </label>
             <label class="field">
-              <span class="field-label">TTS provider</span>
-              <select id="tts-select" aria-label="TTS provider" title="Text-to-speech provider — applied on the next Start. OpenAI needs OPENAI_API_KEY; Deepgram needs DEEPGRAM_API_KEY, Munsit needs MUNSIT_API_KEY, Fish Audio needs FISH_API_KEY on the server.">
-                <option value="">Server default</option>
-                <option value="elevenlabs">ElevenLabs</option>
-                <option value="deepgram">Deepgram Aura</option>
-                <option value="openai">OpenAI</option>
-                <option value="fishaudio">Fish Audio</option>
-                <option value="munsit">Munsit (Arabic)</option>
-              </select>
-            </label>
-            <label class="field">
-              <span class="field-label">TTS model</span>
-              <select id="tts-model-select" aria-label="TTS model" title="Text-to-speech model — options follow the selected provider. Applied on the next Start.">
-                <option value="">Server default</option>
-              </select>
-            </label>
-            <label class="field">
-              <span class="field-label">Language</span>
-              <input type="text" id="language-input" aria-label="Language" placeholder="auto" data-vc="language"
-                     title="ISO code passed to STT and TTS (en, es, ar…). Empty = server default; the agent's default is provider auto-detect.">
-            </label>
-            <label class="field">
-              <span class="field-label">Voice ID</span>
-              <input type="text" id="voice-input" aria-label="TTS voice id" placeholder="Server default" data-vc="voice"
-                     title="Provider voice id for TTS (OpenAI: coral, alloy, marin, cedar…). For Deepgram, enter a full Aura voice model id and leave TTS model at Server default. Applied on the next Start.">
-            </label>
-          </div>
-        </section>
-        <section class="panel-section" aria-label="Turn taking">
-          <h3 class="panel-section-title">Turn taking</h3>
-          <div class="panel-grid">
-            <label class="field">
               <span class="field-label">VAD endpointing</span>
               <select id="vad-select" aria-label="VAD endpointing" title="Local Silero VAD fast path that commits the STT on silence — applied on the next Start. Auto = on when the turn detector has an audio EOU model. Always off for Flux/Munsit (they own end-of-turn).">
                 <option value="">Server default (auto)</option>
@@ -903,7 +1098,20 @@
                 <option value="off">Off</option>
               </select>
             </label>
+<label class="field">
+              <span class="field-label">Entity patience</span>
+              <select id="entity-select" aria-label="Entity patience" title="Wait longer when the caller is dictating a number, spelling a name, or listing items. Applied on the next Start.">
+                <option value="">Server default</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
             <label class="field">
+              <span class="field-label">Entity wait (s)</span>
+              <input type="number" id="entity-secs" min="0.5" max="10" step="0.1" aria-label="Entity patience seconds" placeholder="2.5" data-vc="entity_patience_secs"
+                     title="How long to keep waiting during dictation once Entity patience is on.">
+            </label>
+<label class="field">
               <span class="field-label">Turn timeout (s)</span>
               <input type="number" id="turn-timeout" min="1" max="600" step="1" aria-label="Turn timeout" placeholder="Server default" data-vc="turn_timeout_secs"
                      title="Wall-clock budget for one agent turn (LLM + tools). Past it the turn is cancelled and the fallback line is spoken.">
@@ -916,14 +1124,14 @@
                 <option value="custom">Custom line</option>
               </select>
             </label>
-            <label class="field">
+            <label class="field field-wide">
               <span class="field-label">Apology text</span>
               <input type="text" id="turn-fallback-text" aria-label="Turn timeout fallback text" placeholder="Server default" data-vc="turn_timeout_fallback"
                      title="Spoken when a turn times out. Only used when the apology is set to Custom.">
             </label>
           </div>
         </section>
-        <section class="panel-section" id="greeting-section" aria-label="Greeting (inbound)">
+        <section class="panel-section" data-tab-panel="behaviour" id="greeting-section" aria-label="Greeting (inbound)" hidden>
           <h3 class="panel-section-title">Greeting <span class="direction-tag" id="greeting-tag"></span></h3>
           <div class="panel-grid">
             <label class="field">
@@ -969,7 +1177,7 @@
             </label>
           </div>
         </section>
-        <section class="panel-section" id="outbound-section" aria-label="Greeting (outbound)">
+        <section class="panel-section" data-tab-panel="behaviour" id="outbound-section" aria-label="Greeting (outbound)" hidden>
           <h3 class="panel-section-title">Outbound greeting <span class="direction-tag" id="outbound-tag"></span></h3>
           <div class="panel-grid">
             <label class="field">
@@ -1015,7 +1223,7 @@
             </label>
           </div>
         </section>
-        <section class="panel-section" aria-label="Filler speech">
+        <section class="panel-section" data-tab-panel="behaviour" aria-label="Filler speech" hidden>
           <h3 class="panel-section-title">Filler speech</h3>
           <div class="panel-grid">
             <label class="field">
@@ -1058,7 +1266,7 @@
             </label>
           </div>
         </section>
-        <section class="panel-section" aria-label="User idle">
+        <section class="panel-section" data-tab-panel="behaviour" aria-label="User idle" hidden>
           <h3 class="panel-section-title">User idle</h3>
           <div class="panel-grid">
             <label class="field">
@@ -1101,7 +1309,7 @@
             </label>
           </div>
         </section>
-        <section class="panel-section" aria-label="Ambience">
+        <section class="panel-section" data-tab-panel="behaviour" aria-label="Ambience" hidden>
           <h3 class="panel-section-title">Ambience</h3>
           <div class="panel-grid">
             <label class="field">
@@ -1122,7 +1330,7 @@
             </label>
           </div>
         </section>
-        <section class="panel-section" aria-label="Advanced">
+        <section class="panel-section" data-tab-panel="advanced" aria-label="Advanced" hidden>
           <h3 class="panel-section-title">Advanced</h3>
           <div class="panel-grid">
             <label class="field field-wide">
@@ -1142,7 +1350,7 @@
             </label>
           </div>
         </section>
-        <section class="panel-section" aria-label="Call context" id="call-context-section" hidden>
+        <section class="panel-section" data-tab-panel="advanced" aria-label="Call context" id="call-context-section" hidden>
           <h3 class="panel-section-title">Call context</h3>
           <div class="panel-grid">
             <label class="field field-wide">
@@ -1575,11 +1783,36 @@ const TTS_MODEL_STORAGE_KEY = 'timbal-voice-tts-model';
 // Models per provider — the model picker follows the provider so a foreign
 // model id never rides a provider's wire.
 const TTS_MODELS = {
-  elevenlabs: ['eleven_flash_v2_5', 'eleven_v4_turbo', 'eleven_v4', 'eleven_turbo_v2_5', 'eleven_multilingual_v2'],
+  // Flash first: honours Speed. v4 is nicer but needs Tempo for pace.
+  elevenlabs: ['eleven_flash_v2_5', 'eleven_v4_turbo', 'eleven_v4', 'eleven_v3_conversational', 'eleven_turbo_v2_5', 'eleven_multilingual_v2'],
   fishaudio: ['s2.1-pro', 's2.1-pro-free', 's2-pro', 's1'],
-  deepgram: ['aura-2-thalia-en', 'aura-2-andromeda-en', 'aura-2-helena-en', 'aura-2-apollo-en', 'aura-2-asteria-en'],
+  deepgram: ['aura-2-agustina-es', 'aura-2-alvaro-es', 'aura-2-carina-es', 'aura-2-diana-es', 'aura-2-nestor-es', 'aura-2-silvia-es',
+    // Latin American Aura-2 voices (Argentina, Colombia, Mexico)
+    'aura-2-antonia-es', 'aura-2-celeste-es', 'aura-2-gloria-es', 'aura-2-estrella-es', 'aura-2-luciano-es', 'aura-2-sirio-es',
+    'aura-2-thalia-en'],
   openai: ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'],
+  gemini: ['gemini-3.8-flash-tts', 'gemini-3.8-flash-lite-tts', 'gemini-3.1-flash-tts-preview'],
   munsit: ['faseeh-v1-preview'],
+};
+const ELEVEN_NATIVE_SPEED = new Set(['eleven_flash_v2_5', 'eleven_turbo_v2_5', 'eleven_multilingual_v2', 'eleven_v3', 'eleven_v3_conversational']);
+const VOICE_PRESETS = {
+  'pablo-v3': { voice: 'HIYif4jehvc9P9A8DYbX', name: 'Pablo', region: 'castilian', language: 'es', tts: 'elevenlabs', model: 'eleven_v3_conversational', speed: 1, tempo: 1 },
+  'gemini-fenrir': { voice: 'Fenrir', name: 'Fenrir', region: 'all', language: 'es', tts: 'gemini', model: 'gemini-3.8-flash-tts', speed: 1, tempo: 1 },
+  'es-castilian': { voice: 'UOIqAnmS11Reiei1Ytkc', name: 'Carolina', region: 'castilian', language: 'es', tts: 'elevenlabs', model: 'eleven_flash_v2_5', speed: 1.15, tempo: 1 },
+  // Accents verified by blind judging (Gemini listens without being told the target). Lisa sounds Castilian, so she is not here.
+  'es-andalusian': { voice: '2VUqK4PEdMj16L6xTN4J', name: 'Cristina B', region: 'andalusian', language: 'es', tts: 'elevenlabs', model: 'eleven_flash_v2_5', speed: 1.15, tempo: 1 },
+  'es-andalusian-m': { voice: 'LFPjn8ZBg3VjrjHxRH89', name: 'Ismael', region: 'andalusian', language: 'es', tts: 'elevenlabs', model: 'eleven_flash_v2_5', speed: 1.1, tempo: 1 },
+  'gemini-andaluz': {
+    voice: 'Fenrir', name: 'Fenrir', region: 'all', language: 'es', tts: 'gemini', model: 'gemini-3.8-flash-tts', speed: 1, tempo: 1,
+    extra: { accent: 'andaluz marcado, de Sevilla o Málaga: s aspirada o comida al final de sílaba y de palabra, d intervocálica casi muda, ritmo cantarín. Nada de acento de Madrid ni latinoamericano' },
+  },
+  'ar-rioplatense': { voice: 'aura-2-antonia-es', name: 'Antonia', region: 'latam', language: 'es', tts: 'deepgram', model: 'aura-2-antonia-es', speed: 1, tempo: 1 },
+  'mx-aura': { voice: 'aura-2-estrella-es', name: 'Estrella', region: 'latam', language: 'es', tts: 'deepgram', model: 'aura-2-estrella-es', speed: 1, tempo: 1 },
+  'co-aura': { voice: 'aura-2-celeste-es', name: 'Celeste', region: 'latam', language: 'es', tts: 'deepgram', model: 'aura-2-celeste-es', speed: 1, tempo: 1 },
+  'cl-flash': { voice: 'oJIuRMopN0sojGjwD6rQ', name: 'Camila', region: 'latam', language: 'es', tts: 'elevenlabs', model: 'eleven_flash_v2_5', speed: 1.1, tempo: 1 },
+  'es-canarian': { voice: 'GdP4WGpargn0HxK4FwVg', name: 'Yaiza', region: 'canarian', language: 'es', tts: 'elevenlabs', model: 'eleven_flash_v2_5', speed: 1.1, tempo: 1 },
+  'es-male': { voice: 'PBaBRSRTvwmnK1PAq9e0', name: 'JeiJo', region: 'castilian', language: 'es', tts: 'elevenlabs', model: 'eleven_flash_v2_5', speed: 1.15, tempo: 1 },
+  'naturgy-pace': { speed: 1.15, tempo: 1 },
 };
 function syncTtsModels() {
   const models = TTS_MODELS[ttsSelect.value] || [];
@@ -1613,7 +1846,293 @@ ttsSelect.onchange = () => {
 };
 ttsModelSelect.onchange = () => {
   localStorage.setItem(TTS_MODEL_STORAGE_KEY, ttsModelSelect.value);
+  syncSpeedHint();
 };
+
+// --- Tabs, voice catalog, pace, LLM picker, metrics ----------------------
+const voiceSelect = document.getElementById('voice-select');
+const voiceRegion = document.getElementById('voice-region');
+const voiceMeta = document.getElementById('voice-meta');
+const btnVoicePreview = document.getElementById('btn-voice-preview');
+const ttsSpeed = document.getElementById('tts-speed');
+const ttsSpeedValue = document.getElementById('tts-speed-value');
+const ttsTempo = document.getElementById('tts-tempo');
+const ttsTempoValue = document.getElementById('tts-tempo-value');
+const speedHint = document.getElementById('speed-hint');
+const llmSelect = document.getElementById('llm-select');
+const entitySelect = document.getElementById('entity-select');
+const entitySecs = document.getElementById('entity-secs');
+const metricsStrip = document.getElementById('metrics-strip');
+let voiceCatalog = [];
+let previewAudio = null;
+
+document.querySelectorAll('.panel-tabs [data-tab]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const tab = btn.dataset.tab;
+    document.querySelectorAll('.panel-tabs [data-tab]').forEach((b) => {
+      b.classList.toggle('active', b === btn);
+      b.setAttribute('aria-selected', b === btn ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-tab-panel]').forEach((panel) => {
+      panel.hidden = panel.dataset.tabPanel !== tab;
+    });
+  });
+});
+
+persist(entitySelect, 'timbal-voice-entity');
+persist(entitySecs, 'timbal-voice-entity-secs');
+persist(voiceRegion, 'timbal-voice-region', () => void refreshVoiceSelect());
+persist(llmSelect, 'timbal-voice-llm');
+
+{
+  const savedSpeed = parseFloat(localStorage.getItem('timbal-voice-tts-speed') || '');
+  ttsSpeed.value = Number.isFinite(savedSpeed) ? String(savedSpeed) : '1';
+  const savedTempo = parseFloat(localStorage.getItem('timbal-voice-tts-tempo') || '');
+  ttsTempo.value = Number.isFinite(savedTempo) ? String(savedTempo) : '1';
+}
+function syncSpeedHint() {
+  const model = ttsModelSelect.value || (declaredVoiceConfig && declaredVoiceConfig.tts_model) || '';
+  const native = !model || ELEVEN_NATIVE_SPEED.has(model) || (ttsSelect.value && !['elevenlabs', 'gemini'].includes(ttsSelect.value));
+  speedHint.textContent = native ? '' : '— ignored by this model, use Tempo';
+  ttsSpeedValue.textContent = `${Number(ttsSpeed.value).toFixed(2)}×`;
+  const tempo = Number(ttsTempo.value);
+  ttsTempoValue.textContent = Math.abs(tempo - 1) < 0.001 ? 'off' : `${tempo.toFixed(2)}×`;
+}
+ttsSpeed.oninput = () => {
+  localStorage.setItem('timbal-voice-tts-speed', ttsSpeed.value);
+  syncSpeedHint();
+};
+ttsTempo.oninput = () => {
+  localStorage.setItem('timbal-voice-tts-tempo', ttsTempo.value);
+  syncSpeedHint();
+};
+syncSpeedHint();
+ttsSelect.addEventListener('change', () => { void loadVoiceCatalog(); syncSpeedHint(); });
+
+function regionLabel(region) {
+  return ({
+    castilian: 'Castellano', andalusian: 'Andalucía', canarian: 'Canarias',
+    catalan: 'Cataluña', galician: 'Galicia', basque: 'Euskadi', latam: 'LatAm',
+  })[region] || region || '';
+}
+
+function filterVoices(list) {
+  // Providers without regions (Gemini, OpenAI) have nothing to filter on.
+  if (!list.some((v) => v.region)) return list;
+  const filter = voiceRegion.value || 'es-spain';
+  if (filter === 'all') return list;
+  if (filter === 'account') return list.filter((v) => v.source === 'account');
+  if (filter === 'latam') return list.filter((v) => v.region === 'latam');
+  if (filter === 'es-spain') return list.filter((v) => v.region && v.region !== 'latam');
+  return list.filter((v) => v.region === filter);
+}
+
+function refreshVoiceSelect() {
+  const prev = voiceSelect.value || voiceInput.value.trim();
+  const filtered = filterVoices(voiceCatalog);
+  voiceSelect.innerHTML = '';
+  const def = document.createElement('option');
+  def.value = '';
+  def.textContent = filtered.length ? 'Server default' : 'No voices (check API key / filter)';
+  voiceSelect.appendChild(def);
+  for (const v of filtered.slice(0, 200)) {
+    const o = document.createElement('option');
+    o.value = v.id;
+    const bits = [v.name];
+    if (v.gender) bits.push(v.gender);
+    if (v.region) bits.push(regionLabel(v.region));
+    o.textContent = bits.join(' · ');
+    voiceSelect.appendChild(o);
+  }
+  if (prev && [...voiceSelect.options].some((o) => o.value === prev)) voiceSelect.value = prev;
+  updateVoiceMeta();
+}
+
+function updateVoiceMeta() {
+  const id = voiceSelect.value || voiceInput.value.trim();
+  const v = voiceCatalog.find((x) => x.id === id);
+  if (!v) {
+    voiceMeta.textContent = id ? `Custom id · ${id}` : '';
+    return;
+  }
+  const pills = [];
+  if (v.region) pills.push(`<span class="pill region-${v.region}">${regionLabel(v.region)}</span>`);
+  if (v.gender) pills.push(`<span class="pill">${v.gender}</span>`);
+  if (v.use_case) pills.push(`<span class="pill">${v.use_case}</span>`);
+  const desc = (v.description || '').slice(0, 140);
+  voiceMeta.innerHTML = `${pills.join('')}${desc ? ` ${desc}` : ''}`;
+}
+
+async function loadVoiceCatalog() {
+  const provider = ttsSelect.value || 'elevenlabs';
+  if (!['elevenlabs', 'deepgram', 'openai', 'gemini'].includes(provider)) {
+    voiceCatalog = [];
+    refreshVoiceSelect();
+    return;
+  }
+  const lang = (languageInput.value.trim() || 'es').split('-')[0];
+  try {
+    const r = await fetch(`/launcher/voices?provider=${encodeURIComponent(provider)}&language=${encodeURIComponent(lang)}`);
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    voiceCatalog = data.voices || [];
+  } catch (err) {
+    console.warn('voice catalog', err);
+    voiceCatalog = [];
+    voiceMeta.textContent = `Could not load voices: ${err.message || err}`;
+  }
+  refreshVoiceSelect();
+}
+
+async function loadLlmModels() {
+  try {
+    const r = await fetch('/launcher/models');
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    const prev = llmSelect.value;
+    llmSelect.innerHTML = '';
+    const def = document.createElement('option');
+    def.value = '';
+    def.textContent = 'Server default';
+    llmSelect.appendChild(def);
+    const usable = (data.models || []).filter((m) => m.access === 'key');
+    const rest = (data.models || []).filter((m) => m.access !== 'key');
+    for (const m of usable) {
+      const o = document.createElement('option');
+      o.value = m.id;
+      o.textContent = m.id;
+      llmSelect.appendChild(o);
+    }
+    if (rest.length) {
+      const og = document.createElement('optgroup');
+      og.label = 'No key in this env';
+      for (const m of rest.slice(0, 40)) {
+        const o = document.createElement('option');
+        o.value = m.id;
+        o.textContent = `${m.id} (needs key)`;
+        og.appendChild(o);
+      }
+      llmSelect.appendChild(og);
+    }
+    if (prev) llmSelect.value = prev;
+  } catch (err) {
+    console.warn('llm models', err);
+  }
+}
+
+voiceSelect.onchange = () => {
+  if (voiceSelect.value) {
+    voiceInput.value = voiceSelect.value;
+    localStorage.setItem('timbal-voice-voice-id', voiceInput.value);
+  }
+  updateVoiceMeta();
+};
+voiceInput.addEventListener('change', updateVoiceMeta);
+languageInput.addEventListener('change', () => void loadVoiceCatalog());
+
+btnVoicePreview.onclick = async () => {
+  const provider = ttsSelect.value || 'elevenlabs';
+  const voice = voiceInput.value.trim() || voiceSelect.value;
+  if (!voice) {
+    voiceMeta.textContent = 'Pick a voice first.';
+    return;
+  }
+  btnVoicePreview.disabled = true;
+  try {
+    const r = await fetch('/launcher/tts-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider,
+        voice,
+        model: ttsModelSelect.value || '',
+        speed: Number(ttsSpeed.value),
+        accent: String((jsonObjectOrNull(ttsExtraInput) || {}).accent || ''),
+        text: 'Hola, buenas. Te confirmo el pedido mil uno para Ana Ruiz en Barcelona. Está empaquetado, con la nota de dejarlo con el vecino del segundo b.',
+      }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || r.statusText);
+    }
+    const blob = await r.blob();
+    if (previewAudio) { try { previewAudio.pause(); } catch (_) {} }
+    previewAudio = new Audio(URL.createObjectURL(blob));
+    await previewAudio.play();
+  } catch (err) {
+    voiceMeta.textContent = `Preview failed: ${err.message || err}`;
+  } finally {
+    btnVoicePreview.disabled = false;
+  }
+};
+
+function applyPreset(name) {
+  const p = VOICE_PRESETS[name];
+  if (!p) return;
+  if (p.language) { languageInput.value = p.language; localStorage.setItem('timbal-voice-language', p.language); }
+  if (p.tts) {
+    ttsSelect.value = p.tts;
+    localStorage.setItem(TTS_STORAGE_KEY, p.tts);
+    syncTtsModels();
+  }
+  if (p.model) {
+    ttsModelSelect.value = p.model;
+    localStorage.setItem(TTS_MODEL_STORAGE_KEY, p.model);
+  }
+  if (p.region) {
+    voiceRegion.value = p.region;
+    localStorage.setItem('timbal-voice-region', p.region);
+  }
+  if (p.voice) {
+    voiceInput.value = p.voice;
+    localStorage.setItem('timbal-voice-voice-id', p.voice);
+  }
+  {
+    // A preset's extra replaces the accent line; a preset without one clears it, other keys stay.
+    const extra = { ...(jsonObjectOrNull(ttsExtraInput) || {}) };
+    delete extra.accent;
+    Object.assign(extra, p.extra || {});
+    ttsExtraInput.value = Object.keys(extra).length ? JSON.stringify(extra) : '';
+    localStorage.setItem('timbal-voice-tts-extra', ttsExtraInput.value);
+    markJson(ttsExtraInput, TTS_EXTRA_TITLE);
+  }
+  if (p.speed != null) {
+    ttsSpeed.value = String(p.speed);
+    localStorage.setItem('timbal-voice-tts-speed', ttsSpeed.value);
+  }
+  if (p.tempo != null) {
+    ttsTempo.value = String(p.tempo);
+    localStorage.setItem('timbal-voice-tts-tempo', ttsTempo.value);
+  }
+  document.querySelectorAll('#preset-row [data-preset]').forEach((b) => b.classList.toggle('active', b.dataset.preset === name));
+  syncSpeedHint();
+  void loadVoiceCatalog().then(() => {
+    if (p.voice) voiceSelect.value = p.voice;
+    updateVoiceMeta();
+  });
+}
+document.querySelectorAll('#preset-row [data-preset]').forEach((btn) => {
+  btn.addEventListener('click', () => applyPreset(btn.dataset.preset));
+});
+
+function recordMetrics(m) {
+  if (!m || typeof m !== 'object') return;
+  metricsStrip.hidden = false;
+  const fmt = (v) => (v == null || Number.isNaN(v) ? '—' : Math.round(v));
+  document.getElementById('m-eou').textContent = fmt(m.eou_to_first_audio_ms);
+  document.getElementById('m-llm').textContent = fmt(m.eou_to_llm_first_token_ms);
+  document.getElementById('m-tts').textContent = fmt(m.eou_to_tts_first_byte_ms);
+  document.getElementById('m-turn').textContent = m.turn_index != null ? String(m.turn_index + 1) : '—';
+  const flags = [];
+  if (m.interrupted) flags.push('cut');
+  if (m.speculative) flags.push('spec');
+  if (m.filler_spoken) flags.push('filler');
+  if (m.vad_endpointed) flags.push('vad');
+  document.getElementById('m-flags').textContent = flags.join(' · ') || '—';
+}
+
+void loadVoiceCatalog();
+void loadLlmModels();
 
 // --- Agent target (standalone mode) ---------------------------------------
 // Embedded pages keep dialing their own origin exactly as before. Standalone
@@ -2505,11 +3024,21 @@ function sessionConfigPayload() {
   if (sttModelInput.value.trim()) cfg.stt_model = sttModelInput.value.trim();
   if (languageInput.value.trim()) cfg.language = languageInput.value.trim();
   if (voiceInput.value.trim()) cfg.voice = voiceInput.value.trim();
+  if (llmSelect.value.trim().includes('/')) cfg.model = llmSelect.value.trim();
   const sttExtra = jsonObjectOrNull(sttExtraInput);
   if (sttExtra) cfg.stt_extra = sttExtra;
-  const ttsExtra = jsonObjectOrNull(ttsExtraInput);
-  if (ttsExtra) cfg.tts_extra = ttsExtra;
+  // Merge the Speed slider into tts_extra (allow-listed). A typed JSON field
+  // still wins for the same keys.
+  const ttsExtra = { ...(jsonObjectOrNull(ttsExtraInput) || {}) };
+  const speed = Number(ttsSpeed.value);
+  if (Number.isFinite(speed) && Math.abs(speed - 1) > 0.001) ttsExtra.speed = speed;
+  if (Object.keys(ttsExtra).length) cfg.tts_extra = ttsExtra;
+  const tempo = Number(ttsTempo.value);
+  if (Number.isFinite(tempo) && Math.abs(tempo - 1) > 0.001) cfg.tts_tempo = tempo;
   if (vadSelect.value) cfg.vad_endpointing = vadSelect.value === 'on';
+  if (entitySelect.value) cfg.entity_patience = entitySelect.value === 'on';
+  const entityWait = numOrNull(entitySecs, { min: 0 });
+  if (entityWait !== null && entityWait > 0) cfg.entity_patience_secs = entityWait;
   const turnTimeout = numOrNull(turnTimeoutInput, { min: 0 });
   if (turnTimeout !== null && turnTimeout > 0) cfg.turn_timeout_secs = turnTimeout;
   if (turnFallbackSelect.value === 'off') {
@@ -2874,6 +3403,9 @@ function handleServerMessage(msg) {
       }
       case 'error':
         log('error', msg.message);
+        break;
+      case 'metrics':
+        recordMetrics(msg.metrics);
         break;
       case 'session_transcript':
         window._sessionTranscript = msg.entries;
@@ -3407,7 +3939,20 @@ async function initStandalone() {
     launcherAvailable = true;
     launcherBox.hidden = false;
     localUrlField.hidden = true; // launcher mode: the URL is derived from the spawned child
-    launcherSpecInput.value = localStorage.getItem(TGT_KEY('spec')) || st.launcher?.default_import_spec || '';
+    // A launcher started on a new agent replaces what this browser remembered, once: the old agent, voice,
+    // provider and pace would otherwise override the new agent's own settings on every Start.
+    const launcherDefault = st.launcher?.default_import_spec || '';
+    if (launcherDefault && localStorage.getItem(TGT_KEY('spec-default')) !== launcherDefault) {
+      localStorage.setItem(TGT_KEY('spec-default'), launcherDefault);
+      localStorage.setItem(TGT_KEY('spec'), launcherDefault);
+      for (const key of [
+        'timbal-voice-voice-id', 'timbal-voice-tts-provider', 'timbal-voice-tts-model', 'timbal-voice-tts-speed',
+        'timbal-voice-tts-tempo', 'timbal-voice-region', 'timbal-voice-llm',
+      ]) localStorage.removeItem(key);
+      location.reload();
+      return;
+    }
+    launcherSpecInput.value = localStorage.getItem(TGT_KEY('spec')) || launcherDefault;
     launcherPortInput.value = localStorage.getItem(TGT_KEY('port')) || '';
     launcherSpecInput.onchange = () => localStorage.setItem(TGT_KEY('spec'), launcherSpecInput.value.trim());
     launcherPortInput.onchange = () => localStorage.setItem(TGT_KEY('port'), launcherPortInput.value.trim());

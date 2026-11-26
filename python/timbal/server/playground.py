@@ -45,9 +45,11 @@ import webbrowser
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import urlopen
 
 from .. import __version__
+from . import playground_voices
 
 _HTML_PATH = Path(__file__).parent / "voice.html"
 
@@ -451,6 +453,21 @@ def _make_handler(child: ChildServer, default_import_spec: str) -> type[BaseHTTP
                     },
                 )
                 return
+            if path == "/launcher/voices":
+                query = parse_qs(urlsplit(self.path).query)
+                try:
+                    voices = playground_voices.list_voices(
+                        (query.get("provider") or ["elevenlabs"])[0],
+                        (query.get("language") or [""])[0],
+                    )
+                except playground_voices.PlaygroundApiError as e:
+                    self._send_json(e.status, {"error": str(e)})
+                    return
+                self._send_json(200, {"voices": voices})
+                return
+            if path == "/launcher/models":
+                self._send_json(200, {"models": playground_voices.llm_models()})
+                return
             self._send_json(404, {"error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
@@ -484,6 +501,26 @@ def _make_handler(child: ChildServer, default_import_spec: str) -> type[BaseHTTP
                 return
             if path == "/launcher/stop":
                 self._send_json(200, {"child": child.stop()})
+                return
+            if path == "/launcher/tts-preview":
+                speed = body.get("speed")
+                try:
+                    audio = playground_voices.tts_preview(
+                        str(body.get("provider") or "elevenlabs"),
+                        str(body.get("voice") or ""),
+                        str(body.get("text") or ""),
+                        model=str(body.get("model") or ""),
+                        speed=float(speed) if isinstance(speed, (int, float)) and not isinstance(speed, bool) else None,
+                        accent=str(body.get("accent") or ""),
+                    )
+                except playground_voices.PlaygroundApiError as e:
+                    self._send_json(e.status, {"error": str(e)})
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(audio)))
+                self.end_headers()
+                self.wfile.write(audio)
                 return
             self._send_json(404, {"error": "not found"})
 
