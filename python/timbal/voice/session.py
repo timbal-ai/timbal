@@ -2161,7 +2161,12 @@ class VoiceSession:
         runner = getattr(self.agent, "_guardrail_runner", None)
         if runner is None or not runner.has_stage(GuardrailStage.INPUT):
             return text, []
-        ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=getattr(self.agent, "_path", None))
+        # The event as ``ctx.payload``, as a prompt's check gets its message: a rail may read it. A user message
+        # with ``source="client"``, never a runtime one: rails that let the runtime's own text through screen this.
+        payload = Message(role="user", content=[TextContent(text=text)], metadata={"source": "client"})
+        ctx = GuardrailContext(
+            stage=GuardrailStage.INPUT, agent_path=getattr(self.agent, "_path", None), payload=payload
+        )
         outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
         if outcome.verdict is not None:
             # No run exists yet to carry a guardrail report, so the log is the record.
