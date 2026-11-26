@@ -697,7 +697,8 @@ StoredEventSource = Literal["app", "client", "user", "agent"]
 """Where a stored event came from (``SessionEvent.source``, ``BackgroundTaskStore.post_event``): a
 :data:`SessionEventSource`, or a message from another agent (``"agent"``), which needs its envelope
 (``ChatSession.receive_agent_message`` gives it). :func:`post_session_event` and ``VoiceSession.notify`` take a
-:data:`SessionEventSource` only."""
+:data:`SessionEventSource` only. (The receipt of a message to a background task, ``message_task``, carries its
+:data:`TaskMessageSource` instead.)"""
 SessionEventState = Literal["pending", "delivered", "superseded", "withdrawn", "undelivered"]
 TaskMessageSource = Literal["parent", "app", "user"]
 """Who sent a running background agent a message (:meth:`BackgroundTaskStore.message_task`)."""
