@@ -726,13 +726,17 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
     ``{"from", "text", "message_id"?, "reply_to"?, "priority"?, "hops"?}``.
 
     ``from`` is the sender's claim: the route trusts whoever may call this
-    server's API (as for user messages). 403 when the session's ``accepts``
-    refuses the sender or its input guardrails block the text.
+    server's API (as for user messages). A refusal answers ``{"detail",
+    "reason"}`` (:class:`~timbal.core.peers.PeerRejected`): 403 when the
+    session's ``accepts`` refuses the sender (``not_accepted``) or its input
+    guardrails block the text (``blocked``), 409 ``closed``, 422 ``invalid``.
+    The 202 means it survives a restart (a durable session stored it).
     """
     from ..core.peers import PeerRejected
 
     session = await _session(request, session_id)
     body = await _body(request)
+    _answerable(body, "The message", ("from", "text", "message_id", "reply_to", "priority", "hops"))
     sender, text, hops = body.get("from"), body.get("text"), body.get("hops", 0)
     if not isinstance(sender, str) or not isinstance(text, str):
         raise HTTPException(status_code=400, detail="'from' and 'text' must be strings.")
@@ -751,8 +755,13 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
             hops=hops,
         )
     except PeerRejected as e:
-        raise HTTPException(status_code=_REJECTED_STATUS.get(e.reason, 422), detail=str(e)) from e
-    await session.flush()  # durable: the 202 means it survives a restart
+        return JSONResponse(
+            status_code=_REJECTED_STATUS.get(e.reason, 422), content={"detail": str(e), "reason": e.reason}
+        )
+    mark = session.mark()
+    # A copy of one it has: nothing new to take back if the store fails.
+    undo = None if receipt["duplicate"] else (lambda: session.withdraw(receipt["event_id"]))
+    await _stored(session, mark, undo)
     return _json(receipt, status_code=202)
 
 

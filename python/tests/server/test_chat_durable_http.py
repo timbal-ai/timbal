@@ -204,6 +204,30 @@ def test_a_message_that_could_not_be_stored_is_a_503_and_not_kept(client, monkey
     assert client.get(f"/chat/sessions/{session_id}").json()["turns"] == 0
 
 
+def test_an_agent_message_that_could_not_be_stored_is_a_503_and_a_retry_is_no_duplicate(client, monkeypatch, tmp_path):
+    session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+    (tmp_path / "hang").touch()  # a turn that stays busy: the message waits for the next one
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "wait"})
+    session = client.app.state.chat_sessions[session_id]
+    deadline = time.monotonic() + 5
+    while not session.busy and time.monotonic() < deadline:
+        time.sleep(0.01)
+    url = f"/chat/sessions/{session_id}/agent_messages"
+    body = {"from": "planner", "text": "the build is green", "message_id": "am_1"}
+
+    monkeypatch.setattr(client.app.state.chat_store, "save", _down)
+    response = client.post(url, json=body)
+    assert response.status_code == 503 and response.headers["retry-after"] == "1"
+    assert "Nothing was accepted" in response.json()["detail"]
+    monkeypatch.undo()
+    assert session._store.pending_events() == []
+
+    again = client.post(url, json=body)
+    assert again.status_code == 202 and again.json()["duplicate"] is False
+    assert [event.text for event in session._store.pending_events()] == ["the build is green"]
+    (tmp_path / "hang").unlink()
+
+
 async def _down(*_args, **_kwargs):
     raise OSError("disk full")
 

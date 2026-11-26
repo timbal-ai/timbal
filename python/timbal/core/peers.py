@@ -8,13 +8,14 @@ its running turn after the current tool batch. The recipient answers with ``send
 reply text goes to its own user), so every exchange is visible in both traces.
 
 - **Dedupe:** a message id derived from the sender's run and tool call, so a tool call re-run on resume
-  sends nothing new; the recipient also drops a second identical message from the same sender while the
-  first is still unread.
+  sends nothing new; ids are per sender. The recipient also drops a second identical message from the
+  same sender while the first is still unread.
 - **Chatter:** every message carries ``hops``, one more than the deepest agent message the sending run
   received (or the message it replies to); past ``max_hops`` the tool refuses and tells the model to stop.
 - **Access:** ``accepts=`` on join limits who may message a member (a routing filter, not authentication:
   over HTTP, ``from`` is whatever the authenticated caller claims).
-- **Screening:** the recipient's input guardrails screen the text (a block refuses the message).
+- **Screening:** the recipient's input guardrails screen the text on arrival: a block, or a redaction that
+  leaves nothing, refuses the message; a redaction rewrites it and is recorded on the run that takes it.
 
 Process-local, like the sessions; :class:`RemotePeer` reaches a session on another Timbal server through
 ``POST /chat/sessions/{id}/agent_messages``.
@@ -25,9 +26,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import itertools
+import os
+import re
+import threading
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import quote
 
 import structlog
 
@@ -52,10 +58,31 @@ logger = structlog.get_logger("timbal.core.peers")
 
 PeerPriority = Literal["normal", "urgent"]
 SEND_TO_AGENT_NAME = "send_to_agent"
+# Used when a tool set the agent has brings a tool of that name (an MCP server's own ``send_to_agent``).
+_SEND_TO_AGENT_FALLBACKS = ("message_agent", "send_agent_message")
 DEFAULT_MAX_HOPS = 6
 """Messages one chain of agent replies may run to before ``send_to_agent`` refuses."""
 
 Accepts = Collection[str] | Callable[[str], bool] | None
+
+# A message id, as the recipient keeps it (dedupe, ``reply_to``) and shows it to its model: what the directory
+# makes (``am_`` and hex) and the usual id alphabets, not free text.
+_MESSAGE_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+
+# Guards every directory's members: sessions are served on their own loops, and join and leave from their
+# threads. One lock for all directories (held for a few dict operations, never while user code runs). Re-entrant:
+# a membership's ``accepts`` is never called under it, but a directory method called from a callback may be.
+_LOCK = threading.RLock()
+
+
+def _new_lock() -> None:
+    """In a forked child: the parent's lock may have been held by a thread that does not exist here."""
+    global _LOCK
+    _LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_new_lock)
 
 
 class PeerRejected(Exception):
@@ -75,45 +102,68 @@ def _accepts(rule: Accepts, sender: str) -> bool:
     return sender in rule
 
 
+def _check_name(name: Any) -> str:
+    name = name.strip() if isinstance(name, str) else ""
+    if not name or len(name) > 64 or any(ch.isspace() or ch in "\"'<>&" or not ch.isprintable() for ch in name):
+        raise ValueError("An agent's name must be 1-64 characters, without spaces, quotes or <>&.")
+    return name
+
+
+def _check_message_id(value: Any, what: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _MESSAGE_ID.fullmatch(value):
+        raise PeerRejected("invalid", f"{what} must be 1-128 characters of letters, digits and _.:-")
+    return value
+
+
+_REASONS = frozenset({"unknown", "not_accepted", "blocked", "closed", "hop_limit", "invalid", "unreachable"})
+_REASON_BY_STATUS = {403: "not_accepted", 404: "unknown", 409: "closed", 422: "invalid"}
+_FALLBACK_MESSAGES = {
+    "not_accepted": "The agent does not take messages from you.",
+    "unknown": "The agent's session no longer exists.",
+    "closed": "The agent's session is closed.",
+    "invalid": "The agent refused the message.",
+}
+
+
 @dataclass
 class RemotePeer:
-    """A chat session served by another Timbal server: messages go to its ``agent_messages`` route."""
+    """A chat session served by another Timbal server: messages go to its ``agent_messages`` route.
+
+    Only ``headers`` go out with a message (the run's platform credentials never do): give it what that
+    server takes. They are left out of the peer's ``repr``.
+    """
 
     url: str
     """The server's base URL (the chat routes are under ``{url}/chat``)."""
     session_id: str
-    headers: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=dict, repr=False)
     description: str | None = None
     timeout: float = 30.0
 
     async def deliver(self, envelope: dict[str, Any]) -> dict[str, Any]:
         import httpx
 
-        url = f"{self.url.rstrip('/')}/chat/sessions/{self.session_id}/agent_messages"
+        url = f"{self.url.rstrip('/')}/chat/sessions/{quote(self.session_id, safe='')}/agent_messages"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            # No redirects: the headers are for this server, and a receipt comes from the route itself.
+            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
                 response = await client.post(url, json=envelope, headers=self.headers)
         except httpx.HTTPError as e:
             raise PeerRejected("unreachable", f"Could not reach the agent: {type(e).__name__}.") from e
-        if response.status_code == 403:
-            raise PeerRejected("not_accepted", _detail(response) or "The agent does not take messages from you.")
-        if response.status_code == 404:
-            raise PeerRejected("unknown", "The agent's session no longer exists.")
-        if response.status_code == 409:
-            raise PeerRejected("closed", "The agent's session is closed.")
-        if response.status_code == 422:
-            raise PeerRejected("invalid", _detail(response) or "The agent refused the message.")
-        if response.status_code >= 400:
+        body: Any = None
+        with contextlib.suppress(ValueError):
+            body = response.json()
+        if response.status_code in _REASON_BY_STATUS:
+            said = body if isinstance(body, dict) else {}
+            reason = said.get("reason") if said.get("reason") in _REASONS else _REASON_BY_STATUS[response.status_code]
+            detail = said.get("detail")
+            message = detail if isinstance(detail, str) and detail else _FALLBACK_MESSAGES.get(reason, "Refused.")
+            raise PeerRejected(reason, message)
+        if not response.is_success or not isinstance(body, dict):
             raise PeerRejected("unreachable", f"The agent's server answered {response.status_code}.")
-        return response.json()
-
-
-def _detail(response: Any) -> str | None:
-    try:
-        detail = response.json().get("detail")
-    except Exception:
-        return None
-    return detail if isinstance(detail, str) else None
+        return body
 
 
 class PeerMembership:
@@ -136,7 +186,13 @@ class PeerMembership:
         self._loop: asyncio.AbstractEventLoop | None = None
         with contextlib.suppress(RuntimeError):  # joined outside a loop: delivered on the sender's
             self._loop = asyncio.get_running_loop()
-        self._tools: dict[str, tuple[int, Tool]] = {}
+        # The tool by agent path and name, with the directory version it lists the peers of.
+        self._tools: dict[tuple[str, str], tuple[int, Tool]] = {}
+
+    @property
+    def current(self) -> bool:
+        """Whether the directory still has this session under its name (one that left may have been replaced)."""
+        return self.directory._members.get(self.name) is self
 
     def accepts_from(self, sender: str) -> bool:
         return _accepts(self.accepts, sender)
@@ -144,16 +200,21 @@ class PeerMembership:
     def leave(self) -> None:
         self.directory.leave(self.name, membership=self)
 
-    def tool(self, agent: Agent) -> Tool:
-        """``send_to_agent`` for ``agent``: rebuilt only when the directory changes (its description lists peers)."""
-        cached = self._tools.get(agent._path)
-        if cached is not None and cached[0] == self.directory.version:
+    def tool(self, agent: Agent, name: str = SEND_TO_AGENT_NAME) -> Tool:
+        """``send_to_agent`` for ``agent``, under ``name`` (the agent picks it: see ``Agent._with_peer_tool``).
+
+        Rebuilt only when the directory changes (its description lists the peers): the prompt cache holds.
+        """
+        key = (agent._path, name)
+        version = self.directory.version
+        cached = self._tools.get(key)
+        if cached is not None and cached[0] == version:
             return cached[1]
-        tool = self._build_tool(agent)
-        self._tools[agent._path] = (self.directory.version, tool)
+        tool = self._build_tool(agent, name)
+        self._tools[key] = (version, tool)
         return tool
 
-    def _build_tool(self, agent: Agent) -> Tool:
+    def _build_tool(self, agent: Agent, name: str) -> Tool:
         membership = self
 
         async def send_to_agent(
@@ -167,12 +228,16 @@ class PeerMembership:
                 reply_to: The message_id of the agent message you are answering, if any.
                 priority: "urgent" only when it must reach the agent before it finishes what it is doing.
             """
+            if not membership.current:
+                # Left the directory (the session closed, or the application took it out): another session may
+                # have its name now, and a message stamped with it would claim to be that one.
+                raise ValueError("Not sent: you can no longer message other agents.")
             run_context = get_run_context()
             hops = 0
             if run_context is not None and run_context._peer_hops is not None:
                 hops = run_context._peer_hops + 1
             if reply_to:
-                answered = membership.session._agent_message(reply_to)
+                answered = membership.session._agent_message(to, reply_to)
                 if answered is not None:
                     hops = max(hops, (answered.peer.get("hops") or 0) + 1)
             message_id = _message_id(run_context.id if run_context is not None else "", get_call_id() or "")
@@ -190,9 +255,9 @@ class PeerMembership:
                 raise ValueError(f"Not sent: {e}") from None
 
         peers = self.directory.peers(for_name=self.name)
-        listing = "\n".join(f"- {name}" + (f": {description}" if description else "") for name, description in peers)
+        listing = "\n".join(f"- {peer}" + (f": {description}" if description else "") for peer, description in peers)
         tool = Tool(
-            name=SEND_TO_AGENT_NAME,
+            name=name,
             description=(
                 "Send a message to another agent. It arrives in that agent's inbox; it answers, if it needs to, "
                 "with a message of its own that reaches you later. Only message an agent when it can do or know "
@@ -202,6 +267,10 @@ class PeerMembership:
             handler=send_to_agent,
         )
         tool.nest(agent._path)
+        # One of the agent's own (``_note_pause``): a call that waits keeps this tool, not one of the same name.
+        tool._builtin = SEND_TO_AGENT_NAME
+        # Its ``tool_args`` rails screen what the agent sends, as for any of its calls (a block, an approval).
+        agent._wire_tool_guardrails(tool)
         return tool
 
 
@@ -217,6 +286,7 @@ class AgentDirectory:
         if max_hops < 1:
             raise ValueError("max_hops must be at least 1.")
         self.max_hops = max_hops
+        self._versions = itertools.count(1)
         self.version = 0
         self._members: dict[str, PeerMembership | RemotePeer] = {}
 
@@ -228,41 +298,58 @@ class AgentDirectory:
         description: str | None = None,
         accepts: Accepts = None,
     ) -> PeerMembership:
-        """Make ``session`` reachable as ``name``; its root agent gains ``send_to_agent``. Left on ``close()``."""
+        """Make ``session`` reachable as ``name``; its root agent gains ``send_to_agent``. Left on ``close()``.
+
+        Refused for an agent with a tool of its own named ``send_to_agent``: the notices that bring other
+        agents' messages tell the model to answer with ``send_to_agent``, and it would call that one.
+        """
         name = _check_name(name)
-        if name in self._members:
-            raise ValueError(f"An agent named {name!r} is already in the directory.")
         if session.closed:
             raise RuntimeError("The chat session is closed.")
-        if session._peer is not None:
-            raise ValueError(f"The session is already in a directory as {session._peer.name!r}.")
+        from .tool_set import ToolSet
+
+        tools = getattr(session._agent, "tools", ())
+        if any(not isinstance(tool, ToolSet) and getattr(tool, "name", None) == SEND_TO_AGENT_NAME for tool in tools):
+            # (A tool set's tools come at run time: the send then takes another name, see Agent._with_peer_tool.)
+            raise ValueError(
+                f"The session's agent has a tool named {SEND_TO_AGENT_NAME!r}: rename it to join a directory."
+            )
         membership = PeerMembership(self, name, session, description=description, accepts=accepts)
-        self._members[name] = membership
-        session._peer = membership
-        self.version += 1
+        with _LOCK:
+            if name in self._members:
+                raise ValueError(f"An agent named {name!r} is already in the directory.")
+            if session._peer is not None:
+                raise ValueError(f"The session is already in a directory as {session._peer.name!r}.")
+            self._members[name] = membership
+            session._peer = membership
+            self.version = next(self._versions)
         return membership
 
     def add_remote(self, name: str, peer: RemotePeer) -> None:
         """Make a session on another server reachable as ``name``."""
         name = _check_name(name)
-        if name in self._members:
-            raise ValueError(f"An agent named {name!r} is already in the directory.")
-        self._members[name] = peer
-        self.version += 1
+        with _LOCK:
+            if name in self._members:
+                raise ValueError(f"An agent named {name!r} is already in the directory.")
+            self._members[name] = peer
+            self.version = next(self._versions)
 
     def leave(self, name: str, *, membership: PeerMembership | None = None) -> None:
-        member = self._members.get(name)
-        if member is None or (membership is not None and member is not membership):
-            return
-        del self._members[name]
-        if isinstance(member, PeerMembership) and member.session._peer is member:
-            member.session._peer = None
-        self.version += 1
+        with _LOCK:
+            member = self._members.get(name)
+            if member is None or (membership is not None and member is not membership):
+                return
+            del self._members[name]
+            if isinstance(member, PeerMembership) and member.session._peer is member:
+                member.session._peer = None
+            self.version = next(self._versions)
 
     def peers(self, *, for_name: str | None = None) -> list[tuple[str, str | None]]:
         """``(name, description)`` of every agent ``for_name`` may message, sorted (a stable tool description)."""
+        with _LOCK:
+            members = sorted(self._members.items())
         found = []
-        for name, member in sorted(self._members.items()):
+        for name, member in members:
             if name == for_name:
                 continue
             if isinstance(member, PeerMembership) and for_name is not None and not member.accepts_from(for_name):
@@ -328,10 +415,3 @@ async def _deliver_local(member: PeerMembership, envelope: dict[str, Any]) -> di
         # Sessions are served on their own loop: deliver there.
         return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(receive, loop))
     return await receive
-
-
-def _check_name(name: str) -> str:
-    name = name.strip() if isinstance(name, str) else ""
-    if not name or len(name) > 64 or any(ch.isspace() or ch in "\"'<>&" for ch in name):
-        raise ValueError("An agent's name must be 1-64 characters, without spaces, quotes or <>&.")
-    return name

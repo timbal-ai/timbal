@@ -92,6 +92,7 @@ from .attachment_limit import AttachmentSpills, apply_attachment_limit
 from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
 from .models import Model, base_usage_metric, get_context_window
+from .peers import _SEND_TO_AGENT_FALLBACKS, SEND_TO_AGENT_NAME
 from .runnable import Runnable, RunnableLike
 from .session_scheduler import record_delivery
 from .skill import ReadSkill, Skill
@@ -353,7 +354,9 @@ _CALL_TOOL_FALLBACKS = ("call_found_tool", "call_deferred_tool")
 _CALL_TOOL_NUMBERED = CALL_TOOL_NAME + "_"
 _FIRST_NUMBERED = 2
 # The agent's own tools whose names it picks at run time (Agent._note_pause keeps them across a pause).
-_PICKED_NAMES = frozenset({SEND_MESSAGE_NAME, MARK_SALIENT_NAME, SEARCH_TOOLS_NAME, CALL_TOOL_NAME})
+_PICKED_NAMES = frozenset(
+    {SEND_MESSAGE_NAME, MARK_SALIENT_NAME, SEARCH_TOOLS_NAME, CALL_TOOL_NAME, SEND_TO_AGENT_NAME}
+)
 
 
 async def _no_events() -> AsyncGenerator[Any, None]:
@@ -2925,12 +2928,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 bg_tool._builtin = name
                 _register(bg_tool)
 
-        run_context = get_run_context()
-        peer = run_context._peer if run_context is not None else None
-        if peer is not None and "." not in self._path:
-            _register(peer.tool(self))
         if tool_policy is not None:
             if tool_policy is _UNSET_POLICY:
+                run_context = get_run_context()
                 tool_policy = run_context._tool_policy if run_context is not None else None
             if tool_policy is not None:
                 tools = [tool for tool in tools if self._tool_allowed(tool, tool_policy)]
@@ -3470,6 +3470,49 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     warned.add(name)
             tools = [tool for tool in tools if tool.name != name]
         return [*tools, self._mark_salient_tool(name)], name
+
+    def _with_peer_tool(
+        self,
+        tools: list[Tool],
+        names: Collection[str],
+        name: str | None,
+        peer: Any,
+        policy: Any,
+        offered: bool,
+        kept: str | None = None,
+        warned: set[str] | None = None,
+    ) -> tuple[list[Tool], str | None]:
+        """A step's tools with ``send_to_agent`` (the session is in an :class:`~timbal.core.peers.AgentDirectory`:
+        ``peer``, its membership), and the tool's name.
+
+        Named as the salience tool is (:meth:`_with_salience_tool`): at the first step that offers it, among
+        every name the agent has there, fixed for the turn, and kept by the run that resumes a pause. Unlike
+        it, the run's tool policy applies (``policy``): a message to another agent starts work there, so a
+        read-only turn has none, and what a callable policy allows is recorded with the rest. Not offered once
+        the session has left the directory (another session may have its name now).
+        """
+        if not offered or not peer.current:
+            return tools, name
+        if name is None:
+            name = kept or _unused_name(SEND_TO_AGENT_NAME, _SEND_TO_AGENT_FALLBACKS, set(names))
+        tool = peer.tool(self, name)
+        if policy is not None and not self._tool_allowed(tool, policy):
+            return tools, name
+        if name in names:
+            # A tool set that changed its catalog inside the turn, or since the turn paused: the name is the send's.
+            # (Said once a turn: ``warned``.)
+            if warned is None or name not in warned:
+                logger.warning(
+                    "A tool took the name of the send to agents mid-turn; it is not offered.", path=self._path, tool=name
+                )
+                if warned is not None:
+                    warned.add(name)
+            tools = [t for t in tools if t.name != name]
+        tools = [*tools, tool]
+        if policy is not None:
+            # What the run may call, the send included (a parked wake restores a callable policy from it).
+            self._record_allowed_tools(tools, policy)
+        return tools, name
 
     def _delivered(self, current_span: Any, before: int = 0, rest: Sequence = ()) -> OutputEvent | None:
         """The turn's output with ``delivery="tool"``: what it sent, as one assistant message (None if nothing).
@@ -4683,6 +4726,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         send_name: str | None = None
         # salience_tool=True. The mark_salient tool's name, fixed at the first step that offers it.
         salience_name: str | None = None
+        # In an AgentDirectory. The send_to_agent tool's name, fixed at the first step that offers it.
+        peer_name: str | None = None
         # The names the agent's own tools had when the turn this run resumes paused (_note_pause): kept.
         kept_names = paused_calls.get("tool_names") if paused_calls is not None else None
         # Those of tool search among them: the agent's for the turn, on a step that searches or not.
@@ -4975,6 +5020,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Fixed for the turn; checked on every step. Not with an output_model: that turn ends on the model's first
         # answer, before any tool of it runs (a mark it chose would be neither recorded nor the declared output).
         offer_salience = self.salience_tool and current_span.parent_call_id is None and self.output_model is None
+        # The session's place in an AgentDirectory (core/peers.py), for its root agent: send_to_agent. Fixed for the
+        # turn, like the salience tool (and not with an output_model, for the same reason).
+        peer = run_context._peer if current_span.parent_call_id is None and self.output_model is None else None
         # Fixed for the turn; checked after every tool batch.
         denial_window_on = self.max_denials_window is not None
         denial_limit = self.max_consecutive_denials
@@ -5130,6 +5178,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 withheld = withhold_tools
                 if withhold_tools:
                     tools, commands, withhold_tools = [], {}, False
+                if peer is not None:
+                    tools, peer_name = self._with_peer_tool(
+                        tools,
+                        tool_names,
+                        peer_name,
+                        peer,
+                        tool_policy,
+                        not withheld and i < self.max_iter,
+                        kept_names.get(SEND_TO_AGENT_NAME),
+                        warned_names,
+                    )
                 if delivering:
                     # Not with the tools withheld (a denial limit) nor past the budget: that step answers in text.
                     send_offered = not withheld and i < self.max_iter

@@ -23,6 +23,7 @@ from ..state import RunContext, set_call_id, set_parent_call_id, set_run_context
 from ..state.background import (
     DEFAULT_BG_LOG_MAX_BYTES,
     DEFAULT_BG_LOG_MAX_EVENTS,
+    MAX_SESSION_EVENT_CHARS,
     BackgroundEventLog,
     BackgroundTaskStore,
     SessionEvent,
@@ -820,9 +821,9 @@ class ChatSession:
         # App and client events still queued that the session follows until a turn takes them (_work_arrived).
         self._followed_events: set[str] = set()
         # Messages from other agents (core/peers.py): the directory membership, and the last messages
-        # received by id, for dedupe and for the hops of a reply.
+        # received, by sender and id, for dedupe and for the hops of a reply.
         self._peer: PeerMembership | None = None
-        self._agent_messages: OrderedDict[str, SessionEvent] = OrderedDict()
+        self._agent_messages: OrderedDict[tuple[str, str], SessionEvent] = OrderedDict()
 
     # -- Public API -------------------------------------------------------------
 
@@ -1026,58 +1027,74 @@ class ChatSession:
         """Take a message another agent sent (:class:`~timbal.core.peers.AgentDirectory`); returns its receipt.
 
         It reaches the agent as a ``source="agent"`` event: the next turn takes it (one starts if the session
-        is idle), or with ``priority="urgent"`` the running turn does after its tool batch. A message id seen
-        before, or the same text from the same sender while that one is unread, is a ``duplicate`` and
-        delivered once. The agent's input guardrails screen the text. Raises
+        is idle), or with ``priority="urgent"`` the running turn does after its tool batch (``lane="next"``; it
+        never cuts what runs). A message id this session has from the same sender, or the same text from the
+        same sender while that one is unread, is a ``duplicate`` and delivered once. The agent's input
+        guardrails screen the text: a block, or a redaction that leaves nothing, refuses it. Raises
         :class:`~timbal.core.peers.PeerRejected`.
         """
-        from .peers import PeerRejected
+        from .peers import PeerRejected, _check_message_id, _check_name
 
         if self.closed:
             raise PeerRejected("closed", "The agent's session is closed.")
-        sender = sender.strip() if isinstance(sender, str) else ""
-        if not sender:
-            raise PeerRejected("invalid", "A message from an agent must name its sender.")
+        try:
+            sender = _check_name(sender)
+        except ValueError as e:
+            raise PeerRejected("invalid", f"The sender's name: {e}") from None
+        message_id = _check_message_id(message_id, "message_id")
+        reply_to = _check_message_id(reply_to, "reply_to")
         if priority not in ("normal", "urgent"):
             raise PeerRejected("invalid", f"priority must be 'normal' or 'urgent', got {priority!r}")
+        if not isinstance(hops, int) or isinstance(hops, bool):
+            raise PeerRejected("invalid", "hops must be an integer.")
         if self._peer is not None and not self._peer.accepts_from(sender):
             raise PeerRejected("not_accepted", f"{self._peer.name} does not take messages from {sender}.")
         text = text.strip() if isinstance(text, str) else ""
-        earlier = self._agent_messages.get(message_id) if message_id else None
+        if not text:
+            raise PeerRejected("invalid", "A message from an agent needs text.")
+        if len(text) > MAX_SESSION_EVENT_CHARS:
+            raise PeerRejected("invalid", f"A message from an agent is limited to {MAX_SESSION_EVENT_CHARS} characters.")
+        earlier = self._agent_messages.get((sender, message_id)) if message_id else None
+        if earlier is not None:
+            return {**earlier.receipt(), "duplicate": True}
+        screened, triggered = await self._screen_agent_message(text, sender)
+        # The screening may have taken a while: the session may be gone, and a copy of the message may have
+        # arrived meanwhile (a sender's retry). From here to the post nothing awaits.
+        if self.closed:
+            raise PeerRejected("closed", "The agent's session is closed.")
+        screened = screened.strip()
+        if not screened:
+            logger.warning("agent_message_blocked", rail="redaction", sender=sender, emptied=True)
+            raise PeerRejected("blocked", "Blocked by the recipient's guardrails: nothing of the message was left.")
+        earlier = self._agent_messages.get((sender, message_id)) if message_id else None
         if earlier is None:
             earlier = next(
                 (
                     event
                     for event in self._store.pending_events()
-                    if event.peer is not None and event.peer["from"] == sender and event.text == text
+                    if event.peer is not None and event.peer["from"] == sender and event.text == screened
                 ),
                 None,
             )
         if earlier is not None:
             return {**earlier.receipt(), "duplicate": True}
-        text, triggered = await self._screen_agent_message(text, sender)
         peer = {
             "from": sender,
             "message_id": message_id or f"am_{uuid7(as_type='hex')}",
             "reply_to": reply_to,
             "priority": priority,
-            "hops": max(0, int(hops)),
+            "hops": max(0, hops),
         }
-        urgent = priority == "urgent"
         try:
+            # Urgent is the steering lane, and nothing more: no 'interrupt' policy, which would let another
+            # agent's model cut a reply in flight (a call that shares this session speaks its events).
             event = self._store.post_event(
-                text,
-                source="agent",
-                peer=peer,
-                lane="next" if urgent else "later",
-                announce="interrupt" if urgent else None,
+                screened, source="agent", peer=peer, lane="next" if priority == "urgent" else "later"
             )
         except ValueError as e:
             raise PeerRejected("invalid", str(e)) from None
         event.guardrails.extend(triggered)
-        self._agent_messages[peer["message_id"]] = event
-        while len(self._agent_messages) > _AGENT_MESSAGES_KEPT:
-            self._agent_messages.popitem(last=False)
+        self._remember_agent_message(event)
         self.last_activity = time.monotonic()
         self._record(
             "agent_message",
@@ -1087,16 +1104,26 @@ class ChatSession:
             reply_to=reply_to,
             priority=priority,
             hops=peer["hops"],
-            text=text,
+            text=screened,
         )
         self._ensure_worker()
         return {**event.receipt(), "duplicate": False}
 
-    def _agent_message(self, message_id: str) -> SessionEvent | None:
-        """A message an agent sent this session, by id (while it is among the last ones kept)."""
-        return self._agent_messages.get(message_id)
+    def _agent_message(self, sender: str, message_id: str) -> SessionEvent | None:
+        """A message ``sender`` sent this session, by its id (while it is among the last ones kept)."""
+        return self._agent_messages.get((sender, message_id))
+
+    def _remember_agent_message(self, event: SessionEvent) -> None:
+        """Keep a message from an agent by its sender and id: for dedupe, and for the hops of a reply to it."""
+        if event.peer is None or not event.peer.get("message_id"):
+            return
+        self._agent_messages[(event.peer["from"], event.peer["message_id"])] = event
+        while len(self._agent_messages) > _AGENT_MESSAGES_KEPT:
+            self._agent_messages.popitem(last=False)
 
     async def _screen_agent_message(self, text: str, sender: str) -> tuple[str, list[Any]]:
+        """The agent's input guardrails on a message from another agent (as on a user's prompt): the text they
+        leave, and the rails that fired, for the guardrail report of the run that takes it."""
         from ..guardrails.types import GuardrailContext, GuardrailStage
         from .peers import PeerRejected
 
@@ -1135,6 +1162,10 @@ class ChatSession:
         if any(event.id == work_id and not self._mine(event) for event in self._store.pending_events()):
             return False  # another session's, kept for its restore
         withdrawn = self._store.withdraw_event(work_id)
+        if withdrawn and self._agent_messages:
+            # A message from an agent taken back is not one the session has: a retry is not a duplicate of it.
+            for key in [key for key, event in self._agent_messages.items() if event.id == work_id]:
+                del self._agent_messages[key]
         if not withdrawn:
             wake = next((wake for wake in self._wakes if wake.id == work_id), None)
             if wake is not None:
@@ -2671,8 +2702,7 @@ class ChatSession:
             event = self._store.restore_event(data, held=self._kept_events.pop(data["id"], None))
             if event.source == "user":
                 self._watch(event)
-            if event.peer is not None and event.peer.get("message_id"):
-                self._agent_messages[event.peer["message_id"]] = event
+            self._remember_agent_message(event)
 
     def _drop_stopped(self, events: list[dict[str, Any]], wake: dict[str, Any] | None, dead_run_id: str | None) -> None:
         """The input of a dead turn its user stopped, its messages or its wake: delivered to it (the messages'
@@ -2704,6 +2734,7 @@ class ChatSession:
             self._store.restore_event(event.to_dict(), held=event)
             if event.source == "user":
                 self._watch(event)
+            self._remember_agent_message(event)
 
     async def _load_run(self, run_id: str | None) -> RunContext | None:
         """A stored run of this session as a context (its trace loaded), or None when it was never stored."""

@@ -859,11 +859,12 @@ class SessionEvent:
             "task_id": self.task_id,
             "lane": self.lane,
             "mode": self.mode,
-            "peer": self.peer,
             "posted_at": self.posted_at,
         }
         if self.sent_by is not None:
             data["sent_by"] = self.sent_by  # kept across a restart: it must not come back as a person's
+        if self.peer is not None:
+            data["peer"] = self.peer  # a message from another agent: its envelope (only those have one)
         return data
 
     def receipt(self) -> dict[str, Any]:

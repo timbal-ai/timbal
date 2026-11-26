@@ -1,0 +1,86 @@
+---
+title: "Agents Messaging Each Other"
+description: "Let the agents of several chat sessions message each other"
+---
+
+An `AgentDirectory` names chat sessions so that their agents can message each other. Each member's root agent gets a `send_to_agent` tool. A message lands in the recipient's inbox and starts a turn there, or joins the turn it is running. The recipient answers with a message of its own, and both traces show the exchange.
+
+```python
+from timbal import Agent
+from timbal.core import AgentDirectory, ChatSession
+
+concierge = Agent(name="concierge", model="openai/gpt-6-luna", system_prompt="You talk to the guest.")
+facilities = Agent(name="facilities", model="openai/gpt-6-luna", system_prompt="You handle repairs.")
+
+directory = AgentDirectory()
+async with ChatSession(concierge) as front, ChatSession(facilities) as back:
+    directory.join(front, "concierge", description="Talks to the guest.")
+    directory.join(back, "facilities", description="Books repairs and knows their status.")
+    # Each root agent now has send_to_agent; its description lists the agents it may message.
+```
+
+A session is in one directory at most, and leaves it when it closes. Names are 1 to 64 characters, with no spaces, quotes or `<>&`.
+
+## The tool
+
+`send_to_agent(to, message, reply_to=None, priority="normal")` returns the recipient's receipt: `status` (`"sent"` or `"duplicate"`), `event_id`, `message_id` and `state` (`"pending"` until a turn of the recipient takes the message).
+
+- **Who sent it.** The directory stamps the sender on the message, so a model cannot claim to be another agent.
+- **What the recipient sees.** The message arrives as a runtime notice, `<session_event source="agent" from="concierge" message_id="am_…">`. The notice says the text is not the user's, and that the agent's reply goes to its own user. To answer the other agent, it calls `send_to_agent` with `reply_to=<message_id>`. A turn started only by agent messages may stay silent.
+- **Priority.** `"normal"` waits for the recipient's next turn, and starts one when it is idle. `"urgent"` joins the turn it is running, after the current tool batch. Neither cuts anything the recipient is doing.
+- **A read-only turn has no `send_to_agent`.** A message starts work in another agent, so a turn with `tool_policy="read_only"` (a wake, by default) is not offered the tool.
+- **Your rails apply.** The sender's `tool_args` guardrails see every call, as for any tool: a block refuses it, and an escalation asks a person first.
+
+The tool's name is `send_to_agent`. If a tool set the agent has (an MCP server) brings a tool of that name, the agent's own tool is named `message_agent` instead, for the rest of the turn. An agent with a plain tool named `send_to_agent` cannot join a directory.
+
+## Screening and refusals
+
+The recipient's input guardrails screen each message as it arrives, as they screen a user's prompt. A redaction rewrites the text, and the run that takes it records the rails that fired. A block refuses the message.
+
+A refused message raises `PeerRejected` (the tool tells the model why). Its `reason` is one of:
+
+| reason | when |
+|---|---|
+| `unknown` | no agent of that name |
+| `not_accepted` | the recipient's `accepts` refuses the sender |
+| `blocked` | the recipient's guardrails blocked it, or left nothing of it |
+| `closed` | the recipient's session is closed |
+| `hop_limit` | the exchange went back and forth `max_hops` times |
+| `invalid` | an agent messaging itself, a bad name, id or priority, more than 4,000 characters |
+| `unreachable` | a remote peer did not answer with a receipt |
+
+`accepts` limits who may message a member: `directory.join(session, "billing", accepts={"concierge"})`, or a function of the sender's name. The tool's description only lists the agents that accept the agent.
+
+## Loops and repeats
+
+- **Hop limit.** Each message carries `hops`: one more than the deepest agent message the sending turn received, or than the message it answers. At `AgentDirectory(max_hops=6)` the tool refuses, and tells the model to stop and tell its user where things stand.
+- **Duplicates.** A message's id comes from the sender's run and tool call, so a call that runs again sends the same id, and the recipient keeps one copy. Ids are per sender. The same text from the same sender, while the first copy is still waiting, is a duplicate too.
+
+## Agents on another server
+
+A `RemotePeer` reaches a chat session served by another Timbal server, through `POST /chat/sessions/{id}/agent_messages`:
+
+```python
+import os
+
+from timbal.core import AgentDirectory, RemotePeer
+
+directory = AgentDirectory()
+directory.add_remote(
+    "billing",
+    RemotePeer(
+        url="https://billing.example.com",
+        session_id="06b07f6bc4c57c35",
+        headers={"Authorization": f"Bearer {os.environ.get('BILLING_API_KEY', '')}"},
+        description="Refunds and invoices.",
+    ),
+)
+```
+
+Only the peer's own `headers` go with a message: the run's platform credentials never do. The route answers `202` with the receipt, and a refusal as `{"detail", "reason"}` (403 for `not_accepted` and `blocked`, 404, 409 for `closed`, 422 for `invalid`).
+
+The route takes the sender's name as the caller gives it, so `accepts` is routing, not authentication: anyone who may call the server's API may message its sessions, as they may send them user messages.
+
+## Durable sessions
+
+A durable session keeps pending agent messages in its snapshot, with their envelope. Restored, it still recognizes those as duplicates. A restored session is not in a directory: join it again.
