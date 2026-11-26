@@ -1611,3 +1611,86 @@ class TestOwnerRoundOneReview:
         with pytest.raises(PeerRejected) as refused:
             await directory.send("alice", "bob", "hi again")
         assert refused.value.reason == "unconfirmed"
+
+    def test_restoring_from_another_loop_does_not_move_a_served_session(self):
+        """restore() said the session was served from the loop that called it, also once a worker served it on
+        another: the next message was taken on the caller's loop."""
+        import threading
+
+        loops, served, stop, ready = [], {}, threading.Event(), threading.Event()
+        rail = guardrail(lambda _text: loops.append(asyncio.get_running_loop()) or True, stages=["input"])
+
+        def serve():
+            async def main():
+                async with ChatSession(make_agent("bob", lambda _: "NO_REPLY", guardrails=[rail])) as session:
+                    session._ensure_worker()
+                    served["session"], served["loop"] = session, asyncio.get_running_loop()
+                    ready.set()
+                    await asyncio.get_running_loop().run_in_executor(None, stop.wait, 10)
+
+            asyncio.run(main())
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            assert ready.wait(5)
+
+            async def elsewhere():
+                session = served["session"]
+                await asyncio.wait_for(session.restore(), 5)  # done already: nothing to do here
+                directory = AgentDirectory()
+                directory.join(session, "bob")
+                return await asyncio.wait_for(directory.send("alice", "bob", "hello"), 5)
+
+            assert asyncio.run(elsewhere())["status"] == "sent"
+            assert loops == [served["loop"]]
+        finally:
+            stop.set()
+            thread.join(10)
+
+    async def test_a_replayed_send_keeps_its_id_when_a_rail_rewrites_it_again(self, monkeypatch):
+        """The record was keyed by the arguments after the tool_args rails: one that rewrites differently on each
+        run (a model's rewrite) gave the replayed send a new key, and the peer took both versions."""
+        received, answer, runs = [], asyncio.Event(), []
+
+        async def bob_server(request):
+            received.append(json.loads(request.content))
+            if len(received) == 1:
+                await answer.wait()
+            return httpx.Response(202, json={"event_id": f"e{len(received)}", "state": "pending", "duplicate": False})
+
+        def reword(_text, ctx):
+            if ctx.tool_name != "send_to_agent":
+                return True
+            runs.append(1)
+            return Verdict.replace({**ctx.tool_args, "message": f"{ctx.tool_args['message']} (v{len(runs)})"})
+
+        real = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx, "AsyncClient", lambda **kwargs: real(transport=httpx.MockTransport(bob_server), **kwargs)
+        )
+        send = ToolUseContent(id="t-send", name="send_to_agent", input={"to": "bob", "message": "refund order 7"})
+        pay = ToolUseContent(id="t-pay", name="pay", input={})
+        alice = Agent(
+            name="alice",
+            model=TestModel(responses=[Message(role="assistant", content=[send, pay], stop_reason="tool_use"), "done"]),
+            tools=[Tool(name="pay", handler=lambda: "paid", requires_approval=True)],
+            guardrails=[guardrail(reword, stages=["tool_args"], action="redact", name="reword")],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        directory = AgentDirectory()
+        directory.add_remote("bob", RemotePeer(url="https://bots.example", session_id="s"))
+        membership = directory.join(ChatSession(alice), "alice")
+        context = fresh(peer=membership)
+        stream = alice(prompt="go")
+        async for event in stream:
+            if isinstance(event, ApprovalEvent):
+                approval = event
+                await until(lambda: received)
+                break
+        await stream.aclose()
+        answer.set()
+        fresh(context.id, peer=membership)
+        await run(alice, resume={approval.approval_id: True})
+        assert [body["text"] for body in received] == ["refund order 7 (v1)", "refund order 7 (v2)"]
+        assert received[0]["message_id"] == received[1]["message_id"]

@@ -1731,7 +1731,9 @@ class ChatSession:
         """Pick up the state of the run the session continues (``parent_id``): one parked on an approval or
         ``ask_user`` leaves the session parked, so messages wait and :meth:`resume` answers it (a turn chained
         onto it would resume it and drop its prompt). Once; ``async with`` and the first turn call it."""
-        self._loop = asyncio.get_running_loop()  # served from here (async with, the worker's first step)
+        if self._worker is None or self._worker.done():
+            # Served from here (async with, the worker's first step); not when a worker serves it elsewhere already.
+            self._loop = asyncio.get_running_loop()
         if self._restoring is None or (self._restoring.done() and self._restore_from is not None):
             self._restoring = asyncio.get_running_loop().create_task(self._restore_parked())
         await asyncio.shield(self._restoring)

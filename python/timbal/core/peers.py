@@ -297,7 +297,9 @@ class PeerMembership:
                 answered = membership.session._agent_message(to, reply_to)
                 if answered is not None:
                     hops = max(hops, (answered.peer.get("hops") or 0) + 1)
-            message_id = _sent_message_id(run_context, (to, message, reply_to, priority))
+            message_id = _sent_message_id(
+                run_context, {"to": to, "message": message, "reply_to": reply_to, "priority": priority}
+            )
             try:
                 return await membership.directory.send(
                     membership.name,
@@ -350,15 +352,17 @@ def _message_id(run_id: str, call_id: str) -> str:
     return "am_" + hashlib.sha256(f"{run_id}:{call_id}".encode()).hexdigest()[:24]
 
 
-def _sent_message_id(run_context: Any, sent: tuple[Any, ...]) -> str:
+def _sent_message_id(run_context: Any, sent: dict[str, Any]) -> str:
     """The id of the message this ``send_to_agent`` call sends: the one an earlier attempt at the same call used,
     else a new one, recorded on the agent's span before anything goes out.
 
     A call cut before its answer came back (its caller stopped reading at another call's approval card) runs again
     when the turn resumes, under another run and span: with the id it had, the peer takes it once. The same call is
-    its tool call id and what it sends (``sent``): a model whose ids repeat (a custom one) sends two messages under
-    one id, and those are two. The record is stamped with its span (``call_id``), as ``paused_calls`` is: a key of
-    that name in the agent's own ``metadata`` (which a span's starts as a copy of) is not a record."""
+    its tool call id and the call as the model wrote it (in the agent's memory; ``sent``, what it sends after the
+    ``tool_args`` rails, only where memory has no such call): a model whose ids repeat (a custom one) sends two
+    messages under one id, and those are two, while a rail that rewrites the text differently on each run does not
+    make the replay another message. The record is stamped with its span (``call_id``), as ``paused_calls`` is: a
+    key of that name in the agent's own ``metadata`` (which a span's starts as a copy of) is not a record."""
     if run_context is None:
         return _message_id("", get_call_id() or "")
     span = run_context.current_span()
@@ -367,13 +371,29 @@ def _sent_message_id(run_context: Any, sent: tuple[Any, ...]) -> str:
     agent_span = run_context.parent_span() if tool_call_id else None
     if agent_span is None:
         return message_id
-    key = tool_call_id + ":" + hashlib.sha256(json.dumps(sent, default=str).encode()).hexdigest()[:16]
+    written = _model_call_input(agent_span, tool_call_id)
+    call = written if written is not None else sent
+    key = tool_call_id + ":" + hashlib.sha256(json.dumps(call, sort_keys=True, default=str).encode()).hexdigest()[:16]
     ids = _sent_ids(agent_span)
     if isinstance(ids.get(key), str):
         return ids[key]
     # A copy, never written in place: a span's metadata starts as a shallow copy of the agent's own.
     agent_span.metadata[PEER_SENT_KEY] = {"call_id": agent_span.call_id, "ids": {**ids, key: message_id}}
     return message_id
+
+
+def _model_call_input(agent_span: Any, tool_call_id: str) -> Any:
+    """The input of the tool call ``tool_call_id`` as the model wrote it: in the agent's memory, in the latest
+    assistant message that has it (the batch running now). None if none has."""
+    from ..types.content import ToolUseContent
+
+    for message in reversed(getattr(agent_span, "memory", None) or ()):
+        if getattr(message, "role", None) != "assistant":
+            continue
+        for content in getattr(message, "content", ()):
+            if isinstance(content, ToolUseContent) and content.id == tool_call_id:
+                return content.input
+    return None
 
 
 def _sent_ids(span: Any) -> dict[str, Any]:
