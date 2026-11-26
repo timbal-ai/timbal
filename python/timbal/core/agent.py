@@ -5560,10 +5560,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         await self._save_denials(run_context, consecutive_denials)
                         raise PauseRequired(first_pending)
                     # The replays are done: the ids carried for them go to no later call (peers.carry_sent_ids). Only
-                    # that record: a key of that name the agent's own metadata brought is the application's.
+                    # that record: a key of that name the agent's own metadata brought is the application's, and the
+                    # record that took its place while the replays ran gives it back.
                     replay = current_span.metadata.get(PEER_REPLAY_KEY)
                     if isinstance(replay, dict) and replay.get("call_id") == current_span.call_id:
-                        del current_span.metadata[PEER_REPLAY_KEY]
+                        if PEER_REPLAY_KEY in self.metadata:
+                            current_span.metadata[PEER_REPLAY_KEY] = self.metadata[PEER_REPLAY_KEY]
+                        else:
+                            del current_span.metadata[PEER_REPLAY_KEY]
                     i += 1
                     if denial_window_on or consecutive_denials >= denial_limit:
                         await _check_denials()
