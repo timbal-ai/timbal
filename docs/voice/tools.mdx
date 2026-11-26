@@ -241,7 +241,7 @@ agent = Agent(
 
 Give the model a tool that ends the call, and have it say goodbye in that same reply, before the tool runs. Two calls do different jobs.
 
-`await session.commit_hangup()` is the one to use when `hangup_grace_secs` is set. It waits until any goodbye already playing has finished, then for that many quiet seconds. Speech in that span — a new transcript, or a partial that is not an echo of the goodbye — returns false and does not hang up. True means the window already passed: it then calls `end_call(grace_secs=0)`, so there is no second quiet window after the tool returns. Return a short "Ending the call." Do not ask for a goodbye in that success result. A goodbye spoken only after True has no retract window left.
+`await session.commit_hangup()` is the one to use when `hangup_grace_secs` is set. It waits until any goodbye already playing has finished, then for that many quiet seconds. Speech in that span — a new transcript, or a partial that is not an echo of the goodbye — returns false and does not hang up. True means the window already passed. If a goodbye played before it, `end_call(grace_secs=0)` follows, so there is no second quiet window after the tool returns. If nothing had been said yet, `end_call()` keeps the window, which then opens after the goodbye the model speaks in its next step; speech in it still keeps the call up, though the tool has already returned True. Return a short "Ending the call." Do not ask for a goodbye in that success result.
 
 ```python agent.py
 from timbal import Agent, Tool

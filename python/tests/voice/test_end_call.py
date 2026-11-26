@@ -635,6 +635,23 @@ class TestCommitHangup:
         assert await session.commit_hangup() is True
         assert session._end_call_task is not None
 
+    async def test_no_goodbye_yet_keeps_the_window_for_the_one_that_follows(self) -> None:
+        """The tool ran before anything was said: the goodbye of the next step still gets its window."""
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.2)
+        session._last_commit_at = time.monotonic()
+        assert session._turn_first_audio_at is None
+        assert await session.commit_hangup() is True
+        assert session._end_call_task is not None
+        assert session._end_call_grace_secs == 0.2
+
+    async def test_a_goodbye_heard_before_the_window_closes_without_a_second_one(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.2)
+        session._last_commit_at = time.monotonic()
+        session._turn_first_audio_at = time.monotonic()  # the goodbye of this turn has gone out
+        assert await session.commit_hangup() is True
+        assert session._end_call_task is not None
+        assert session._end_call_grace_secs == 0
+
     async def test_a_later_commit_does_not_request_hangup(self) -> None:
         session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
         session._last_commit_at = time.monotonic()

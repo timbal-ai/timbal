@@ -1115,7 +1115,9 @@ class VoiceSession:
         True. With a window, the goodbye (if any) plays out, then that many
         quiet seconds pass, and only then is teardown requested. Any new
         caller speech in that span returns False and does not call
-        :meth:`end_call`.
+        :meth:`end_call`. When no goodbye had played by then, teardown is
+        requested with the same window, which opens after whatever the turn
+        says next.
 
         Await this from the hangup tool *before* treating the hangup as done.
         The tool's own side effects belong after a True result.
@@ -1128,6 +1130,8 @@ class VoiceSession:
             return True
         baseline = self._last_commit_at
         give_up = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
+        # Whether a goodbye has gone out before the window: audio this turn, or seen pending below.
+        goodbye_heard = self._turn_first_audio_at is not None or self._hangup_audio_pending()
         while not self._closed and self._hangup_audio_pending():
             if self._caller_retracted_since(baseline):
                 logger.info("end_call_cancelled", reason="caller_spoke", phase="before_commit")
@@ -1143,6 +1147,7 @@ class VoiceSession:
             if self._hangup_audio_pending():
                 # The goodbye started after the window opened. Quiet time
                 # counts from when it finishes, not from the tool call.
+                goodbye_heard = True
                 deadline = time.monotonic() + grace
                 if deadline > give_up:
                     deadline = give_up
@@ -1151,8 +1156,13 @@ class VoiceSession:
             if not self._closed:
                 logger.info("end_call_cancelled", reason="caller_spoke", phase="grace")
             return False
-        # The quiet window already elapsed. Do not open a second one.
-        self.end_call(grace_secs=0)
+        if goodbye_heard:
+            # The quiet window already elapsed after the goodbye. Do not open a second one.
+            self.end_call(grace_secs=0)
+        else:
+            # Nothing was said before the tool (the model will say goodbye in its next step): the window
+            # opens again once that goodbye has played, so the caller can still answer it.
+            self.end_call(grace_secs=grace)
         return True
 
     def _stop_end_call(self) -> None:
