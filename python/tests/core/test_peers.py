@@ -1738,3 +1738,159 @@ class TestBugbotRoundTwo:
             closing.close()
             b._loop = asyncio.get_running_loop()
             await b.close()
+
+
+# -- Owner review, round 2 ---------------------------------------------------------------------------------------
+
+
+def remote_bob(monkeypatch, received, answer):
+    """A remote peer that takes every message (``received``) and answers the first one only once ``answer`` is set."""
+
+    async def bob_server(request):
+        received.append(json.loads(request.content))
+        if len(received) == 1:
+            await answer.wait()
+        return httpx.Response(202, json={"event_id": f"e{len(received)}", "state": "pending", "duplicate": False})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kwargs: real(transport=httpx.MockTransport(bob_server), **kwargs)
+    )
+
+
+class TestOwnerRoundTwo:
+    async def test_a_send_replayed_by_a_resume_with_messages_keeps_its_id(self, monkeypatch):
+        """[P1] A resume that brings its own history (messages=) returned before the record of the turn's sends was
+        carried over: the cut send ran again under a new id, and the peer took it twice."""
+        received, answer = [], asyncio.Event()
+        remote_bob(monkeypatch, received, answer)
+        send = ToolUseContent(id="t-send", name="send_to_agent", input={"to": "bob", "message": "refund order 7"})
+        pay = ToolUseContent(id="t-pay", name="pay", input={})
+        alice = Agent(
+            name="alice",
+            model=TestModel(responses=[Message(role="assistant", content=[send, pay], stop_reason="tool_use"), "done"]),
+            tools=[Tool(name="pay", handler=lambda: "paid", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        directory = AgentDirectory()
+        directory.add_remote("bob", RemotePeer(url="https://bots.example", session_id="s"))
+        membership = directory.join(ChatSession(alice), "alice")
+        context = fresh(peer=membership)
+        stream = alice(prompt="go")
+        async for event in stream:
+            if isinstance(event, ApprovalEvent):
+                approval = event
+                await until(lambda: received)
+                break
+        await stream.aclose()
+        answer.set()
+        history = list(next(s for s in context._trace.values() if s.parent_call_id is None).memory)
+        fresh(context.id, peer=membership)
+        await alice(messages=history, resume={approval.approval_id: True}).collect()
+        assert len(received) == 2 and received[0]["message_id"] == received[1]["message_id"]
+
+    def test_a_recipient_loop_that_closes_before_running_the_receive_settles_the_sender(self):
+        """[P2] The hand-over succeeded while the recipient's loop was stopping, and the loop closed before its next
+        callbacks: the receive never started, and the sender waited for good."""
+
+        class Stopping(asyncio.SelectorEventLoop):
+            """Running at the check, and takes the receive; never runs it."""
+
+            pretending = False
+            handed = None
+
+            def is_running(self):
+                return self.pretending or super().is_running()
+
+            def call_soon_threadsafe(self, callback, *args, **kwargs):
+                if self.pretending and self.handed is None:
+                    self.handed = callback
+                return super().call_soon_threadsafe(callback, *args, **kwargs)
+
+        async def sender():
+            b = ChatSession(make_agent("bob", lambda _: "NO_REPLY"))
+            b._hold_worker = True
+            stopping = Stopping()
+            stopping.pretending = True
+            b._loop = stopping
+            send = asyncio.ensure_future(b.receive_agent_message("hello", sender="alice"))
+            await until(lambda: stopping.handed is not None)
+            stopping.pretending = False
+            stopping.close()  # closed without running what it took
+            try:
+                with pytest.raises(PeerRejected) as refused:
+                    await asyncio.wait_for(send, 5)
+                return refused.value.reason
+            finally:
+                b._loop = asyncio.get_running_loop()
+                await b.close()
+
+        assert asyncio.run(sender()) == "closed"
+
+    async def test_an_id_coalesced_by_its_text_survives_a_restore(self):
+        """[P2] The alias lived only in memory: restored while A was pending, a retry of B once A was taken started
+        a second turn."""
+        store = InMemoryChatSessionStore()
+        agent = make_agent("bob", lambda _: "NO_REPLY")
+        session = ChatSession(agent, session_store=store)
+        session.persist()
+        session._hold_worker = True
+        first = await session.receive_agent_message("ship it", sender="alice", message_id="am_A")
+        second = await session.receive_agent_message("ship it", sender="alice", message_id="am_B")
+        assert second["duplicate"] is True
+        await session.flush()
+        await session.close(keep=True)
+        restored = await ChatSession.from_store(agent, store, session.id)
+        restored._hold_worker = True
+        try:
+            (event,) = restored._store.drain_events(settle=False)
+            assert event.id == first["event_id"]
+            event._settle("delivered", "run-1")  # a turn took A
+            again = await restored.receive_agent_message("ship it", sender="alice", message_id="am_B")
+            assert again["duplicate"] is True and not restored._store.pending_events()
+        finally:
+            await restored.close()
+
+    async def test_the_same_call_in_two_model_steps_is_two_messages(self):
+        """[P2] A model that reuses a tool call id asked the same thing in two steps (the second after the first was
+        answered): the record of the first gave the second its id, and the peer dropped it."""
+        directory = AgentDirectory()
+        b = ChatSession(make_agent("bob", lambda _: "NO_REPLY"))
+        directory.join(b, "bob")
+        b._hold_worker = True
+        asked = call("send_to_agent", call_id="s", to="bob", message="status of order 7?")
+
+        def alice_model(messages):
+            sends = sum(1 for m in messages if m.role == "tool")
+            if sends == 1:
+                for event in b._store.drain_events(settle=False):
+                    event._settle("delivered", "run-b")  # bob answered the first check meanwhile
+            return asked if sends < 2 else "done"
+
+        alice = Agent(name="alice", model=TestModel(handler=alice_model), tracing_provider=InMemoryTracingProvider)
+        fresh(peer=directory.join(ChatSession(alice), "alice"))
+        await run(alice)
+        assert [e.text for e in b._store.pending_events()] == ["status of order 7?"]
+        await b.close()
+
+    @pytest.mark.parametrize(
+        "response, reason",
+        [
+            (httpx.Response(202, json={"event_id": "e1", "state": ["pending"], "duplicate": False}), "unconfirmed"),
+            (httpx.Response(202, json={"event_id": "e1", "state": {"x": 1}, "duplicate": False}), "unconfirmed"),
+            (httpx.Response(403, json={"detail": "no", "reason": ["blocked"]}), "not_accepted"),
+            (httpx.Response(422, json={"detail": {"x": 1}, "reason": {"x": 1}}), "invalid"),
+        ],
+    )
+    async def test_a_remote_answer_of_the_wrong_types_is_read_as_the_fallback(self, monkeypatch, response, reason):
+        """[P2] An array or an object where a string belongs raised TypeError (an unhashable value in a set lookup):
+        the sender got no PeerRejected at all."""
+        real = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kwargs: real(transport=httpx.MockTransport(lambda _request: response), **kwargs),
+        )
+        with pytest.raises(PeerRejected) as refused:
+            await RemotePeer(url="https://bots.example", session_id="s").deliver({"from": "a", "text": "x"})
+        assert refused.value.reason == reason

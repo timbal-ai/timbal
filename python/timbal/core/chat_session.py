@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import copy
 import functools
+import inspect
 import json
 import math
 import os
@@ -94,6 +95,11 @@ _RECOVERY_ADVICE = (
     "check whether it already happened, or ask the user."
 )
 _AGENT_MESSAGES_KEPT = 512
+# How often a message handed to a session on another loop checks that loop is still there (a loop closed after it
+# took the receive and before it ran it settles nothing by itself).
+_HANDOVER_CHECK_S = 0.25
+# Ids a message from another agent also stands for (copies coalesced by their text): at most this many are kept.
+_AGENT_MESSAGE_ALIASES_KEPT = 16
 # A restored log continues this far past the saved cursor: further than any client of the old process read.
 _LOG_RESTART_GAP = 1_000_000_000
 _PERSISTED_KINDS = frozenset(
@@ -1070,11 +1076,24 @@ class ChatSession:
                 # Closed between the check above and the hand-over: nothing reached it (and nothing will run this).
                 receive.close()
                 raise PeerRejected("closed", "The agent's session is not being served.") from None
+            waiting = asyncio.wrap_future(handed)
             try:
-                return await asyncio.wrap_future(handed)
+                while True:
+                    done, _ = await asyncio.wait({waiting}, timeout=_HANDOVER_CHECK_S)
+                    if done:
+                        return waiting.result()
+                    if loop.is_closed() and not handed.done():
+                        # Closed after it took the receive and before it settled it (a loop that was stopping, or
+                        # closed with its tasks left as they were): nothing will settle this now. Nothing was posted:
+                        # a receive that posts completes in the same step.
+                        handed.cancel()
+                        if inspect.getcoroutinestate(receive) == inspect.CORO_CREATED:
+                            receive.close()  # never started: no "never awaited" left behind
+                        raise PeerRejected("closed", "The agent's session stopped before the message reached it.")
             except asyncio.CancelledError:
                 task = asyncio.current_task()
                 if task is not None and task.cancelling():
+                    waiting.cancel()  # (and with it the receive on the session's loop)
                     raise  # the caller's own cancellation
                 # The session's loop ended (or cancelled the receive) before the message was posted: nothing
                 # awaits between the post and the receipt, so a cancelled receive posted nothing.
@@ -1160,8 +1179,13 @@ class ChatSession:
         if earlier is not None:
             if given_id:
                 # The same message under another id (a sender's retry): a later copy under this one is it too,
-                # also once the first is taken. Forgotten with it if it is withdrawn (withdraw).
+                # also once the first is taken. Forgotten with it if it is withdrawn (withdraw). Kept with the
+                # event's envelope too, which its snapshot holds: a restore remembers it.
                 self._remember_agent_message(earlier, (sender, given_id))
+                aliases = list(earlier.peer.get("aliases") or ())
+                if given_id not in aliases and given_id != earlier.peer.get("message_id"):
+                    earlier.peer = {**earlier.peer, "aliases": [*aliases, given_id][-_AGENT_MESSAGE_ALIASES_KEPT:]}
+                    self._persist()
             return {**earlier.receipt(), "duplicate": True}
         try:
             # Urgent is the steering lane, and nothing more: no 'interrupt' policy, which would let another
@@ -1198,6 +1222,9 @@ class ChatSession:
             if event.peer is None or not event.peer.get("message_id"):
                 return
             key = (event.peer["from"], event.peer["message_id"])
+            for alias in event.peer.get("aliases") or ():
+                if isinstance(alias, str):
+                    self._agent_messages[(event.peer["from"], alias)] = event
         self._agent_messages[key] = event
         while len(self._agent_messages) > _AGENT_MESSAGES_KEPT:
             self._agent_messages.popitem(last=False)
