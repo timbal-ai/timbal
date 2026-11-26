@@ -1,0 +1,254 @@
+---
+title: "Operate the connector"
+description: "Check, query, upgrade, reconfigure and retire a Timbal Connect server"
+---
+
+Two kinds of tasks live here: commands you run **on the server**, and actions you trigger **from Timbal** with the API. Server commands work even when the connector is offline; API actions need it online.
+
+## Running the binary
+
+Every command below calls `timbal-connect`. The service installs it in a fixed place, which is usually not on your `PATH`:
+
+<Tabs>
+  <Tab title="Windows">
+    In an elevated PowerShell:
+
+    ```powershell
+    & "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" doctor
+    ```
+  </Tab>
+  <Tab title="Linux">
+    Load the service's environment first so the command sees the same settings as the service:
+
+    ```bash
+    sudo bash -c 'set -a; . /etc/timbal-connect/connector.env; exec /opt/timbal-connect/current/timbal-connect doctor'
+    ```
+  </Tab>
+  <Tab title="macOS">
+    ```bash
+    sudo /opt/timbal-connect/current/timbal-connect doctor
+    ```
+  </Tab>
+</Tabs>
+
+Below, `timbal-connect` stands for that whole prefix.
+
+## Check the setup with `doctor`
+
+`doctor` is a read-only preflight. It uses the same configuration lookup as the service, so it shows what the service will see. It exits with a non-zero code on failure, which makes it safe to script.
+
+```bash
+timbal-connect doctor                                    # everything
+timbal-connect doctor --connection erp                   # one connection
+timbal-connect doctor --connection erp --table "dbo.Cust_Ledger_Entry"
+timbal-connect doctor --connection main --table orders   # public.orders
+timbal-connect doctor --connection shop --table shopdb.orders   # MySQL: schema = database
+```
+
+| Block | Passing means | Typical failure |
+| ----- | ------------- | --------------- |
+| `[config]` | The URL, state path and connections parse | Missing file, bad JSON, byte-order mark |
+| `[egress]` | The server reaches Timbal on port 443 | A firewall drops outbound HTTPS, or a proxy is needed |
+| `[connection: name]` | A real login works, the server banner is read and tables are listed. On SQL Server it prints the `auth=` mode it used | Bad connection string, wrong authentication, TLS, no read permission |
+| `--table` | Columns are listed with `[pkN]` and `[cursor]` marks | Table not found |
+| `[service: name]` | The [web service](/connect/web-services) answers an MCP handshake with its configured credential | Wrong `url`, service down, credential refused, a `${VAR}` that isn't set |
+
+`--table` needs `--connection`. A bare name uses the default schema; `schema.table` splits on the **first** dot, so names with dots still work: `--table "dbo.Cust. Ledger Entry"` is schema `dbo`, table `Cust. Ledger Entry`.
+
+Marks next to a column:
+
+- `[pk1]`, `[pk2]`, ...: primary-key columns, in order. Use them as `key_columns` when you [create a sync](/connect/sync-data#keys-and-merging).
+- `[cursor]`: the type can be a cursor column (integer, date or timestamp types, SQL Server `rowversion`).
+- Warnings: no primary key on a table you want to upsert, or no cursor candidate at all.
+
+If Timbal has [rebound](#move-the-connector-to-another-environment) the connector, `doctor` shows the address it will actually use, so it never reports the wrong one.
+
+## Run a query on the server
+
+`query` runs one SQL batch against a connection and prints the result as tab-separated text (the rows on stdout, a `(N rows...)` summary on stderr). It goes through the same driver as ad-hoc queries from Timbal, read-only wrapper included, so it is the way to test exactly what a remote query would do.
+
+```bash
+# Read-only by default: a write fails on PostgreSQL and MySQL, and is rolled back on SQL Server
+timbal-connect query --connection main "SELECT id, name FROM users ORDER BY id LIMIT 5"
+
+# Writes need to be asked for
+timbal-connect query --connection main --write "UPDATE users SET active = false WHERE id = 42"
+
+# Limits
+timbal-connect query --connection erp --max-rows 1000 --timeout-secs 60 "SELECT TOP 10 * FROM dbo.Customer"
+```
+
+The `query` setting in the connection file is **not** applied here: it limits Timbal, and whoever is logged in to the server already holds the connection string.
+
+## Manage the service
+
+```bash
+timbal-connect service status      # is the operating-system service running?
+timbal-connect run                 # run in the foreground, to debug
+```
+
+| Task | Windows (elevated PowerShell) | Linux | macOS |
+| ---- | ----------------------------- | ----- | ----- |
+| Restart | `Restart-Service timbal-connect` | `sudo systemctl restart timbal-connect` | `sudo launchctl kickstart -k system/ai.timbal.connect` |
+| Follow the log | `Get-Content -Wait C:\ProgramData\TimbalConnect\timbal-connect.log` | `journalctl -fu timbal-connect` | `tail -f /Library/Logs/timbal-connect.log` |
+
+Set `RUST_LOG=debug` in the service's environment for more detail.
+
+## Upgrade
+
+The connector updates itself when Timbal pushes a new version. An update runs **on trial**: if the new binary can't connect within its budget, the connector goes back to the previous one.
+
+You can also trigger it yourself:
+
+<Tabs>
+  <Tab title="From Timbal (API)">
+    Needs organization membership, and the connector online. It is refused while jobs are running.
+
+    ```bash
+    # Latest published version
+    curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/update" \
+      -H "Authorization: Bearer $API_KEY"
+
+    # A specific version
+    curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/update" \
+      -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+      -d '{"version": "0.1.33"}'
+    ```
+
+    The answer is `dispatched: true`, or `dispatched: false` if it already runs that version. Watch `version` in [the connector's details](/api-reference/connectors/get) after it reconnects. See [Update connector](/api-reference/connectors/update).
+  </Tab>
+  <Tab title="On the server">
+    Run the installer again **without a token**. It keeps the configuration and credentials and swaps the binary.
+
+    ```bash
+    curl -fsSL https://api.timbal.ai/v1/connect/releases/install.sh | sudo bash -s -- \
+      --url wss://api.timbal.ai/v1/connect/channel
+    ```
+
+    On Windows, run `TimbalConnectSetup.cmd` with no `-Token`.
+  </Tab>
+</Tabs>
+
+Some features need a minimum version:
+
+| Feature | From connector version |
+| ------- | ---------------------- |
+| Remote update | 0.1.3 |
+| Rebind to another environment | 0.1.14 |
+| Table inspection (`describe`), full-scan jobs, full-refresh syncs | 0.1.25 |
+| Ad-hoc queries | 0.1.26 |
+| File shares, `connections` inside `config.json` | 0.1.27 |
+| Push configuration from Timbal | 0.1.28 |
+| Run a sync now | 0.1.30 |
+| Trust the operating system's certificate store | 0.1.32 |
+| Proxy support | 0.1.33 |
+
+## Change the configuration from Timbal
+
+Replace a server's `connections` and `filesystems` from Timbal, without logging in to it: rotate a connection string, add a share, or change a `query` setting. It needs the connector online, the **ConnectorsManage** role and connector 0.1.28 or newer.
+
+```bash
+curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/local-config" \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "connections": {
+      "erp": { "kind": "postgres", "dsn": "postgres://u:p@host/db", "query": "read" }
+    },
+    "filesystems": {
+      "exports": { "path": "/mnt/share/exports" }
+    }
+  }'
+```
+
+- **Each map is replaced as a whole.** A map in the request replaces the server's entire map; entries are never merged. A map you leave out keeps the local one. Send at least one.
+- The connector checks every entry, saves the result, and **restarts by itself**. It refuses while jobs are running.
+- On the next start the pushed maps win over environment variables, `config.json` and `connections.json`. The local files are not changed, only shadowed. `doctor` warns while a pushed configuration is active.
+
+To go back to the files on the server:
+
+```bash
+timbal-connect local-config clear
+```
+
+Run it as the service user or root, then restart the service.
+
+The pushed configuration is stored next to the state file as `config.override.json`. It is refused while an update or rebind restart is in progress, a corrupt override is deleted when the connector starts, and there is no trial or automatic revert: to undo a bad push, push again or run `local-config clear`. If `config.json` sets both `connections` and `connections_path`, the connector fails to start before it reads the override.
+
+<Warning>
+This is the one action that sends connection strings, with their passwords, from Timbal to the server. They pass through Timbal's control plane. If your rule is that credentials never leave the server, edit the files on the server by hand and don't use this endpoint. See [Push local config](/api-reference/connectors/local-config).
+</Warning>
+
+## Move the connector to another environment
+
+Point a running connector at a different Timbal address (for example from staging to production) without touching the server. The connector keeps its identity and credential, so the other environment must recognize it.
+
+```bash
+curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/rebind" \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{"url": "wss://api.timbal.ai/v1/connect/channel"}'
+```
+
+It needs the connector **online**, the **ConnectorsManage** role and connector 0.1.14 or newer, and answers `202 { "url", "dispatched": true }`. It is refused while jobs are running (`rebind refused: N job(s) in flight`). The connector checks the address (`wss://` and a `*.timbal.ai` host), saves it in `rebind.json` in its install folder, restarts, and is **on trial**: it must enroll at the new address within about 90 seconds per attempt, three attempts, or it goes back to the previous one. A wrong address can't strand the server. Once it enrolls, the new address is confirmed and stays until the next rebind. The fleet list shows the connector going offline and coming back with the same id, and `doctor` on the server shows the effective address and whether it is on trial or confirmed. See [Rebind connector](/api-reference/connectors/rebind).
+
+## Retire or revoke
+
+<Tabs>
+  <Tab title="Uninstall from the server">
+    Without `--purge` the service is removed but the configuration and credentials stay, so a reinstall can reuse the same identity. `--purge` deletes everything local.
+
+    ```bash
+    sudo /opt/timbal-connect/current/timbal-connect service uninstall
+    sudo /opt/timbal-connect/current/timbal-connect service uninstall --purge
+    ```
+
+    On Windows:
+
+    ```powershell
+    & "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" service uninstall
+    & "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" service uninstall --purge
+    ```
+
+    Back up `state.json` before `--purge` if you want to keep the identity. If the binary is gone or `service uninstall` fails, remove the service by hand: [Install on Windows](/connect/install-windows#uninstall) or [Install on Linux and macOS](/connect/install-linux-macos#uninstall).
+  </Tab>
+  <Tab title="Revoke in Timbal">
+    Uninstalling doesn't revoke the connector in Timbal; it only goes offline. **Revoke** needs the **ConnectorsManage** role, kills its credential from Timbal, needs nothing from the server, and is what you want for a server that was lost, stolen or decommissioned without you.
+
+    ```bash
+    curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/revoke" \
+      -H "Authorization: Bearer $API_KEY"
+    # -> { "connector_id": "...", "disconnected": true, "stopped_syncs": 3 }
+    ```
+
+    Its credential stops working, the open connection is dropped (immediately, or on the connector's next heartbeat, 30 seconds at most by default), and running jobs fail. The connector disappears from the list and every later request for it returns `404`. `disconnected: false` only means it was already offline. Syncs that pointed at it are **not deleted**: they stop being scheduled. Create them again on the replacement connector with the same `dest_table`, and they pick up where the table ends.
+
+    **There is no undo.** To bring the server back you need a new enrollment token, which creates a new connector with a new id. Errors: `403` without ConnectorsManage, `404` for an unknown or already revoked connector. See [Revoke connector](/api-reference/connectors/revoke).
+  </Tab>
+</Tabs>
+
+## Settings and environment variables
+
+For each setting, an environment variable wins over the configuration file (`TIMBAL_CONNECT_CONFIG`), which wins over the platform default. Windows services have no environment files, which is why `config.json` exists.
+
+| Variable | Meaning |
+| -------- | ------- |
+| `TIMBAL_CONNECT_URL` | Control plane: `wss://host/v1/connect/channel` |
+| `TIMBAL_CONNECT_ENROLLMENT_TOKEN` | First-contact token. Unused after enrollment |
+| `TIMBAL_CONNECT_STATE_PATH` | Where the credential and sync progress are stored |
+| `TIMBAL_CONNECT_CONNECTIONS_PATH` | Path of the connections file |
+| `TIMBAL_CONNECT_CONFIG` | Path of the JSON configuration file |
+| `TIMBAL_CONNECT_PROXY` | `auto` (default), `none`, or `http://[user:pass@]host:port`. Overrides `proxy`. From 0.1.33. See [Network requirements](/connect/network-requirements#proxies) |
+| `TIMBAL_CONNECT_TLS_TRUST` | `system` (default) or `public`. Overrides `tls.trust`. From 0.1.32 |
+| `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` | Read by `proxy: auto`, the way `curl` reads them |
+| `TIMBAL_CONNECT_FEATURES` | Extra capabilities to advertise, comma-separated. Advertising one the binary can't do gets jobs rejected |
+| `RUST_LOG` | Log level (default `info`) |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Sync your data" icon="rotate" href="/connect/sync-data">
+    One-off jobs, scheduled syncs and cursors.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/connect/troubleshooting">
+    Messages from the installer, `doctor` and the service log.
+  </Card>
+</CardGroup>

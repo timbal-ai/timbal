@@ -31,7 +31,7 @@ requires-python = ">=3.11"
 
 dependencies = [
   "anthropic>=0.83.0",
-  "httpx>=0.28.0",
+  "httpx[zstd]>=0.28.0",
   "mcp>=1.26.0,<2",
   "openai>=1.60.0",
   "pydantic[email]>=2.10.6",
@@ -86,6 +86,8 @@ dev = [
   "pytest>=8.3.4",
   "pytest-asyncio>=0.25.2",
   "pytest-cov>=7.0.0",
+  "pytest-rerunfailures>=15.0",
+  "pytest-xdist>=3.8.0",
   "yappi>=1.7.6",
 ]
 
@@ -129,6 +131,12 @@ path = "python"
 [tool.hatch.version]
 source = "vcs"
 
+# Versions come from git tags. On a release branch (`release/2.8`) the next version is the next patch
+# (2.8.5.devN after v2.8.4); anywhere else (main, feature branches) it is the next minor (2.9.0.devN),
+# so main never builds with a version a release line will publish. See RELEASING.md.
+[tool.hatch.version.raw-options]
+version_scheme = "release-branch-semver"
+
 [tool.hatch.build.hooks.vcs]
 version-file = "python/timbal/_version.py"
 
@@ -164,8 +172,12 @@ convention = "google"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# A test still running after 5 minutes is hung: print every thread's stack (the run goes on waiting; CI's job
+# timeout ends it). Without it a hang shows only the test's name.
+faulthandler_timeout = 300
 markers = [
   "integration: marks tests that need real services (LLM keys, Timbal platform/KB, network); default run uses '-m not integration'",
+  "serial: CI runs these one at a time, after the parallel pass (see the `Run tests` step of ci.yml)",
 ]
 addopts = [
   "-v",
@@ -173,8 +185,6 @@ addopts = [
   "--strict-markers",
   "--color=yes",
   "-W ignore::DeprecationWarning",
-  "--cov=timbal",
-  "--cov-report=term-missing",
   "-m",
   "not integration",
 ]

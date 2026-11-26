@@ -44,7 +44,7 @@ from urllib.parse import urlsplit
 import structlog
 from uuid_extensions import uuid7
 
-from ..core.agent import Agent
+from ..core.agent import Agent, _render_sections
 from ..core.llm.prompt_cache import (
     SystemPrompt,
     bind_prompt_cache_key,
@@ -728,6 +728,9 @@ class VoiceSession:
             can_interrupt=True,
             # Work posted between turns (report_progress, post_session_event) has no notify() to start the watcher.
             on_work=self._watch_for_event_turns,
+            # A chat open on the conversation lends it to the call while it is live, and answers what is typed.
+            borrows=True,
+            user_messages=False,
         )
         self._event_task: asyncio.Task[None] | None = None
         # The in-flight turn's run, from its first event until the turn ends.
@@ -792,6 +795,8 @@ class VoiceSession:
         self._stale_partial_commit_secs = 2.5
         self._stale_partial_poll_secs = 0.5
         self._stale_commit_sent_at = 0.0
+        # Last value ``_event_stamp`` handed out (caller events are ordered by their stamps).
+        self._last_event_stamp = 0.0
 
         # Serial TTS runs off the agent ``async for`` critical path so we keep pulling
         # LLM/Agent events (and emit trace OUTPUT) while audio still synthesizes.
@@ -1156,6 +1161,19 @@ class VoiceSession:
         ):
             self._end_call_task.cancel()
         self._end_call_task = None
+
+    def _event_stamp(self) -> float:
+        """``time.monotonic()`` for a caller event (commit, partial), strictly after the previous stamp.
+
+        The session orders caller events by these stamps: a commit after ``end_call`` keeps the call up,
+        a partial newer than the last commit means the caller is speaking. Before Python 3.13,
+        ``time.monotonic()`` on Windows ticks every 15.6 ms, so two events in one tick compared equal
+        and the later one read as not newer (the call hung up on a caller who had just spoken). A stamp
+        is never more than microseconds ahead of the clock, so durations measured from it hold.
+        """
+        stamp = max(time.monotonic(), self._last_event_stamp + 1e-6)
+        self._last_event_stamp = stamp
+        return stamp
 
     def _end_call_output_busy(self) -> bool:
         """The goodbye, or another turn, is still going out. Not caller audio."""
@@ -2126,7 +2144,7 @@ class VoiceSession:
                 if _likely_stt_echo(self._latest_partial_text, self._spoken_assistant_text()):
                     logger.debug("stt_stale_partial_echo_skipped", text_preview=self._latest_partial_text[:80])
                     continue
-                self._stale_commit_sent_at = time.monotonic()
+                self._stale_commit_sent_at = self._event_stamp()
                 stranded = self._latest_partial_text
                 # INFO on purpose: this is the only trace that a transcript was
                 # rescued from a provider that silently refused to commit.
@@ -2343,7 +2361,7 @@ class VoiceSession:
                             stranded_preview=self._latest_partial_text[:80],
                         )
                     elif text:
-                        self._last_partial_at = time.monotonic()
+                        self._last_partial_at = self._event_stamp()
                         self._latest_partial_text = text
                         if self._eou_predictor is not None:
                             self._eou_predictor.note_partial(text)
@@ -2583,7 +2601,7 @@ class VoiceSession:
         self._cancel_hold()
         self._held_user_text = text
         self._hold_armed_timeout_secs = timeout_secs
-        self._last_commit_at = time.monotonic()
+        self._last_commit_at = self._event_stamp()
 
         # Anchor for "user resumed speaking": partials older than the commit
         # event are the held fragment's own trailing refinements and must not
@@ -2749,7 +2767,7 @@ class VoiceSession:
         self._turn_predictive_endpoint = predictive_endpoint
         self._turn_stt_latency = self._pending_stt_latency
         self._pending_stt_latency = None
-        self._last_commit_at = time.monotonic()
+        self._last_commit_at = self._event_stamp()
         # A confirmed real turn closes the speculative budget for this utterance.
         self._speculative_attempts = 0
         self._caller_speech_started_at = None
@@ -3219,7 +3237,7 @@ class VoiceSession:
         self._turn_vad_endpointed = vad_endpointed
         self._turn_stt_latency = self._pending_stt_latency
         self._pending_stt_latency = None
-        self._last_commit_at = time.monotonic()
+        self._last_commit_at = self._event_stamp()
         # The headline clocks start at confirmation, not at the eager start.
         self._turn_eou_at = time.monotonic()
         self._active_turn_user_text = final_text
@@ -3335,7 +3353,7 @@ class VoiceSession:
             self._commits_in_flight -= 1
 
     async def _handle_committed_inner(self, text: str) -> None:
-        self._commit_event_at = time.monotonic()
+        self._commit_event_at = self._event_stamp()
         # Measured now (the VAD / partial stamps are freshest here) but only
         # published once the commit is *accepted* below: a noise commit the
         # detector ignores mid-HOLD, or a late duplicate, must not overwrite the
@@ -3665,8 +3683,17 @@ class VoiceSession:
             store = self._unbound_store
         if store is None:
             ctx = self._turn_run_context or self._last_run_context or self._seed_run_context()
-            # The run this call continues may be where an owned session joined before it had a store.
-            joined = store_joined_from(ctx.parent_id) if ctx is not None and ctx.parent_id else None
+            # An owned session may have joined before it had a store: one that continues this call's
+            # last run (a chat opened on it), or, before the call's first turn, the one the call itself
+            # continues. Not the parent of a run the call has made: a session that continues that one
+            # is a run behind the call (a client that had not seen its last reply), and joining it
+            # would take the call back to its head.
+            joined = None
+            if ctx is not None:
+                joined = store_joined_from(ctx.id)
+                # `is None`, not truth: a store with no tasks is empty, not missing.
+                if joined is None and ctx.parent_id and not ctx._trace:
+                    joined = store_joined_from(ctx.parent_id)
             if joined is not None:
                 adopt_background_store(ctx, joined)
                 store = joined
@@ -3707,7 +3734,8 @@ class VoiceSession:
         self._scheduler.note_run(ctx.id)
         if ctx._bg_store is None:
             previous = self._last_run_context._bg_store if self._last_run_context is not None else None
-            store = previous or self._unbound_store
+            # `is None`, not truth: a store with no tasks is empty, not missing.
+            store = previous if previous is not None else self._unbound_store
             if store is not None:
                 adopt_background_store(ctx, store)
                 self._unbound_store = None
@@ -4078,6 +4106,11 @@ class VoiceSession:
             agent_kwargs: dict[str, Any] = {"prompt": msg}
             if self.model:
                 agent_kwargs["model"] = self.model
+            if getattr(self.agent, "delivery", "text") != "text":
+                # A call reads the reply aloud as it streams. With delivery="tool" that text is a
+                # private draft and the reply is a tool call's argument, so here the agent answers
+                # in text, whatever it does on other channels.
+                agent_kwargs["delivery"] = "text"
             # Another channel's turn ran on this conversation since the call's
             # last one (or before its first): continue from it, not from the
             # call's own last run or the parent it was started with.
@@ -4736,12 +4769,15 @@ class VoiceSession:
                     self._audio_hold = None
                 self._turn_is_event = False
                 self._turn_asked_caller = False
-                self._turn_run_context = None
+                ran, self._turn_run_context = self._turn_run_context, None
                 if followup is not None:
                     # Cut before its run started (a barge-in right after the
                     # start): what it carried goes back for the caller's turn.
                     followup.release()
-                self._scheduler.turn_finished()
+                # With how the turn's run ended: a chat sharing the conversation holds what is typed
+                # while the call's question waits, and gets the session back knowing it does.
+                root = ran.root_span() if ran is not None else None
+                self._scheduler.turn_finished(is_parked(root.status) if root is not None else None)
                 self._watch_for_event_turns()
 
     # -- Internal: tool-call filler ------------------------------------------
@@ -5800,6 +5836,10 @@ class VoiceSession:
         """
         try:
             resolved = await self.agent._resolve_system_prompt()
+            if isinstance(resolved, dict):
+                # Named sections: as plain text, the way a subagent gets them. Callers join it
+                # with their own lines, or pass it as a turn's ``system_prompt`` override.
+                resolved = _render_sections(resolved)
         except Exception as e:
             logger.debug("greeting_system_prompt_unavailable", error=str(e))
             return None

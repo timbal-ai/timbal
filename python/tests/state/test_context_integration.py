@@ -736,7 +736,7 @@ class TestTraceLifecycle:
         assert hasattr(output, 't1')
         assert output.t0 is not None
         assert output.t1 is not None
-        assert output.t1 > output.t0  # End time after start time
+        assert output.t1 >= output.t0  # Not before the start (a fast run fits in one 15.6 ms Windows clock tick)
         assert output.t0 >= start_test_time  # Started after test began
         assert output.t1 <= end_test_time  # Ended before test completed
 

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .chat_session import ChatSession
     from .fallback_model import FallbackModel, ModelEntry
     from .mcp import MCPServer
     from .memory_compaction import MemoryCompactor  # noqa: F401 - type alias
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Agent",
+    "ChatSession",
     "FallbackModel",
     "LocalOffloadStore",
     "MCPServer",
@@ -35,6 +37,7 @@ __all__ = [
 
 _LAZY_IMPORTS = {
     "Agent": ".agent",
+    "ChatSession": ".chat_session",
     "FallbackModel": ".fallback_model",
     "LocalOffloadStore": ".tool_result_offload",
     "MCPServer": ".mcp",

@@ -16,7 +16,7 @@ def get_weather(location: str) -> str:
 
 agent = Agent(
     name="weather_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     tools=[get_weather]  # Function automatically becomes a tool
 )
 ```
@@ -30,10 +30,22 @@ from timbal import Agent, Tool
 
 agent = Agent(
     name="weather_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     tools=[Tool(handler=get_weather)]
 )
 ```
+
+### Read-only tools
+
+`Tool(read_only=True)` declares that the tool only reads: it sends, writes, deletes, and buys nothing. A run with `tool_policy="read_only"` — [`context.tool_policy`](/deployment/self-hosted#request-context) on `/run` and `/stream`, and `ChatSession.wake` by default — offers only those tools, plus the agent's own readers (`read_skill`, `read_offloaded`, `get_background_task`, `list_background_tasks`, `read_background_transcript`). A call to anything else comes back as `tool_not_found`. An MCP tool takes `read_only` from the server's `readOnlyHint`.
+
+### Tool search
+
+`Tool(defer_loading=True)` keeps that tool's schema out of the model's context until the model looks for it. `Agent(tool_search=...)` is `"auto"` (default), `"client"`, or `"off"`.
+
+With `"auto"`, Claude Opus, Sonnet, and Haiku 4.5 and later, and OpenAI gpt-5.4 and later on the Responses API, search natively: every tool is still sent, deferred ones flagged `defer_loading`, and the provider searches inside the same response. `TIMBAL_OPENAI_API=chat_completions` falls back to client search. Other models, a [`FallbackModel`](/agents#fallback-models), and `"client"` get a read-only `search_tools(query, limit=5)` tool. If a tool already has that name, it is named `find_tools` (then `load_tools`, then `search_deferred_tools`). Tools it finds stay loaded for the session. A deferred tool called by its exact name still runs. The agent's own readers are never deferred, and a [tool policy](#read-only-tools) is applied before deferral, so hidden tools are absent from the search catalog too.
+
+`Tool.search_group` groups deferred tools into one OpenAI namespace, so the model sees the group instead of every description until it searches. Without a group, OpenAI still sends each deferred tool's name and description. An [MCP server](/agents/mcp) sets the group to its `name`. A run that searches or loads a deferred tool records `metadata.tool_search` as `{mode, loaded, searches: [{query, loaded}]}`. When no tool is deferred, nothing changes; `tool_search="off"` sends every schema as well. Deferral pays off for large catalogs. A few KB of stable tools costs about the same with it off once cached. Native search leaves that prefix alone. Client search rewrites the tool list each time a tool loads, so the conversation is cached again.
 
 ### Custom Description
 
@@ -151,7 +163,7 @@ from timbal.tools import WebSearch
 
 agent = Agent(
     name="research_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     tools=[
         WebSearch(
             allowed_domains=["wikipedia.org", "github.com"],  # Restrict to specific domains
@@ -187,8 +199,46 @@ domain_search.description = "Search only within example.com domain."
 
 agent = Agent(
     name="research_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     tools=[general_search, domain_search]
+)
+```
+
+### Snowflake
+
+`SnowflakeQuery`, `SnowflakeExecute`, `SnowflakeListTables`, `SnowflakeDescribeTable`, and `SnowflakeInsertRows` run against Snowflake. `SnowflakeQuery` is read-only (`SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN`, `LIST`). `SnowflakeExecute` runs writes and DDL — prefer `SnowflakeQuery` for reads. `SnowflakeListTables` and `SnowflakeDescribeTable` inspect tables and views. `SnowflakeInsertRows` inserts rows.
+
+```python
+from timbal import Agent
+from timbal.tools import SnowflakeListTables, SnowflakeQuery
+
+agent = Agent(
+    name="warehouse_agent",
+    model="openai/gpt-6.1-terra",
+    tools=[
+        SnowflakeQuery(database="ANALYTICS", schema_name="PUBLIC"),
+        SnowflakeListTables(database="ANALYTICS"),
+    ],
+)
+```
+
+Each value resolves tool field → `Integration("snowflake")` → env: `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PRIVATE_KEY` or `SNOWFLAKE_PRIVATE_KEY_PATH`, `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`, `SNOWFLAKE_TOKEN`, and `SNOWFLAKE_PAT`, plus optional `SNOWFLAKE_HOST` (PrivateLink), `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, and `SNOWFLAKE_ROLE`. The schema tool field is `schema_name`. Auth precedence is OAuth token → PAT → key pair. Use `?` bindings.
+
+<Warning>
+The Snowflake role is the real permission boundary. `SnowflakeQuery`'s read-only check is only a guardrail. Put write tools (`SnowflakeExecute`, `SnowflakeInsertRows`) behind `requires_approval`. See [Approval gates](/human-in-the-loop/approval-gates).
+</Warning>
+
+To use a [Snowflake-managed MCP server](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents-mcp) (Cortex Search, Cortex Analyst, custom tools) with the same credentials, pass `SnowflakeAuth` as the `MCPServer`'s `auth`. It refreshes key-pair tokens before they expire, so long sessions keep working.
+
+```python
+from timbal.core import MCPServer
+from timbal.tools.snowflake import SnowflakeAuth
+
+snowflake_mcp = MCPServer(
+    name="snowflake",
+    transport="http",
+    url="https://myorg-myaccount.snowflakecomputing.com/api/v2/databases/ANALYTICS/schemas/PUBLIC/mcp-servers/ANALYST",
+    auth=SnowflakeAuth(),
 )
 ```
 
@@ -209,7 +259,7 @@ def calculate_cost(days: int, hotel_rate: float, flights: float = 0) -> float:
 pricing_agent = Agent(
     name="pricing_calculator",
     description="Calculate travel costs",  # Tool description for other agents
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     system_prompt="Answer only with the price. Any text",
     tools=[calculate_cost]
 )
@@ -217,7 +267,7 @@ pricing_agent = Agent(
 # Main travel agent
 travel_agent = Agent(
     name="travel_assistant", 
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     system_prompt="Help plan trips and provide travel advice.",
     tools=[pricing_agent]
 )
@@ -314,7 +364,7 @@ from timbal.core import MCPServer
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     tools=[
         MCPServer(
             name="filesystem",
@@ -326,7 +376,7 @@ agent = Agent(
 )
 ```
 
-The server's tools are discovered at runtime and offered to the LLM alongside your other tools. See [MCP Servers](/agents/mcp) for transports, authentication, result handling, and connection lifecycle.
+The server's tools are discovered at runtime and offered to the LLM alongside your other tools. Set `defer_loading=True` to keep every tool on that server out of the prompt until [tool search](#tool-search) loads it. See [MCP Servers](/agents/mcp) for transports, authentication, result handling, and connection lifecycle.
 
 ## Dynamic Tools
 
@@ -354,6 +404,7 @@ See [Dynamic Agents](/agents/dynamic#dynamic-tools) for implementation details a
 - **Performance**: Concurrent execution and optimized patterns
 - **Robustness**: Improved error handling and tracing
 - **Tool Sets**: Dynamic tool resolution
+- **Tool search**: Large catalogs stay out of the prompt until the model searches for them
 - **MCP Servers**: Any Model Context Protocol server as a tool source — see [MCP Servers](/agents/mcp)
 - **Commands**: Slash-command shortcuts for direct tool invocation — see [Commands](/agents/commands)
 - **Result limits & pinning**: Keep oversized or durable tool output under control — see [Memory Compaction](/agents/memory-compaction)

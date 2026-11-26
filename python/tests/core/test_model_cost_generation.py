@@ -54,6 +54,51 @@ def test_sol_61_costs_include_cache_and_combined_tiers(tmp_path):
     assert "web_search_requests" not in rates
 
 
+def test_gpt_62_costs_include_cache_and_supported_tiers(tmp_path):
+    dest = tmp_path / "costs.sql"
+    costs.main(output_path=dest, provider_filter="openai")
+    units = ["input_text_tokens", "output_text_tokens", "input_cached_tokens", "input_cache_write_tokens"]
+    expected = {
+        "openai/gpt-6.2-astra": {"": [8, 40, 0.4, 10], "_long_context": [16, 60, 0.8, 20]},
+        "openai/gpt-6.2-sol": {"": [2, 10, 0.1, 2.5], "_long_context": [4, 15, 0.2, 5]},
+    }
+    for model, contexts in expected.items():
+        rates = _rates(dest.read_text(encoding="utf-8"), model)
+        for context, prices in contexts.items():
+            for tier, multiplier in [("", 1), ("_fast", 2), ("_ultrafast", 6)]:
+                for unit, price in zip(units, prices, strict=True):
+                    assert rates[unit + context + tier] == pytest.approx(price * multiplier)
+            # Flex is unsupported on GPT-6.2: no flex-priced units and no flex tier suffix.
+            assert all(not key.endswith("_flex") for key in rates)
+        assert service_tier_usage_suffix(model, "flex") == ""
+        assert service_tier_usage_suffix(model, "ultrafast") == "_ultrafast"
+
+
+def test_terra_61_costs_include_cache_and_tiers(tmp_path):
+    dest = tmp_path / "costs.sql"
+    costs.main(output_path=dest, provider_filter="openai")
+    rates = _rates(dest.read_text(encoding="utf-8"), "openai/gpt-6.1-terra")
+    units = ["input_text_tokens", "output_text_tokens", "input_cached_tokens", "input_cache_write_tokens"]
+    for context, expected in [("", [1, 5, 0.05, 1.25]), ("_long_context", [2, 7.5, 0.1, 2.5])]:
+        for tier, multiplier in [("", 1), ("_flex", 0.5), ("_fast", 2)]:
+            for unit, price in zip(units, expected, strict=True):
+                assert rates[unit + context + tier] == pytest.approx(price * multiplier)
+    assert all(not key.endswith("_ultrafast") for key in rates)
+
+
+def test_fable_52_costs_and_fast_tier(tmp_path):
+    dest = tmp_path / "costs.sql"
+    costs.main(output_path=dest, provider_filter="anthropic")
+    rates = _rates(dest.read_text(encoding="utf-8"), "anthropic/claude-fable-5-2")
+    assert rates["input_tokens"] == pytest.approx(8)
+    assert rates["output_tokens"] == pytest.approx(40)
+    assert rates["cache_read_input_tokens"] == pytest.approx(0.2)
+    assert rates["ephemeral_5m_input_tokens"] == pytest.approx(10)
+    assert rates["ephemeral_1h_input_tokens"] == pytest.approx(16)
+    assert rates["input_tokens_fast"] == pytest.approx(16)
+    assert rates["output_tokens_fast"] == pytest.approx(80)
+
+
 def test_ultrafast_usage_units_and_prices(tmp_path):
     suffix = service_tier_usage_suffix("openai/gpt-6-astra", "ultrafast")
     assert suffix == "_ultrafast"

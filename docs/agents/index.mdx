@@ -15,7 +15,7 @@ from timbal import Agent
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-5"
+    model="openai/gpt-6.1-sol"
 )  # That's it! You've created your first agent!
 ```
 
@@ -129,7 +129,7 @@ agent = Agent(
 # OpenAI
 agent = Agent(
     name="reasoning_agent",
-    model="openai/gpt-5",
+    model="openai/gpt-6.1-sol",
     model_params={"reasoning": {"effort": "high", "summary": "auto"}},
 )
 ```
@@ -183,7 +183,7 @@ def out_of_budget(ctx):
         return {"role": "assistant", "content": f"[Stopped after {ctx.max_iter} steps.]"}
     return {"role": "user", "content": "Budget spent. Report what is done and what is not; claim nothing else."}
 
-agent = Agent(name="assistant", model="openai/gpt-5", tools=[search, write_report], max_iter=16, on_max_iter=out_of_budget)
+agent = Agent(name="assistant", model="openai/gpt-6.1-sol", tools=[search, write_report], max_iter=16, on_max_iter=out_of_budget)
 ```
 
 Every mode records `metadata["max_iter_reached"] = {"max_iter", "behavior"}` on the agent span. Injected messages are persisted in memory tagged `metadata={"source": "runtime", "kind": "max_iter_notice" | "max_iter_stop"}`, so `Message.is_runtime()` lets you hide them when rendering a human transcript.
@@ -201,7 +201,7 @@ def write_report(text: str) -> str:
     """Write a report."""
     return text
 
-agent = Agent(name="assistant", model="openai/gpt-5", tools=[search, write_report], timeout=120)
+agent = Agent(name="assistant", model="openai/gpt-6.1-sol", tools=[search, write_report], timeout=120)
 
 result = await agent(prompt="Research and write the report").collect()
 if result.status.code == "timeout":
@@ -223,6 +223,10 @@ A `TimeoutError` raised inside a handler, such as a slow HTTP call, is still rep
 
 **Performance.** An unset timeout has negligible overhead: the per-call check remains, but the stream relay and timers are bypassed. Enabling a timeout adds timer and relay work per streamed event. The `benchmarks/timeout/bench_streaming.py` benchmark measures this cost separately from network and LLM latency.
 
+### Empty answers at the output limit
+
+A final answer (no tool calls) that hits the output limit — `max_tokens`, `max_output_tokens`, or `length` — with no visible text is dropped and retried once. A reasoning model can spend the whole budget thinking. The retry uses `max_tokens` ×4, capped at 32,000, and records `metadata.max_tokens_retry` with `from` (the previous budget) and `to` (the retry). Agents with an [`output_model`](/agents/structured-output) are retried the same way. If the answer is still empty, no `max_tokens` was set, or the budget is already at 32,000, the run fails with `timbal.errors.ModelOutputTruncated` and `status.code == "error"`. A truncated answer that does have text is kept, and `status.reason` is that stop reason.
+
 ### Approval-Required Tools
 
 Any runnable — Tool, Agent, or Workflow step — can pause for human approval before it runs. Mark it with `requires_approval`, listen for `ApprovalEvent`, and resume by calling the runnable again with `resume`:
@@ -239,7 +243,7 @@ refund = Tool(
     approval_prompt=lambda amount: f"Approve refunding ${amount}?",
 )
 
-agent = Agent(name="support_agent", model="openai/gpt-5", tools=[refund])
+agent = Agent(name="support_agent", model="openai/gpt-6.1-sol", tools=[refund])
 
 approval_id = None
 async for event in agent(prompt="Refund $250"):
@@ -308,7 +312,7 @@ def get_user_info():
 
 agent = Agent(
     name="user_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-6-luna",
     tools=[Tool(handler=get_user_info)]
 )
 
@@ -334,11 +338,11 @@ What if you want to change the model, `max_tokens`, or thinking config for each 
 # Agent with default values
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",  # Default model
+    model="openai/gpt-6-luna",  # Default model
     max_tokens=1024  # Default max_tokens
 )
 
-# Override model: was "openai/gpt-4o-mini", now "anthropic/claude-sonnet-4-6"
+# Override model: was "openai/gpt-6-luna", now "anthropic/claude-sonnet-4-6"
 response = await agent(
     prompt="What is the capital of Germany?",
     model="anthropic/claude-sonnet-4-6"
@@ -399,6 +403,50 @@ print(result.output.collect_text())
 <Warning>
 Response content can contain thinking, text, tool, and other blocks in a provider-dependent order. `content[0]` is not guaranteed to be text, and reasoning need not occupy a fixed position. Use `collect_text()` to extract the text response.
 </Warning>
+
+### Replying through a tool
+
+By default the reply is the agent's final text. With `delivery="tool"` the agent gets a `send_message(text, end_turn=False)` tool, and only what it sends with that tool reaches the user. A turn can then say several things, give an update before a slow tool finishes, or say nothing.
+
+```python
+from timbal import Agent
+from timbal.types.events import DeltaEvent
+
+def search_orders(order_id: str) -> str:
+    """Look up an order's status."""
+    return f"Order {order_id} ships tomorrow."
+
+agent = Agent(
+    name="assistant",
+    model="anthropic/claude-sonnet-4-6",
+    max_tokens=1024,
+    tools=[search_orders],
+    delivery="tool",
+)
+
+async for event in agent(prompt="Where is my order?"):
+    if isinstance(event, DeltaEvent) and event.item.type == "custom":
+        data = event.item.data
+        if data.get("kind") == "message":
+            print(data["text"])  # {"kind": "message", "text", "index", "end_turn"}
+```
+
+- **Messages.** Each one is delivered when its call runs, as a `Custom` delta of kind `"message"`. Several sends in one step go out in the order the model wrote them. Show these events to the user, not the tool call's input: the text is checked by the agent's `model_output` [guardrails](/agents/guardrails) before the event goes out.
+- **`end_turn=True`** ends the turn after that tool batch, with no further model call. If a message or an event joined the turn in the meantime, the agent answers it first.
+- **Other text is a draft.** The user does not see it. It is delivered (a `message` event with `fallback: True`) when the turn sent nothing, and when a step had no tools to send with, which happens once `max_iter` is spent or a denial limit withheld the tools. The result of a [slash command](/agents/commands) is delivered the same way, as the tool's `tool_result` guardrails left it, and the next turn's model reads that screened result, not the raw output. A command that returns a list delivers its items on separate lines.
+- **Output.** `result.output` is one assistant message that joins everything the turn sent. `metadata.messages_sent` lists the messages and `metadata.delivery` summarizes them.
+- **Guardrails.** A blocked message is not sent: the tool returns an error and the model rewrites it. A redacted message is sent as redacted, and the tool result tells the model what the user received.
+- **Approvals.** A turn that pauses for an [approval](#approval-required-tools) goes on in the run that resumes it: what it sent before the pause still counts, so a draft after the resume stays private.
+- **Denial limits.** A message sent does not reset `max_consecutive_denials` or count in `max_denials_window`: telling the user "trying again" is not a call that went through.
+- **Name.** The tool is called `send_message`. If one of the agent's tools has that name, including a tool from an MCP server, it is `send_to_user`, then `reply_to_user`. A [tool policy](/agents/tools) never hides it.
+
+`delivery` only applies to the agent the user talks to. An agent used as a tool answers with its text. Pass `delivery="text"` on a call to get the plain reply from an agent configured with `"tool"`. A voice call does this, because it reads the reply aloud as it streams. Only `"text"` is read this way. Any other value, and any value passed to an agent that is not set to `"tool"`, is passed through like any [custom input](#passing-input-parameters).
+
+```python
+result = await agent(prompt="Where is my order?", delivery="text").collect()
+```
+
+An agent with an [`output_model`](/agents/structured-output) answers with its structured output: `delivery="tool"` does not apply to it.
 
 ## Messages
 

@@ -1,12 +1,15 @@
 import asyncio
+import copy
 import os
 import time
+import weakref
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from uuid_extensions import uuid7
 
 from ..errors import SpanNotFound
@@ -26,6 +29,74 @@ def _get_logger():
     import structlog
 
     return structlog.get_logger("timbal.state.context")
+
+
+# What a run without resume values holds. Read-only and shared by every context: a call
+# installs a new mapping (``Runnable._stream``), nothing ever writes into one in place.
+_NO_RESUME_VALUES: MappingProxyType[str, Any] = MappingProxyType({})
+_NOTHING_WAITING: Mapping[tuple[str, str | None], str] = MappingProxyType({})
+# Waits before reading the parent's trace again when the read failed (a locked database, a busy file).
+_PARENT_READ_RETRIES_S = (0.05, 0.2)
+
+# call id -> the run context of every call whose stream has not ended (``Runnable._stream`` keeps it). An ambient
+# call id found here is a call still running, whatever run context is set by now: a run minted under it, or a
+# message posted to a session under it, comes from that call's code. An id a stream abandoned mid-way left behind
+# in its consumer's task is gone from here once the loop has closed it.
+_LIVE_CALLS: "dict[str, RunContext]" = {}
+# The same for a detached call (a background child), from the task that runs its code being made until it ends:
+# its stream is over, its handler is not.
+_DETACHED_CALLS: "dict[str, RunContext]" = {}
+
+
+# Calls whose stream its consumer closed before its end (``GeneratorExit``: an ``async for`` left mid-way is
+# closed by the loop, from another task), each with the task that was consuming its run. Such an id stays behind
+# in that task, where it means nobody's code; the same id in any other task is a copy in something the call's
+# code started. Bounded: an id matters until the consumer's next run in that task, which clears it.
+_ABANDONED_CALLS: "dict[str, weakref.ref | None]" = {}
+_ABANDONED_CALLS_MAX = 4096
+
+
+def _note_abandoned_call(call_id: str, run_context: "RunContext") -> None:
+    driver = run_context.__dict__.get("_driver")
+    _ABANDONED_CALLS[call_id] = weakref.ref(driver) if driver is not None else None
+    if len(_ABANDONED_CALLS) > _ABANDONED_CALLS_MAX:
+        del _ABANDONED_CALLS[next(iter(_ABANDONED_CALLS))]
+
+
+def _left_behind(call_id: str) -> bool:
+    """Whether ``call_id``, ambient here, is only what a stream left mid-way left in the task that was consuming
+    it: nobody's code is running under it. False for a call that ended any other way, and for the same id seen
+    from another task (one the call's code started, which goes on after the stream is cut)."""
+    if call_id not in _ABANDONED_CALLS:
+        return False
+    driver = _ABANDONED_CALLS[call_id]
+    if driver is None:
+        return False  # who was consuming it is not known: not shown to be a leftover
+    try:
+        return driver() is asyncio.current_task()
+    except RuntimeError:  # no running loop here (a thread): not the consumer's task
+        return False
+
+
+def _running_call(call_id: str | None) -> "RunContext | None":
+    """The run context of the call ``call_id`` while its code is still running, else None."""
+    if call_id is None:
+        return None
+    return _LIVE_CALLS.get(call_id) or _DETACHED_CALLS.get(call_id)
+
+
+def _waiting_approval(span: Any) -> dict[str, Any] | None:
+    """The approval ``span`` still waits for (its ``metadata.approval``), or None. Tolerates ``RunStatus``
+    instances and dicts: traces read back from JSONL/SQLite carry the status as a dict."""
+    status = span.status
+    if isinstance(status, dict):
+        code, reason = status.get("code"), status.get("reason")
+    else:
+        code, reason = getattr(status, "code", None), getattr(status, "reason", None)
+    if code != "cancelled" or reason != "approval_required":
+        return None
+    approval = (span.metadata or {}).get("approval")
+    return approval if approval and approval.get("id") else None
 
 
 class _NoDefault:
@@ -148,6 +219,21 @@ class _EarlierRunLookup:
         return getattr(self._original, name)
 
 
+def _own_copy(value: Any) -> Any:
+    """A deep copy of a trigger. Where it holds what cannot be copied (a caller's lock, a client), its dicts and
+    lists are still copied one by one, and only those objects are shared."""
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        if isinstance(value, dict):
+            return {key: _own_copy(item) for key, item in value.items()}
+        if type(value) is list:
+            return [_own_copy(item) for item in value]
+        if type(value) is tuple:
+            return tuple(_own_copy(item) for item in value)
+        return value
+
+
 class RunContext(BaseModel):
     """Runtime execution context shared across all components in a run.
 
@@ -179,6 +265,22 @@ class RunContext(BaseModel):
         default=None,
         description="Platform configuration for the run.",
     )
+
+    trigger: Any = Field(
+        default=None,
+        description=(
+            "What started this run: an object is stamped as the root span's metadata.trigger when it has none "
+            '(e.g. {"kind": "routine", "routine_id": ..., "fire_id": ..., "scheduled_at": ...}). Any value is '
+            "kept as given, as any key of a run context was before this field existed; anything but an object "
+            "is not used. An object is the context's own copy, taken when the context is made: a caller that "
+            "goes on to change its dict (the next fire of a routine) changes nothing of this run."
+        ),
+    )
+
+    @field_validator("trigger")
+    @classmethod
+    def _own_trigger(cls, value: Any) -> Any:
+        return _own_copy(value) if isinstance(value, dict) else value
 
     tracing_provider: Any = Field(
         default=TRACING_UNSET,
@@ -218,17 +320,57 @@ class RunContext(BaseModel):
     #   _foreign_turn_of: SessionScheduler | None — the scheduler that admitted this
     #       root run into a session it owns, told when the run ends (strong until
     #       then: a release it defers completes there)
-    #   _resume_values: dict — active resume values keyed by id, supplied via
-    #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
-    #       approval gate (value normalized to ``ApprovalResolution``) or a
-    #       suspension_id for a ``suspend()`` call (value is arbitrary).
+    #   _steering: bool | None — the channel that started this run asks its root agent to
+    #       take ``lane="next"`` session events between steps (``Agent.steering=None``),
+    #       or, False, forbids it for this turn whatever the agent says (a wake)
+    #   _tool_policy: "read_only" | Collection[str] | Callable | ReadOnlyWithin | None — narrows
+    #       the tools every agent in this run offers its model (``Agent._tool_allowed``)
+    #   _tool_policy_origin: (RunContext, call_id) | None — for a run started inside a call
+    #       under a callable policy, the outermost such call: its agents note what the policy
+    #       let through on that call's span too (``timbal.core.tool_policy``)
+    #   _silence_token: str | None — a root agent whose final answer is exactly this
+    #       marks its span ``metadata.silent`` (a turn the runtime started may stay quiet)
+    #   _cut: asyncio.Event | None — set by the channel on a 'now' message: the steering
+    #       root agent cuts its answer or its interruptible tools and takes the message
+    #   _trace_unsaved: bool — the latest write-through save of the trace failed (cleared by the
+    #       next one that lands): what the provider holds is behind the run. A chat session does
+    #       not go on to the next turn while it is (the next turn reads this one from the provider)
+    #   _before_tool_dispatch: async (agent_path, [(tool_use_id, name, input)]) | None — awaited
+    #       by every agent of the run right before it runs tool calls (a model's, a slash
+    #       command's, those a resume left pending): a durable chat session records them
+    #       first, so a restart knows what may have run
+    #   _resume_values: read-only mapping — active resume values keyed by id,
+    #       supplied via ``resume=`` to fulfill a paused run. The id is an approval_id
+    #       for an approval gate (value normalized to ``ApprovalResolution``) or a
+    #       suspension_id for a ``suspend()`` call (value is arbitrary). A
+    #       ``MappingProxyType``: the call that brings values installs a new mapping
+    #       and puts the previous one back, so writing into one in place would outlive
+    #       that call (an approval decision staying on the context).
     #   _used_resume_ids: set — resume ids that matched a gate or ``suspend()``
     #       during this run; used to warn about unrecognized resume values.
     #   _invoked_by: dict | None — ``{"run_id", "call_id"}`` of the call whose
     #       code started this run (an Agent called inside a tool or step body);
     #       stamped on the root span. Not ``parent_id``: that chains turns.
+    #   _invoker: (RunContext | None, call_id) | None — the run and the call whose code started
+    #       this one: set when the run's root span is minted while a call is ambient that is
+    #       still running (``_LIVE_CALLS`` / ``_DETACHED_CALLS``: an Agent called inside a tool
+    #       or step body, forked or on a context the handler built and set; a background
+    #       child), or that has ended (a task it left running), unless the id is only what a
+    #       stream left mid-way left in its consumer's task (``_left_behind``, by ``_driver``:
+    #       the task consuming this run, noted when its root starts). The run is None when it
+    #       cannot be told. The
+    #       way up the call chain across runs: an approval reviewer follows it to the agent the
+    #       person talks to, since this run's own root agent got its prompt from that call's
+    #       code. ``_invoked_by`` is the fork's link as ids, for the trace
+    #   _parent_pending: (parent_id, {(approval_id, tool_call_id): run it first waited in}) — the approvals
+    #       the run this one continues left waiting, read once when a gate asks (``_left_waiting``)
     #   _live_background: int — background work (spawned tasks, handed-off
     #       continuations) running on this context; it can outlive the root run.
+    #   _save_turn: None | uploads._Queues — a ``sync`` provider's saves of this run, one at a time per
+    #       event loop (``uploads.write_through``): per loop, a mark while one is being written, the queue
+    #       they wait in once two overlapped. Absent until the run's first such save
+    # ``_invoker``, ``_parent_pending``, ``_driver`` and ``_save_turn`` are only set when they apply (read
+    # them with ``__dict__.get``): a default for each would be paid by every run.
     # Do not add class-level annotations for them — pydantic would turn any
     # annotated underscore name back into a (slow) private attribute.
 
@@ -246,31 +388,27 @@ class RunContext(BaseModel):
         """
         pending: list[dict[str, Any]] = []
         for span in self._trace.values():
-            status = span.status
-            code = status.get("code") if isinstance(status, dict) else getattr(status, "code", None)
-            reason = status.get("reason") if isinstance(status, dict) else getattr(status, "reason", None)
-            if code == "cancelled" and reason == "approval_required":
-                approval = (span.metadata or {}).get("approval")
-                if approval and approval.get("id"):
-                    entry = {
-                        "approval_id": approval["id"],
-                        "path": span.path,
-                        "call_id": span.call_id,
-                        "tool_call_id": approval.get("tool_call_id"),
-                        "prompt": approval.get("prompt"),
-                        "description": approval.get("description"),
-                        "kind": approval.get("kind"),
-                        "ui": approval.get("ui"),
-                        "input_schema": approval.get("input_schema"),
-                        "grant_key": approval.get("grant_key", span.path),
-                        "grantable": approval.get("grantable", True),
-                        "metadata": approval.get("metadata", {}),
-                        "input": approval.get("input"),
-                    }
-                    if approval.get("expired"):
-                        entry["expired"] = True
-                        entry["expired_at"] = approval.get("expired_at")
-                    pending.append(entry)
+            approval = _waiting_approval(span)
+            if approval is not None:
+                entry = {
+                    "approval_id": approval["id"],
+                    "path": span.path,
+                    "call_id": span.call_id,
+                    "tool_call_id": approval.get("tool_call_id"),
+                    "prompt": approval.get("prompt"),
+                    "description": approval.get("description"),
+                    "kind": approval.get("kind"),
+                    "ui": approval.get("ui"),
+                    "input_schema": approval.get("input_schema"),
+                    "grant_key": approval.get("grant_key", span.path),
+                    "grantable": approval.get("grantable", True),
+                    "metadata": approval.get("metadata", {}),
+                    "input": approval.get("input"),
+                }
+                if approval.get("expired"):
+                    entry["expired"] = True
+                    entry["expired_at"] = approval.get("expired_at")
+                pending.append(entry)
         return pending
 
     def pending_interactions(self) -> list[dict[str, Any]]:
@@ -318,19 +456,30 @@ class RunContext(BaseModel):
         from .background import bind_background_store
         from .config_loader import resolve_platform_config
 
-        # Plain instance attributes (see NOTE above).
-        self._base_path: Path | None = None
-        self._session_data: dict[str, Any] | None = None
-        # Captured once per run so off-loop emit() can marshal onto it.
-        # None until the first Runnable._stream on this context.
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._resume_values: dict[str, Any] = {}
-        self._used_resume_ids: set[str] = set()
-        self._invoked_by: dict[str, str] | None = None
-        self._live_background = 0
-        self._trace = Trace()
-        self._continuation_owner = None
-        self._foreign_turn_of = None
+        # Plain instance attributes (see NOTE above), set in one go: BaseModel.__setattr__ costs ~1 µs each.
+        self.__dict__.update(
+            _base_path=None,
+            _session_data=None,
+            # Captured once per run so off-loop emit() can marshal onto it.
+            # None until the first Runnable._stream on this context.
+            _loop=None,
+            _resume_values=_NO_RESUME_VALUES,
+            _used_resume_ids=set(),
+            _invoked_by=None,
+            _live_background=0,
+            _trace=Trace(),
+            _continuation_owner=None,
+            _foreign_turn_of=None,
+            _steering=None,
+            # The ChatSession this run belongs to (its id), for MCP provenance (``timbal.ai/session_id``).
+            _session_id=None,
+            _tool_policy=None,
+            _tool_policy_origin=None,
+            _silence_token=None,
+            _cut=None,
+            _before_tool_dispatch=None,
+            _trace_unsaved=False,
+        )
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
         # Allocates nothing unless this session actually has children.
@@ -351,7 +500,7 @@ class RunContext(BaseModel):
             if self.platform_config is None and self.tracing_provider is not None:
                 self.platform_config = getattr(self.tracing_provider, "platform_config", None)
             self.platform_config = resolve_platform_config(self.platform_config)
-            self._tracing_provider = self.tracing_provider
+            self.__dict__["_tracing_provider"] = self.tracing_provider
             return
 
         # Platform credentials are also used by model proxies and tools, even
@@ -367,7 +516,7 @@ class RunContext(BaseModel):
                     event_name="tracing_setup",
                     run_id=self.id,
                 )
-                self._tracing_provider = PlatformTracingProvider
+                self.__dict__["_tracing_provider"] = PlatformTracingProvider
                 return
             if self.platform_config.sync_traces_enabled is False:
                 _get_logger().info(
@@ -387,7 +536,7 @@ class RunContext(BaseModel):
             event_name="tracing_setup",
             run_id=self.id,
         )
-        self._tracing_provider = InMemoryTracingProvider
+        self.__dict__["_tracing_provider"] = InMemoryTracingProvider
 
     async def _get_parent_trace(self, run_id: str | None = None) -> Trace | None:
         """Load the trace data for the parent run, or for ``run_id`` further up the chain.
@@ -469,7 +618,7 @@ class RunContext(BaseModel):
                 return True
         t0 = time.monotonic()
         try:
-            await uploads.write_through(self, self._tracing_provider.put)
+            wrote = await uploads.write_through(self, self._tracing_provider.put)
         except Exception as e:
             _get_logger().error(
                 "Trace save failed. The run continues, but this snapshot was not stored...",
@@ -478,10 +627,13 @@ class RunContext(BaseModel):
                 error=str(e),
             )
             self.update_usage("tracing:save_failed", 1)
+            self.__dict__["_trace_unsaved"] = True
             return False
         finally:
             uploads.count(self, "tracing:wait_ms", round((time.monotonic() - t0) * 1000))
-        uploads.count(self, "tracing:saves")
+        # Stored either way. A save another one's write held (overlapping saves of a sync provider) is not a write.
+        uploads.count(self, "tracing:saves_coalesced" if wrote is False else "tracing:saves")
+        self.__dict__["_trace_unsaved"] = False
         return True
 
     async def _end_background_work(self) -> None:
@@ -508,7 +660,7 @@ class RunContext(BaseModel):
         """
         requested = self.parent_id
         self.parent_id = run_id
-        self._session_data = None
+        self.__dict__["_session_data"] = None
         await self.get_session()
         root = self.root_span()
         if root is not None:
@@ -517,7 +669,7 @@ class RunContext(BaseModel):
     async def get_session(self) -> dict[str, Any]:
         """Get session data that persists across runs."""
         if self._session_data is None:
-            self._session_data = {}
+            self.__dict__["_session_data"] = {}
             if self.parent_id and self._tracing_provider is not None:
                 try:
                     trace = await self._tracing_provider.get(self)
@@ -545,6 +697,58 @@ class RunContext(BaseModel):
                 if root_span.session is not None:
                     self._session_data.update(root_span.session)
         return self._session_data
+
+    async def _left_waiting(self) -> "Mapping[tuple[str, str | None], str]":
+        """The approvals the run this one continues left waiting: this run is running those calls again, and so
+        may any other run continuing the same one, with resume values or without. Empty when it left none (or
+        this run continues nothing).
+
+        Keyed by ``(approval_id, tool_call_id)``: the approval id alone is the call's path and arguments, and a
+        second call with the same ones (the model reads the same status again) is another call, with a gate of
+        its own. Each with the run it first waited in, which is what a claim on it is made under: a gate a
+        partial resume carried forward (answered one, asked again for the other) still waits in the run before
+        as well, and runs continuing either must claim the same thing.
+
+        Read from the parent's trace, once per run, when a gate first asks (never with a provider that keeps no
+        claims: there is nothing to decide). Read with ``get_strict``: the built-in providers' ``get`` answers a
+        failed read with None, which would read as a parent that left nothing waiting. A read that fails is
+        tried again shortly; one that keeps failing raises :class:`~timbal.errors.ApprovalStateUnreadable`, and
+        the gate that asked fails without running or asking again (see there).
+        """
+        parent_id = self.parent_id
+        provider = self._tracing_provider
+        if not parent_id or provider is None:
+            return _NOTHING_WAITING
+        if provider.claim_approval.__func__ is TracingProvider.claim_approval.__func__:
+            return _NOTHING_WAITING
+        known = self.__dict__.get("_parent_pending")
+        if known is None or known[0] != parent_id:
+            for pause in (*_PARENT_READ_RETRIES_S, None):
+                try:
+                    trace = await provider.get_strict(self)
+                    break
+                except Exception as e:
+                    if pause is None:
+                        from ..errors import ApprovalStateUnreadable
+
+                        _get_logger().error(
+                            "Parent trace fetch failed. Its approvals cannot be resolved in this run.",
+                            parent_id=parent_id,
+                            run_id=self.id,
+                            error=str(e),
+                        )
+                        raise ApprovalStateUnreadable(
+                            f"The run being continued ({parent_id}) could not be read, so its approvals cannot "
+                            f"be resolved: {e}"
+                        ) from e
+                    await asyncio.sleep(pause)
+            waiting = {
+                (approval["id"], approval.get("tool_call_id")): str(approval.get("pending_since") or parent_id)
+                for span in (trace.values() if trace is not None else ())
+                if (approval := _waiting_approval(span))
+            }
+            known = self.__dict__["_parent_pending"] = (parent_id, waiting)
+        return known[1]
 
     def root_span(self) -> Span | None:
         """Get the root span of the trace (the first span with no parent)."""
@@ -713,10 +917,17 @@ class RunContext(BaseModel):
         """
         from . import get_call_id
 
-        call_id = get_call_id() or self._trace._root_call_id
+        ambient = call_id = get_call_id() or self._trace._root_call_id
         # Update usage for all parents in the call stack
         while call_id:
-            assert call_id in self._trace, f"RunContext.update_usage: Call ID {call_id} not found in trace."
+            if call_id not in self._trace:
+                # Only the ambient id may be another context's (a handler that swapped this context in is still
+                # inside its own call): the usage is this run's all the same, recorded from its root. Any other
+                # miss is a broken trace.
+                assert call_id is ambient, f"RunContext.update_usage: Call ID {call_id} not found in trace."
+                ambient = None
+                call_id = self._trace._root_call_id
+                continue
             span = self._trace[call_id]
             span.usage[key] = span.usage.get(key, 0) + value
             call_id = span.parent_call_id

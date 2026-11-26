@@ -9,7 +9,7 @@ import pytest
 from structlog.testing import capture_logs
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.context import RunContext
-from timbal.state.tracing.providers.platform import PlatformTracingProvider, _parse_cache_limits
+from timbal.state.tracing.providers.platform import PlatformTracingProvider, _next_snapshot, _parse_cache_limits
 from timbal.state.tracing.trace import Trace
 
 CONFIG = PlatformConfig(
@@ -63,7 +63,7 @@ def clock(monkeypatch):
 
 
 def _remember(key: str, body: bytes) -> None:
-    Provider._remember(key, next(PlatformTracingProvider._snapshots), body)
+    Provider._remember(key, _next_snapshot(), body)
 
 
 async def _store(run_id: str, request: AsyncMock) -> None:
@@ -327,8 +327,8 @@ def test_the_byte_budget_evicts_the_oldest(monkeypatch):
 async def _overlapping_saves(
     older_fails: bool, newer_fails: bool, between=lambda: None
 ) -> tuple[list[str], Trace | None]:
-    """Save run-1 twice; the older snapshot's PATCH finishes after the newer one's, and ``between`` runs
-    in the gap. Returns the request methods and what the next turn reads."""
+    """Save run-1 twice; the older snapshot's PATCH stalls and finishes after the newer one's, and ``between``
+    runs in the gap. Returns the request methods and what the next turn reads."""
     stored = _context(run_id="run-1")
     stored._trace["c1"] = dict(RECORD)
     older_sent, release_older = asyncio.Event(), asyncio.Event()
@@ -348,10 +348,14 @@ async def _overlapping_saves(
             raise RuntimeError("timed out after the write landed")
         return _ok()
 
-    with patch("timbal.platform.utils._request", request):
+    with (
+        patch("timbal.platform.utils._request", request),
+        patch.object(PlatformTracingProvider, "_stall_s", 0.01),  # the newer round goes past the stalled one
+    ):
         older = asyncio.create_task(Provider._store(stored))
         await older_sent.wait()
         stored._trace["c1"].metadata["snapshot"] = "newer"
+        stored._trace["c1"].t1 = 1  # the run's end: the only save that goes past a stalled one
         try:
             await Provider._store(stored)
         except RuntimeError:
@@ -447,24 +451,30 @@ async def test_a_save_that_hangs_holds_the_read_only_for_the_bound(monkeypatch):
     monkeypatch.setattr(PlatformTracingProvider, "_save_wait_s", 0.05)
     stored = _context(run_id="run-1")
     stored._trace["c1"] = dict(RECORD)
-    patch_sent = asyncio.Event()
+    patch_sent, timed_out = asyncio.Event(), asyncio.Event()
 
     async def request(method, **_):
         if method == "PATCH":
             patch_sent.set()
-            await asyncio.Event().wait()
+            await timed_out.wait()  # until the read timeout ends it
+            raise RuntimeError("read timeout")
         return _ok({"trace": [dict(RECORD)]})
 
     with patch("timbal.platform.utils._request", request):
         save = asyncio.create_task(Provider._store(stored))
         await patch_sent.wait()
         trace = await asyncio.wait_for(Provider.get(_context(parent_id="run-1")), timeout=1)
-        save.cancel()
+        save.cancel()  # the caller gives up; the save is not abandoned
         with pytest.raises(asyncio.CancelledError):
             await save
+        assert PlatformTracingProvider._saving
+        timed_out.set()
+        for _ in range(5):
+            await asyncio.sleep(0)
 
     assert trace is not None
     assert not PlatformTracingProvider._saving
+    assert not PlatformTracingProvider._flights
 
 
 def test_interleaved_conversations_keep_their_previous_turn():

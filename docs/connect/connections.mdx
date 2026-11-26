@@ -1,0 +1,401 @@
+---
+title: "Configure connections"
+description: "Tell Timbal Connect which databases and file shares it may use"
+---
+
+The connector only uses sources you list on the server. Each database has a name, a driver and a connection string. Timbal refers to the connection by its name only; the connection string, and any password in it, stays on the server (the only exception is when you [push configuration from Timbal](/connect/operate#change-the-configuration-from-timbal)). File shares work the same way: Timbal sees the name of the share, never its path. See [File shares](#file-shares).
+
+<Note>
+If you're used to the Power BI gateway, this is the main difference: the server and password of a data source are not entered in Timbal. Connections are defined here, on the gateway server, and appear in Timbal by name once the service restarts.
+</Note>
+
+<Tip>
+Prefer to be told what to type? The [Guided setup](/connect/guided-setup) builds the commands and files for your operating system and database.
+</Tip>
+
+## What it can connect to
+
+| `kind` | Database | Capability the connector reports | Connection string |
+| ------ | -------- | -------------------------------- | ----------------- |
+| `postgres` | PostgreSQL | `source:postgres` | URL: `postgres://user:password@host:5432/database` |
+| `mysql` | MySQL and **MariaDB** | `source:mysql` | URL: `mysql://user:password@host:3306/database` |
+| `sql_server` | Microsoft SQL Server | `source:sqlserver` | ADO.NET: `Server=tcp:host,1433;Database=name;...` |
+
+- MariaDB uses `kind: "mysql"`. There is no separate MariaDB kind.
+- One binary contains all three drivers.
+- When a request names no schema, the connector uses `public` (PostgreSQL), `dbo` (SQL Server), or the database in the connection string (MySQL and MariaDB, where "schema" means database).
+
+## Where the connector looks
+
+| Platform | Main configuration | Connections file (optional) |
+| -------- | ------------------ | --------------------------- |
+| Windows | `C:\ProgramData\TimbalConnect\config.json` | `C:\ProgramData\TimbalConnect\connections.json` |
+| Linux / macOS | `/etc/timbal-connect/config.json` | `/etc/timbal-connect/connections.json` |
+
+You can list connections in either place. They are equivalent:
+
+<Tabs>
+  <Tab title="connections.json">
+    A map of connection name to entry. The control-plane settings stay in `config.json` (or `connector.env` on Linux).
+
+    ```json
+    {
+      "erp": {
+        "kind": "postgres",
+        "dsn": "postgres://timbal_ro:secret@127.0.0.1:5432/appdb"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Inside config.json">
+    From connector **0.1.27**. The same map, under the `connections` key, next to the other settings.
+
+    ```json
+    {
+      "url": "wss://api.timbal.ai/v1/connect/channel",
+      "connections": {
+        "erp": {
+          "kind": "postgres",
+          "dsn": "postgres://timbal_ro:secret@127.0.0.1:5432/appdb"
+        }
+      },
+      "filesystems": {
+        "exports": { "path": "/mnt/share/exports" }
+      }
+    }
+    ```
+
+    On Windows and macOS the installer already created `config.json`: add the keys and leave the others alone. On Linux the control-plane settings live in `connector.env`, and `config.json` does not exist yet: create it with only the keys you need. If `doctor` doesn't show the connections you put there, add `TIMBAL_CONNECT_CONFIG=/etc/timbal-connect/config.json` to `connector.env` so the connector reads that file, then restart.
+  </Tab>
+</Tabs>
+
+The connector picks the first source that applies:
+
+1. The `TIMBAL_CONNECT_CONNECTIONS_PATH` environment variable, if set
+2. `connections_path` in `config.json`, pointing to a file
+3. `connections` inside `config.json`
+4. The default `connections.json`, if it exists
+
+Sources are **never merged**. Setting both `connections` and `connections_path` in `config.json` is an error and the connector refuses to start. A configuration [pushed from Timbal](/connect/operate#change-the-configuration-from-timbal) is stored separately and wins over all of the above for the maps it carries.
+
+<Accordion title="Move from connections.json to config.json">
+  1. Copy the whole map from `connections.json` into `config.json` under `"connections"`.
+  2. Delete `connections.json`.
+  3. Restart the service and run `doctor`.
+</Accordion>
+
+<Warning>
+Save every file as **UTF-8 without BOM**. Notepad on older Windows versions and PowerShell's `Set-Content -Encoding utf8` add a byte-order mark, and the file then fails to parse. In PowerShell write it with `[System.IO.File]::WriteAllText($p, $json)` instead. Also remember that `\` must be doubled inside JSON strings: write `"CORP\\svc_timbal"`, not `"CORP\svc_timbal"`.
+</Warning>
+
+## Fields
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `kind` | Yes | `postgres`, `sql_server` or `mysql` (MySQL and MariaDB) |
+| `dsn` | Yes | Connection string. Stays on the server unless you push configuration from Timbal |
+| `auth` | No | SQL Server only. How to log in, see [SQL Server authentication](#sql-server-authentication). Default: credentials from the `dsn` |
+| `query` | No | What ad-hoc queries from Timbal may do on this connection: `"none"`, `"read"` (default) or `"write"` |
+
+### The `query` setting
+
+| Value | Ad-hoc queries from Timbal |
+| ----- | -------------------------- |
+| `"none"` | Refused |
+| `"read"` | Read-only queries. A write is refused even if Timbal asks for it |
+| `"write"` | Reads and writes |
+
+It only applies to ad-hoc SQL. Browsing schemas and [extracting data](/connect/sync-data) are not affected, and the setting on the server always wins over what Timbal requests. The command-line [`query`](/connect/operate#run-a-query-on-the-server) tool ignores it: whoever is logged in to the server already holds the connection string.
+
+<Warning>
+Give the database login only the privileges that queries should have. `"read"` is a second guard, not a replacement for a read-only account.
+</Warning>
+
+## PostgreSQL
+
+<Steps>
+  <Step title="Create a read-only role">
+    Connected to the database as an administrator:
+
+    ```sql
+    CREATE ROLE timbal_ro LOGIN PASSWORD 'a-strong-password';
+    GRANT CONNECT ON DATABASE appdb TO timbal_ro;
+    GRANT USAGE ON SCHEMA public TO timbal_ro;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO timbal_ro;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO timbal_ro;
+    ```
+
+    Repeat the `USAGE` and `SELECT` grants for every other schema you want to reach.
+  </Step>
+  <Step title="Add the connection">
+    ```json
+    {
+      "main": {
+        "kind": "postgres",
+        "dsn": "postgres://timbal_ro:a-strong-password@127.0.0.1:5432/appdb",
+        "query": "read"
+      }
+    }
+    ```
+
+    If the password has special characters, percent-encode them in the URL: `@` becomes `%40`, `/` becomes `%2F`, `:` becomes `%3A`.
+  </Step>
+  <Step title="Restart and check">
+    ```bash
+    timbal-connect doctor --connection main
+    ```
+
+    The restart and `doctor` commands for each platform are in [Apply and verify](#apply-and-verify).
+  </Step>
+</Steps>
+
+## MySQL and MariaDB
+
+<Steps>
+  <Step title="Create a read-only user">
+    ```sql
+    CREATE USER 'timbal_ro'@'%' IDENTIFIED BY 'a-strong-password';
+    GRANT SELECT ON shopdb.* TO 'timbal_ro'@'%';
+    ```
+
+    `'%'` accepts any client address. Use the address of the connector server if you can.
+  </Step>
+  <Step title="Add the connection">
+    ```json
+    {
+      "shop": {
+        "kind": "mysql",
+        "dsn": "mysql://timbal_ro:a-strong-password@db.internal:3306/shopdb",
+        "query": "read"
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+- The database in the connection string is the default schema. Wherever a request takes a `schema`, it means the database name. Leave it out to use the default.
+- Ad-hoc queries take one statement per request.
+- For a table, `doctor` takes `database.table` (a bare table name uses the default schema): `doctor --connection shop --table shopdb.orders`.
+
+## SQL Server
+
+The connection string is an ADO.NET string. Two choices are independent of each other: **how to reach the server** (`Server=`) and **how to log in** (`auth.mode`). Any combination works.
+
+```json
+{
+  "erp": {
+    "kind": "sql_server",
+    "dsn": "Server=tcp:sql01.corp.local,1433;Database=ERP;Encrypt=true;TrustServerCertificate=true",
+    "auth": { "mode": "integrated" },
+    "query": "read"
+  }
+}
+```
+
+### Reaching the server
+
+| `Server=` | Use when |
+| --------- | -------- |
+| `tcp:sql01.corp.local,1433` | Default instance. Always prefer an explicit port |
+| `tcp:localhost,1433` (or `tcp:.,1433`) | The database runs on the same machine as the connector |
+| `tcp:sql01.corp.local,52001` | Named instance whose static port you know (SQL Server Configuration Manager, TCP/IP, IPAll) |
+| `tcp:sql01.corp.local\INSTANCE` | Named instance on a dynamic port. Needs the SQL Browser service and UDP 1434 open |
+
+On locked-down networks, always use `,PORT`: it doesn't need the Browser.
+
+### SQL Server authentication
+
+| `auth.mode` | Logs in as | Works on |
+| ----------- | ---------- | -------- |
+| `sql` (default) | `User Id` and `Password` from the `dsn` | All platforms |
+| `integrated` | The Windows account the service runs as, no password stored | Windows |
+| `windows` | An explicit domain account, `{"mode": "windows", "user": "CORP\\svc", "password": "..."}` | Windows |
+
+<Tabs>
+  <Tab title="sql">
+    The simplest option, and the only one that works on Linux and macOS. Create a login and give it read access:
+
+    ```sql
+    CREATE LOGIN [timbal_ro] WITH PASSWORD = 'a-strong-password';
+    USE [ERP];
+    CREATE USER [timbal_ro] FOR LOGIN [timbal_ro];
+    ALTER ROLE db_datareader ADD MEMBER [timbal_ro];
+    ```
+
+    ```json
+    {
+      "erp": {
+        "kind": "sql_server",
+        "dsn": "Server=tcp:sql01.corp.local,1433;Database=ERP;User Id=timbal_ro;Password=a-strong-password;Encrypt=true;TrustServerCertificate=true"
+      }
+    }
+    ```
+
+    `Login failed for user 'timbal_ro'` means the login doesn't exist, or the server only allows Windows logins (mixed mode off), which is the default for Business Central and NAV. Use `integrated` or `windows` in that case.
+  </Tab>
+  <Tab title="integrated">
+    No password on disk: the connector logs in as whichever Windows account the service runs as. Many Business Central and NAV databases only allow Windows logins, so `sql` fails with `Login failed for user`. Use `integrated` with a dedicated service account:
+
+    <Steps>
+      <Step title="Run the service as a domain account">
+        A group managed service account (gMSA) is best because no password is stored. Note the trailing `$` and the empty password:
+
+        ```powershell
+        sc.exe config timbal-connect obj= "CORP\svc_timbal$" password= ""
+        Restart-Service timbal-connect
+        ```
+
+        For a normal domain user, pass its password instead of `""`: `sc.exe config timbal-connect obj= "CORP\svc_timbal" password= "<password>"`.
+      </Step>
+      <Step title="Grant it read access in SQL Server">
+        ```sql
+        CREATE LOGIN [CORP\svc_timbal$] FROM WINDOWS;
+        USE [ERP];
+        CREATE USER  [CORP\svc_timbal$] FOR LOGIN [CORP\svc_timbal$];
+        ALTER ROLE db_datareader ADD MEMBER [CORP\svc_timbal$];
+        ```
+      </Step>
+      <Step title="Add the connection">
+        ```json
+        {
+          "erp": {
+            "kind": "sql_server",
+            "dsn": "Server=tcp:sql01.corp.local,1433;Database=ERP;Encrypt=true;TrustServerCertificate=true",
+            "auth": { "mode": "integrated" }
+          }
+        }
+        ```
+      </Step>
+    </Steps>
+
+    By default the service runs as `NT AUTHORITY\NetworkService`, which reaches a SQL Server on *another* machine as the computer account (`CORP\SERVERNAME$`). That account rarely has a login, hence `Login failed for user 'CORP\SERVERNAME$'`. If SQL Server is on the same machine as the connector, `NetworkService` often works without changing the account.
+
+    On Linux and macOS this mode fails at connect with `connection auth mode 'integrated' (SSPI) is only supported on Windows connectors`.
+  </Tab>
+  <Tab title="windows">
+    Use it when you can't change the account the service runs as. The password sits in the file, so prefer `integrated` with a gMSA if you can.
+
+    ```json
+    {
+      "erp": {
+        "kind": "sql_server",
+        "dsn": "Server=tcp:sql01.corp.local,1433;Database=ERP;Encrypt=true;TrustServerCertificate=true",
+        "auth": { "mode": "windows", "user": "CORP\\svc_timbal", "password": "a-strong-password" }
+      }
+    }
+    ```
+
+    `user` must be `DOMAIN\\user`: a bare name authenticates against the local machine and fails. It is a Windows login, so it works even when SQL logins are disabled. If the domain blocks NTLM you get a generic `Login failed`: use `integrated` with a service account.
+  </Tab>
+</Tabs>
+
+### Encryption
+
+| In the `dsn` | Meaning |
+| ------------ | ------- |
+| `Encrypt=true;TrustServerCertificate=true` | Encrypted, certificate not verified. The usual choice for on-premises servers with self-signed certificates |
+| `Encrypt=true;TrustServerCertificate=false` | Encrypted and verified. The certificate must be trusted and match the `Server=` host name |
+| `Encrypt=false` | Not encrypted. Avoid |
+
+With verification on and a self-signed certificate you get *"The certificate chain was issued by an authority that is not trusted"*. Install the certificate in the connector server's trust store, or set `TrustServerCertificate=true`. Omitting `TrustServerCertificate` on newer drivers behaves like `false`. Connecting by IP or short name also fails when the certificate names the FQDN: make `Server=` match.
+
+## Several sources on one connector
+
+One connector can hold any mix of databases and file shares:
+
+```json
+{
+  "url": "wss://api.timbal.ai/v1/connect/channel",
+  "connections": {
+    "main": { "kind": "postgres",   "dsn": "postgres://timbal_ro:secret@127.0.0.1:5432/appdb" },
+    "shop": { "kind": "mysql",      "dsn": "mysql://timbal_ro:secret@127.0.0.1:3306/shopdb" },
+    "erp":  { "kind": "sql_server", "dsn": "Server=tcp:sql01.corp.local,1433;Database=ERP;Encrypt=true;TrustServerCertificate=true",
+              "auth": { "mode": "integrated" } }
+  },
+  "filesystems": {
+    "exports": { "path": "/mnt/share/exports" }
+  }
+}
+```
+
+## File shares
+
+Directories the connector may read are listed in `config.json`, under `filesystems`. They are never entries in `connections.json`. The key is the name Timbal uses for that share; the path stays on the server.
+
+| Platform | File |
+| -------- | ---- |
+| Windows | `C:\ProgramData\TimbalConnect\config.json` |
+| Linux / macOS | `/etc/timbal-connect/config.json` |
+
+On Windows and macOS the installer already created this file. Add `filesystems` and leave the other keys alone (the control-plane URL and the enrollment token). On Linux those live in `connector.env` and `config.json` does not exist yet: create it with only the map.
+
+```json
+{
+  "filesystems": {
+    "exports": { "path": "/srv/exports" }
+  }
+}
+```
+
+On Windows, double the backslashes: `"path": "D:\\Shares\\invoices"`.
+
+`path` is the only field. It is a directory on the server: a local folder, or a share already mounted there. SFTP and FTP locations are not supported directly: mount or synchronize them to a local folder first.
+
+The service account has to be able to read the directory. On Windows that is `NT AUTHORITY\NetworkService` unless you changed the service account. On Linux it is the `timbal-connect` user, and the unit sets `ProtectHome=true`, so a path under `/home` is hidden from the service.
+
+Rules the connector enforces:
+
+- **Names only cross the wire.** Timbal sees the name of the share and paths relative to it.
+- **Confined to the share.** A symbolic link that points outside is rejected, and folder walks never follow symbolic links.
+- **Read-only.** Timbal can list, summarize, search and copy files out. It cannot write to the server.
+- **No commands.** The connector reads files itself; it never runs `ls`, `grep`, `find` or anything else on the server.
+
+With at least one share configured, the connector reports the `fs:browse` and `fs:copy` capabilities. With none, those features don't exist on it. To explore a share and copy files into a knowledge base: [File shares in Timbal](/connect/filesystems).
+
+## Web services
+
+From connector 0.1.35, `config.json` can also list MCP servers on your network under `services`, so that Cursor or a Timbal agent can call them through Timbal. The service's address and credential stay on the server. How to set one up: [Web services](/connect/web-services).
+
+## Apply and verify
+
+Restart the service after every change, then run `doctor`, which really connects to every database in the configuration and reports, per connection, whether it worked and why not. It also checks each share and reports whether the directory is readable.
+
+<Tabs>
+  <Tab title="Windows">
+    ```powershell
+    Restart-Service timbal-connect
+    & "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" doctor
+    ```
+  </Tab>
+  <Tab title="Linux">
+    ```bash
+    sudo systemctl restart timbal-connect
+    sudo bash -c 'set -a; . /etc/timbal-connect/connector.env; exec /opt/timbal-connect/current/timbal-connect doctor'
+    ```
+  </Tab>
+  <Tab title="macOS">
+    ```bash
+    sudo launchctl kickstart -k system/ai.timbal.connect
+    sudo /opt/timbal-connect/current/timbal-connect doctor
+    ```
+  </Tab>
+</Tabs>
+
+If `doctor` says a remote local-config override is active, that override replaces the maps you edited until you run `timbal-connect local-config clear` and restart.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Operate the connector" icon="gauge" href="/connect/operate">
+    doctor in depth, running queries, upgrades and revoking.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/connect/troubleshooting">
+    When `doctor` or the service log names a failure.
+  </Card>
+  <Card title="Network requirements" icon="network-wired" href="/connect/network-requirements">
+    If the connector stays offline after it starts.
+  </Card>
+  <Card title="Guided setup" icon="wand-magic-sparkles" href="/connect/guided-setup">
+    The commands for your system, step by step.
+  </Card>
+</CardGroup>

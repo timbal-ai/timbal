@@ -222,6 +222,18 @@ class TestCoerceElicitResume:
 # --- annotations -> approval gate ------------------------------------------------
 
 
+class TestReadOnlyFromAnnotations:
+    async def test_only_tools_the_server_marks_read_only_are(self, make_server):
+        server = make_server()
+        try:
+            tools = {t.name: t for t in await server.resolve()}
+            assert tools["read_kb"].read_only is True
+            assert tools["plain"].read_only is False
+            assert tools["delete_thing"].read_only is False
+        finally:
+            await server.close()
+
+
 class TestApprovalFromAnnotations:
     async def test_destructive_policy_gates_only_destructive_tools(self, make_server):
         server = make_server(approval="destructive")

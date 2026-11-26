@@ -30,6 +30,10 @@ class Skill(ToolSet):
 
     _agent_path: str = PrivateAttr()
 
+    def _provider_identity(self) -> tuple:
+        # What it is (where it lives on disk), not what it did: ``references`` fills as it reads its files.
+        return (type(self).__module__, type(self).__qualname__, str(self.path))
+
     @model_validator(mode="after")
     def validate_skill_structure(self) -> "Skill":
         """Validate that the path is a directory with proper skill structure."""
@@ -147,7 +151,6 @@ class ReadSkill(Tool):
                 session["__in_context_skills"][_agent_path] = []
             if name not in session["__in_context_skills"][_agent_path]:
                 session["__in_context_skills"][_agent_path].append(name)
-
 
             if reference:
                 return skill.get_reference(reference)

@@ -195,7 +195,7 @@ async def grade_rubric(
     rubric: Any,
     text: str,
     *,
-    model: Any = "openai/gpt-5-mini",
+    model: Any = "anthropic/claude-haiku-5-5",
     context: str | None = None,
     pass_threshold: float = 1.0,
     max_concurrency: int = 8,

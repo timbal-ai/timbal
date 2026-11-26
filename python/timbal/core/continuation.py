@@ -235,6 +235,8 @@ class AgentContinuation:
         if self._followup is not None:
             self._followup.started(context)
             context.root_span().metadata["trigger"]["continuation_index"] = self.continuations
+            if isinstance(context.trigger, dict):
+                context.trigger["continuation_index"] = self.continuations  # the run's own copy says it too
 
     def _end_run(self, output: OutputEvent) -> None:
         self._scheduler.turn_finished()

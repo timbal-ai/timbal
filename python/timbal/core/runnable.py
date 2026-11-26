@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import contextlib
 import contextvars
 import hashlib
 import inspect
@@ -11,6 +12,7 @@ import traceback
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any, Literal
 
 from pydantic import (
@@ -44,7 +46,16 @@ from ..state import (
     set_parent_call_id,
     set_run_context,
 )
-from ..state.context import RunContext, _EmitSink
+from ..state.context import (  # noqa: F401  (_own_copy: chat_session imports it from here)
+    _DETACHED_CALLS,
+    _LIVE_CALLS,
+    RunContext,
+    _EmitSink,
+    _left_behind,
+    _note_abandoned_call,
+    _own_copy,
+    _running_call,
+)
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
 from ..state.tracing.providers import TRACING_UNSET
 from ..state.tracing.span import Span
@@ -67,6 +78,7 @@ from ..types.events.delta import Custom, DeltaEvent, DeltaItem
 from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import dump, invalidate_message_dump_caches, sync_to_async_gen
+from .tool_policy import describe_tool_policy
 
 
 def _get_logger():
@@ -223,6 +235,23 @@ ApprovalPrompt = str | Callable[..., str | None] | None
 ApprovalUi = dict[str, Any] | BaseModel | Callable[..., dict[str, Any] | BaseModel | None] | None
 
 
+_current_task = asyncio.current_task
+
+
+def _inherit_tool_policy(run_context: RunContext, entry_run_context: RunContext, entry_call_id: str) -> None:
+    """Give a run started inside a call (``entry_call_id`` of ``entry_run_context``) that run's tool policy.
+
+    A callable policy also gets an origin: the outermost call it came through, on whose span the new run's
+    agents note what they were offered (``Agent._record_allowed_tools``), since a session continuing the
+    parked outer run rebuilds the callable from that trace alone.
+    """
+    policy = entry_run_context._tool_policy
+    run_context.__dict__["_tool_policy"] = policy
+    if callable(policy):
+        origin = entry_run_context.__dict__.get("_tool_policy_origin") or (entry_run_context, entry_call_id)
+        run_context.__dict__["_tool_policy_origin"] = origin
+
+
 def _normalize_resume_values(raw: Any) -> dict[str, Any]:
     """Normalize caller-provided resume values keyed by id.
 
@@ -274,6 +303,11 @@ def _approval_id_for(path: str, input_dump: Any) -> str:
     """
     payload = {"path": path, "input": input_dump}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:32]
+
+
+ATTENDED_TRIGGER_KINDS = ("user_message", "resume")
+"""Root ``metadata.trigger`` kinds an approval reviewer reads as a person's turn (``ApprovalRequest.attended``;
+no trigger at all counts too). What an application starts (a wake, a routine) must not use them."""
 
 
 class Runnable(ABC, BaseModel):
@@ -991,6 +1025,17 @@ class Runnable(ABC, BaseModel):
 
         return _cancel(task_id)
 
+    def message_background_task(self, task_id: str, message: str) -> dict[str, Any]:
+        """Send a running background agent a message it reads after its current step."""
+        from ..state.background import message_background_task as _message
+
+        return _message(task_id, message, source="parent")
+
+    @property
+    def _takes_task_messages(self) -> bool:
+        """Whether this runnable, detached as a background task, reads messages sent to it (agents do)."""
+        return False
+
     def read_background_transcript(self, task_id: str, after: int = 0) -> dict[str, Any]:
         """Raw events for a background task from cursor ``after``."""
         from ..state.background import read_background_transcript as _read
@@ -1417,6 +1462,8 @@ class Runnable(ABC, BaseModel):
                 prompt=prompt,
                 description=verdict.reason,
                 kind="guardrail_escalation",
+                # (A runnable whose approvals cannot be remembered keeps that when a guardrail asks for one.)
+                grantable=self.approval_grantable,
                 metadata={"guardrail": rail.name},
             )
             return validated_input, events, forced, False
@@ -1490,6 +1537,9 @@ class Runnable(ABC, BaseModel):
             "metadata": approval_decision.metadata,
             "input": redacted_input,
         }
+        # What this gate is, among those the run being continued left waiting: this tool call's. The approval
+        # id alone is the call's path and arguments, which a second, identical call shares.
+        waited = (approval_id, tool_call_id)
         approval_resolution = None
         approval_cancel: Cancel | None = None
         granted_by: ApprovalGrant | None = None
@@ -1533,15 +1583,19 @@ class Runnable(ABC, BaseModel):
                 run_context.update_usage("approvals:granted", 1)
 
         # A decision OR a cancel claims the gate; the first claimer wins and
-        # any later duplicate (resolve or cancel) stops here. A grant is not a
-        # resume of a pending gate, so there is nothing to race for.
-        if (
-            (approval_resolution is not None or approval_cancel is not None)
-            and granted_by is None
-            and run_context._tracing_provider is not None
-        ):
+        # any later duplicate (resolve or cancel) stops here. A grant claims
+        # only a gate that was left waiting: a fresh call it approves has
+        # nothing to race for.
+        async def _claim() -> bool:
+            """Claim the gate for this run; False (and the span closed as already claimed) when another run did."""
+            if run_context._tracing_provider is None:
+                return True
+            # Under the run the gate first waited in, not always the one this run continues: a partial resume
+            # carries an unanswered gate forward, and it then waits in both runs. Runs continuing either one
+            # must be after the same claim.
+            waiting = await run_context._left_waiting()
             claimed = await run_context._tracing_provider.claim_approval(
-                str(run_context.parent_id) if run_context.parent_id else None,
+                waiting.get(waited) or (str(run_context.parent_id) if run_context.parent_id else None),
                 approval_id,
                 str(run_context.id),
             )
@@ -1560,7 +1614,14 @@ class Runnable(ABC, BaseModel):
                     "status": "approval_already_claimed",
                 }
                 span._output_dump = await dump(span.output)
-                return False, None, validated_input
+            return claimed
+
+        if approval_resolution is not None or approval_cancel is not None:
+            # A grant claims too when it resolves a gate the run this one continues left waiting: that call
+            # is being run again here, and another run continuing the same one would find the same grant.
+            if granted_by is None or waited in await run_context._left_waiting():
+                if not await _claim():
+                    return False, None, validated_input
 
         if approval_cancel is not None:
             run_context.update_usage("approvals:cancelled", 1)
@@ -1571,7 +1632,37 @@ class Runnable(ABC, BaseModel):
             span._output_dump = await dump(span.output)
             return False, None, validated_input
 
+        # Nobody answered this call yet: the agent's reviewer (if it has one) may, before a person is asked.
+        review = None
         if approval_resolution is None:
+            hidden = redaction_active and await dump(redacted_input) != input_dump
+            review = await self._review_gate(approval_decision, redacted_input, span, run_context, hidden=hidden)
+            if review is not None:
+                span.metadata["approval"]["review"] = review.record()
+                run_context.update_usage(f"approvals:reviewer_{review.verdict}", 1)
+                if review.verdict != "escalate":
+                    # A gate the run this one continues left waiting is being run again here, resume values
+                    # given or not, and another run continuing the same one may be deciding it too: claimed
+                    # like a person's answer, so the call runs at most once. The run that loses a claim
+                    # stops there (see ``RunCancelled``), so what would follow is not done twice either.
+                    # A call that waited nowhere has nothing to race for.
+                    if waited in await run_context._left_waiting() and not await _claim():
+                        return False, None, validated_input
+                    approved = review.verdict == "approve"
+                    approval_resolution = ApprovalResolution(
+                        approved=approved,
+                        reason=review.reason if approved else f"Denied by the approval reviewer: {review.reason}",
+                        approver_id=review.reviewer,
+                        decided_at=int(time.time() * 1000),
+                        metadata={"reviewed": True},
+                    )
+
+        if approval_resolution is None:
+            # Waiting again in a run that continues one it already waited in: it keeps the run it first
+            # waited in (see ``_claim``), for whoever continues this run to claim it under.
+            carried = (await run_context._left_waiting()).get(waited)
+            if carried is not None:
+                span.metadata["approval"]["pending_since"] = carried
             # Status/output MUST be set BEFORE the caller yields the event.
             # If the consumer breaks the stream right after seeing the
             # ApprovalEvent, GeneratorExit fires at the yield and we'd
@@ -1608,7 +1699,12 @@ class Runnable(ABC, BaseModel):
                 ui=approval_decision.ui,
                 grant_key=grant_key,
                 grantable=approval_decision.grantable,
-                metadata=approval_decision.metadata,
+                # An escalating reviewer's reason goes on the card: why a person is asked.
+                metadata=(
+                    {**(approval_decision.metadata or {}), "review": review.record()}
+                    if review is not None
+                    else approval_decision.metadata
+                ),
             )
             run_context.update_usage("approvals:required", 1)
             return False, approval_event, validated_input
@@ -1686,6 +1782,110 @@ class Runnable(ABC, BaseModel):
             span.metadata["approval"]["effective_input"] = span.input
 
         return True, None, validated_input
+
+    async def _review_gate(
+        self,
+        approval_decision: ApprovalPolicyDecision,
+        redacted_input: Any,
+        span: Any,
+        run_context: Any,
+        *,
+        hidden: bool = False,
+    ) -> Any:
+        """The verdict of the nearest calling agent's ``approval_reviewer`` on this gate, or None (no reviewer, or
+        one that does not review this kind of approval)."""
+        from ..types.message import Message
+
+        caller = run_context.parent_of(span)
+        while caller is not None and getattr(caller.runnable, "_approval_reviewer", None) is None:
+            caller = run_context.parent_of(caller)
+        if caller is None:
+            return None
+        reviewer = caller.runnable._approval_reviewer
+        if not reviewer.reviews(approval_decision.kind):
+            return None
+        from .approval_reviewer import ApprovalRequest, said_by_the_user
+
+        # Evidence is what the person said, to the agent the person talks to: the root agent of the run a person
+        # (or a channel) started. Every agent below it got its prompt from a model or from code: a subagent,
+        # an agent under a workflow step, and an agent some call's code started as a run of its own (inside a
+        # tool or step body, where it is its run's root). Followed up the call chain, across those runs.
+        outermost, top_context, top_span = caller, run_context, caller
+        while True:
+            above = top_context.parent_of(top_span)
+            if above is None:
+                invoker = top_context.__dict__.get("_invoker")
+                if invoker is None:
+                    break
+                invoking_context, invoking_call_id = invoker
+                above = invoking_context._trace.get(invoking_call_id) if invoking_context is not None else None
+                if above is None:
+                    outermost = None  # the call that started this run cannot be found: nobody to cite
+                    break
+                top_context = invoking_context
+            top_span = above
+            if isinstance(top_span.memory, list):
+                outermost = top_span
+
+        def said(span: Any) -> list[str]:
+            memory = span.memory if isinstance(span.memory, list) else []
+            return [
+                text
+                for message in memory
+                if isinstance(message, Message)
+                and said_by_the_user(message)
+                and (text := message.collect_text().strip())
+            ]
+
+        # The request the person-facing agent is acting on may itself be one a running call posted to its
+        # session (``ChatSession.send`` from a tool): its latest message that is not the runtime's.
+        posted_by_code = None
+        if outermost is not None:
+            for message in reversed(outermost.memory if isinstance(outermost.memory, list) else []):
+                if (
+                    isinstance(message, Message)
+                    and message.role == "user"
+                    and (message.metadata or {}).get("source") is None
+                ):
+                    if (message.metadata or {}).get("sent_by"):
+                        posted_by_code = message.collect_text().strip() or None
+                    break
+
+        if outermost is not None and outermost is top_span:
+            # ``top_span`` is the root of the run nothing else started: an agent there talks to the person.
+            user_messages = said(outermost)
+            delegated_by = caller if outermost is not caller else None
+        else:
+            # Under a workflow step, a tool, or a chain that cannot be followed: a request, not the user's words.
+            user_messages = []
+            delegated_by = caller
+        # Who started the turn is on the root of that same run; a chain that cannot be followed shows nobody,
+        # and neither does a turn opened by a message a call's code posted.
+        trigger = (top_span.metadata or {}).get("trigger") if outermost is not None else None
+        attended = (
+            outermost is not None
+            and posted_by_code is None
+            and (not isinstance(trigger, dict) or trigger.get("kind") in ATTENDED_TRIGGER_KINDS)
+        )
+        user_messages = user_messages[-reviewer.context_messages :] if reviewer.context_messages else []
+        delegation = posted_by_code
+        if delegated_by is not None:
+            asked = said(delegated_by)
+            delegation = asked[-1] if asked else delegation
+        request = ApprovalRequest(
+            tool=self.name,
+            arguments=redacted_input,
+            description=getattr(self, "description", None),
+            prompt=approval_decision.prompt,
+            kind=approval_decision.kind,
+            ui=approval_decision.ui,
+            user_messages=user_messages,
+            attended=attended,
+            trigger=trigger if isinstance(trigger, dict) else None,
+            delegation=delegation,
+            hidden_arguments=hidden,
+        )
+        return await reviewer.decide(request)
 
     @staticmethod
     async def _find_approval_grant(run_context: Any, grant_key: str) -> ApprovalGrant | None:
@@ -1850,6 +2050,8 @@ class Runnable(ABC, BaseModel):
         registered = False
         try:
             task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
+            _DETACHED_CALLS[span.call_id] = run_context
+            task.add_done_callback(lambda _task, call_id=span.call_id: _DETACHED_CALLS.pop(call_id, None))
             record = register_background_task(
                 name=self.name,
                 input=input,
@@ -1866,6 +2068,7 @@ class Runnable(ABC, BaseModel):
                 if task is not None:
                     task.cancel()
             raise
+        record.steerable, record.call_id = self._takes_task_messages, span.call_id
         record_box.append(record)
         return {"task_id": record.task_id, "status": "running"}
 
@@ -1962,6 +2165,8 @@ class Runnable(ABC, BaseModel):
         registered = False
         try:
             task = asyncio.create_task(_continue_in_background(), context=contextvars.copy_context())
+            _DETACHED_CALLS[span.call_id] = run_context
+            task.add_done_callback(lambda _task, call_id=span.call_id: _DETACHED_CALLS.pop(call_id, None))
             record = register_background_task(
                 name=self.name,
                 input=input,
@@ -1989,6 +2194,7 @@ class Runnable(ABC, BaseModel):
                 if task is not None:
                     task.cancel()
             raise
+        record.steerable, record.call_id = self._takes_task_messages, span.call_id
         record_box.append(record)
         return {"task_id": record.task_id, "status": "running"}, start, record
 
@@ -2072,6 +2278,7 @@ class Runnable(ABC, BaseModel):
         _entry_call_id = _call_id
         if run_context is None:
             run_context = RunContext(parent_id=explicit_parent_id, tracing_provider=self.tracing_provider)
+            _entry_parent_call_id = _parent_call_id  # put back at exit when a call's code started this run
             _parent_call_id = None
             _call_id = None
         elif "." not in self._path:
@@ -2094,6 +2301,16 @@ class Runnable(ABC, BaseModel):
                         tracing_provider=self.tracing_provider,
                         platform_config=_inherited_platform_config,
                     )
+                    if _entry_call_id is not None:
+                        # Started by a call that outlived its run (a background tool): its tools are still
+                        # that run's, so a read-only tool cannot run an agent with write tools.
+                        _inherit_tool_policy(run_context, _entry_run_context, _entry_call_id)
+                        from ..state.background import current_background_task_id
+
+                        if current_background_task_id() is not None:
+                            # A background child's code, for certain (an id a stream abandoned mid-way
+                            # left behind in its consumer's task is nobody's code).
+                            run_context.__dict__["_invoker"] = (_entry_run_context, _entry_call_id)
                 else:
                     run_context = RunContext(
                         parent_id=explicit_parent_id,
@@ -2104,6 +2321,9 @@ class Runnable(ABC, BaseModel):
                         # Started by a running call's code (an Agent inside a tool or step
                         # body): link the two runs both ways so a trace viewer can follow it.
                         run_context._invoked_by = {"run_id": _entry_run_context.id, "call_id": _entry_call_id}
+                        run_context.__dict__["_invoker"] = (_entry_run_context, _entry_call_id)
+                        # Its tools are the caller's run's: a read-only tool cannot run an agent with write tools.
+                        _inherit_tool_policy(run_context, _entry_run_context, _entry_call_id)
                         caller_span = _entry_run_context._trace.get(_entry_call_id)
                         if caller_span is not None:
                             caller_span.metadata.setdefault("invoked_runs", []).append(run_context.id)
@@ -2114,13 +2334,9 @@ class Runnable(ABC, BaseModel):
             # A top-level invoke always mints the first span of its context,
             # and that span must be a root: carrying the stale ids over would
             # produce an orphan parent_call_id that trace validation rejects.
+            _entry_parent_call_id = _parent_call_id  # put back at exit when a call's code started this run
             _parent_call_id = None
             _call_id = None
-        previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
-        if _background_handoff_control is not None:
-            run_context._background_handoff_control = _background_handoff_control
-        previous_resume_values = dict(run_context._resume_values)
-        run_context._resume_values.update(resume_values)
         set_run_context(run_context)
 
         _new_parent_call_id = _call_id
@@ -2150,8 +2366,35 @@ class Runnable(ABC, BaseModel):
 
         assert _new_call_id not in run_context._trace, f"Call ID {_new_call_id} already exists in trace."
         metadata = {**self.metadata}  # Shallow copy
-        if _new_parent_call_id is None and run_context._invoked_by is not None:
-            metadata["invoked_by"] = run_context._invoked_by
+        if _new_parent_call_id is None:
+            if _entry_call_id is not None and run_context.__dict__.get("_invoker") is None:
+                # A run of its own that the forks above did not link, minted while a call is ambient: on a
+                # context the handler built and set, or with none set. If that call is still running (or
+                # detached, its code still running), its code started this run all the same.
+                invoking = _running_call(_entry_call_id)
+                if invoking is None and not _left_behind(_entry_call_id):
+                    # The call has ended: its id is ambient here because something its code started is still
+                    # going, a task it left running (also when its stream was cut meanwhile). Not so in the
+                    # task that was consuming a stream it left mid-way: there the id is only left behind,
+                    # nobody's code. Its run is the context that task carries, when that holds the call.
+                    held = _entry_run_context is not None and _entry_call_id in _entry_run_context._trace
+                    run_context.__dict__["_invoker"] = (_entry_run_context if held else None, _entry_call_id)
+                    invoking = _entry_run_context if held else None
+                elif invoking is not None:
+                    run_context.__dict__["_invoker"] = (invoking, _entry_call_id)
+                if invoking is not None and run_context._tool_policy is None:
+                    # Its tools are the caller's run's here too: a read-only tool cannot run an agent
+                    # with write tools by building it a context of its own.
+                    _inherit_tool_policy(run_context, invoking, _entry_call_id)
+            if run_context._invoked_by is not None:
+                metadata["invoked_by"] = run_context._invoked_by
+            if run_context._tool_policy is not None:
+                # What a run resuming this one restores when it does not say (see server/http.py).
+                metadata["tool_policy"] = describe_tool_policy(run_context._tool_policy)
+            if isinstance(run_context.trigger, dict):
+                # What started the run, over the runnable's own static metadata (an approval reviewer reads it). A
+                # copy: a tool's write to ``ctx.trigger`` changes nothing stored.
+                metadata["trigger"] = _own_copy(run_context.trigger)
         span = Span(
             path=self._path,
             call_id=_new_call_id,
@@ -2165,7 +2408,8 @@ class Runnable(ABC, BaseModel):
         # it. The per-call sink itself is allocated lazily on first emit() —
         # benches never emit, so this is a pointer compare, not an object.
         if run_context._loop is None:
-            run_context._loop = asyncio.get_running_loop()
+            # And the task consuming this run: where its ids stay behind if it leaves the stream mid-way.
+            run_context.__dict__.update(_loop=asyncio.get_running_loop(), _driver=_current_task())
 
         def _restore_context():
             """Restore this invocation's context vars.
@@ -2199,6 +2443,15 @@ class Runnable(ABC, BaseModel):
         # first so finally closes *this* object, not the child's.
         emit_sink = None
         spawned_background = False
+        # Installed last, with nothing that can raise before the ``try`` whose ``finally`` takes them
+        # back off: a call that fails while it is being set up leaves neither on the context.
+        previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
+        if _background_handoff_control is not None:
+            run_context.__dict__["_background_handoff_control"] = _background_handoff_control
+        # A read-only mapping (see RunContext's NOTE), so a call without resume values shares it.
+        previous_resume_values = run_context._resume_values
+        if resume_values:
+            run_context.__dict__["_resume_values"] = MappingProxyType({**previous_resume_values, **resume_values})
         handoff_control = (
             getattr(run_context, "_background_handoff_control", None)
             if self.background_mode == "auto" and self._is_async_gen and not self._is_orchestrator
@@ -2206,6 +2459,7 @@ class Runnable(ABC, BaseModel):
         )
         if handoff_control is not None:
             handoff_control.register(span.call_id, self.name)
+        _LIVE_CALLS[_new_call_id] = run_context
         try:
             start_event = StartEvent(
                 run_id=run_context.id,
@@ -2480,6 +2734,7 @@ class Runnable(ABC, BaseModel):
 
         except GeneratorExit:
             _generator_closed = True
+            _note_abandoned_call(_new_call_id, run_context)
             # Only overwrite status if no earlier branch (e.g. approval gate)
             # already set it. This keeps approval_required, early_exit etc.
             # intact when a consumer breaks the stream right after their event.
@@ -2487,6 +2742,12 @@ class Runnable(ABC, BaseModel):
                 span.status = RunStatus(code="cancelled", reason="interrupted", message="")
                 if collector is not None:
                     span.output = _collector_output_on_interrupt(collector)
+                    # Stored from its dump, like every other way a call ends: without it the trace says
+                    # the call produced nothing, whatever it had streamed. (Plain data: no suspension.)
+                    try:
+                        span._output_dump = await dump(span.output)
+                    except Exception as dump_err:
+                        _get_logger().warning("output_dump_failed_on_exit", error=str(dump_err))
             if collector is not None and not handed_off:
                 # Closing a parent must also close a suspended nested handler;
                 # async-for does not propagate aclose() to its inner iterator.
@@ -2500,8 +2761,10 @@ class Runnable(ABC, BaseModel):
             # A human supplied a Cancel on the resume channel (approval or
             # suspend). Terminal: the whole run ends cancelled and nothing is
             # fed back to the model. Distinct from a denial (approval_denied).
-            span.status = RunStatus(code="cancelled", reason="cancelled", message=cancelled.message)
-            span.output = {"status": "cancelled", "reason": cancelled.message}
+            # Or a gate below was already claimed by another run continuing the same paused one
+            # (``reason="approval_already_claimed"``): that run goes on with the turn, this one stops.
+            span.status = RunStatus(code="cancelled", reason=cancelled.reason, message=cancelled.message)
+            span.output = {"status": cancelled.reason, "reason": cancelled.message}
             span._output_dump = await dump(span.output)
 
         except EarlyExit as early_exit:
@@ -2581,6 +2844,14 @@ class Runnable(ABC, BaseModel):
             # the original assignment, leaving span.status=None and causing a Pydantic
             # ValidationError in the finally block (OutputEvent.status is required).
             span.status = RunStatus(code="cancelled", reason="interrupted", message=str(e))
+            if span._input_dump is None and span.input is not None:
+                # Cut before its input was resolved (admission, session data, the params themselves): stored
+                # as it was given. A turn that stored neither its memory nor its input would take its prompt
+                # out of the conversation: the next turn rebuilds a cut turn from it (Agent._previous_memory).
+                try:
+                    span._input_dump = await dump(span.input)
+                except Exception:
+                    span._input_dump = None
             if isinstance(e, InterruptError):
                 _get_logger().warning(
                     "Interrupted",
@@ -2651,6 +2922,7 @@ class Runnable(ABC, BaseModel):
             raise
 
         finally:
+            _LIVE_CALLS.pop(_new_call_id, None)
             # Only skip the snapshot when spawn actually rebound the sink.
             # run_in_background is set at _stream entry; a raise / early
             # return from pre_hook, approval, guardrails, or param
@@ -2698,41 +2970,59 @@ class Runnable(ABC, BaseModel):
                 )
             output_event._input_dump = span._input_dump
             output_event._output_dump = await dump(handoff_result) if handed_off else span._output_dump
-            if handoff_start is None:
-                # The end of the root run is stored before the caller goes on, even with background work still live.
-                await run_context._save_trace(barrier=span is run_context.root_span())
-                # The save counts on the span (a failure, the tracing counters) after the event copied its usage.
-                output_event.usage = dict(span.usage)
-            else:
-                # The continuation must not mutate the shared span until the
-                # foreground placeholder has been snapshotted for tracing.
-                try:
-                    await run_context._save_trace(barrier=True)
+            try:
+                if handoff_start is None:
+                    # The end of the root run is stored before the caller goes on, even with background work
+                    # still live.
+                    await run_context._save_trace(barrier=span is run_context.root_span())
+                    # The save counts on the span (a failure, the tracing counters) after the event copied
+                    # its usage.
                     output_event.usage = dict(span.usage)
-                finally:
-                    handoff_start.set()
-                    if handoff_control is not None and handoff_result is not None:
-                        if handoff_record is not None and (
-                            handoff_record.task.done() or handoff_record.task.cancelling()
-                        ):
-                            status = handoff_record.status_code()
-                            output_event.output = {**handoff_result, "status": status}
-                            output_event._output_dump = await dump(output_event.output)
-                            handoff_control.fail(
-                                RuntimeError(f"Foreground-to-background handoff ended before cutover: {status}.")
-                            )
-                            handoff_control.unregister(span.call_id)
-                        else:
-                            handoff_control.complete(span.call_id, handoff_result)
-            # After the save: a turn queued behind this one reads what it stored.
-            if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
-                scheduler, run_context._foreign_turn_of = run_context._foreign_turn_of, None
-                scheduler.foreign_finished(run_context.id, span.status)
+                else:
+                    # The continuation must not mutate the shared span until the
+                    # foreground placeholder has been snapshotted for tracing.
+                    try:
+                        await run_context._save_trace(barrier=True)
+                        output_event.usage = dict(span.usage)
+                    finally:
+                        handoff_start.set()
+                        if handoff_control is not None and handoff_result is not None:
+                            if handoff_record is not None and (
+                                handoff_record.task.done() or handoff_record.task.cancelling()
+                            ):
+                                status = handoff_record.status_code()
+                                output_event.output = {**handoff_result, "status": status}
+                                output_event._output_dump = await dump(output_event.output)
+                                handoff_control.fail(
+                                    RuntimeError(f"Foreground-to-background handoff ended before cutover: {status}.")
+                                )
+                                handoff_control.unregister(span.call_id)
+                            else:
+                                handoff_control.complete(span.call_id, handoff_result)
+            except BaseException:
+                if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
+                    # The save was cut (a turn interrupted as it ended). Once more before the session
+                    # lets the next turn in, which reads this run. Shielded: a second cut ends the
+                    # wait, not the save.
+                    with contextlib.suppress(BaseException):
+                        await asyncio.shield(run_context._save_trace(barrier=True))
+                raise
+            finally:
+                # After the save: a turn queued behind this one reads what it stored. Also when the save
+                # was cut: the session it was admitted to must not keep counting it as running, or no
+                # turn of that session would ever start again.
+                if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
+                    scheduler, run_context._foreign_turn_of = run_context._foreign_turn_of, None
+                    scheduler.foreign_finished(run_context.id, span.status)
             # Warn about resume values that didn't match any gate or suspend()
             # so callers find typos / stale IDs instead of silently dropping
             # them. Only check the IDs introduced by THIS call; nested children
             # don't re-introduce them.
             if resume_values:
+                # Only a call that installed values takes them off (a plain attribute, see RunContext's
+                # NOTE). A call that brought none has nothing to undo, and writing back what it saw when
+                # it started would reinstall them if it outlived the call that did (a background child).
+                run_context.__dict__["_resume_values"] = previous_resume_values
                 unused = [rid for rid in resume_values if rid not in run_context._used_resume_ids]
                 if unused:
                     _get_logger().warning(
@@ -2741,7 +3031,6 @@ class Runnable(ABC, BaseModel):
                         unused_resume_ids=unused,
                         runnable_path=self._path,
                     )
-            run_context._resume_values = previous_resume_values
             if _background_handoff_control is not None:
                 _background_handoff_control.close()
                 if previous_handoff_control is None:
@@ -2760,6 +3049,15 @@ class Runnable(ABC, BaseModel):
                 # (entry call id None) deliberately leave their context set so
                 # sequential same-task runs chain sessions implicitly.
                 set_run_context(_entry_run_context)
+                if _call_id is None and run_context.__dict__.get("_invoker") is not None:
+                    # This was a run of its own, started by a call's code, and that code goes on: it is
+                    # still inside its call. Without its ids back, the next run it starts would look like
+                    # one nobody's code started (no link, no tool policy inherited, and an approval
+                    # reviewer reading its prompt as a person's). The context set may be one the handler
+                    # swapped in, which these ids are not from: as it was before this run started
+                    # (``RunContext.update_usage`` records on that context's root then).
+                    set_parent_call_id(_entry_parent_call_id)
+                    set_call_id(_entry_call_id)
             # Flush any still-buffered RunContext.emit() events (post_hook,
             # error paths, plain handlers) so every emission is ordered
             # before this call's OUTPUT. Close first: a racing off-loop emit

@@ -2,7 +2,7 @@
 from .base import Exporter, TracingProvider
 from .in_memory import InMemoryTracingProvider
 from .jsonl import JsonlTracingProvider
-from .platform import PlatformTracingProvider
+from .platform import PlatformTracingProvider, RunNotStored, RunPath
 from .sqlite import SqliteTracingProvider
 
 

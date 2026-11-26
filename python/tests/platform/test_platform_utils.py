@@ -402,6 +402,35 @@ class TestRequest:
         assert mock_http.request.call_count == 3
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("total_timeout", [None, 30])
+    @pytest.mark.parametrize(
+        ("failure", "raised"),
+        [
+            (_make_http_status_error(503, "Service Unavailable"), PlatformError),
+            (httpx.ReadTimeout("slow"), PlatformError),
+            (httpx.ConnectError("down"), httpx.ConnectError),
+        ],
+    )
+    async def test_backoff_is_not_consulted_after_the_last_attempt(self, failure, raised, total_timeout):
+        """A backoff backed by one delay per retry has none to give for the terminal failure."""
+        delays = [0.0]
+        consulted = []
+
+        def backoff(attempt: int) -> float:
+            consulted.append(attempt)
+            return delays[attempt]
+
+        mock_http = AsyncMock()
+        mock_http.request = AsyncMock(side_effect=failure)
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=_mock_httpx_client(mock_http)):
+            with pytest.raises(raised):
+                await _request(
+                    "GET", "health", service="api", max_retries=1, backoff=backoff, total_timeout=total_timeout
+                )
+        assert consulted == [0]
+        assert mock_http.request.call_count == 2
+
+    @pytest.mark.asyncio
     async def test_default_timeout_passed_to_client(self):
         mock_http = AsyncMock()
         mock_client_cm = _mock_httpx_client(mock_http)

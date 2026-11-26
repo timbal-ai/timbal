@@ -23,7 +23,7 @@ from timbal.core import MCPServer
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     tools=[
         # stdio: spawn a local server process
         MCPServer(
@@ -83,6 +83,7 @@ Discovery does not invoke application tools, and tool approvals still apply.
 | `approval` | both | Gate tools through the [approval flow](/human-in-the-loop/approval-gates): `"destructive"`, `"all"`, a callable over the tool, or a callable over the tool **and the call's arguments**. See [Approval from annotations](#approval-from-annotations). |
 | `elicitation` | both | Advertise the elicitation capability and bridge server questions to `suspend()`. Default `True`. See [Elicitation](#elicitation). |
 | `sampling_model` | both | Timbal model string used to answer the server's `sampling/createMessage` requests. Default `None` (unsupported). |
+| `defer_loading` | both | Defer every tool on this server: the model finds them through [tool search](/agents/tools#tool-search) instead of receiving every schema on each call. The server's `name`, when set, is the search group. Default `False`. |
 
 ### Authentication
 
@@ -131,7 +132,7 @@ MCPServer(name="payments", transport="http", url="https://example.com/mcp", inte
 
 ## Approval from Annotations
 
-MCP tools carry [`ToolAnnotations`](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations) such as `readOnlyHint` and `destructiveHint`. `approval=` turns them into a client-side gate that runs through Timbal's normal approval flow — a server cannot skip it:
+MCP tools carry [`ToolAnnotations`](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations) such as `readOnlyHint` and `destructiveHint`. `readOnlyHint: true` marks the tool [`read_only`](/agents/tools#read-only-tools), so a [`tool_policy="read_only"`](/deployment/self-hosted#request-context) run offers it. `approval=` turns the annotations into a client-side gate that runs through Timbal's normal approval flow — a server cannot skip it:
 
 ```python
 MCPServer(
@@ -166,7 +167,7 @@ Servers can ask the user a question mid tool call ([elicitation](https://modelco
 from timbal import Agent
 from timbal.types.events import InteractionEvent
 
-agent = Agent(name="my_agent", model="openai/gpt-5-mini")
+agent = Agent(name="my_agent", model="openai/gpt-6.1-terra")
 paused_run_id = None
 interaction_id = None
 async for event in agent(prompt="Swap the KB to 1586"):
@@ -224,7 +225,7 @@ server = MCPServer(
     command="npx",
     args=["-y", "@modelcontextprotocol/server-filesystem", "."],
 )
-agent = Agent(name="my_agent", model="openai/gpt-5-mini", tools=[server])
+agent = Agent(name="my_agent", model="openai/gpt-6.1-terra", tools=[server])
 
 
 async def ask() -> None:

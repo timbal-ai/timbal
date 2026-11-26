@@ -11,6 +11,14 @@ backoff.
 Background work that outlives the root run saves the same way: scheduled while it runs, and each piece's
 end is a barrier.
 
+``durability="sync"`` awaits every save, and holds the same order: saves of one run that overlap (the end
+of the root run and the end of background work, parallel calls that end together) are written one at a
+time. A save takes its snapshot when its write starts and commits some time later, so two on their way at
+once could land the older one last, for good when it is the run's last save. A save that waited is not
+written again when a write that began after it was asked for has landed: that write holds its state (calls
+that end together while one write is in flight cost one more write, not one each). A provider that keeps
+that order itself opts out (``TracingProvider.overlapping_saves``).
+
 The live trace is the buffer, so memory does not grow with pending changes; what grows is the lag, the age
 of the oldest change not yet stored. A run whose uploads fail or fall behind by more than ``max_lag_s``
 goes back to synchronous saves until one succeeds: the state may be the only copy, so it is retried, never
@@ -30,7 +38,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
+import weakref
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -62,10 +72,19 @@ def _env_float(name: str, scale: float = 1.0) -> float | None:
         return None
 
 
-def durability(provider: type[TracingProvider]) -> str:
-    """``sync`` (the default, and any value it does not know), ``buffered`` or ``end``."""
-    mode = (getattr(provider, "durability", None) or os.environ.get(DURABILITY_ENV) or "sync").strip().lower()
+def _explicit_durability(provider: type[TracingProvider]) -> str | None:
+    return getattr(provider, "durability", None) or os.environ.get(DURABILITY_ENV) or None
+
+
+def _mode(raw: str) -> str:
+    mode = raw.strip().lower()
     return mode if mode in ("buffered", "end") else "sync"
+
+
+def durability(provider: type[TracingProvider]) -> str:
+    """``sync``, ``buffered`` or ``end`` (any value it does not know reads as ``sync``): the provider's
+    ``durability``, else ``TIMBAL_TRACE_DURABILITY``, else the provider's ``default_durability``."""
+    return _mode(_explicit_durability(provider) or getattr(provider, "default_durability", None) or "sync")
 
 
 def buffered(provider: type[TracingProvider]) -> bool:
@@ -73,8 +92,12 @@ def buffered(provider: type[TracingProvider]) -> bool:
 
 
 def metrics_on(provider: type[TracingProvider]) -> bool:
-    """Counters go into usage only when asked: they are new usage keys for every run."""
-    return durability(provider) != "sync" or os.environ.get(METRICS_ENV, "").strip().lower() in ("1", "true", "yes")
+    """Counters go into usage only when asked: they are new usage keys for every run, so a provider's
+    default mode does not turn them on."""
+    explicit = _explicit_durability(provider)
+    if explicit is not None and _mode(explicit) != "sync":
+        return True
+    return os.environ.get(METRICS_ENV, "").strip().lower() in ("1", "true", "yes")
 
 
 def _flush_interval(provider: type[TracingProvider]) -> float:
@@ -99,12 +122,14 @@ def count(run_context: RunContext, key: str, value: int = 1) -> None:
 class _RunUploads:
     __slots__ = (
         "context", "provider", "task", "pending", "sending", "started_at", "unsent_since", "failures",
-        "lock", "requests", "writers",
+        "lock", "requests", "writers", "loop",
     )  # fmt: skip
 
     def __init__(self, context: RunContext, provider: type[TracingProvider]) -> None:
         self.context = context
         self.provider = provider
+        # The event loop its lock and drain belong to: a save of the run on another loop does not queue here.
+        self.loop = asyncio.get_running_loop()
         self.task: asyncio.Task | None = None
         # A change no save has picked up yet, and when the oldest such change happened.
         self.pending = False
@@ -124,6 +149,89 @@ class _RunUploads:
 _RUNS: dict[tuple[int, str], _RunUploads] = {}
 
 
+class _Writing:
+    """A ``sync`` write of a run in flight on one event loop, with no queue there yet: a mark, by identity."""
+
+    __slots__ = ()
+
+
+class _Turns:
+    """A run's saves on a ``sync`` provider on one event loop, from the moment two of them overlapped there: one
+    write at a time.
+
+    ``started`` counts the writes begun, ``landed`` is the latest of them that succeeded. A save asked for
+    when n had begun is stored once write n + 1 or a later one has landed: that write took its snapshot
+    after the save was asked for. ``users``: the saves holding or waiting for it; the last one out retires it
+    (``_retire``), since it would keep its loop alive.
+    """
+
+    __slots__ = ("lock", "started", "landed", "users")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.started = 1  # the write in flight this was made for
+        self.landed = 0
+        self.users = 0
+
+
+def _retire(queues: _Queues, loop: asyncio.AbstractEventLoop, turn: _Turns) -> None:
+    """Drop a loop's queue that no save holds or waits for: a nested ``asyncio.run()`` per call would otherwise
+    keep every loop it made alive through the run context. Called with ``_QUEUES_LOCK`` held."""
+    if turn.users == 0 and not turn.lock.locked() and queues.get(loop) is turn:
+        del queues[loop]
+
+
+class _Queues(dict):
+    """A run context's ``sync`` saves, per event loop (``RunContext._save_turn``): for each loop, a ``_Writing``
+    mark while one write of the run is in flight there, or the queue its saves wait in once two overlapped there
+    (``_Turns``). Each loop's saves are in order among themselves. Saves of the run on two loops (a tool whose
+    handler runs nested work with ``asyncio.run()`` on the same run context) are not ordered against each other
+    and never wait on each other: an ``asyncio.Lock`` is one loop's. ``owner``: the run context it belongs to,
+    held weakly: a copy of the context (``model_copy``) carries this object along and makes its own."""
+
+    __slots__ = ("owner",)
+
+    def __init__(self, owner: RunContext) -> None:
+        super().__init__()
+        self.owner = weakref.ref(owner)
+
+
+# Every change to a run context's _Queues, from whichever thread its loop runs on. Nothing is allocated while it is
+# held: an allocation can set off a collection, which can finish a save abandoned on a closed loop, whose cleanup
+# changes the run's _Queues too. Re-entrant all the same, should a collection land there.
+_QUEUES_LOCK = threading.RLock()
+
+
+def _new_queues_lock_after_fork() -> None:
+    """In a forked child: a parent thread may have held the lock at the fork, and nothing would let it go."""
+    global _QUEUES_LOCK
+    _QUEUES_LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_new_queues_lock_after_fork)
+
+
+def _gone(loop: asyncio.AbstractEventLoop) -> bool:
+    """A loop that will not run the run's uploads further: closed, or stopped (a helper's loop between
+    ``run_until_complete`` calls, kept but not running)."""
+    return loop.is_closed() or not loop.is_running()
+
+
+def _movable(run: _RunUploads) -> bool:
+    """Whether another loop may take a run's buffered uploads over: their loop is gone, or nothing of them is under
+    way there (nothing pending, no upload, no barrier), so that loop's lock orders nothing."""
+    return _gone(run.loop) or not (run.pending or run.sending or run.writers)
+
+
+def _take_over(key: tuple[int, str], run: _RunUploads, run_context: RunContext) -> _RunUploads:
+    """Move a run's buffered uploads to this loop. What was owed comes along: a change no upload stored stays
+    pending here, to be stored by this loop's next upload, barrier or flush."""
+    moved = _RUNS[key] = _RunUploads(run_context, run.provider)
+    moved.pending, moved.unsent_since, moved.failures = run.pending, run.unsent_since, run.failures
+    return moved
+
+
 def _key(run_context: RunContext) -> tuple[int, str]:
     return id(run_context._tracing_provider), run_context.id
 
@@ -132,11 +240,18 @@ def schedule(run_context: RunContext) -> bool:
     """Defer this mid-run save. False: the run is too far behind, and the caller saves synchronously."""
     provider = run_context._tracing_provider
     loop = asyncio.get_running_loop()
-    run = _RUNS.get(_key(run_context))
+    key = _key(run_context)
+    run = _RUNS.get(key)
     if run is None:
-        run = _RUNS[_key(run_context)] = _RunUploads(run_context, provider)
+        run = _RUNS[key] = _RunUploads(run_context, provider)
+    elif run.loop is not loop:
+        if not _movable(run):
+            return False  # under way on another live loop: stored now, by the caller, as it comes
+        run = _take_over(key, run, run_context)
     now = loop.time()
-    if run.unsent_since is not None and now - run.unsent_since > _max_lag(provider):
+    # At or past the limit (inclusive: on a coarse clock, Windows before Python 3.13, a backlog started in
+    # this 15.6 ms tick reads as 0 s behind, and max_lag_s=0 must still mean "always synchronous").
+    if run.unsent_since is not None and now - run.unsent_since >= _max_lag(provider):
         count(run_context, "tracing:lag_exceeded")
         return False
     run.requests += 1
@@ -156,20 +271,109 @@ def tracked(run_context: RunContext) -> bool:
     return _key(run_context) in _RUNS
 
 
-async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[None]]) -> None:
+async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[None]]) -> bool:
     """Store the run's latest state now, as its next write (a barrier).
 
     It waits for an upload in flight or another barrier's write (the root's end and a background task's end
     can overlap), never for a drain waiting out its interval or a retry backoff; saves requested while it
     writes are uploaded after it; what it covers is not uploaded again. Raises what ``put`` raises.
+
+    Every save of a ``sync`` provider comes through here, and waits the same way for one of its run that is
+    being written (see the module docstring). A run whose saves never overlap takes no lock: its write in
+    flight is only marked (``RunContext._save_turn``), and the save that finds the mark makes the lock the
+    run's saves queue on from then on. ``put`` must not save the same run itself: that save would wait for
+    the one it is part of.
+
+    Saves are ordered per event loop: a save of the run from another loop (a tool whose handler runs nested
+    work with ``asyncio.run()`` on the same run context) queues with that loop's saves, and is ordered against
+    this loop's only by a provider that orders its own writes (``SqliteTracingProvider`` numbers its
+    snapshots). The same for a buffered run: its uploads are the loop's that started them, and a barrier from
+    another live loop is stored as it comes. A copy of the run context made while it was being written does not
+    wait for the original's write.
+
+    Returns False when this call wrote nothing because a write that began after it was asked for has stored
+    its state (a ``sync`` save that waited): stored all the same, and not a write to count.
     """
     key = _key(run_context)
     run = _RUNS.get(key)
     if run is None:
-        if durability(run_context._tracing_provider) == "sync":
+        provider = run_context._tracing_provider
+        if durability(provider) == "sync":
+            if provider.overlapping_saves and not provider._exporters:
+                # Exporters are awaited in put(): with some attached, their exports are ordered by the queue.
+                await put(run_context)
+                return True
+            loop = asyncio.get_running_loop()
+            state = run_context.__dict__
+            took = False
+            while True:
+                # What the step below may need is made first, outside the lock (see _QUEUES_LOCK); a step that
+                # finds it needs something it did not make goes round again.
+                queues = state.get("_save_turn")
+                fresh = _Queues(run_context) if queues is None or queues.owner() is not run_context else None
+                seen = None if fresh is not None else queues.get(loop)
+                mark, turns = _Writing(), (_Turns() if type(seen) is _Writing else None)
+                with _QUEUES_LOCK:
+                    queues = state.get("_save_turn")
+                    if queues is None or queues.owner() is not run_context:
+                        # None yet, or the queues of the context this one was copied from (model_copy), which
+                        # this one would wait on in vain.
+                        if fresh is None:
+                            continue
+                        queues = state["_save_turn"] = fresh
+                    turn = queues.get(loop)
+                    if turn is None:
+                        mine = queues[loop] = mark
+                    elif type(turn) is _Writing:
+                        # A write of this run is in flight on this loop and holds no lock: take one in its name,
+                        # which it lets go of when it ends. A lock nobody holds is taken without waiting, so that
+                        # write cannot end first.
+                        if turns is None:
+                            continue
+                        turn = queues[loop] = turns
+                        took = True
+                    if turn is not None:
+                        turn.users += 1
+                break
+            if turn is None:
+                try:
+                    await put(run_context)
+                finally:
+                    with _QUEUES_LOCK:
+                        turn = queues.get(loop)
+                        if turn is mine:
+                            del queues[loop]  # the queues object stays: it may be in use on another loop
+                            turn = None
+                    if turn is not None and not loop.is_closed():
+                        turn.lock.release()  # the queue a save of this loop made in this write's name
+                        with _QUEUES_LOCK:
+                            _retire(queues, loop, turn)
+                return True
+            try:
+                if took:
+                    await turn.lock.acquire()
+                covering = turn.started + 1
+                async with turn.lock:
+                    if turn.landed >= covering:
+                        return False  # a write that began after this save was asked for has landed
+                    turn.started = mine = turn.started + 1
+                    await put(run_context)
+                    turn.landed = mine
+                return True
+            finally:
+                with _QUEUES_LOCK:
+                    turn.users -= 1
+                    _retire(queues, loop, turn)
+        run = _RUNS[key] = _RunUploads(run_context, provider)
+    elif run.loop is not asyncio.get_running_loop():
+        if _movable(run):
+            # Their loop is closed or stopped, or nothing of them is under way there: this loop takes them over,
+            # with what was owed, and this loop's barriers queue here.
+            run = _take_over(key, run, run_context)
+        else:
+            # Under way on another live event loop, whose lock this one cannot wait on: stored as it comes.
             await put(run_context)
-            return
-        run = _RUNS[key] = _RunUploads(run_context, run_context._tracing_provider)
+            return True
     run.writers += 1
     try:
         async with run.lock:
@@ -180,6 +384,7 @@ async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[
     finally:
         run.writers -= 1
         _release(run)
+    return True
 
 
 def _release(run: _RunUploads, *, draining: bool = False) -> None:
@@ -203,8 +408,16 @@ def _finished(run_context: RunContext) -> bool:
     return root is not None and root.t1 is not None and run_context._live_background == 0
 
 
-async def flush_all(timeout: float | None = 10.0) -> None:
-    """Store every buffered run's latest state now (process shutdown)."""
+async def flush_all(timeout: float | None = None) -> None:
+    """Store every buffered run's latest state now, then wait for the platform saves still owed
+    (process shutdown). One bound for both: ``timeout``, default ``TIMBAL_TRACE_FLUSH_TIMEOUT_SECS``
+    (5 s), inside a pod's termination grace period."""
+    from .providers.platform import PlatformTracingProvider, _flush_timeout
+
+    if timeout is None:
+        timeout = _flush_timeout()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     runs = list(_RUNS.values())
 
     async def flush(run: _RunUploads) -> None:
@@ -218,6 +431,7 @@ async def flush_all(timeout: float | None = 10.0) -> None:
             await asyncio.wait_for(asyncio.gather(*map(flush, runs)), timeout)
         except TimeoutError:
             logger.error("trace_flush_timed_out", runs=[run.context.id for run in runs], timeout_s=timeout)
+    await PlatformTracingProvider.flush(max(0.0, deadline - loop.time()))
 
 
 async def _drain(run: _RunUploads) -> None:

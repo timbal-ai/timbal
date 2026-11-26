@@ -1,0 +1,307 @@
+---
+title: "Sync your data"
+description: "Pull database tables into a Timbal knowledge base once, or keep them fresh on a schedule"
+---
+
+Once a connection is configured, Timbal can read from it by name. This page shows how to explore a database through the connector and move tables into a knowledge base. Every request needs the connector **online**, `Authorization: Bearer $API_KEY`, and the **ConnectorsManage** role for anything that dispatches work.
+
+| You want to | Use |
+| ----------- | --- |
+| Look at schemas, columns, keys | [Browse](#find-what-to-sync) |
+| Try a query on the source | [Ad-hoc query](#try-a-query) |
+| Copy a table now | [One-off job](#one-off-job) |
+| Keep a table up to date | [Scheduled sync](#scheduled-sync) |
+| Re-read a table that is edited in place | [Full-refresh sync](#full-refresh-sync) |
+
+The commands below use `$ORG_ID`, `$CONNECTOR_ID` (from `GET /orgs/$ORG_ID/connectors`) and `$KB_ID`. They run against Timbal's API, not on the server. All paths are under `https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID`.
+
+## Find what to sync
+
+<Steps>
+  <Step title="List the connections">
+    Only the names you configured on the server come back.
+
+    ```bash
+    curl "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/browse/connections" \
+      -H "Authorization: Bearer $API_KEY"
+    # -> { "connections": ["main", "erp", "shop"] }
+    ```
+  </Step>
+  <Step title="List the tables">
+    ```bash
+    curl "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/browse/tables?connection_ref=erp" \
+      -H "Authorization: Bearer $API_KEY"
+    # -> { "tables": [{ "schema": "dbo", "name": "Cust_Ledger_Entry", "approx_rows": 918273 }, ...] }
+    ```
+
+    `approx_rows: -1` means the database has never analyzed the table.
+  </Step>
+  <Step title="Read the columns">
+    ```bash
+    curl "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/browse/columns?connection_ref=erp&schema=dbo&table=Cust_Ledger_Entry" \
+      -H "Authorization: Bearer $API_KEY"
+    ```
+
+    Each column says whether it can be a **cursor** (`cursor_candidate`) and its place in the primary key (`pk_position`, starting at 1). Those two fields are everything you need to configure a sync.
+  </Step>
+  <Step title="Inspect one table in depth (optional)">
+    Adds indexes, foreign keys, check constraints, comments and size. Needs connector 0.1.25.
+
+    ```bash
+    curl "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/browse/table?connection_ref=erp&schema=dbo&table=Cust_Ledger_Entry" \
+      -H "Authorization: Bearer $API_KEY"
+    ```
+  </Step>
+</Steps>
+
+`doctor --connection erp --table dbo.Cust_Ledger_Entry` gives the same answer on the server, without a live connection to Timbal. These calls time out after 15 seconds.
+
+## Try a query
+
+Run one statement and see the result, to check a table before syncing it. It needs the **ConnectorsManage** role, connector 0.1.26 or newer, and the connection's [`query` setting](/connect/connections#the-query-setting) to allow it, and every run is recorded in the audit log.
+
+```bash
+curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/query" \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "connection_ref": "erp",
+    "sql": "SELECT TOP 5 [No_], [Name] FROM [CRONUS].[Customer] ORDER BY [No_]"
+  }'
+# -> 200 { "columns": [{ "name": "No_", "data_type": "nvarchar" }, ...],
+#          "rows": [["01121212", "..."], ...], "row_count": 5, "truncated": false, "rows_affected": null }
+```
+
+| Field | Default | Notes |
+| ----- | ------- | ----- |
+| `mode` | `read` | `read` or `write`. Read is enforced on the connector: a read-only transaction on PostgreSQL and MySQL, a `BEGIN TRAN … ROLLBACK` wrapper on SQL Server. A write also needs `"query": "write"` on the server |
+| `max_rows` | 500 | Up to 10,000. `truncated: true` when the row cap or the ~4 MiB size budget was hit |
+| `timeout_ms` | 30000 | Up to 60,000 |
+
+On MySQL and MariaDB send one statement. On PostgreSQL and SQL Server you can send several and get the **last** result set back (on PostgreSQL the last one that returns rows; SQL Server returns the true last set, even if empty). `rows_affected` counts changed rows for statements that return none on PostgreSQL and MySQL, and is `null` on SQL Server. See [Run an ad-hoc query](/api-reference/connectors/query).
+
+## One-off job
+
+A job copies a table once, starting now.
+
+```bash
+curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/jobs" \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "kb_id": '"$KB_ID"',
+    "dest_table": "orders",
+    "mode": "create",
+    "key_columns": ["id"],
+    "source": {
+      "kind": "postgres",
+      "connection_ref": "main",
+      "schema": "public",
+      "table": "orders",
+      "cursor_column": "id"
+    }
+  }'
+# -> 202 { "job_id": "..." }
+```
+
+`source.kind` is `postgres`, `sql_server` or `mysql`. List recent jobs with `GET /orgs/$ORG_ID/connectors/jobs?connector_id=$CONNECTOR_ID` and stop one with `POST .../jobs/$JOB_ID/stop`. Stopping returns `200 { "job_id", "state" }` and is safe to repeat. A job goes `accepted`, `running`, then `completed`, `failed` or `stopped`, and a finished job stays finished.
+
+| `mode` | What it does |
+| ------ | ------------ |
+| `create` | First load (the default). Builds `dest_table` (with a primary key if you give `key_columns`) |
+| `append` | Adds new rows. Keyless tables only grow; with `key_columns`, overlapping rows are merged |
+| `replace` | Drops and rebuilds the table |
+| `upsert` | Merges every batch on `key_columns`, and builds a keyed table if none exists. Requires them |
+
+Other fields: `columns` (a subset of columns; `key_columns` are added to it automatically), `batch_rows` (default 5000), and `pacing` to protect a busy source: `batch_delay_ms` and `max_rows_per_sec` (any source), `max_dop` and `read_uncommitted` (SQL Server only). See [Create job](/api-reference/connectors/jobs/create).
+
+### Start from a point
+
+`cursor` is an inclusive lower bound on the cursor column. It works with every mode: create a table with only the rows from a date on, or resume after a previous run.
+
+```json
+{ "mode": "create", "cursor": { "kind": "timestamp", "value": "2026-06-01" } }
+```
+
+Cursor values:
+
+```jsonc
+// scalar cursors
+{ "kind": "integer", "value": 12345 }
+{ "kind": "timestamp", "value": "2026-06-11T00:00:00Z" }
+{ "kind": "row_version", "value": [0, 0, 0, 0, 0, 1, 2, 3] }
+
+// keyset cursor: a non-unique cursor column plus the primary key as tie-breakers.
+// This is the shape a sync stores when it resumes.
+{ "kind": "keyset", "keys": [
+  { "column": "posting_date", "value": { "kind": "timestamp", "value": "2026-06-01T00:00:00Z" } },
+  { "column": "entry_no", "value": { "kind": "integer", "value": 42 } }
+] }
+```
+
+### A table with no usable cursor
+
+Leave out `cursor_column` and the job does one full scan, with no checkpoint: if it stops or fails, it starts over. Use it when nothing is monotonic, the only candidates are nullable, or a non-unique candidate has no primary key to break ties. Needs connector 0.1.25, and `cursor` can't be set.
+
+## Scheduled sync
+
+A sync stores the definition and runs it on an interval. Each run continues from where the last one landed.
+
+```bash
+curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/syncs" \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "name": "ERP customer ledger",
+    "kb_id": '"$KB_ID"',
+    "dest_table": "cust_ledger_entry",
+    "interval_secs": 900,
+    "key_columns": ["entry_no"],
+    "start_cursor": { "kind": "timestamp", "value": "2026-06-01T00:00:00Z" },
+    "source": {
+      "kind": "sql_server",
+      "connection_ref": "erp",
+      "schema": "dbo",
+      "table": "Cust_Ledger_Entry",
+      "cursor_column": "posting_date"
+    }
+  }'
+# -> 201 { "sync_id": "..." }
+```
+
+- The **first run builds** `dest_table`. Later runs append, or merge when `key_columns` is set.
+- `start_cursor` is a floor for the first run only.
+- `interval_secs` is the time between run **starts**, with a floor of about 30 seconds (any whole number of seconds up to 2147483647).
+- The sync is created, not run: wait for the next tick, or [run it now](#run-now).
+- List the syncs of a connector with `GET /orgs/$ORG_ID/connectors/syncs?connector_id=$CONNECTOR_ID`.
+
+### Adopt a table you already loaded
+
+The usual path from "I copied these tables with one-off jobs" to "keep them fresh": create the sync against the same `dest_table`. By default (`existing_dest: "adopt"`) Timbal reads the largest cursor value in the table and continues from there, instead of loading it again.
+
+```bash
+# 1. Load once
+curl -X POST ".../jobs" ... -d '{"kb_id":1,"dest_table":"orders","mode":"create","key_columns":["id"],
+  "source":{"kind":"postgres","connection_ref":"main","table":"orders","cursor_column":"id"}}'
+
+# 2. Keep it fresh
+curl -X POST ".../syncs" ... -d '{"kb_id":1,"dest_table":"orders","interval_secs":900,
+  "source":{"kind":"postgres","connection_ref":"main","table":"orders","cursor_column":"id"}}'
+# -> 201 { "sync_id": "...", "adopted_dest_table": true,
+#          "initial_cursor": { "kind": "integer", "value": 918273 }, "key_columns": ["id"] }
+```
+
+Adoption is checked when you create the sync, not when it first runs: the cursor column must exist in the destination, and any `key_columns` you pass must match the table's own primary key. Pass `initial_cursor` if the derived value is wrong (for example a job you stopped halfway), or `existing_dest: "replace"` to throw the table away and rebuild it. `start_cursor` is ignored when adopting, `initial_cursor` without an existing table is a 400, and an adopted table that is empty is simply built.
+
+### Run now
+
+```bash
+curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/syncs/$SYNC_ID/run" \
+  -H "Authorization: Bearer $API_KEY"
+# -> 202 { "sync_id": "...", "dispatched": true,  "job_id": "..." }   # started from here
+# -> 202 { "sync_id": "...", "dispatched": false, "job_id": null }    # queued: starts within one tick
+```
+
+It runs exactly what the next tick would, restarts the interval, and skips any failure backoff, so it doubles as "I fixed it, try again now". The sync must be enabled (`sync_disabled`) and have no run in progress (`run_active`; stop the job first). Needs connector 0.1.30.
+
+### Pause, change, delete
+
+```bash
+# Pause (the cursor is kept)
+curl -X PATCH ".../syncs/$SYNC_ID" -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" -d '{"enabled": false}'
+
+# Change the interval
+curl -X PATCH ".../syncs/$SYNC_ID" ... -d '{"interval_secs": 3600}'
+
+# Delete the definition (running jobs are not stopped; history stays)
+curl -X DELETE ".../syncs/$SYNC_ID" -H "Authorization: Bearer $API_KEY"
+```
+
+`PATCH` and `DELETE` answer `204`. `PATCH` only takes `enabled` and `interval_secs`. To change the source or destination, delete the sync and create it again against the same `dest_table`: it adopts the rows already there.
+
+## Full-refresh sync
+
+Leave out `source.cursor_column` and the sync is no longer incremental: every run reads the whole table and **rebuilds** `dest_table`. Use it for tables that are updated or deleted in place with nothing recording it. An incremental sync would keep appending and never notice a deletion.
+
+```bash
+curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/syncs" \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "kb_id": '"$KB_ID"',
+    "dest_table": "price_list",
+    "interval_secs": 3600,
+    "key_columns": ["item_no"],
+    "source": { "kind": "sql_server", "connection_ref": "erp", "schema": "dbo", "table": "Price_List" }
+  }'
+```
+
+- The whole table crosses the connection every `interval_secs`. Size the interval to the table, and prefer an incremental sync whenever there is a usable cursor.
+- While it runs, the destination is rebuilt in place: a query at that moment sees a partial table, and a run that fails halfway leaves one until the next run completes.
+- If the source is emptied, the destination is emptied too.
+- `start_cursor`, `initial_cursor` and `existing_dest: "adopt"` are refused: there is nowhere to continue from. `existing_dest: "replace"` is accepted and changes nothing. `key_columns` keep the primary key on each rebuild, and `pacing` helps with large tables. Needs connector 0.1.25.
+
+## Keys and merging
+
+`key_columns` are the destination's primary key, in order. Take them from `pk_position` in the column list.
+
+- With keys, the first run creates a keyed table and later runs **merge**: a row that comes again overwrites its previous version.
+- Without keys, the table is append-only.
+- `upsert` needs keys. They're also strongly recommended whenever the cursor isn't unique on its own.
+
+## Choosing a cursor
+
+The connector reads in batches, ordered by the cursor and then the key, and remembers the last row it landed.
+
+| Cursor column | Source primary key | What happens |
+| ------------- | ------------------ | ------------ |
+| Unique (primary key, unique index, `rowversion`) | any | Simple cursor |
+| Not unique (for example `posting_date`) | present | The cursor and the key together are used, so rows sharing a date are never skipped or repeated |
+| Not unique | **missing** | Refused: nothing to break ties. Use a unique cursor, or leave the cursor out |
+| Nullable | any | Refused. A `NULL` never compares greater than anything, so rows would be silently lost |
+| None usable | any | Full-scan job or [full-refresh sync](#full-refresh-sync) |
+
+Every run after the first resumes inclusively from the saved checkpoint. It first removes the rows at or after it (for a keyset cursor, the exact matching row), then reads again from it, so a crash or restart never leaves duplicates. Keyed tables merge on every batch anyway.
+
+Dates and times are converted to what the column's type accepts: fractions of a second are trimmed to the type's precision, and time-zone suffixes are removed where the type can't hold them. That means an ISO value such as `2026-06-01T00:00:00Z` works as a floor on every database. Connector 0.1.24 or newer: older versions failed on legacy `datetime` columns in SQL Server, and silently matched no rows on MySQL.
+
+## Watch a sync
+
+```bash
+curl "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/syncs/$SYNC_ID" \
+  -H "Authorization: Bearer $API_KEY"
+# -> { "sync": {...}, "stats": { "runs_total": 37, "runs_completed": 36, "runs_failed": 1, "rows_total": 9123456 },
+#      "recent_runs": [ { "job_id", "state", "rows_emitted", "duration_ms", "rows_per_sec" }, ... ] }
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `last_run_at`, `last_state` | When the last run started and how it ended. `recent_runs` holds the last 20, newest first |
+| `last_success_at`, `seconds_since_success` | Move only on a **completed** run. Compare `seconds_since_success` with `interval_secs` to spot a sync that stalls |
+| `has_cursor` | The sync holds a checkpoint and resumes instead of rebuilding. Always `false` on a full-refresh sync |
+| `consecutive_failures` | Greater than zero means retries are backing off |
+| `disabled_reason` | Set when Timbal disabled the sync after repeated failures, with the last error |
+
+**Failures back off.** A run that fails itself (a source SQL error, not a disconnect or a stop) doubles the wait before the next try, up to an hour or the interval, whichever is larger. After **10 failures in a row** the sync is disabled and `disabled_reason` says why. A completed run resets the count, and so does enabling the sync again. Fix the cause, then `PATCH {"enabled": true}` (this also clears `disabled_reason`) and run it now. Trying to run a disabled sync returns `sync_disabled` with the reason.
+
+## Common refusals
+
+| Message | Cause |
+| ------- | ----- |
+| `connector_offline` | The connector isn't connected. Run `doctor` on the server |
+| `source_unsupported` | The connector doesn't report that database kind |
+| `snapshot_unsupported` | No `cursor_column`, and the connector is older than 0.1.25 |
+| `upsert` without `key_columns` | Add the primary key columns |
+| Cursor not unique and no key | Add a unique cursor, or leave the cursor out |
+| Cursor column is nullable | Choose a `NOT NULL` column, or leave the cursor out |
+| `query_timeout`, `query_unsupported`, `query_failed` (422) | A query ran past `timeout_ms`; the connector is older than 0.1.26; or the SQL failed, the connection name is unknown, or the connection's `query` policy refuses it |
+| `browse_timeout`, `browse_unsupported` (422) | A browse call took over 15 seconds, or the connector is too old for it |
+| Adoption conflict (400) | The cursor column isn't in the destination table, `key_columns` differ from its primary key, or the table has rows whose cursor is entirely `NULL`. Pass `initial_cursor`, or `existing_dest: "replace"` |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="File shares in Timbal" icon="folder-open" href="/connect/filesystems">
+    Explore folders and copy files into a knowledge base.
+  </Card>
+  <Card title="Connect your IDE" icon="plug" href="/connect/mcp">
+    Browse schemas and run bounded SQL from Cursor.
+  </Card>
+</CardGroup>

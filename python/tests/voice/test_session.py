@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from timbal import Agent
+from timbal.core.llm.prompt_cache import system_prompt_text
 from timbal.core.test_model import TestModel
 from timbal.state import get_run_context
 from timbal.voice import (
@@ -942,6 +943,39 @@ class TestNestedAgentText:
         assert replies == ["Your document is ready."]
 
 
+class TestDeliveryAndPromptSections:
+    """What the agent says on a call is read aloud as it streams: the agent's text is the reply."""
+
+    def _llm_inputs(self, session: VoiceSession) -> list[dict]:
+        return [span.input for span in session._last_run_context._trace.values() if span.path == "test_voice.llm"]
+
+    async def test_an_agent_that_delivers_by_tool_answers_a_call_in_text(self) -> None:
+        agent = Agent(name="test_voice", model=TestModel(responses=["Hello, caller."]), delivery="tool")
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=tts, turn_detector="heuristic")
+        await session._run_turn("hi")
+
+        assert "Hello, caller." in " ".join(tts.synthesized_texts)
+        (llm_input,) = self._llm_inputs(session)
+        # Nothing tells the model its text is private, and it has no tool to answer with instead. (A call's
+        # prompt still carries its per-turn facts: the clock, the reply language.)
+        prompt = system_prompt_text(llm_input.get("system_prompt")) or ""
+        assert "send_message" not in prompt
+        assert "Current date and time" in prompt
+        assert [tool.name for tool in llm_input.get("tools") or []] == []
+        assert "delivery" not in session._last_run_context.root_span().metadata
+
+    async def test_named_sections_reach_the_call_as_text(self) -> None:
+        agent = Agent(
+            name="test_voice",
+            model=TestModel(responses=["Hello, caller."]),
+            system_prompt={"role": "You are Ada.", "today": "Today is Monday."},
+        )
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector="heuristic")
+        # Joined with the greeting's own lines, and passed as turn one's prompt after an opener.
+        assert await session._agent_system_prompt() == "You are Ada.\n\nToday is Monday."
+
+
 # ---------------------------------------------------------------------------
 # Tests: multi-turn conversation (DelayedMockSTT)
 # ---------------------------------------------------------------------------
@@ -1567,7 +1601,7 @@ class TestInterruptionTruncation:
         agent = Agent(name="t", model=TestModel(handler=lambda _messages: next(replies)), tools=[])
         stt = DelayedMockSTT()
         tts = MockTTS(chunk=b"\x00\x01" * 50, num_chunks=4)
-        session = _RaceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+        session = _RaceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic", playback_tracker=tracker)
 
         events: list[VoiceSessionEvent] = []
 
@@ -2343,7 +2377,8 @@ class TestHoldExpiryTiming:
             timeout_secs=0.2,
             partial_after_commit_delay=None,
         )
-        assert elapsed < 2.0, f"hold expiry took {elapsed:.2f}s — pre-commit partial stretched it"
+        # A stretched hold takes >= grace_secs (5 s); 4 s leaves a busy runner room above the 0.2 s timeout.
+        assert elapsed < 4.0, f"hold expiry took {elapsed:.2f}s — pre-commit partial stretched it"
         assert session.transcript[0].text == "Thank you."
 
     async def test_post_arm_partial_extends_hold(self) -> None:
@@ -3028,29 +3063,42 @@ class TestEmptyCallerTurnRecovery:
         await session._run_turn("Hello")
         assert model.call_count == 1
 
-    async def test_retry_keeps_original_deadline(self):
+    async def test_retry_keeps_original_deadline(self, monkeypatch: pytest.MonkeyPatch):
+        import time
+
         from timbal.types.message import Message
 
+        # The session's clock moves only when the test says so. On the real clock the empty first
+        # attempt had to finish inside a 100 ms budget, and on a slow runner it did not: the turn
+        # timed out before it could retry.
+        now = 1000.0
+        monkeypatch.setattr(
+            "timbal.voice.session.time",
+            SimpleNamespace(**(vars(time) | {"monotonic": lambda: now})),
+        )
+        turn_timeout_secs = 30.0
         deadlines = []
         replies = iter([Message(role="assistant", content=[]), "Too late"])
 
-        async def delay():
+        def spend_half_the_budget():
+            # Once per attempt. After the retry's the original deadline is reached, while a
+            # deadline counted from the retry would have half its budget left.
+            nonlocal now
             deadlines.append(session._turn_deadline)
-            if len(deadlines) == 2:
-                await asyncio.Event().wait()
+            now += turn_timeout_secs / 2
 
         model = TestModel(handler=lambda _messages: next(replies))
         session = VoiceSession(
-            agent=Agent(name="desk", model=model, pre_hook=delay),
+            agent=Agent(name="desk", model=model, pre_hook=spend_half_the_budget),
             stt=MockSTT(),
             tts=MockTTS(),
             turn_detector="heuristic",
-            turn_timeout_secs=0.1,
+            turn_timeout_secs=turn_timeout_secs,
             turn_timeout_fallback=None,
         )
-        await asyncio.wait_for(session._run_turn("Hello"), 2)
-        assert len(deadlines) == 2
-        assert deadlines[0] == deadlines[1]
+        await asyncio.wait_for(session._run_turn("Hello"), 5)
+        assert deadlines == [1000.0 + turn_timeout_secs] * 2
+        # Cut at the original deadline, before the retry reached the model.
         assert model.call_count == 1
         assert len(session._metrics) == 1
 

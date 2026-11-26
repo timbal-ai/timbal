@@ -41,8 +41,8 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
-# Check if git tag exists and get commit hash
-if ! TAG_COMMIT=$(git rev-parse "v$VERSION" 2>/dev/null); then
+# Check if git tag exists and get commit hash (^{commit}: an annotated tag's own object is not a commit)
+if ! TAG_COMMIT=$(git rev-parse "v$VERSION^{commit}" 2>/dev/null); then
     echo "Error: Git tag v$VERSION does not exist. Please create the tag first."
     exit 1
 fi
@@ -87,7 +87,11 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     rm -f "$NOTES_TMPFILE"
 fi
 
-# TODO Add building the python package.
+# The Python package is built and published to PyPI at the end (scripts/publish-pypi.sh).
+
+# zig 0.14 cannot link against the macOS 26 SDK: build against the Command Line Tools' one (see the file).
+. "$REPO_ROOT/scripts/zig_macos_sdk.sh"
+zig_macos_sdk
 
 cd cli
 
@@ -201,3 +205,13 @@ gh release create "v$VERSION" \
     --notes "$RELEASE_NOTES" \
     --target "$TAG_COMMIT" \
     -R "$GH_REPO"
+
+# --- Python package on PyPI ---
+echo ""
+read -p "Publish timbal $VERSION to PyPI? A version can never be uploaded again, even after it is deleted. (y/N): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    "$SCRIPT_DIR/publish-pypi.sh" "$VERSION"
+else
+    echo "Skipped PyPI. To publish later: scripts/publish-pypi.sh $VERSION"
+fi

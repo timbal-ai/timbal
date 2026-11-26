@@ -51,6 +51,42 @@ class Tool(Runnable):
         ),
     )
 
+    read_only: bool = Field(
+        default=False,
+        description=(
+            "Declares that the tool only reads: it sends, writes, deletes and buys nothing. "
+            "Turns run with tool_policy='read_only' (e.g. ChatSession.wake) offer only these. "
+            "MCP tools take it from the server's readOnlyHint."
+        ),
+    )
+
+    defer_loading: bool = Field(
+        default=False,
+        description=(
+            "Keep this tool's schema out of the model's context until it searches for it "
+            "(Agent.tool_search). Claude 4.5+ and OpenAI gpt-5.4+ (Responses API) search natively; "
+            "others get a search_tools tool. "
+            "For large catalogs (many MCP tools); keep the few tools used on most turns loaded."
+        ),
+    )
+
+    interruptible: bool | None = Field(
+        default=None,
+        description=(
+            "Whether a 'now' message (ChatSession.send(mode='now')) may cancel this tool mid-run; it then "
+            "returns an interrupted result. None follows read_only: readers are cut, anything that acts "
+            "runs to the end before the message is delivered."
+        ),
+    )
+
+    search_group: str | None = Field(
+        default=None,
+        description=(
+            "Deferred tools sharing a group are offered to OpenAI's tool search as one namespace, so the "
+            "model first sees one short entry instead of every tool's description. MCPServer sets its name."
+        ),
+    )
+
     result_limit: ToolResultLimit | int | None | Literal["inherit"] = Field(
         default="inherit",
         description=(

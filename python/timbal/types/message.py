@@ -11,7 +11,7 @@ from pydantic import (
 )
 from pydantic_core import CoreSchema, core_schema
 
-from .content import TextContent, ThinkingContent, ToolResultContent, ToolUseContent, content_factory
+from .content import CustomContent, TextContent, ThinkingContent, ToolResultContent, ToolUseContent, content_factory
 
 # Shared empty view returned by the ``metadata`` property when unset. Never
 # stored on the instance — MappingProxyType is not deepcopy/pickle-safe, and
@@ -23,6 +23,8 @@ _EMPTY_METADATA: MappingProxyType[str, Any] = MappingProxyType({})
 RUNTIME_SOURCE = "runtime"
 BACKGROUND_TASK_COMPLETED_KIND = "background_task_completed"
 SESSION_EVENT_KIND = "session_event"
+# A message the user posted to a session (not runtime: transcripts show it).
+USER_MESSAGE_KIND = "user_message"
 
 
 def _append_anthropic_content_blocks(
@@ -171,9 +173,14 @@ class Message:
                     add_part(item_input, None)
             else:
                 item_input = content_item.to_openai_responses_input(role=self.role)
-                if item_input is not None:
-                    phase = getattr(content_item, "phase", None) if self.role == "assistant" else None
-                    add_part(item_input, phase)
+                if item_input is None:
+                    continue
+                if isinstance(content_item, CustomContent) and item_input.get("type") in CustomContent.OPENAI_ITEMS:
+                    flush()
+                    inputs.append(item_input)
+                    continue
+                phase = getattr(content_item, "phase", None) if self.role == "assistant" else None
+                add_part(item_input, phase)
         flush()
         return inputs
 

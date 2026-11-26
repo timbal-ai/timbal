@@ -75,6 +75,17 @@ If several Timbal remotes exist, name the intended one `timbal`. A remote named 
 
 Environment variables are separate from code: use `timbal env push` to upload them and `timbal env pull` to configure your local environment after the first code push.
 
+## Cloning a project
+
+Every platform project is a Git repository at `https://api.timbal.ai/orgs/{org_id}/projects/{project_id}/git`. Run `timbal configure` first: it registers the Timbal credential helper for your profile's platform base URL (`https://api.timbal.ai` by default), so `git clone`, `pull`, and `push` authenticate with your profile's API key without prompting. The helper reads the profile from `TIMBAL_PROFILE` (falling back to `default`), so set it when cloning from a non-default profile.
+
+```bash
+timbal configure
+git clone https://api.timbal.ai/orgs/{org_id}/projects/{project_id}/git my-project
+```
+
+Without the CLI, Git prompts for credentials (for example through Git Credential Manager). Enter any non-empty username, such as `timbal`, and a Timbal API key with access to the project as the password. Do not use your account password.
+
 ## `timbal.yaml` manifest
 
 Every workforce member needs a `timbal.yaml`. `timbal create` generates one automatically — do not remove the `_id` or `_type` fields.

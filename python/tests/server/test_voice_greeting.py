@@ -705,9 +705,7 @@ class TestGreetingMemory:
 
         return drive
 
-    async def test_first_turn_prompt_says_do_not_greet_again(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_first_turn_prompt_says_do_not_greet_again(self, monkeypatch: pytest.MonkeyPatch) -> None:
         prompts = _spy_on_resolved_voice_prompts(monkeypatch)
         stt = _OpenSTT()
         session = _make_session(greeting={"text": GREETING}, stt=stt)
@@ -790,9 +788,7 @@ class TestGreetingMemory:
         assert GREETING not in second
         assert "latest substantive message" in second
 
-    async def test_prompt_note_survives_a_callable_system_prompt(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_prompt_note_survives_a_callable_system_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
         prompts = _spy_on_resolved_voice_prompts(monkeypatch)
         stt = _OpenSTT()
 
@@ -1246,9 +1242,7 @@ class TestGreetingTurnMetrics:
 class TestGreetingPromptNoteAfterBargeIn:
     """The note quotes what the caller *heard*, not what was configured."""
 
-    async def test_note_quotes_only_the_heard_prefix(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_note_quotes_only_the_heard_prefix(self, monkeypatch: pytest.MonkeyPatch) -> None:
         prompts = _spy_on_resolved_voice_prompts(monkeypatch)
         tts = _PacedTTS(num_chunks=4, every_secs=0.05)
         session = _make_session(greeting={"text": GREETING, "interruptible": True}, tts=tts)
@@ -1282,7 +1276,13 @@ class TestGreetingPromptNoteAfterBargeIn:
         """Cut before a single word landed → the agent should greet normally."""
         prompts = _spy_on_resolved_voice_prompts(monkeypatch)
         tts = _PacedTTS(num_chunks=2, every_secs=0.0)
-        session = _make_session(greeting={"text": GREETING, "interruptible": True}, tts=tts)
+        session = _make_session(
+            greeting={"text": GREETING, "interruptible": True},
+            tts=tts,
+            # Playback frozen at 0 bytes: "never heard" by construction. With the real clock, the few ms between
+            # the claim and the interrupt on a busy runner already counted as a heard "H".
+            playback_tracker=BufferedPlaybackTracker(bytes_per_second=32_000, clock=lambda: 0.0),
+        )
         await session._claim_greeting(GREETING)
         await session.interrupt()
         assert session.transcript == []

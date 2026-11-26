@@ -48,6 +48,7 @@ def _redacted_trace(trace: Trace, redact: Callable[[Any], Any]) -> Trace:
             error=redact(span.error),
             usage=span.usage,
             metadata=redact(span.metadata),
+            runnable=span.runnable,
             **(span._extra or {}),
         )
         for attr in _SPAN_DUMP_ATTRS:
@@ -115,6 +116,13 @@ class TracingProvider(ABC):
     calls ``put()`` at the end of every run to store the completed trace, and
     ``get()`` at the start of a run to retrieve the parent's trace when session
     chaining is active (i.e. when ``run_context.parent_id`` is set).
+
+    **Durability**
+
+    ``durable`` says whether what a provider stores outlives the process that stored it. A provider whose
+    traces another process can read leaves it True; a process-local one (``InMemoryTracingProvider``) sets
+    it False, which tells callers that keep state across restarts — durable chat sessions — that they cannot
+    rely on this one.
 
     **Why class-based, not instance-based?**
 
@@ -190,6 +198,9 @@ class TracingProvider(ABC):
 
     _exporters: list[Exporter] = []
 
+    durable: bool = True
+    """Whether what this provider stores outlives the process that stored it (see **Durability**)."""
+
     _trace_redactor: Callable[[Any], Any] | None = None
     """Optional redactor applied to every span's serialized surfaces (input/output/
     memory dumps, error, metadata) before ``_store()`` and before exporters fire.
@@ -198,10 +209,30 @@ class TracingProvider(ABC):
     load memory from stored traces, so chained turns see the redacted history."""
 
     durability: str | None = None
-    """``"sync"``: every save is awaited (the default). ``"buffered"``: a save while the run is still going
-    is stored in the background, coalesced, and the run waits only at its end and at other barriers (see
+    """``"sync"``: every save is awaited. ``"buffered"``: a save while the run is still going is stored in
+    the background, coalesced, and the run waits only at its end and at other barriers (see
     :mod:`timbal.state.tracing.uploads`). ``"end"``: saves while the run is going are skipped; only its end
-    and other barriers store. ``None`` reads ``TIMBAL_TRACE_DURABILITY``."""
+    and other barriers store. ``None`` reads ``TIMBAL_TRACE_DURABILITY``, else :attr:`default_durability`."""
+
+    default_durability: str = "sync"
+    """The mode when neither :attr:`durability` nor ``TIMBAL_TRACE_DURABILITY`` sets one."""
+
+    overlapping_saves: bool = False
+    """Whether ``sync`` saves of one run may be on their way at once. False: :meth:`put` is called for one
+    of them at a time, so a snapshot ``_store`` took earlier never lands after a later one (the end of the
+    root run and the end of background work that outlives it are two saves, and so are parallel calls that
+    end together); a save that waited behind another is skipped when a ``put`` that began after it was asked
+    for has returned. True for a provider that keeps that order itself or has none to keep: the platform
+    provider sends one request per run at a time and folds the saves asked for meanwhile into the next, the
+    in-memory one stores the trace in the step that copies it. A subclass of either whose ``_store`` copies
+    the trace and then awaits sets it back to False. Not while exporters are attached (``_exporters``): they
+    are awaited in :meth:`put`, and their exports are ordered by the queue like any other write.
+
+    What this does not cover: a ``put`` whose caller is cancelled returns at once, and the next save starts.
+    A provider whose write goes on without its caller (a worker thread, a shielded request) has to drop it
+    itself once a later save has landed, as ``SqliteTracingProvider`` does. And the queue is one event loop's:
+    a save of the run from another loop goes straight to :meth:`put`, ordered only by a provider that orders
+    its own writes, as ``SqliteTracingProvider`` does."""
 
     flush_interval_s: float | None = None
     """Buffered mode: the least time between the starts of two background saves of one run. ``None`` reads
@@ -210,6 +241,12 @@ class TracingProvider(ABC):
     max_lag_s: float | None = None
     """Buffered mode: how old a run's oldest unsaved change may get before its saves are awaited again
     (uploads failing or falling behind). ``None`` reads ``TIMBAL_TRACE_MAX_LAG_S``, else 30 s."""
+
+    store_before_acting: bool = False
+    """Buffered mode: an agent stores the run before running a tool batch that is not all read-only, so a
+    crash between a call and its effects never leaves the effects with no record of the call (crash
+    recovery reads it). One awaited save per such batch. ``ChatSession`` turns it on for the buffered
+    providers it configures."""
 
     @classmethod
     def configured(cls, **kwargs: Any) -> type["TracingProvider"]:
@@ -260,6 +297,17 @@ class TracingProvider(ABC):
         pass
 
     @classmethod
+    async def get_strict(cls, run_context: "RunContext") -> Trace | None:
+        """:meth:`get`, except that a failed read raises: ``None`` means the run is not stored.
+
+        For callers that must not take an unreadable run for a missing one (a
+        chat session continuing a run that may be waiting for an approval).
+        The built-in providers implement it; the default calls :meth:`get`,
+        so a provider whose ``get`` returns ``None`` on errors cannot tell.
+        """
+        return await cls.get(run_context)
+
+    @classmethod
     async def put(cls, run_context: "RunContext") -> None:
         """Persist the completed run's trace and fire all attached exporters.
 
@@ -272,9 +320,7 @@ class TracingProvider(ABC):
                          keyed by ``run_context.id``.
         """
         if cls._trace_redactor is not None:
-            run_context = _RedactedRunContextView(
-                run_context, _redacted_trace(run_context._trace, cls._trace_redactor)
-            )
+            run_context = _RedactedRunContextView(run_context, _redacted_trace(run_context._trace, cls._trace_redactor))
         await cls._store(run_context)
         for exporter in cls._exporters:
             try:

@@ -13,6 +13,41 @@ def pytest_configure(config):
     """Configure pytest with global settings."""
     # Load environment variables
     load_dotenv(override=True)
+    if os.environ.get("TIMBAL_TEST_SLOW_IO"):
+        _slow_storage(float(os.environ["TIMBAL_TEST_SLOW_IO"]))
+
+
+def _slow_storage(delay: float) -> None:
+    """Opt-in (``TIMBAL_TEST_SLOW_IO=<seconds>``): every chat-session store read/write and every SQLite/JSONL
+    trace save waits ``delay`` first, like the disk of a loaded CI runner. A test that only passes because
+    storage is fast on the machine it was written on fails here, not on Windows a week later.
+    ``TIMBAL_TEST_SLOW_IO_JITTER=1`` waits a random time in [0, delay] instead (orderings vary too;
+    ``TIMBAL_TEST_SLOW_IO_SEED`` picks the sequence)."""
+    import asyncio
+    import functools
+    import random
+
+    from timbal.state.chat_store import SqliteChatSessionStore
+    from timbal.state.tracing.providers import JsonlTracingProvider, SqliteTracingProvider
+
+    jitter = os.environ.get("TIMBAL_TEST_SLOW_IO_JITTER") == "1"
+    rng = random.Random(int(os.environ.get("TIMBAL_TEST_SLOW_IO_SEED", "0")))
+
+    def slowed(cls, name):
+        real = cls.__dict__[name]
+        inner = real.__func__ if isinstance(real, classmethod) else real
+
+        @functools.wraps(inner)
+        async def wrapped(*args, **kwargs):
+            await asyncio.sleep(rng.uniform(0, delay) if jitter else delay)
+            return await inner(*args, **kwargs)
+
+        setattr(cls, name, classmethod(wrapped) if isinstance(real, classmethod) else wrapped)
+
+    slowed(SqliteChatSessionStore, "save")
+    slowed(SqliteChatSessionStore, "load")
+    slowed(SqliteTracingProvider, "_store")
+    slowed(JsonlTracingProvider, "_store")
 
 
 @pytest.fixture(scope="session")
@@ -83,16 +118,110 @@ def clear_in_memory_tracing_storage():
     Both are class-level dicts: the storage otherwise grows unbounded across the
     full test suite, and a trace one test stored would answer another test's get().
     """
+    from timbal.state.tracing.providers import platform as platform_module
     from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
     from timbal.state.tracing.providers.platform import PlatformTracingProvider
 
-    InMemoryTracingProvider._storage.clear()
-    PlatformTracingProvider._recent.clear()
-    PlatformTracingProvider._saving.clear()
+    def clear():
+        InMemoryTracingProvider._storage.clear()
+        PlatformTracingProvider._recent.clear()
+        PlatformTracingProvider._saving.clear()
+        # Saves a test left unlanded would otherwise be resent by the exit flush, to a host that was mocked.
+        PlatformTracingProvider._flights.clear()
+        PlatformTracingProvider._unsaved.clear()
+        PlatformTracingProvider._own_snapshots.clear()
+        for task in PlatformTracingProvider._retries.values():
+            task.cancel()
+        PlatformTracingProvider._retries.clear()
+        PlatformTracingProvider._closing = False
+        platform_module._TRACE_POOLS.clear()
+        PlatformTracingProvider._oversized.clear()
+
+    clear()
     yield
-    InMemoryTracingProvider._storage.clear()
-    PlatformTracingProvider._recent.clear()
-    PlatformTracingProvider._saving.clear()
+    clear()
+
+
+# How long the event loop may run no callback before loop_watchdog reports it (TIMBAL_TEST_LOOP_STALL_S).
+LOOP_STALL_S = float(os.environ.get("TIMBAL_TEST_LOOP_STALL_S", "10"))
+
+
+@pytest.fixture
+async def loop_watchdog(request):
+    """Report a test whose event loop stopped running callbacks for ``LOOP_STALL_S``, with every thread's stack.
+
+    A test that waits for a session (``until``, ``settle``, ``records``) and times out says only that the work
+    did not happen. This tells the two other reasons apart: the loop thread was blocked (a synchronous call on
+    it; the stacks say which, and the test fails), or the whole process stopped running (this thread was late
+    by as much: nothing in the process ran, so nothing could have happened; noted on the report, the test's
+    own result stands). Measured on ``time.perf_counter``, which no test moves (``Clock`` moves monotonic).
+
+    Async tests only: during a sync test's body nothing runs the loop, so a sync test that waits (on a thread,
+    a file) would read as a blocked loop. Applied module-wide, it lets the sync tests of the module pass as is.
+    """
+    import asyncio
+    import inspect
+    import sys
+    import threading
+    import traceback
+
+    if not inspect.iscoroutinefunction(getattr(request.node, "obj", None)):
+        yield
+        return
+
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    last_beat = [time.perf_counter()]
+    found: list[tuple[str, float, float, str]] = []  # (kind, loop late, this thread late, stacks)
+    stop = threading.Event()
+
+    def beat() -> None:
+        last_beat[0] = time.perf_counter()
+
+    def stacks() -> str:
+        out = []
+        for ident, frame in sys._current_frames().items():
+            label = "event loop" if ident == loop_thread else "thread"
+            out.append(f"--- {label} {ident} ---\n" + "".join(traceback.format_stack(frame)))
+        return "\n".join(out)
+
+    def watch() -> None:
+        ticked, reported = time.perf_counter(), False
+        while not stop.wait(0.25):
+            now = time.perf_counter()
+            own_late, ticked = now - ticked - 0.25, now
+            late = now - last_beat[0]
+            if own_late >= LOOP_STALL_S:
+                # This thread did not run either: the process was stopped (the loop's stack now says nothing).
+                found.append(("process", late, own_late, ""))
+                reported = True
+            elif late >= LOOP_STALL_S and not reported:
+                # On time itself while the loop is not: something holds the loop thread. Its stack says what.
+                found.append(("loop", late, own_late, stacks()))
+                reported = True
+            elif late < 1.0:
+                reported = False
+            try:
+                loop.call_soon_threadsafe(beat)
+            except RuntimeError:
+                return  # the loop is closed
+
+    watcher = threading.Thread(target=watch, name="loop-watchdog", daemon=True)
+    watcher.start()
+    yield
+    stop.set()
+    watcher.join(2)
+    if not found:
+        return
+    text = "\n\n".join(
+        f"The event loop ran no callback for {late:.1f} s; this watchdog thread was itself {own:.1f} s late "
+        f"({'the whole process stopped running' if kind == 'process' else 'the loop thread was blocked'}).\n"
+        f"{stack}"
+        for kind, late, own, stack in found
+    )
+    if any(kind == "loop" for kind, *_ in found):
+        pytest.fail(text, pytrace=False)
+    request.node.add_report_section("teardown", "loop watchdog", text)
 
 
 def assert_has_output_event(output: OutputEvent):

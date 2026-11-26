@@ -1,0 +1,114 @@
+---
+title: "File shares in Timbal"
+description: "Explore a folder on your server and copy its files into a knowledge base"
+---
+
+After you [list a folder](/connect/connections#file-shares) in `config.json`, Timbal can explore it and copy its files into a knowledge base. The connector reads the files itself, in read-only mode, and only the share's **name** and **paths relative to it** cross the connection.
+
+Every request needs the connector **online** and the `fs:browse` capability (copying needs `fs:copy`), both reported by connector 0.1.27 or newer and only when at least one share is configured. Otherwise browse requests answer `browse_unsupported` (or `fs_unsupported`) and copy answers `fs_unsupported`.
+
+| Operation | Request | Role needed |
+| --------- | ------- | ----------- |
+| List the shares | `GET /orgs/{org_id}/connectors/{connector_id}/browse/filesystems` | Membership |
+| List a folder | `GET /orgs/{org_id}/connectors/{connector_id}/browse/filesystems/entries` | Membership |
+| Summarize a folder tree | `GET /orgs/{org_id}/connectors/{connector_id}/browse/filesystems/summary` | Membership |
+| Search file contents | `GET /orgs/{org_id}/connectors/{connector_id}/browse/filesystems/search` | ConnectorsManage |
+| Copy to a knowledge base | `POST /orgs/{org_id}/connectors/{connector_id}/filesystems/copy` | ConnectorsManage and K2Manage |
+
+Searching needs more than membership because reading file contents is data leaving your network.
+
+## Explore
+
+<Steps>
+  <Step title="List the shares">
+    ```bash
+    curl "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/browse/filesystems" \
+      -H "Authorization: Bearer $API_KEY"
+    # -> { "filesystems": ["exports"] }
+    ```
+  </Step>
+  <Step title="Summarize before you look inside">
+    A cheap overview of a folder: counts, total size, the largest files and a breakdown by extension. Do this before listing or copying a big folder.
+
+    ```bash
+    curl "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/browse/filesystems/summary?filesystem_ref=exports&path=reports" \
+      -H "Authorization: Bearer $API_KEY"
+    # -> { "file_count": 1250, "dir_count": 42, "total_bytes": 913421312, "truncated": false,
+    #      "largest": [...], "by_extension": [...], "max_depth": 4 }
+    ```
+  </Step>
+  <Step title="List one level">
+    ```bash
+    curl "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/browse/filesystems/entries?filesystem_ref=exports&path=reports&sort=size" \
+      -H "Authorization: Bearer $API_KEY"
+    # -> { "entries": [{ "name", "path", "kind", "size_bytes", "mtime_epoch_secs" }, ...], "truncated": false }
+    ```
+
+    Parameters: `filesystem_ref`, `path` (relative to the share), `all`, `sort` (`name`, `size` or `mtime`), `glob`, `depth` (default 0, so one level), `limit`, `timeout_ms`.
+  </Step>
+  <Step title="Search file contents (optional)">
+    ```bash
+    curl "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/browse/filesystems/search?filesystem_ref=exports&path=reports&pattern=invoice&glob=*.pdf" \
+      -H "Authorization: Bearer $API_KEY"
+    # -> { "matches": [{ "path", "line_number", "line" }, ...], "files_scanned", "files_matched", "truncated" }
+    ```
+
+    Parameters: `filesystem_ref`, `path`, `pattern` (a regular expression, matched per line), `glob`, `max_matches`, `timeout_ms`.
+  </Step>
+</Steps>
+
+### Limits and partial answers
+
+- Each request has a time budget on the server: **20 seconds** by default. `timeout_ms` changes it, up to **30 seconds**. On a big or slow mount, pass a short one (`5000`) so you fail fast.
+- An answer can be **partial**. When `truncated` is `true` the walk stopped at a limit. That is a normal result, not an error. `summary` also returns a `truncated_reason`.
+- `depth` is capped at 8. List one level at a time instead of walking a deep tree.
+- A browse request **can't be cancelled** once sent, and a single stuck network read can hold it until the operating system gives up. Copy jobs can be stopped; browse requests can't.
+
+Errors (HTTP 422): `connector_offline`, `browse_timeout`, `browse_unsupported` (the connector lacks `fs:browse`), and `fs_unsupported` (no shares configured, or a connector older than 0.1.27). Copy answers `404` for an unknown connector or knowledge base.
+
+## Copy files to a knowledge base
+
+Copying streams files from a share into a knowledge base's document store. It is a job: you can list it with the other [jobs](/connect/sync-data#one-off-job) and stop it. It needs the **ConnectorsManage** and **K2Manage** roles.
+
+```bash
+curl -X POST "https://api.timbal.ai/orgs/$ORG_ID/connectors/$CONNECTOR_ID/filesystems/copy" \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "filesystem_ref": "exports",
+    "path": "reports/2024",
+    "recursive": true,
+    "kb_id": 123,
+    "directory": "imports/reports",
+    "parse": false
+  }'
+# -> 202 { "job_id": "..." }
+```
+
+| Field | Required | Default | Notes |
+| ----- | -------- | ------- | ----- |
+| `filesystem_ref` | Yes | | A name from `browse/filesystems` |
+| `path` | No | `""` | Relative to the share. Empty copies the whole share |
+| `recursive` | No | `false` | Must be `true` when `path` is a folder |
+| `kb_id` | Yes | | Target knowledge base |
+| `directory` | No | Root | Folder in the knowledge base. A recursive copy recreates the tree under it |
+| `parse` | No | `false` | `true` also parses and embeds, whatever the knowledge base's automatic processing is set to. Files are only stored by default |
+| `metadata` | No | `{}` | Added to every file |
+| `max_files` | No | 5,000 | The job is refused before it starts if the folder holds more |
+| `max_total_bytes` | No | 2 GiB | Same, for the total size |
+
+- **100 MB per file.** Larger files, empty files and symbolic links are skipped with a note. One failed file doesn't fail the job.
+- The job's `rows_emitted` counts **files** that landed.
+- Run `summary` on the folder first to see whether it fits the limits.
+
+See [Copy files to a knowledge base](/api-reference/connectors/filesystems/copy).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Connect your IDE" icon="plug" href="/connect/mcp">
+    Explore a share from Cursor with `fs_du`, `fs_ls` and `fs_search`.
+  </Card>
+  <Card title="Configure connections" icon="database" href="/connect/connections#file-shares">
+    How to list a folder in `config.json`.
+  </Card>
+</CardGroup>
