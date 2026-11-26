@@ -56,6 +56,27 @@ class TestContentlessSingleToken:
         for text in ("I need help.", "The blue one.", "To account 448."):
             assert not _is_contentless_single_token(text), text
 
+    def test_spanish_function_words_are_dropped(self) -> None:
+        for text in ("de", "De.", "del", "la", "El.", "en", "un", "con"):
+            assert _is_contentless_single_token(text), text
+
+    def test_spanish_one_word_turns_survive(self) -> None:
+        # "¿Y?" asks for more, "o"/"u" can be a spelled letter, and the rest are plain answers.
+        for text in ("Sí.", "No.", "Vale.", "Hola.", "¿Y?", "O.", "U.", "Gracias.", "Dígame.", "¿Qué?"):
+            assert not _is_contentless_single_token(text), text
+
+    def test_a_spanish_function_word_inside_an_utterance_survives(self) -> None:
+        for text in ("Es de Sevilla.", "De nada.", "La de octubre.", "Sí, de acuerdo."):
+            assert not _is_contentless_single_token(text), text
+
+    async def test_provider_ignores_the_ghost_de_after_a_dictated_dni(self) -> None:
+        """Flux commits "de" on the silence after the patient thresholds are restored."""
+        det = ProviderTurnDetector()
+        for _ in range(3):
+            decision = await det.on_committed("de", _state())
+            assert decision.action is CommitAction.IGNORE
+            assert decision.reason == "contentless"
+
     async def test_provider_ignores_a_lone_pronoun(self) -> None:
         """Observed on flux/heuristic: 'I' committing its own turn after a finished one,
         which is a ghost turn — the assistant answers a word the user did not say."""
