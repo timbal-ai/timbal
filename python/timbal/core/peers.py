@@ -346,9 +346,10 @@ def _leave_on_close(session: ChatSession) -> None:
             membership.leave()
 
 
-#: The agent span's record of its sends to agents: ``{call_id, ids, replay?}``. ``ids`` are the ids its sends used,
-#: by call, and those a run that resumes a pause carried for the calls it replays (``carry_sent_ids``); ``replay``
-#: lists the carried ones its replays have not used yet (each is used once).
+#: The agent span's record of its sends to agents: ``{call_id, ids, replay?}``. ``ids`` are the ids the sends of its
+#: latest batch of tool calls used, by call (the one batch a pause can leave waiting), and those a run that resumes
+#: a pause carried for the calls it replays (``carry_sent_ids``); ``replay`` lists the carried ones its replays have
+#: not used yet (each is used once). A fresh batch starts it empty (:func:`start_batch`).
 PEER_SENT_KEY = "peer_sent"
 
 
@@ -402,13 +403,15 @@ def carry_sent_ids(current_span: Any, paused_span: Any, waiting: Collection[str]
         _write_sent(current_span, ids, sorted(ids))
 
 
-def end_replays(span: Any) -> None:
-    """The resumed batch has run: the ids carried for its replays go to no later call (a replay a rail blocked, a
-    call refused before it ran). A batch cut on its way leaves them listed, which nothing reads: only a paused span
-    is carried from, and a carry takes the ids its waiting calls need, not the list."""
+def start_batch(span: Any) -> None:
+    """A fresh batch of the model's tool calls is about to run: the record holds this batch's sends from here on,
+    since a pause can only leave this batch waiting. Neither an id of an earlier step's call nor one carried for a
+    replay that did not run (a rail blocked it, the call was refused) goes to a call of this batch that pauses
+    before it runs: the peer would drop that new message as a duplicate. A batch cut on its way leaves its record,
+    which nothing reads: only a paused span is carried from."""
     ids, replay = _sent_record(span)
-    if replay:
-        _write_sent(span, ids, [])
+    if ids or replay:
+        _write_sent(span, {}, [])
 
 
 def _write_sent(span: Any, ids: dict[str, Any], replay: list[str]) -> None:

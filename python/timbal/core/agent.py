@@ -92,7 +92,7 @@ from .attachment_limit import AttachmentSpills, apply_attachment_limit
 from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
 from .models import Model, base_usage_metric, get_context_window
-from .peers import _SEND_TO_AGENT_FALLBACKS, SEND_TO_AGENT_NAME, carry_sent_ids, end_replays
+from .peers import _SEND_TO_AGENT_FALLBACKS, SEND_TO_AGENT_NAME, carry_sent_ids, start_batch
 from .runnable import Runnable, RunnableLike
 from .session_scheduler import note_peer_hops, record_delivery
 from .skill import ReadSkill, Skill
@@ -5559,8 +5559,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if first_pending is not None:
                         await self._save_denials(run_context, consecutive_denials)
                         raise PauseRequired(first_pending)
-                    # The replays are done: the ids carried for them go to no later call (peers.carry_sent_ids).
-                    end_replays(current_span)
                     i += 1
                     if denial_window_on or consecutive_denials >= denial_limit:
                         await _check_denials()
@@ -6044,6 +6042,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     await run_context._save_trace(barrier=True)
                 first_pending: OutputEvent | None = None
                 lost_claim: OutputEvent | None = None
+                if peer is not None:
+                    start_batch(current_span)  # the sends' record holds the batch a pause can leave waiting: this one
                 if run_context._before_tool_dispatch is not None:
                     await run_context._before_tool_dispatch(
                         self._path, [(call.id, call.name, call.input) for call in tool_calls]

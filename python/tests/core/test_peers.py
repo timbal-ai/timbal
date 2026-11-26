@@ -2360,3 +2360,127 @@ class TestOwnerRoundThree:
         assert len(received) == 2 and received[0]["message_id"] == received[1]["message_id"]  # replayed, same id
         assert resumed.root_span().metadata["peer_replay"] == "app-value"
         assert out.metadata["peer_replay"] == "app-value"
+
+    async def test_an_id_a_blocked_replay_left_is_not_carried_past_another_pause(self, monkeypatch):
+        """Found reviewing c3ab025c: a replay a rail blocked left its carried id in the sends' record, and the same
+        call made in the next step, which paused before it ran, was given it on the next resume: the peer dropped
+        that new message as a duplicate."""
+        runs = []
+
+        def rail(_text, ctx):
+            if ctx.tool_name != "send_to_agent":
+                return True
+            runs.append(1)
+            if len(runs) == 2:
+                return Verdict.block("not now")  # the replay
+            return Verdict.escalate("a person checks it") if len(runs) == 3 else True  # the later call
+
+        received, answer = [], asyncio.Event()
+        remote_bob(monkeypatch, received, answer)
+        send = ToolUseContent(id="t-send", name="send_to_agent", input={"to": "bob", "message": "refund order 7"})
+        pay = ToolUseContent(id="t-pay", name="pay", input={})
+        again = call("send_to_agent", call_id="t-send", to="bob", message="refund order 7")
+        alice = Agent(
+            name="alice",
+            model=TestModel(
+                responses=[Message(role="assistant", content=[send, pay], stop_reason="tool_use"), again, "done"]
+            ),
+            tools=[Tool(name="pay", handler=lambda: "paid", requires_approval=True)],
+            guardrails=[guardrail(rail, stages=["tool_args"], name="rail")],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        directory = AgentDirectory()
+        directory.add_remote("bob", RemotePeer(url="https://bots.example", session_id="s"))
+        membership = directory.join(ChatSession(alice), "alice")
+        context = fresh(peer=membership)
+        stream = alice(prompt="go")
+        async for event in stream:
+            if isinstance(event, ApprovalEvent):
+                approval = event
+                await until(lambda: received)
+                break
+        await stream.aclose()
+        answer.set()
+        second = fresh(context.id, peer=membership)
+        events, _ = await run(alice, resume={approval.approval_id: True})
+        (asked,) = [e for e in events if isinstance(e, ApprovalEvent)]
+        fresh(second.id, peer=membership)
+        await run(alice, resume={asked.approval_id: True})
+        assert len(received) == 2  # the cut send, then the later call (the replay was blocked)
+        assert received[0]["message_id"] != received[1]["message_id"]
+
+    async def test_an_id_from_an_earlier_step_is_not_carried_for_a_call_that_paused_before_running(self, monkeypatch):
+        """Found reviewing c3ab025c (also before it): the sends' record kept each call's id across steps, so the
+        same call made in a later step, which paused before it ran, was given the earlier step's id on the resume:
+        the peer dropped it as a duplicate."""
+        runs = []
+
+        def rail(_text, ctx):
+            if ctx.tool_name != "send_to_agent":
+                return True
+            runs.append(1)
+            return Verdict.escalate("a person checks it") if len(runs) == 2 else True
+
+        received, answer = [], asyncio.Event()
+        answer.set()
+        remote_bob(monkeypatch, received, answer)
+        first = call("send_to_agent", call_id="functions.send_to_agent:0", to="bob", message="yes")
+        again = call("send_to_agent", call_id="functions.send_to_agent:0", to="bob", message="yes")
+        alice = Agent(
+            name="alice",
+            model=TestModel(responses=[first, again, "done"]),
+            guardrails=[guardrail(rail, stages=["tool_args"], name="rail")],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        directory = AgentDirectory()
+        directory.add_remote("bob", RemotePeer(url="https://bots.example", session_id="s"))
+        membership = directory.join(ChatSession(alice), "alice")
+        context = fresh(peer=membership)
+        events, _ = await run(alice)
+        (asked,) = [e for e in events if isinstance(e, ApprovalEvent)]
+        fresh(context.id, peer=membership)
+        await run(alice, resume={asked.approval_id: True})
+        assert len(received) == 2  # "yes" to two questions is two messages
+        assert received[0]["message_id"] != received[1]["message_id"]
+
+    async def test_a_replay_that_pauses_again_keeps_its_id_for_the_next_resume(self, monkeypatch):
+        """The cut send's replay was escalated, so the run that resumed paused again before it ran: the next resume
+        replays it with the id it had, and the peer takes it once."""
+        runs = []
+
+        def rail(_text, ctx):
+            if ctx.tool_name != "send_to_agent":
+                return True
+            runs.append(1)
+            return Verdict.escalate("a person checks it") if len(runs) == 2 else True  # the first replay
+
+        received, answer = [], asyncio.Event()
+        remote_bob(monkeypatch, received, answer)
+        send = ToolUseContent(id="t-send", name="send_to_agent", input={"to": "bob", "message": "refund order 7"})
+        pay = ToolUseContent(id="t-pay", name="pay", input={})
+        alice = Agent(
+            name="alice",
+            model=TestModel(responses=[Message(role="assistant", content=[send, pay], stop_reason="tool_use"), "done"]),
+            tools=[Tool(name="pay", handler=lambda: "paid", requires_approval=True)],
+            guardrails=[guardrail(rail, stages=["tool_args"], name="rail")],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        directory = AgentDirectory()
+        directory.add_remote("bob", RemotePeer(url="https://bots.example", session_id="s"))
+        membership = directory.join(ChatSession(alice), "alice")
+        context = fresh(peer=membership)
+        stream = alice(prompt="go")
+        async for event in stream:
+            if isinstance(event, ApprovalEvent):
+                approval = event
+                await until(lambda: received)
+                break
+        await stream.aclose()
+        answer.set()
+        second = fresh(context.id, peer=membership)
+        events, _ = await run(alice, resume={approval.approval_id: True})
+        (asked,) = [e for e in events if isinstance(e, ApprovalEvent)]
+        assert len(received) == 1  # the replay waits for a person
+        fresh(second.id, peer=membership)
+        await run(alice, resume={approval.approval_id: True, asked.approval_id: True})
+        assert len(received) == 2 and received[0]["message_id"] == received[1]["message_id"]
