@@ -161,10 +161,11 @@ class TestExchange:
         assert len(results["bob"]) == 2 and "back and forth 3 times" in results["bob"][-1]
 
     async def test_an_urgent_message_joins_the_running_turn(self):
-        gate = asyncio.Event()
+        gate, working = asyncio.Event(), asyncio.Event()
         seen = []
 
         async def work() -> str:
+            working.set()  # the turn is past its start: what arrives now is steered into it
             await gate.wait()
             return "worked"
 
@@ -186,8 +187,7 @@ class TestExchange:
         async with ChatSession(make_agent("bob", bob, tools=[Tool(name="work", handler=work)])) as b:
             directory.join(b, "bob")
             b.send("start")
-            await until(lambda: b.busy)
-            await asyncio.sleep(0.05)
+            await asyncio.wait_for(working.wait(), 5)
             receipt = await directory.send("alice", "bob", "stop after this", priority="urgent")
             gate.set()
             await settle(b)
@@ -251,10 +251,13 @@ class TestDirectory:
                 directory.add_remote("carol", RemotePeer(url="http://x", session_id="s"))
 
     async def test_a_repeated_message_is_delivered_once(self):
-        gate = asyncio.Event()
+        gate, working = asyncio.Event(), asyncio.Event()
         received = []
 
         async def work() -> str:
+            # The turn is past its start, so the messages sent now wait for a turn of their own. Sent before it
+            # (a slow runner: Windows CI), the turn's start takes them, ahead of its prompt.
+            working.set()
             await gate.wait()
             return "worked"
 
@@ -273,7 +276,7 @@ class TestDirectory:
         async with ChatSession(make_agent("bob", bob, tools=[Tool(name="work", handler=work)])) as b:
             directory.join(b, "bob")
             b.send("start")
-            await until(lambda: b.busy)
+            await asyncio.wait_for(working.wait(), 5)
             first = await directory.send("alice", "bob", "hello", message_id="am_1")
             again = await directory.send("alice", "bob", "hello", message_id="am_1")
             same_text = await directory.send("alice", "bob", "hello", message_id="am_2")
