@@ -1022,17 +1022,24 @@ class TestReviewRoundOne:
                 await peer_answering(answer).deliver({"from": "a", "text": "x"})
             assert refused.value.reason == reason
 
-    async def test_a_blocked_message_is_not_written_to_the_log(self):
-        import structlog
+    async def test_a_blocked_message_is_not_written_to_the_log(self, monkeypatch):
+        # Read from the module's logger itself, not with structlog's capture_logs: once a test in the same
+        # process has set logging up twice (the server, codegen), a logger cached in between keeps the first
+        # configuration's processors, and capture_logs sees nothing of it (macOS CI, merge queue on f1dcd020).
+        from structlog.testing import CapturingLogger
+        from timbal.core import chat_session
 
+        captured = CapturingLogger()
+        monkeypatch.setattr(chat_session, "logger", captured)
         rail = guardrail(lambda text: Verdict.block("no") if "4111" in text else True, stages=["input"])
         directory = AgentDirectory()
         async with ChatSession(make_agent("bob", lambda _: "NO_REPLY", guardrails=[rail])) as b:
             directory.join(b, "bob")
-            with structlog.testing.capture_logs() as logs, pytest.raises(PeerRejected):
+            with pytest.raises(PeerRejected):
                 await directory.send("alice", "bob", "my card is 4111 1111")
-        (entry,) = [e for e in logs if e["event"] == "agent_message_blocked"]
-        assert not any("4111" in str(value) for value in entry.values())
+        (entry,) = [c for c in captured.calls if c.args[:1] == ("agent_message_blocked",)]
+        assert entry.kwargs["sender"] == "alice"
+        assert not any("4111" in str(value) for value in (*entry.args, *entry.kwargs.values()))
 
     def test_a_block_cannot_be_closed_in_capitals(self):
         from timbal.state.background import SessionEvent, format_session_notice
