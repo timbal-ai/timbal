@@ -283,7 +283,7 @@ def test_an_agent_message_refused_by_the_session_says_why(client, monkeypatch):
     refused = client.post(url, json={"from": "the planner", "text": "hi"})
     assert refused.status_code == 422 and refused.json()["reason"] == "invalid"
 
-    async def blocked(self, text, sender):
+    async def blocked(_self, _text, _sender):
         raise PeerRejected("blocked", "Blocked by the recipient's 'pii' guardrail.")
 
     monkeypatch.setattr(ChatSession, "_screen_agent_message", blocked)

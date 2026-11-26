@@ -87,7 +87,8 @@ if hasattr(os, "register_at_fork"):
 
 class PeerRejected(Exception):
     """A message was not delivered. ``reason``: ``unknown`` | ``not_accepted`` | ``blocked`` | ``closed`` |
-    ``hop_limit`` | ``invalid`` | ``unreachable``."""
+    ``hop_limit`` | ``invalid`` | ``unreachable`` (nothing reached the agent) | ``unconfirmed`` (a remote agent's
+    server did not confirm it: it may have arrived)."""
 
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
@@ -117,8 +118,14 @@ def _check_message_id(value: Any, what: str) -> str | None:
     return value
 
 
-_REASONS = frozenset({"unknown", "not_accepted", "blocked", "closed", "hop_limit", "invalid", "unreachable"})
-_REASON_BY_STATUS = {403: "not_accepted", 404: "unknown", 409: "closed", 422: "invalid"}
+_REASONS = frozenset(
+    {"unknown", "not_accepted", "blocked", "closed", "hop_limit", "invalid", "unreachable", "unconfirmed"}
+)
+_REASON_BY_STATUS = {400: "invalid", 403: "not_accepted", 404: "unknown", 409: "closed", 422: "invalid"}
+_UNCONFIRMED = (
+    "The agent's server did not confirm it: the message may have arrived. Do not send it again; tell your user "
+    "if it matters."
+)
 _FALLBACK_MESSAGES = {
     "not_accepted": "The agent does not take messages from you.",
     "unknown": "The agent's session no longer exists.",
@@ -150,8 +157,12 @@ class RemotePeer:
             # No redirects: the headers are for this server, and a receipt comes from the route itself.
             async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
                 response = await client.post(url, json=envelope, headers=self.headers)
-        except httpx.HTTPError as e:
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            # No connection was made: nothing was sent.
             raise PeerRejected("unreachable", f"Could not reach the agent: {type(e).__name__}.") from e
+        except httpx.HTTPError as e:
+            # Sent, or partly: the server may have taken it before the answer was lost.
+            raise PeerRejected("unconfirmed", _UNCONFIRMED) from e
         body: Any = None
         with contextlib.suppress(ValueError):
             body = response.json()
@@ -161,8 +172,15 @@ class RemotePeer:
             detail = said.get("detail")
             message = detail if isinstance(detail, str) and detail else _FALLBACK_MESSAGES.get(reason, "Refused.")
             raise PeerRejected(reason, message)
-        if not response.is_success or not isinstance(body, dict):
+        if response.status_code >= 500 and "retry-after" not in response.headers:
+            # The route answers a 503 with Retry-After only when nothing was accepted: without it the message may be
+            # stored (or a turn may have it), and any other server error may have come after it was queued.
+            raise PeerRejected("unconfirmed", _UNCONFIRMED)
+        if not response.is_success:
             raise PeerRejected("unreachable", f"The agent's server answered {response.status_code}.")
+        if not isinstance(body, dict):
+            # Taken by something, and no receipt says what became of it.
+            raise PeerRejected("unconfirmed", _UNCONFIRMED)
         return body
 
 
@@ -252,7 +270,7 @@ class PeerMembership:
                     hops=hops,
                 )
             except PeerRejected as e:
-                raise ValueError(f"Not sent: {e}") from None
+                raise ValueError(f"{'Not confirmed' if e.reason == 'unconfirmed' else 'Not sent'}: {e}") from None
 
         peers = self.directory.peers(for_name=self.name)
         listing = "\n".join(f"- {peer}" + (f": {description}" if description else "") for peer, description in peers)
@@ -260,7 +278,8 @@ class PeerMembership:
             name=name,
             description=(
                 "Send a message to another agent. It arrives in that agent's inbox; it answers, if it needs to, "
-                "with a message of its own that reaches you later. Only message an agent when it can do or know "
+                "with a message of its own that reaches you later. To answer a message an agent sent you, send to "
+                "its from= name with its message_id as reply_to. Only message an agent when it can do or know "
                 "something you need, or needs something from you; never just to acknowledge or thank.\n\n"
                 + ("Agents you can message:\n" + listing if listing else "No other agent can be messaged right now.")
             ),
@@ -298,22 +317,11 @@ class AgentDirectory:
         description: str | None = None,
         accepts: Accepts = None,
     ) -> PeerMembership:
-        """Make ``session`` reachable as ``name``; its root agent gains ``send_to_agent``. Left on ``close()``.
-
-        Refused for an agent with a tool of its own named ``send_to_agent``: the notices that bring other
-        agents' messages tell the model to answer with ``send_to_agent``, and it would call that one.
-        """
+        """Make ``session`` reachable as ``name``; its root agent gains ``send_to_agent`` (another name if one of
+        its tools has that one, see ``Agent._with_peer_tool``). Left on ``close()``."""
         name = _check_name(name)
         if session.closed:
             raise RuntimeError("The chat session is closed.")
-        from .tool_set import ToolSet
-
-        tools = getattr(session._agent, "tools", ())
-        if any(not isinstance(tool, ToolSet) and getattr(tool, "name", None) == SEND_TO_AGENT_NAME for tool in tools):
-            # (A tool set's tools come at run time: the send then takes another name, see Agent._with_peer_tool.)
-            raise ValueError(
-                f"The session's agent has a tool named {SEND_TO_AGENT_NAME!r}: rename it to join a directory."
-            )
         membership = PeerMembership(self, name, session, description=description, accepts=accepts)
         with _LOCK:
             if name in self._members:

@@ -114,15 +114,20 @@ class Followup:
 
 def record_delivery(run_context: Any, span: Any, events: list[SessionEvent]) -> None:
     """Settle ``events`` as delivered to ``run_context``'s run and account for them on ``span``."""
+    from_agents = False
     for event in events:
         event._settle("delivered", run_context.id)
         if event.peer is not None:
             # How deep in a chain of agent replies this run is: its own messages to agents go one further.
+            from_agents = True
             hops = event.peer.get("hops") or 0
             if run_context._peer_hops is None or hops > run_context._peer_hops:
                 run_context._peer_hops = hops
     if span is None or not events:
         return
+    if from_agents:
+        # Where a run that resumes this turn after a pause finds it (ChatSession._run_turn).
+        span.metadata["peer_hops"] = run_context._peer_hops
     span.usage["session_events:delivered"] = span.usage.get("session_events:delivered", 0) + len(events)
     records = [record for event in events for record in event.guardrails]
     if records:

@@ -477,6 +477,18 @@ def _left_parked(turn: asyncio.Task | None) -> bool | None:
     return is_parked(output.status) if output is not None else None
 
 
+def _peer_hops_of(context: RunContext | None) -> int | None:
+    """How deep in a chain of agent messages a run was (``RunContext._peer_hops``): from the context while it lives,
+    else from its root span (``metadata.peer_hops``, :func:`~timbal.core.session_scheduler.record_delivery`)."""
+    if context is None:
+        return None
+    if context._peer_hops is not None:
+        return context._peer_hops
+    root = context.root_span()
+    hops = root.metadata.get("peer_hops") if root is not None else None
+    return hops if isinstance(hops, int) and not isinstance(hops, bool) else None
+
+
 def _brief(value: Any, limit: int = 160) -> str:
     text = value if isinstance(value, str) else repr(value)
     text = " ".join(text.split())
@@ -1053,7 +1065,9 @@ class ChatSession:
         if not text:
             raise PeerRejected("invalid", "A message from an agent needs text.")
         if len(text) > MAX_SESSION_EVENT_CHARS:
-            raise PeerRejected("invalid", f"A message from an agent is limited to {MAX_SESSION_EVENT_CHARS} characters.")
+            raise PeerRejected(
+                "invalid", f"A message from an agent is limited to {MAX_SESSION_EVENT_CHARS} characters."
+            )
         earlier = self._agent_messages.get((sender, message_id)) if message_id else None
         if earlier is not None:
             return {**earlier.receipt(), "duplicate": True}
@@ -1064,7 +1078,7 @@ class ChatSession:
             raise PeerRejected("closed", "The agent's session is closed.")
         screened = screened.strip()
         if not screened:
-            logger.warning("agent_message_blocked", rail="redaction", sender=sender, emptied=True)
+            logger.warning("agent_message_blocked", rail="redaction", sender=sender, chars=len(text), emptied=True)
             raise PeerRejected("blocked", "Blocked by the recipient's guardrails: nothing of the message was left.")
         earlier = self._agent_messages.get((sender, message_id)) if message_id else None
         if earlier is None:
@@ -1072,7 +1086,9 @@ class ChatSession:
                 (
                     event
                     for event in self._store.pending_events()
-                    if event.peer is not None and event.peer["from"] == sender and event.text == screened
+                    if event.peer is not None
+                    and (event.peer["from"], event.text, event.peer.get("reply_to"), event.peer.get("priority"))
+                    == (sender, screened, reply_to, priority)
                 ),
                 None,
             )
@@ -1133,8 +1149,9 @@ class ChatSession:
         ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._agent._path)
         outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
         if outcome.verdict is not None:
-            # No run exists yet to carry a guardrail report, so the log is the record.
-            logger.warning("agent_message_blocked", rail=outcome.rail.name, sender=sender, text_preview=text[:120])
+            # No run exists yet to carry a guardrail report, so the log is the record. Not of the text: it is what
+            # the rail kept out (a card number, a secret).
+            logger.warning("agent_message_blocked", rail=outcome.rail.name, sender=sender, chars=len(text))
             raise PeerRejected("blocked", f"Blocked by the recipient's {outcome.rail.name!r} guardrail.")
         return outcome.text, list(outcome.triggered)
 
@@ -2093,6 +2110,9 @@ class ChatSession:
             # has none (it becomes the root once it is the head, see _pump).
             context._session_id = self.root_run_id or (context.id if context.parent_id is None else None)
             context._peer = self._peer
+            if resume is not None and self._peer is not None:
+                # The same turn, after its pause: the agent messages it took count toward its hop limit still.
+                context._peer_hops = _peer_hops_of(self._last_context)
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
             context._cut = asyncio.Event()

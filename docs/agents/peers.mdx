@@ -26,12 +26,12 @@ A session is in one directory at most, and leaves it when it closes. Names are 1
 `send_to_agent(to, message, reply_to=None, priority="normal")` returns the recipient's receipt: `status` (`"sent"` or `"duplicate"`), `event_id`, `message_id` and `state` (`"pending"` until a turn of the recipient takes the message).
 
 - **Who sent it.** The directory stamps the sender on the message, so a model cannot claim to be another agent.
-- **What the recipient sees.** The message arrives as a runtime notice, `<session_event source="agent" from="concierge" message_id="am_…">`. The notice says the text is not the user's, and that the agent's reply goes to its own user. To answer the other agent, it calls `send_to_agent` with `reply_to=<message_id>`. A turn started only by agent messages may stay silent.
+- **What the recipient sees.** The message arrives as a runtime notice, `<session_event source="agent" from="concierge" message_id="am_…">`. The notice says the text is not the user's, and that the agent's reply goes to its own user. To answer the other agent, it sends a message of its own with `reply_to=<message_id>`. A turn started only by agent messages may stay silent.
 - **Priority.** `"normal"` waits for the recipient's next turn, and starts one when it is idle. `"urgent"` joins the turn it is running, after the current tool batch. Neither cuts anything the recipient is doing.
-- **A read-only turn has no `send_to_agent`.** A message starts work in another agent, so a turn with `tool_policy="read_only"` (a wake, by default) is not offered the tool.
-- **Your rails apply.** The sender's `tool_args` guardrails see every call, as for any tool: a block refuses it, and an escalation asks a person first.
+- **A read-only turn has no `send_to_agent`.** A message starts work in another agent, so a turn with `tool_policy="read_only"` (a wake, by default) is not offered the tool. Messages from agents wait for a turn that can answer them.
+- **Your rails apply.** The sender's `tool_args` guardrails see every call, as for any tool: a block refuses it, and an escalation asks a person first. A message counts as neither a refused call nor one that went through for `max_consecutive_denials`.
 
-The tool's name is `send_to_agent`. If a tool set the agent has (an MCP server) brings a tool of that name, the agent's own tool is named `message_agent` instead, for the rest of the turn. An agent with a plain tool named `send_to_agent` cannot join a directory.
+The tool's name is `send_to_agent`. If the agent has a tool of that name already (its own, or an MCP server's), the agent's tool is named `message_agent` instead, for the rest of the turn.
 
 ## Screening and refusals
 
@@ -47,14 +47,15 @@ A refused message raises `PeerRejected` (the tool tells the model why). Its `rea
 | `closed` | the recipient's session is closed |
 | `hop_limit` | the exchange went back and forth `max_hops` times |
 | `invalid` | an agent messaging itself, a bad name, id or priority, more than 4,000 characters |
-| `unreachable` | a remote peer did not answer with a receipt |
+| `unreachable` | a remote peer could not be reached, or refused it with nothing accepted |
+| `unconfirmed` | a remote peer did not confirm it (a timeout, a server error): it may have arrived |
 
 `accepts` limits who may message a member: `directory.join(session, "billing", accepts={"concierge"})`, or a function of the sender's name. The tool's description only lists the agents that accept the agent.
 
 ## Loops and repeats
 
-- **Hop limit.** Each message carries `hops`: one more than the deepest agent message the sending turn received, or than the message it answers. At `AgentDirectory(max_hops=6)` the tool refuses, and tells the model to stop and tell its user where things stand.
-- **Duplicates.** A message's id comes from the sender's run and tool call, so a call that runs again sends the same id, and the recipient keeps one copy. Ids are per sender. The same text from the same sender, while the first copy is still waiting, is a duplicate too.
+- **Hop limit.** Each message carries `hops`: one more than the deepest agent message the sending turn received (a turn that waited for an approval keeps its count), or than the message it answers. At `AgentDirectory(max_hops=6)` the tool refuses, and tells the model to stop and tell its user where things stand.
+- **Duplicates.** Each message has an id, unique per sender. A message sent again with an id the recipient has (`directory.send(message_id=...)`, a retry over HTTP) is delivered once. So is the same text from the same sender, answering the same message, while the first copy is still waiting.
 
 ## Agents on another server
 

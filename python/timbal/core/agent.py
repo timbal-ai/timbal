@@ -354,9 +354,7 @@ _CALL_TOOL_FALLBACKS = ("call_found_tool", "call_deferred_tool")
 _CALL_TOOL_NUMBERED = CALL_TOOL_NAME + "_"
 _FIRST_NUMBERED = 2
 # The agent's own tools whose names it picks at run time (Agent._note_pause keeps them across a pause).
-_PICKED_NAMES = frozenset(
-    {SEND_MESSAGE_NAME, MARK_SALIENT_NAME, SEARCH_TOOLS_NAME, CALL_TOOL_NAME, SEND_TO_AGENT_NAME}
-)
+_PICKED_NAMES = frozenset({SEND_MESSAGE_NAME, MARK_SALIENT_NAME, SEARCH_TOOLS_NAME, CALL_TOOL_NAME, SEND_TO_AGENT_NAME})
 
 
 async def _no_events() -> AsyncGenerator[Any, None]:
@@ -2200,7 +2198,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # and events are the call's to speak (SessionScheduler.takes), so they stay pending for it.
             return
         notifications = store.drain_completions()
-        events = store.drain_events(settle=False, where=lambda event: event.source != "user")
+        if run_context._peer is not None and not self._answers_agents(run_context):
+            # A turn that cannot answer another agent (a read-only wake, a recovery turn): its messages wait for a
+            # turn that can (they start one of their own once this one is over).
+            events = store.drain_events(settle=False, where=lambda event: event.source not in ("user", "agent"))
+        else:
+            events = store.drain_events(settle=False, where=lambda event: event.source != "user")
         if not notifications and not events:
             return
         notice = format_session_notice(notifications, events)
@@ -2214,6 +2217,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             memory.insert(-1, notice)
         else:
             memory.append(notice)
+
+    def _answers_agents(self, run_context: Any) -> bool:
+        """Whether this turn may message other agents: its tool policy does not hide the send (a read-only turn
+        has none). With no send to hide (an ``output_model``, a session that left the directory) messages are
+        taken all the same: no turn of this agent could answer them."""
+        policy = run_context._tool_policy
+        peer = run_context._peer
+        if policy is None or self.output_model is not None or not peer.current:
+            return True
+        return self._tool_allowed(peer.tool(self, SEND_TO_AGENT_NAME), policy)
 
     def _steers(self, run_context: Any, current_span: Any) -> bool:
         """Whether this turn takes ``lane="next"`` events between steps (see ``steering``)."""
@@ -3488,26 +3501,29 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         Named as the salience tool is (:meth:`_with_salience_tool`): at the first step that offers it, among
         every name the agent has there, fixed for the turn, and kept by the run that resumes a pause. Unlike
         it, the run's tool policy applies (``policy``): a message to another agent starts work there, so a
-        read-only turn has none, and what a callable policy allows is recorded with the rest. Not offered once
-        the session has left the directory (another session may have its name now).
+        read-only turn has none, and what a callable policy allows is recorded with the rest. A tool that takes
+        the name later in the turn is not offered, whether the policy shows the send or not. Not offered once the
+        session has left the directory (another session may have its name now).
         """
         if not offered or not peer.current:
             return tools, name
         if name is None:
             name = kept or _unused_name(SEND_TO_AGENT_NAME, _SEND_TO_AGENT_FALLBACKS, set(names))
-        tool = peer.tool(self, name)
-        if policy is not None and not self._tool_allowed(tool, policy):
-            return tools, name
         if name in names:
             # A tool set that changed its catalog inside the turn, or since the turn paused: the name is the send's.
             # (Said once a turn: ``warned``.)
             if warned is None or name not in warned:
                 logger.warning(
-                    "A tool took the name of the send to agents mid-turn; it is not offered.", path=self._path, tool=name
+                    "A tool took the name of the send to agents mid-turn; it is not offered.",
+                    path=self._path,
+                    tool=name,
                 )
                 if warned is not None:
                     warned.add(name)
             tools = [t for t in tools if t.name != name]
+        tool = peer.tool(self, name)
+        if policy is not None and not self._tool_allowed(tool, policy):
+            return tools, name
         tools = [*tools, tool]
         if policy is not None:
             # What the run may call, the send included (a parked wake restores a callable policy from it).
@@ -4878,12 +4894,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             else:
                 content = event.output
             tool_name = event.path.rsplit(".", 1)[-1]
-            # A message sent to the user, or a moment marked worth remembering, is not a call that went
-            # through: the streak stands, and neither enters the window. (Looked at only when it matters.)
+            # A message sent to the user or to another agent, or a moment marked worth remembering, is not a call
+            # that went through: the streak stands, and none enters the window. (Looked at only when it matters.)
             if denied:
                 consecutive_denials += 1
             elif consecutive_denials and not (
-                (delivering and tool_name == send_name) or (salience_name is not None and tool_name == salience_name)
+                (delivering and tool_name == send_name)
+                or (salience_name is not None and tool_name == salience_name)
+                or (peer_name is not None and tool_name == peer_name)
             ):
                 consecutive_denials = 0
             if self.max_denials_window is not None and (
@@ -4891,6 +4909,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 or not (
                     (delivering and tool_name == send_name)
                     or (salience_name is not None and tool_name == salience_name)
+                    or (peer_name is not None and tool_name == peer_name)
                 )
             ):
                 window = await _denial_window()
@@ -5023,6 +5042,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # The session's place in an AgentDirectory (core/peers.py), for its root agent: send_to_agent. Fixed for the
         # turn, like the salience tool (and not with an output_model, for the same reason).
         peer = run_context._peer if current_span.parent_call_id is None and self.output_model is None else None
+        if peer is not None and run_context._peer_hops is not None:
+            # The hops a turn resumed after a pause carries (ChatSession): where a later resume finds them too.
+            current_span.metadata["peer_hops"] = run_context._peer_hops
         # Fixed for the turn; checked after every tool batch.
         denial_window_on = self.max_denials_window is not None
         denial_limit = self.max_consecutive_denials
