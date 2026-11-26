@@ -83,6 +83,15 @@ def _resolve_api_key(explicit: str | SecretStr | None) -> str:
     return key
 
 
+class _ConfigureAck:
+    """One Configure waiting for its answer (an object, so a failed send removes its own entry)."""
+
+    __slots__ = ("patient",)
+
+    def __init__(self, patient: bool | None) -> None:
+        self.patient = patient
+
+
 def _clamp(value: float, lo: float, hi: float) -> float:
     return min(hi, max(lo, value))
 
@@ -137,7 +146,7 @@ class _DeepgramSTTBase(SpeechToText):
         # One entry per Configure on the wire, in send order: the ``patient`` flag of a thresholds message,
         # ``None`` for one that does not touch them (language hints). Flux answers each in order, so every
         # ConfigureSuccess / ConfigureFailure is matched to the message it acknowledges, not the latest one.
-        self._configure_acks: deque[bool | None] = deque()
+        self._configure_acks: deque[_ConfigureAck] = deque()
 
     def _build_uri(self, config: AudioInputConfig) -> str:
         raise NotImplementedError
@@ -262,12 +271,14 @@ class _DeepgramSTTBase(SpeechToText):
             if self._ws is None:
                 return
             # Noted before the send: its answer can be read while ``send`` is still draining.
-            self._configure_acks.append(patient)
+            entry = _ConfigureAck(patient)
+            self._configure_acks.append(entry)
             try:
                 await self._ws.send(json.dumps(payload))
             except Exception:
-                # Never sent, so never answered (the newest entry is this one: sends hold the wire lock).
-                self._configure_acks.pop()
+                # Not answered after all. Its entry may already be gone (an answer read while it drained).
+                with contextlib.suppress(ValueError):
+                    self._configure_acks.remove(entry)
 
     async def close(self) -> None:
         self._stop.set()
@@ -462,13 +473,13 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
                 await self._queue.put(TranscriptEvent(type="resumed", text=text, confidence=confidence))
             return
         if mt == "ConfigureSuccess":
-            patient = self._configure_acks.popleft() if self._configure_acks else None
+            patient = self._configure_acks.popleft().patient if self._configure_acks else None
             if patient is not None:
                 self.patient_thresholds_live = patient
             logger.info("dg_flux_configure_ok", patient=self.patient_thresholds_live)
             return
         if mt == "ConfigureFailure":
-            patient = self._configure_acks.popleft() if self._configure_acks else None
+            patient = self._configure_acks.popleft().patient if self._configure_acks else None
             # The thresholds on the socket did not change: a failed patient Configure leaves Flux not
             # patient; a failed restore or language update leaves the state it had.
             if patient:

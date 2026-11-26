@@ -2289,6 +2289,11 @@ class VoiceSession:
             return
         self._eager_unconfirmed = None
         self._settle_eager_gate(confirm=False)
+        # Words parked behind a protected tool are the cancelled ones: they must not start a turn later, ungated.
+        # The caller's EndOfTurn brings the whole utterance, deferred again if the tool still runs.
+        deferred = self._deferred_user_text
+        if deferred and _contains_spoken_words(deferred, text):
+            self._deferred_user_text = "" if _same_spoken_words(deferred, text) else deferred.replace(text, "").strip()
         logger.info("flux_eager_cancelled")
         await self.interrupt()
         retracted = False
@@ -2355,9 +2360,13 @@ class VoiceSession:
             self._eager_commit = False
         # Only an accepted turn (not IGNORE / echo / hesitation) may suppress
         # the later EndOfTurn. Set this after the detector decides.
-        if self._eager_gate_taken or self._active_turn_user_text == text or self._held_user_text == text:
-            # A turn started on these words (merged with a held fragment or a deferred prefix, too) or a hold
-            # keeps them: EndOfTurn with the same words releases its tools, anything else cancels them.
+        if self._eager_gate_taken or any(
+            _contains_spoken_words(kept or "", text)
+            for kept in (self._active_turn_user_text, self._held_user_text, self._deferred_user_text)
+        ):
+            # A turn started on these words (merged with a held fragment or a deferred prefix, too), a hold keeps
+            # them, or they wait for a protected tool to finish (deferred): EndOfTurn with the same words releases
+            # the tools of the turn they start, anything else cancels them.
             self._eager_unconfirmed = text
         else:
             self._eager_gate = None  # not accepted: no turn waits on it

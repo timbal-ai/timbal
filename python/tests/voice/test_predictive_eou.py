@@ -891,3 +891,36 @@ class TestEagerGateOwnership:
         session._eager_commit = True
         assert session._eager_gate_for("What time is it?") is None
         assert session._eager_gate_for("I want to cancel my booking.") is session._eager_gate
+
+    def _protect(self, session) -> None:
+        """A protected tool still runs: caller speech is deferred, not a turn."""
+        session._turn_tool_batch_inflight = 1
+        session._turn_tool_batch_mode = "disable_during_tool"
+        assert session._interruptions_suppressed()
+
+    async def test_deferred_eager_words_keep_their_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ran: list[str] = []
+        session = self._session(monkeypatch, ran)
+        self._protect(session)
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="cancel my booking.", confidence=0.9)
+        )
+        assert session._deferred_user_text == "cancel my booking."
+        assert session._eager_unconfirmed == "cancel my booking."
+        assert session._eager_gate is not None
+        # The deferred turn would take the gate.
+        assert session._eager_gate_for(session._deferred_user_text) is session._eager_gate
+
+    async def test_turn_resumed_drops_the_deferred_eager_words(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ran: list[str] = []
+        session = self._session(monkeypatch, ran)
+        self._protect(session)
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="cancel my booking.", confidence=0.9)
+        )
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="resumed", text="cancel my booking, no wait", confidence=0.1)
+        )
+        assert session._deferred_user_text == ""
+        assert session._eager_gate is None
+        assert ran == []

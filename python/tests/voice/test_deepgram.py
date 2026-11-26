@@ -198,6 +198,26 @@ class TestFluxEventMapping:
         assert stt.patient_thresholds_live is True
         assert not stt._configure_acks
 
+    async def test_a_send_that_fails_after_its_answer_was_read_is_harmless(self) -> None:
+        class _AnsweredThenFails(_SlowFakeWs):
+            async def send(self, payload) -> None:
+                await super().send(payload)
+                raise ConnectionError("socket closed while draining")
+
+        stt = DeepgramFluxSTT()
+        stt._ws = _AnsweredThenFails()
+        send = asyncio.create_task(stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True))
+        while stt._ws.in_flight == 0:
+            await asyncio.sleep(0)
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        await send  # no IndexError
+        assert not stt._configure_acks
+        # A later Configure is still matched to its own answer.
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is False
+
     async def test_a_failed_language_update_leaves_patience_live(self) -> None:
         stt = DeepgramFluxSTT()
         stt._ws = _FakeWs()
