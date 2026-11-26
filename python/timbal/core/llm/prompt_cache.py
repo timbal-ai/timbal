@@ -194,15 +194,17 @@ def apply_openai_prompt_cache_key(
     kwargs: dict[str, Any],
     provider_params: dict[str, Any],
 ) -> None:
-    """Put ``prompt_cache_key`` on an OpenAI body. Drop it for every other provider.
+    """Put the session's ``prompt_cache_key`` on an OpenAI body.
 
-    Groq rejects nothing it does not document only when the field is absent;
-    its cache is automatic and has no session key. The key is popped here so a
-    later ``dict.update`` cannot put it back on a Groq request.
+    Other providers never get the session key (Groq's cache is automatic and has
+    no key). A ``prompt_cache_key`` the caller put in ``model_params`` is left in
+    ``provider_params`` for them, so it is sent unchanged as it was before.
     """
-    explicit = provider_params.pop("prompt_cache_key", _MISSING)
     if provider != "openai":
+        # The session key is OpenAI's only. A key the caller set in ``model_params`` is theirs and goes out
+        # as before (xAI documents it for cache routing on Responses).
         return
+    explicit = provider_params.pop("prompt_cache_key", _MISSING)
     raw = current_prompt_cache_key() if explicit is _MISSING else explicit
     key = normalize_cache_key(raw)
     if key:

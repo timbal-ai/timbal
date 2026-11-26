@@ -255,12 +255,12 @@ class TestOpenAIAndGroqRequests:
         await _drive(create_stream)
         return captured
 
-    async def _prepare_responses(self, model_name: str, system_prompt, provider_params=None):
+    async def _prepare_responses(self, model_name: str, system_prompt, provider_params=None, provider="openai"):
         captured, fake_create = _capture_create()
         client = MagicMock()
         client.responses.create = fake_create
         create_stream, _ = prepare_responses_request(
-            provider="openai",
+            provider=provider,
             client=client,
             model_name=model_name,
             request_headers={},
@@ -334,6 +334,17 @@ class TestOpenAIAndGroqRequests:
             "content": "Stable rules.\n\nCaller: +1",
         }
         assert "prompt_cache_key" not in captured
+
+    async def test_xai_keeps_an_explicit_key_and_gets_no_session_key(self):
+        """xAI documents ``prompt_cache_key`` for cache routing: a caller's key goes out as before."""
+        token = bind_prompt_cache_key("sess-1")
+        try:
+            explicit = await self._prepare_responses("grok-4.7", "Hi", {"prompt_cache_key": "conv-123"}, provider="xai")
+            session_only = await self._prepare_responses("grok-4.7", "Hi", provider="xai")
+        finally:
+            reset_prompt_cache_key(token)
+        assert explicit["prompt_cache_key"] == "conv-123"
+        assert "prompt_cache_key" not in session_only
 
     async def test_openai_chat_completions_sends_the_session_key(self):
         token = bind_prompt_cache_key("sess-1")

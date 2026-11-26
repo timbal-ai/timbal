@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import json
 import os
+from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlencode
@@ -133,7 +134,10 @@ class _DeepgramSTTBase(SpeechToText):
         self.eager_suppressed_count = 0
         self.on_eager_end_of_turn: Any = None
         self.patient_thresholds_live = False
-        self._patient_pending = False
+        # One entry per Configure on the wire, in send order: the ``patient`` flag of a thresholds message,
+        # ``None`` for one that does not touch them (language hints). Flux answers each in order, so every
+        # ConfigureSuccess / ConfigureFailure is matched to the message it acknowledges, not the latest one.
+        self._configure_acks: deque[bool | None] = deque()
 
     def _build_uri(self, config: AudioInputConfig) -> str:
         raise NotImplementedError
@@ -148,6 +152,9 @@ class _DeepgramSTTBase(SpeechToText):
             additional_headers={"Authorization": f"Token {self._api_key}"},
         )
         self._stop.clear()
+        # A new socket starts from its connect parameters: nothing patient, nothing waiting for an answer.
+        self._configure_acks.clear()
+        self.patient_thresholds_live = False
         self._flusher = asyncio.create_task(self._flush_loop())
         self._receiver = asyncio.create_task(self._receive_loop())
 
@@ -248,6 +255,19 @@ class _DeepgramSTTBase(SpeechToText):
                 return
             with contextlib.suppress(Exception):
                 await self._ws.send(json.dumps(payload))
+
+    async def _send_configure(self, payload: dict[str, Any], patient: bool | None) -> None:
+        """Send a Configure and note what its answer will acknowledge."""
+        async with self._wire_lock:
+            if self._ws is None:
+                return
+            # Noted before the send: its answer can be read while ``send`` is still draining.
+            self._configure_acks.append(patient)
+            try:
+                await self._ws.send(json.dumps(payload))
+            except Exception:
+                # Never sent, so never answered (the newest entry is this one: sends hold the wire lock).
+                self._configure_acks.pop()
 
     async def close(self) -> None:
         self._stop.set()
@@ -355,7 +375,7 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
         if not str(model).endswith("-multi"):
             return False
         hint = (language or "").strip()
-        await self._send_json({"type": "Configure", "language_hints": [hint] if hint else []})
+        await self._send_configure({"type": "Configure", "language_hints": [hint] if hint else []}, None)
         return True
 
     async def configure_turn(
@@ -391,8 +411,7 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
                 thresholds["eager_eot_threshold"] = eager
         if not thresholds:
             return
-        self._patient_pending = patient
-        await self._send_json({"type": "Configure", "thresholds": thresholds})
+        await self._send_configure({"type": "Configure", "thresholds": thresholds}, patient)
 
     async def _handle_message(self, msg: dict[str, Any]) -> None:
         mt = msg.get("type", "")
@@ -443,11 +462,17 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
                 await self._queue.put(TranscriptEvent(type="resumed", text=text, confidence=confidence))
             return
         if mt == "ConfigureSuccess":
-            self.patient_thresholds_live = self._patient_pending
+            patient = self._configure_acks.popleft() if self._configure_acks else None
+            if patient is not None:
+                self.patient_thresholds_live = patient
             logger.info("dg_flux_configure_ok", patient=self.patient_thresholds_live)
             return
         if mt == "ConfigureFailure":
-            self.patient_thresholds_live = False
+            patient = self._configure_acks.popleft() if self._configure_acks else None
+            # The thresholds on the socket did not change: a failed patient Configure leaves Flux not
+            # patient; a failed restore or language update leaves the state it had.
+            if patient:
+                self.patient_thresholds_live = False
             logger.warning(
                 "dg_flux_configure_failed",
                 description=msg.get("description") or msg.get("message") or msg.get("error"),

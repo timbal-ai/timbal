@@ -139,6 +139,7 @@ from .turn_detection import (
     TurnState,
     _is_same_user_utterance_refinement,
     _likely_stt_echo,
+    ends_with_question,
     resolve_turn_detector,
 )
 
@@ -171,6 +172,13 @@ def _same_spoken_words(a: str, b: str) -> bool:
     left = " ".join(_SPOKEN_WORD_RE.findall(a.lower()))
     right = " ".join(_SPOKEN_WORD_RE.findall(b.lower()))
     return bool(left) and left == right
+
+
+def _contains_spoken_words(text: str, words: str) -> bool:
+    """True when ``words`` appear in ``text`` as consecutive words, ignoring case and punctuation."""
+    inner = " ".join(_SPOKEN_WORD_RE.findall(words.lower()))
+    outer = " ".join(_SPOKEN_WORD_RE.findall(text.lower()))
+    return bool(inner) and f" {inner} " in f" {outer} "
 
 
 # Wall-clock cap on a single agent turn (LLM stream + in-turn TTS drains).
@@ -572,6 +580,12 @@ class VoiceSession:
         self._eou_predictor: SpeechEouPredictor | None = None
         # Text of an EagerEndOfTurn turn that EndOfTurn has not confirmed.
         self._eager_unconfirmed: str | None = None
+        # Holds the tools of a turn an EagerEndOfTurn started until EndOfTurn confirms it (the speculative gate,
+        # without holding audio): TurnResumed then discards it, so no tool of a cancelled turn has run.
+        self._eager_gate: SpeculativeGate | None = None
+        # The eager words the gate belongs to, and whether a turn took the gate (set by ``_eager_gate_for``).
+        self._eager_gate_text = ""
+        self._eager_gate_taken = False
         self._eager_commit = False
         # Mic PCM for a Smart Turn vote when the turn detector does not buffer
         # (provider mode on Flux). Unused when the detector already has audio.
@@ -2274,6 +2288,7 @@ class VoiceSession:
         if not text:
             return
         self._eager_unconfirmed = None
+        self._settle_eager_gate(confirm=False)
         logger.info("flux_eager_cancelled")
         await self.interrupt()
         retracted = False
@@ -2323,6 +2338,10 @@ class VoiceSession:
                 text_preview=text[:80],
             )
             return
+        self._settle_eager_gate(confirm=False)  # an earlier eager turn that never confirmed
+        self._eager_gate = SpeculativeGate()
+        self._eager_gate_text = text
+        self._eager_gate_taken = False
         self._eager_commit = True
         try:
             logger.info(
@@ -2336,8 +2355,33 @@ class VoiceSession:
             self._eager_commit = False
         # Only an accepted turn (not IGNORE / echo / hesitation) may suppress
         # the later EndOfTurn. Set this after the detector decides.
-        if self._active_turn_user_text == text or self._held_user_text == text:
+        if self._eager_gate_taken or self._active_turn_user_text == text or self._held_user_text == text:
+            # A turn started on these words (merged with a held fragment or a deferred prefix, too) or a hold
+            # keeps them: EndOfTurn with the same words releases its tools, anything else cancels them.
             self._eager_unconfirmed = text
+        else:
+            self._eager_gate = None  # not accepted: no turn waits on it
+
+    def _settle_eager_gate(self, *, confirm: bool) -> None:
+        """Release (EndOfTurn) or cancel (TurnResumed, a different final) the tools of an eager-started turn."""
+        gate, self._eager_gate = self._eager_gate, None
+        if gate is None:
+            return
+        if confirm:
+            gate.confirm()
+        else:
+            gate.discard()
+
+    def _eager_gate_for(self, final_text: str) -> SpeculativeGate | None:
+        """The gate a turn starting now waits on: the eager commit itself, or the hold it armed expiring."""
+        gate = self._eager_gate
+        if gate is None or not _contains_spoken_words(final_text, self._eager_gate_text):
+            # Not a turn on the eager words (a typed message, a deferred turn): never parked on this gate.
+            return None
+        if self._eager_commit or self._eager_unconfirmed:
+            self._eager_gate_taken = True
+            return gate
+        return None
 
     async def _handle_provider_commit(self, text: str) -> None:
         """``EndOfTurn`` / any committed transcript, confirming an eager turn.
@@ -2350,6 +2394,7 @@ class VoiceSession:
         pending = self._eager_unconfirmed
         if pending and _same_spoken_words(pending, text):
             self._eager_unconfirmed = None
+            self._settle_eager_gate(confirm=True)
             logger.info("flux_eager_confirmed", text_preview=text[:80])
             return
         if pending:
@@ -2443,6 +2488,11 @@ class VoiceSession:
         # wait sits until the turn timeout.
         if self._speculative_attempt is not None and not self._speculative_attempt.settled:
             await self._discard_speculative(reason="stt_ended")
+        # No EndOfTurn will come: an eager turn is cancelled like on TurnResumed, tools and all (discarding
+        # only its gate would let the model go on and answer as if the call had been made).
+        if self._eager_unconfirmed:
+            await self._cancel_unconfirmed_eager()
+        self._settle_eager_gate(confirm=False)
         # Wait for the last turn to finish before closing so AgentTextDone is emitted.
         if self._current_turn_task is not None and not self._current_turn_task.done():
             try:
@@ -2475,7 +2525,23 @@ class VoiceSession:
             mic_speech_since_last_commit=self._mic_speech_since_last_commit(),
             partials_since_last_commit=self._partials_since_last_commit,
             holding=holding,
+            # Only a question the caller has heard: the reply is done and its audio has played out. While it
+            # is still generating or playing, its text runs ahead of what the caller heard.
+            assistant_asked=(
+                not assistant_active
+                and not self._assistant_audio_playing
+                and ends_with_question(self._last_assistant_line())
+            ),
         )
+
+    def _last_assistant_line(self) -> str:
+        """The assistant's last transcript line (a finished reply; an interrupted one keeps only what was heard)."""
+        for entry in reversed(self._transcript):
+            if entry.role == "assistant":
+                return entry.text or ""
+            if entry.role == "user":
+                return ""
+        return ""
 
     async def configure_endpointing(
         self,
@@ -2798,7 +2864,11 @@ class VoiceSession:
         self._turn_eou_at = time.monotonic()
         # Busy from here, not from the task's first step: a turn queued behind a cut one would slip in between.
         self._scheduler.turn_started()
-        task = self._spawn_session_task(self._run_turn(final_text))
+        gate = self._eager_gate_for(final_text)
+        # Only an eager turn passes the gate, so an override of ``_run_turn(user_text)`` keeps working.
+        task = self._spawn_session_task(
+            self._run_turn(final_text, tool_gate=gate) if gate is not None else self._run_turn(final_text)
+        )
         task.add_done_callback(self._turn_task_done)
         self._current_turn_task = task
         logger.debug(
@@ -4012,7 +4082,14 @@ class VoiceSession:
             raise TimeoutError("agent turn timed out")
         return result
 
-    async def _run_turn(self, user_text: str, *, followup: Followup | None = None, speculative: bool = False) -> None:
+    async def _run_turn(
+        self,
+        user_text: str,
+        *,
+        followup: Followup | None = None,
+        speculative: bool = False,
+        tool_gate: SpeculativeGate | None = None,
+    ) -> None:
         """One agent turn: the caller's ``user_text``, or an event turn's ``followup`` (``user_text`` "")."""
         # Busy before waiting: a turn queued behind the running one goes after the call's.
         # The task's done callback clears it if this is cancelled before the try below.
@@ -4099,6 +4176,9 @@ class VoiceSession:
                 voice_token = _current_voice_session.set(self)
             if speculative and self._speculative_gate is not None:
                 speculative_token = install_speculative_gate(self._speculative_gate)
+            elif tool_gate is not None:
+                # A turn an EagerEndOfTurn started: its tools wait for EndOfTurn (audio is not held).
+                speculative_token = install_speculative_gate(tool_gate)
             if self._last_run_context is not None:
                 set_run_context(self._last_run_context)
 

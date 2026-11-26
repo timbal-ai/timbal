@@ -9,6 +9,7 @@ of the voice scenario scripts: decision latency versus false cuts.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import time
 from collections.abc import AsyncIterator
@@ -724,3 +725,169 @@ class TestBuildVoiceSession:
         await asyncio.sleep(0.15)
         assert commits == [1]
         assert session._endpointer.last_predictive is True
+
+
+class TestEagerTurnHoldsTools:
+    """A turn an EagerEndOfTurn started runs no tool before EndOfTurn confirms it."""
+
+    @staticmethod
+    async def _until(condition, timeout: float = 3.0) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not condition():
+            if asyncio.get_running_loop().time() > deadline:
+                raise AssertionError("condition not met")
+            await asyncio.sleep(0.01)
+
+    def _session(self, monkeypatch: pytest.MonkeyPatch, ran: list[str]):
+        from timbal.server.voice import build_voice_session
+        from timbal.types.content import ToolUseContent
+        from timbal.types.message import Message
+
+        def cancel_booking(day: str) -> str:
+            ran.append(day)
+            return "cancelled"
+
+        def reply(messages: list) -> Message | str:
+            # Calls the tool only for the eager sentence itself, once; anything after that is an answer.
+            last = messages[-1]
+            if last.role == "user" and last.collect_text().strip() == "Cancel my booking.":
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="call-1", name="cancel_booking", input={"day": "friday"})],
+                )
+            return "Okay."
+
+        model = TestModel(handler=reply)
+        agent = Agent(name="voice_test", model=model, tools=[cancel_booking])
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(agent, VoiceConfig(predict_during_speech=True), {})
+        _stub_tts(session)
+        return session
+
+    async def _eager_turn_at_its_tool(self, session) -> None:
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Cancel my booking.", confidence=0.9)
+        )
+        assert session._eager_unconfirmed == "Cancel my booking."
+        # The tool call is announced and its call has started: it waits at the gate.
+        await self._until(lambda: any(key.startswith("start:") for key in session._turn_tool_call_ids))
+
+    async def test_turn_resumed_cancels_before_the_tool_runs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ran: list[str] = []
+        session = self._session(monkeypatch, ran)
+        await self._eager_turn_at_its_tool(session)
+        assert ran == []
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="resumed", text="Cancel my booking, no wait", confidence=0.1)
+        )
+        task = session._current_turn_task
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(task, 3.0)
+        assert ran == []
+        assert session._eager_gate is None
+
+    async def test_end_of_turn_releases_the_tool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ran: list[str] = []
+        session = self._session(monkeypatch, ran)
+        await self._eager_turn_at_its_tool(session)
+        assert ran == []
+        await session._handle_provider_commit("Cancel my booking.")
+        await asyncio.wait_for(session._current_turn_task, 3.0)
+        assert ran == ["friday"]
+
+    async def test_a_longer_end_of_turn_cancels_the_held_tool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ran: list[str] = []
+        session = self._session(monkeypatch, ran)
+        await self._eager_turn_at_its_tool(session)
+        first = session._current_turn_task
+        await session._handle_provider_commit("Cancel my booking. No, not that one.")
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await asyncio.wait_for(first, 3.0)
+        replacement = session._current_turn_task
+        assert replacement is not None and replacement is not first
+        await asyncio.wait_for(replacement, 3.0)
+        # The eager turn's call never ran. The replacement turn (a confirmed one, no gate) did not ask for it.
+        assert ran == []
+        assert session._eager_gate is None
+
+
+class TestEagerGateOwnership:
+    """The gate belongs to the turn that started on the eager words, merged or not."""
+
+    @staticmethod
+    async def _until(condition, timeout: float = 3.0) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not condition():
+            if asyncio.get_running_loop().time() > deadline:
+                raise AssertionError("condition not met")
+            await asyncio.sleep(0.01)
+
+    def _session(self, monkeypatch: pytest.MonkeyPatch, ran: list[str]):
+        from timbal.server.voice import build_voice_session
+        from timbal.types.content import ToolUseContent
+        from timbal.types.message import Message
+
+        def cancel_booking(day: str) -> str:
+            ran.append(day)
+            return "cancelled"
+
+        def reply(messages: list) -> Message | str:
+            last = messages[-1]
+            if last.role == "user" and "booking" in last.collect_text():
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="call-1", name="cancel_booking", input={"day": "friday"})],
+                )
+            return "Okay."
+
+        agent = Agent(name="voice_test", model=TestModel(handler=reply), tools=[cancel_booking])
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(agent, VoiceConfig(predict_during_speech=True), {})
+        _stub_tts(session)
+        return session
+
+    async def test_a_turn_merged_with_a_held_fragment_is_confirmed_by_end_of_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ran: list[str] = []
+        session = self._session(monkeypatch, ran)
+        session.turn_detector.hold_unfinished_secs = 1.0
+        await session._handle_provider_commit("I want to")
+        assert session._held_user_text == "I want to"
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="cancel my booking.", confidence=0.9)
+        )
+        # The merged turn took the gate and waits on the eager words.
+        assert session._eager_unconfirmed == "cancel my booking."
+        await self._until(lambda: any(key.startswith("start:") for key in session._turn_tool_call_ids))
+        merged = session._current_turn_task
+        assert ran == []
+        await session._handle_provider_commit("cancel my booking.")
+        await asyncio.wait_for(merged, 3.0)
+        assert ran == ["friday"]
+        assert [e.text for e in session.transcript if e.role == "user"] == ["I want to cancel my booking."]
+
+    async def test_stt_ending_cancels_the_eager_turn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ran: list[str] = []
+        session = self._session(monkeypatch, ran)
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="cancel my booking.", confidence=0.9)
+        )
+        await self._until(lambda: any(key.startswith("start:") for key in session._turn_tool_call_ids))
+        turn = session._current_turn_task
+        await session._cancel_unconfirmed_eager()  # the STT-ended path
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await asyncio.wait_for(turn, 3.0)
+        assert ran == []
+        # The model was not asked to go on after a call that never ran.
+        assert not any(e.role == "assistant" and e.text == "Okay." for e in session.transcript)
+
+    async def test_a_typed_turn_never_takes_the_eager_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ran: list[str] = []
+        session = self._session(monkeypatch, ran)
+        session._eager_gate = __import__("timbal.voice.speculative", fromlist=["SpeculativeGate"]).SpeculativeGate()
+        session._eager_gate_text = "cancel my booking."
+        session._eager_commit = True
+        assert session._eager_gate_for("What time is it?") is None
+        assert session._eager_gate_for("I want to cancel my booking.") is session._eager_gate

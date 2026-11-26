@@ -170,8 +170,47 @@ class TestFluxEventMapping:
         await stt._handle_message({"type": "ConfigureSuccess"})
         assert stt.patient_thresholds_live is True
         await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is False
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
         await stt._handle_message({"type": "ConfigureFailure", "description": "nope"})
         assert stt.patient_thresholds_live is False
+
+    async def test_each_configure_answer_settles_its_own_message(self) -> None:
+        """Off then on, back to back: the first answer is for "off", so patience is not live until the second."""
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is False
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is True
+
+    async def test_an_answer_read_while_the_send_drains_is_matched(self) -> None:
+        stt = DeepgramFluxSTT()
+        stt._ws = _SlowFakeWs()
+        send = asyncio.create_task(stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True))
+        while stt._ws.in_flight == 0:
+            await asyncio.sleep(0)
+        await stt._handle_message({"type": "ConfigureSuccess"})  # answered before send() returned
+        await send
+        assert stt.patient_thresholds_live is True
+        assert not stt._configure_acks
+
+    async def test_a_failed_language_update_leaves_patience_live(self) -> None:
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        stt._input_config = AudioInputConfig(model="flux-general-multi")
+        assert await stt.update_language("es") is True
+        await stt._handle_message({"type": "ConfigureFailure", "description": "bad hint"})
+        assert stt.patient_thresholds_live is True
+        # A failed restore leaves Flux as it was: still patient.
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt._handle_message({"type": "ConfigureFailure", "description": "nope"})
+        assert stt.patient_thresholds_live is True
 
     async def test_empty_transcripts_skipped(self) -> None:
         stt = DeepgramFluxSTT()

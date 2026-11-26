@@ -93,6 +93,8 @@ class TurnState(BaseModel):
     """Partial transcripts seen since the previous committed transcript."""
     holding: bool = False
     """Session is debouncing an incomplete commit (:attr:`CommitAction.HOLD`)."""
+    assistant_asked: bool = False
+    """The assistant's last spoken line ends in a question: "sí" / "okay" now answer it."""
 
 
 class PartialDecision(StrEnum):
@@ -789,6 +791,15 @@ def _normalize_spoken(text: str, *, strip_accents: bool = True) -> str:
     return re.sub(r"\s+", " ", folded).strip()
 
 
+_QUESTION_TAIL = re.compile(r"[?\uff1f\u061f][\s\"'»”’)\]]*\Z")
+
+
+def ends_with_question(text: str) -> bool:
+    """Whether ``text`` (an assistant line) ends by asking something: ``?``, ``？`` or ``؟``,
+    closing quotes and brackets aside."""
+    return bool(text) and _QUESTION_TAIL.search(text.rstrip()) is not None
+
+
 def _backchannel_window_open(state: TurnState) -> bool:
     """Assistant is speaking, or stopped recently enough that a late commit is still its overlap."""
     if state.assistant_active or state.audio_playing:
@@ -964,7 +975,8 @@ class HeuristicTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
         if _is_unvoiced_hallucination(text, state):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination_no_vad")
-        if self.suppresses_backchannel(text, state):
+        if self.suppresses_backchannel(text, state) and not state.assistant_asked:
+            # A partial "sí" still does not cut the line; a committed one after a question is the answer.
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="backchannel")
         # Pending HOLD: STT often re-commits a longer form of the same fragment.
         # Mid-turn "refinement" IGNORE would freeze the held text until timeout —
@@ -1176,7 +1188,8 @@ class ProviderTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
         if _is_unvoiced_hallucination(text, state):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination_no_vad")
-        if self.suppresses_backchannel(text, state):
+        if self.suppresses_backchannel(text, state) and not state.assistant_asked:
+            # A partial "sí" still does not cut the line; a committed one after a question is the answer.
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="backchannel")
         # Unfinished HOLD before the final NEW_TURN. A resumed-merge check
         # belongs between these two: it only applies to commits that would

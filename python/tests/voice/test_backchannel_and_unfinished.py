@@ -32,6 +32,7 @@ from timbal.voice.turn_detection import (
     PartialDecision,
     ProviderTurnDetector,
     TurnState,
+    ends_with_question,
 )
 
 from .test_session import MockSTT, MockTTS
@@ -475,3 +476,72 @@ class TestVoiceConfigAndSession:
                 turn_detector="heuristic",
                 hold_unfinished_secs=1.2,
             )
+
+
+class TestBackchannelAnswersAQuestion:
+    """After the assistant asks something, a committed "sí" is the answer, not a backchannel."""
+
+    def _detector(self, cls=ProviderTurnDetector):
+        det = cls()
+        det.ignore_backchannels = True
+        return det
+
+    @pytest.mark.parametrize("text", ["Sí.", "Vale.", "Okay.", "Claro.", "Sí, claro."])
+    async def test_commit_after_a_question_starts_a_turn(self, text: str) -> None:
+        for det in (self._detector(), self._detector(HeuristicTurnDetector)):
+            during = await det.on_committed(text, _playing(assistant_asked=True))
+            after = await det.on_committed(text, _state(seconds_since_assistant_active=0.4, assistant_asked=True))
+            assert during.action is CommitAction.NEW_TURN, (det, text)
+            assert after.action is CommitAction.NEW_TURN, (det, text)
+
+    async def test_partial_after_a_question_still_does_not_cut_the_line(self) -> None:
+        for det in (self._detector(), self._detector(HeuristicTurnDetector)):
+            assert await det.on_partial("sí", _playing(assistant_asked=True)) is PartialDecision.IGNORE
+
+    async def test_without_a_question_it_is_still_a_backchannel(self) -> None:
+        for det in (self._detector(), self._detector(HeuristicTurnDetector)):
+            decision = await det.on_committed("Vale.", _playing(assistant_asked=False))
+            assert decision.action is CommitAction.IGNORE
+
+    @pytest.mark.parametrize(
+        ("line", "asked"),
+        [
+            ("¿Le confirmo la cita?", True),
+            ("Shall I book it? ", True),
+            ('He said "ready?"', True),
+            ("¿Confirmo？", True),
+            ("Perfecto, ya está.", False),
+            ("Is it 3? Yes, it is.", False),
+            ("", False),
+        ],
+    )
+    def test_ends_with_question(self, line: str, asked: bool) -> None:
+        assert ends_with_question(line) is asked
+
+
+class TestSessionAssistantAsked:
+    def test_turn_state_reads_the_last_assistant_line(self) -> None:
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+        from timbal.voice.session import TranscriptEntry
+
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector="heuristic")
+        assert session._turn_state().assistant_asked is False
+        session._transcript.append(TranscriptEntry(role="assistant", text="¿Le confirmo la cita?"))
+        assert session._turn_state().assistant_asked is True
+        session._transcript.append(TranscriptEntry(role="user", text="Sí."))
+        assert session._turn_state().assistant_asked is False
+
+    def test_a_question_still_generating_or_playing_is_not_asked_yet(self) -> None:
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+        from timbal.voice.session import TranscriptEntry
+
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector="heuristic")
+        session._transcript.append(TranscriptEntry(role="assistant", text="¿Le confirmo la cita?"))
+        session._is_speaking = True  # the reply is still generating / going out
+        assert session._turn_state().assistant_asked is False
+        session._is_speaking = False
+        assert session._turn_state().assistant_asked is True
