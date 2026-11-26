@@ -52,6 +52,7 @@ from ..core.llm.prompt_cache import (
     system_prompt_text,
 )
 from ..core.session_scheduler import Followup, OnBusy, SessionScheduler, is_parked
+from ..core.voice_context import CURRENT_VOICE_SESSION
 from ..guardrails.types import GuardrailContext, GuardrailStage
 from ..state import get_run_context, set_run_context
 from ..state.background import (
@@ -177,9 +178,8 @@ DEFAULT_TURN_TIMEOUT_SECS = 60.0
 # disables the apology; the session stays open either way.
 DEFAULT_TURN_TIMEOUT_FALLBACK = "Sorry, I lost that for a moment. Could you say that again?"
 
-_current_voice_session: contextvars.ContextVar[VoiceSession | None] = contextvars.ContextVar(
-    "timbal_voice_session", default=None
-)
+# Lives in core so Agent and Runnable can check it without importing this module.
+_current_voice_session: contextvars.ContextVar[VoiceSession | None] = CURRENT_VOICE_SESSION
 
 
 def _extra_float(extra: dict, key: str, default: float | None) -> float | None:

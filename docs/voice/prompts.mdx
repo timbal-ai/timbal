@@ -13,7 +13,7 @@ from timbal.voice import voice_prompt
 
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     system_prompt=voice_prompt(
         "You help callers check a delivery. Reply in one or two short spoken sentences. Ask one question at a time.",
         "Account: gold. Last delivery was order 101.",
@@ -45,7 +45,7 @@ async def refund_order(order_id: str) -> str:
 
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     system_prompt="You help callers with orders. Reply in one or two short spoken sentences.",
     tools=[refund_order],
     voice_config={"language": "en"},

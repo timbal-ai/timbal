@@ -107,6 +107,7 @@ from .tool_result_offload import (
     create_read_offloaded,
 )
 from .tool_set import ToolSet
+from .voice_context import CURRENT_VOICE_SESSION
 
 logger = structlog.get_logger("timbal.core.agent")
 
@@ -2980,9 +2981,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 self._record_allowed_tools(tools, tool_policy)
         # Voice barge-in policy, keyed by the name the LLM calls. Only the
         # non-default modes are stored; VoiceSession treats a missing name as allow.
-        self._tool_interruption_modes = {
-            tool.name: mode for tool in tools if (mode := getattr(tool, "interruption_mode", "allow")) != "allow"
-        }
+        # Only on a call: everywhere else nothing reads it.
+        if CURRENT_VOICE_SESSION.get() is not None:
+            self._tool_interruption_modes = {
+                tool.name: mode for tool in tools if (mode := getattr(tool, "interruption_mode", "allow")) != "allow"
+            }
         return tools, commands, tools_names, tool_providers
 
     def _tell_alike_sets_apart(self, sets: list[tuple[str, list[str], list[int]]], providers: dict[int, str]) -> None:
@@ -4731,7 +4734,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             else:
                 system_prompt = _render_sections(system_prompt)
         # A voice turn keeps its per-turn facts after the static prefix (sections rendered first).
-        system_prompt = self._voice_system_prompt(system_prompt)
+        if CURRENT_VOICE_SESSION.get() is not None:
+            system_prompt = self._voice_system_prompt(system_prompt)
         # delivery="tool". The tool's name, fixed at the turn's first step (the system prompt says it): it
         # depends on the names of the step's tools, a tool set's included.
         send_name: str | None = None

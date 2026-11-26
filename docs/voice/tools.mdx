@@ -88,7 +88,7 @@ async def confirm_payment(order_id: str) -> str:
 
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     system_prompt="You confirm payments. Reply in one or two short spoken sentences.",
     tools=[
         Tool(
@@ -228,7 +228,7 @@ async def book_table(name: str) -> str:
 
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     system_prompt="You book tables. Reply in one short spoken sentence.",
     tools=[Tool(handler=book_table, defer_until_eot=True)],
     voice_config={"language": "en", "speculative_generation": {"enabled": True}},
@@ -260,7 +260,7 @@ async def end_call() -> str:
 
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-6.1-terra",
     system_prompt="When the caller is done, say a short goodbye and then call end_call.",
     tools=[Tool(handler=end_call)],
     voice_config={"hangup_grace_secs": 1.5},

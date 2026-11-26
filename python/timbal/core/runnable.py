@@ -78,6 +78,7 @@ from ..types.events.delta import Custom, DeltaEvent, DeltaItem
 from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import dump, invalidate_message_dump_caches, sync_to_async_gen
+from .speculative_gate import _GATE as _SPECULATIVE_GATE
 from .tool_policy import describe_tool_policy
 
 
@@ -2481,7 +2482,7 @@ class Runnable(ABC, BaseModel):
             # approval, pre_hook, and the handler. Discard cancels the wait,
             # so none of those start. No gate (speculation off) skips this.
             # Audio already held until confirm is untouched.
-            if self._holds_for_unconfirmed_turn(_new_parent_call_id):
+            if _SPECULATIVE_GATE.get() is not None and self._holds_for_unconfirmed_turn(_new_parent_call_id):
                 from .speculative_gate import wait_for_turn_confirmation
 
                 await wait_for_turn_confirmation()
