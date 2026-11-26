@@ -2166,6 +2166,23 @@ class TestOwnerRoundThree:
             allowed = typing.get_args(typing.get_type_hints(entry)["source"])
             assert set(allowed) == {"app", "client", "user"}, entry.__qualname__
 
+    def test_session_event_source_keeps_its_meaning_for_typed_callers(self):
+        """[P3] SessionEventSource was widened with "agent", so a typed wrapper that passes one on to
+        post_session_event (which excludes "agent") stopped type-checking:
+        ``def forward(run_id: str, source: SessionEventSource) -> None: post_session_event(run_id, "u", source=source)``.
+        The alias is main's again; a stored event's source has a type of its own that includes "agent"."""
+        import typing
+
+        from timbal.state import background
+        from timbal.voice.session import VoiceSession
+
+        assert typing.get_args(background.SessionEventSource) == ("app", "client", "user")
+        for entry in (background.post_session_event, VoiceSession.notify):
+            assert typing.get_type_hints(entry)["source"] == background.SessionEventSource, entry.__qualname__
+        assert set(typing.get_args(background.StoredEventSource)) == {"app", "client", "user", "agent"}
+        for entry in (background.SessionEvent.__init__, background.BackgroundTaskStore.post_event):
+            assert typing.get_type_hints(entry)["source"] == background.StoredEventSource, entry.__qualname__
+
     async def test_an_agents_own_peer_hops_metadata_is_not_a_hop_count(self):
         """Found reviewing the fix above: the hop count a resumed turn gets back was read from its root span's
         metadata["peer_hops"] unstamped, which starts as the agent's own metadata: with metadata={"peer_hops": 5}

@@ -41,8 +41,8 @@ from ..state import get_run_context, set_run_context
 from ..state.background import (
     Announce,
     BackgroundTaskStore,
-    PostedEventSource,
     SessionEvent,
+    SessionEventSource,
     adopt_background_store,
     bind_background_store,
     ensure_background_store,
@@ -740,7 +740,7 @@ class VoiceSession:
         text: str,
         *,
         key: str | None = None,
-        source: PostedEventSource = "app",
+        source: SessionEventSource = "app",
         announce: Announce | None = None,
     ) -> SessionEvent:
         """Tell the agent something happened, so it can speak up without waiting for the caller.

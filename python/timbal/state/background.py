@@ -692,10 +692,12 @@ def format_user_message(events: Sequence[SessionEvent], *, steered: bool = False
 #: A user message (``source="user"``) is a prompt and has no cap of its own.
 MAX_SESSION_EVENT_CHARS = 4_000
 
-SessionEventSource = Literal["app", "client", "user", "agent"]
-PostedEventSource = Literal["app", "client", "user"]
-"""What an application or a device posts (:func:`post_session_event`, ``VoiceSession.notify``): a message from
-another agent (``"agent"``) needs its envelope, which ``ChatSession.receive_agent_message`` gives it."""
+SessionEventSource = Literal["app", "client", "user"]
+StoredEventSource = Literal["app", "client", "user", "agent"]
+"""Where a stored event came from (``SessionEvent.source``, ``BackgroundTaskStore.post_event``): a
+:data:`SessionEventSource`, or a message from another agent (``"agent"``), which needs its envelope
+(``ChatSession.receive_agent_message`` gives it). :func:`post_session_event` and ``VoiceSession.notify`` take a
+:data:`SessionEventSource` only."""
 SessionEventState = Literal["pending", "delivered", "superseded", "withdrawn", "undelivered"]
 TaskMessageSource = Literal["parent", "app", "user"]
 """Who sent a running background agent a message (:meth:`BackgroundTaskStore.message_task`)."""
@@ -818,7 +820,7 @@ class SessionEvent:
         text: str,
         *,
         key: str | None,
-        source: SessionEventSource,
+        source: StoredEventSource,
         announce: Announce | None = None,
         task_id: str | None = None,
         lane: SessionEventLane = "later",
@@ -828,7 +830,7 @@ class SessionEvent:
         self.id: str = uuid7(as_type="hex")  # type: ignore[assignment]
         self.text = text
         self.key = key
-        self.source: SessionEventSource = source
+        self.source: StoredEventSource = source
         self.announce: Announce | None = announce
         self.task_id = task_id
         self.lane: SessionEventLane = lane
@@ -1773,7 +1775,7 @@ class BackgroundTaskStore:
         text: str,
         *,
         key: str | None = None,
-        source: SessionEventSource = "app",
+        source: StoredEventSource = "app",
         announce: Announce | None = None,
         task_id: str | None = None,
         lane: SessionEventLane | None = None,
@@ -2138,7 +2140,7 @@ def post_session_event(
     text: str,
     *,
     key: str | None = None,
-    source: PostedEventSource = "app",
+    source: SessionEventSource = "app",
     announce: Announce | None = None,
     lane: SessionEventLane | None = None,
     mode: UserMessageMode | None = None,
