@@ -730,6 +730,44 @@ def _resolve_waiter(waiter: asyncio.Future[None]) -> None:
         waiter.set_result(None)
 
 
+def _storable_records(records: list[Any]) -> list[dict[str, Any]]:
+    """Screening records (``TriggerRecord``) as a snapshot holds them: JSON, a rail's own metadata left out where
+    JSON cannot carry it (a snapshot that cannot be written stores nothing)."""
+    import json
+
+    stored = []
+    for record in records:
+        data = record.as_dict() if hasattr(record, "as_dict") else None
+        if not isinstance(data, dict):
+            continue
+        try:
+            json.dumps(data, allow_nan=False)
+        except (TypeError, ValueError):
+            data.pop("metadata", None)
+            try:
+                json.dumps(data, allow_nan=False)
+            except (TypeError, ValueError):
+                continue
+        stored.append(data)
+    return stored
+
+
+def _restored_records(stored: Any) -> list[Any]:
+    if not isinstance(stored, list) or not stored:
+        return []
+    from ..guardrails.runner import TriggerRecord
+
+    fields = set(TriggerRecord.__dataclass_fields__)
+    records = []
+    for data in stored:
+        if isinstance(data, dict):
+            try:
+                records.append(TriggerRecord(**{key: value for key, value in data.items() if key in fields}))
+            except TypeError:
+                continue  # (written by a version whose records had other required fields)
+    return records
+
+
 class SessionEvent:
     """Receipt for one event posted to a session (:meth:`BackgroundTaskStore.post_event`).
 
@@ -871,6 +909,9 @@ class SessionEvent:
             data["sent_by"] = self.sent_by  # kept across a restart: it must not come back as a person's
         if self.peer is not None:
             data["peer"] = self.peer  # a message from another agent: its envelope (only those have one)
+        if self.guardrails:
+            # What screened its text (a redaction): the run that takes it after a restore reports them too.
+            data["guardrails"] = _storable_records(self.guardrails)
         return data
 
     def receipt(self) -> dict[str, Any]:
@@ -1889,6 +1930,7 @@ class BackgroundTaskStore:
         event.id = data["id"]
         event.posted_at = data.get("posted_at", event.posted_at)
         event.sent_by = data.get("sent_by")
+        event.guardrails = _restored_records(data.get("guardrails"))
         self._queue_event(event)
         return event
 

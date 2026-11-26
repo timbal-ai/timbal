@@ -478,6 +478,13 @@ def _left_parked(turn: asyncio.Task | None) -> bool | None:
     return is_parked(output.status) if output is not None else None
 
 
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
 def _peer_hops_of(context: RunContext | None) -> int | None:
     """How deep in a chain of agent messages a run was (``RunContext._peer_hops``): from the context while it lives,
     else from its root span (``metadata.peer_hops``, :func:`~timbal.core.session_scheduler.record_delivery`)."""
@@ -836,6 +843,11 @@ class ChatSession:
         # Messages from other agents (core/peers.py): the directory membership, and the last messages
         # received, by sender and id, for dedupe and for the hops of a reply.
         self._peer: PeerMembership | None = None
+        # The loop that serves the session (its worker's): a message from another agent is taken there, whichever
+        # thread or loop sends it (receive_agent_message). Known once the session runs on one.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        with contextlib.suppress(RuntimeError):
+            self._loop = asyncio.get_running_loop()
         self._agent_messages: OrderedDict[tuple[str, str], SessionEvent] = OrderedDict()
 
     # -- Public API -------------------------------------------------------------
@@ -1039,6 +1051,35 @@ class ChatSession:
     ) -> dict[str, Any]:
         """Take a message another agent sent (:class:`~timbal.core.peers.AgentDirectory`); returns its receipt.
 
+        Taken on the loop that serves the session, whichever thread or loop calls it: its guardrails run there,
+        and its worker is started there. Raises :class:`~timbal.core.peers.PeerRejected`.
+        """
+        from .peers import PeerRejected
+
+        loop = self._loop
+        if loop is not None and loop is not _running_loop():
+            if loop.is_closed() or not loop.is_running():
+                raise PeerRejected("closed", "The agent's session is not being served.")
+            receive = self._receive_agent_message(
+                text, sender=sender, message_id=message_id, reply_to=reply_to, priority=priority, hops=hops
+            )
+            return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(receive, loop))
+        return await self._receive_agent_message(
+            text, sender=sender, message_id=message_id, reply_to=reply_to, priority=priority, hops=hops
+        )
+
+    async def _receive_agent_message(
+        self,
+        text: str,
+        *,
+        sender: str,
+        message_id: str | None = None,
+        reply_to: str | None = None,
+        priority: "PeerPriority" = "normal",
+        hops: int = 0,
+    ) -> dict[str, Any]:
+        """:meth:`receive_agent_message`, on the session's own loop.
+
         It reaches the agent as a ``source="agent"`` event: the next turn takes it (one starts if the session
         is idle), or with ``priority="urgent"`` the running turn does after its tool batch (``lane="next"``; it
         never cuts what runs). A message id this session has from the same sender, or the same text from the
@@ -1072,7 +1113,15 @@ class ChatSession:
         earlier = self._agent_messages.get((sender, message_id)) if message_id else None
         if earlier is not None:
             return {**earlier.receipt(), "duplicate": True}
-        screened, triggered = await self._screen_agent_message(text, sender)
+        given_id, message_id = message_id, message_id or f"am_{uuid7(as_type='hex')}"
+        peer = {
+            "from": sender,
+            "message_id": message_id,
+            "reply_to": reply_to,
+            "priority": priority,
+            "hops": max(0, hops),
+        }
+        screened, triggered = await self._screen_agent_message(text, sender, peer)
         # The screening may have taken a while: the session may be gone, and a copy of the message may have
         # arrived meanwhile (a sender's retry). From here to the post nothing awaits.
         if self.closed:
@@ -1081,7 +1130,7 @@ class ChatSession:
         if not screened:
             logger.warning("agent_message_blocked", rail="redaction", sender=sender, chars=len(text), emptied=True)
             raise PeerRejected("blocked", "Blocked by the recipient's guardrails: nothing of the message was left.")
-        earlier = self._agent_messages.get((sender, message_id)) if message_id else None
+        earlier = self._agent_messages.get((sender, given_id)) if given_id else None
         if earlier is None:
             earlier = next(
                 (
@@ -1094,14 +1143,11 @@ class ChatSession:
                 None,
             )
         if earlier is not None:
+            if given_id:
+                # The same message under another id (a sender's retry): a later copy under this one is it too,
+                # also once the first is taken. Forgotten with it if it is withdrawn (withdraw).
+                self._remember_agent_message(earlier, (sender, given_id))
             return {**earlier.receipt(), "duplicate": True}
-        peer = {
-            "from": sender,
-            "message_id": message_id or f"am_{uuid7(as_type='hex')}",
-            "reply_to": reply_to,
-            "priority": priority,
-            "hops": max(0, hops),
-        }
         try:
             # Urgent is the steering lane, and nothing more: no 'interrupt' policy, which would let another
             # agent's model cut a reply in flight (a call that shares this session speaks its events).
@@ -1130,24 +1176,34 @@ class ChatSession:
         """A message ``sender`` sent this session, by its id (while it is among the last ones kept)."""
         return self._agent_messages.get((sender, message_id))
 
-    def _remember_agent_message(self, event: SessionEvent) -> None:
-        """Keep a message from an agent by its sender and id: for dedupe, and for the hops of a reply to it."""
-        if event.peer is None or not event.peer.get("message_id"):
-            return
-        self._agent_messages[(event.peer["from"], event.peer["message_id"])] = event
+    def _remember_agent_message(self, event: SessionEvent, key: tuple[str, str] | None = None) -> None:
+        """Keep a message from an agent by its sender and id (``key``: another id it stands for): for dedupe, and
+        for the hops of a reply to it."""
+        if key is None:
+            if event.peer is None or not event.peer.get("message_id"):
+                return
+            key = (event.peer["from"], event.peer["message_id"])
+        self._agent_messages[key] = event
         while len(self._agent_messages) > _AGENT_MESSAGES_KEPT:
             self._agent_messages.popitem(last=False)
 
-    async def _screen_agent_message(self, text: str, sender: str) -> tuple[str, list[Any]]:
+    async def _screen_agent_message(self, text: str, sender: str, peer: dict[str, Any]) -> tuple[str, list[Any]]:
         """The agent's input guardrails on a message from another agent (as on a user's prompt): the text they
-        leave, and the rails that fired, for the guardrail report of the run that takes it."""
+        leave, and the rails that fired, for the guardrail report of the run that takes it. A rail gets the message
+        as ``ctx.payload``, as for a prompt: a runtime ``user`` message with the envelope (``metadata.peer``)."""
         from ..guardrails.types import GuardrailContext, GuardrailStage
+        from ..types.message import SESSION_EVENT_KIND
         from .peers import PeerRejected
 
         runner = getattr(self._agent, "_guardrail_runner", None)
         if runner is None or not runner.has_stage(GuardrailStage.INPUT):
             return text, []
-        ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._agent._path)
+        payload = Message(
+            role="user",
+            content=[TextContent(text=text)],
+            metadata={"source": RUNTIME_SOURCE, "kind": SESSION_EVENT_KIND, "peer": dict(peer)},
+        )
+        ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._agent._path, payload=payload)
         outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
         if outcome.verdict is not None:
             # No run exists yet to carry a guardrail report, so the log is the record. Not of the text: it is what
@@ -1837,7 +1893,10 @@ class ChatSession:
         if self._hold_worker:
             return
         if self._worker is None or self._worker.done():
-            self._worker = asyncio.get_running_loop().create_task(self._serve())
+            loop = asyncio.get_running_loop()
+            if self._loop is None:
+                self._loop = loop
+            self._worker = loop.create_task(self._serve())
 
     def _work_arrived(self) -> None:
         self._work.set()

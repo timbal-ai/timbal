@@ -35,7 +35,7 @@ The tool's name is `send_to_agent`. If the agent has a tool of that name already
 
 ## Screening and refusals
 
-The recipient's input guardrails screen each message as it arrives, as they screen a user's prompt. A redaction rewrites the text, and the run that takes it records the rails that fired. A block refuses the message.
+The recipient's input guardrails screen each message as it arrives, as they screen a user's prompt. A rail's `ctx.payload` is the message, with its envelope in `metadata["peer"]`. The message is taken on the loop that serves the recipient's session, from whatever thread or loop sends it. A redaction rewrites the text, and the run that takes it records the rails that fired. A block refuses the message.
 
 A refused message raises `PeerRejected` (the tool tells the model why). Its `reason` is one of:
 
@@ -55,7 +55,7 @@ A refused message raises `PeerRejected` (the tool tells the model why). Its `rea
 ## Loops and repeats
 
 - **Hop limit.** Each message carries `hops`: one more than the deepest agent message the sending turn received (a turn that waited for an approval keeps its count), or than the message it answers. At `AgentDirectory(max_hops=6)` the tool refuses, and tells the model to stop and tell its user where things stand.
-- **Duplicates.** Each message has an id, unique per sender. A message sent again with an id the recipient has (`directory.send(message_id=...)`, a retry over HTTP) is delivered once. So is the same text from the same sender, answering the same message, while the first copy is still waiting.
+- **Duplicates.** Each message has an id, unique per sender. A send that runs again after a pause (it was cut before its answer came back) keeps its id. A message sent again with an id the recipient has (that replay, `directory.send(message_id=...)`, a retry over HTTP) is delivered once. So is the same text from the same sender, answering the same message, while the first copy is still waiting.
 
 ## Agents on another server
 

@@ -809,7 +809,10 @@ class TestRemotePeer:
         assert refused.value.reason == reason
 
     async def test_the_session_id_is_one_path_segment(self, monkeypatch):
-        calls = self._mock(monkeypatch, lambda _request: httpx.Response(202, json={"event_id": "e"}))
+        calls = self._mock(
+            monkeypatch,
+            lambda _request: httpx.Response(202, json={"event_id": "e", "state": "pending", "duplicate": False}),
+        )
         await RemotePeer(url="https://bots.example/", session_id="../../run").deliver({"from": "a", "text": "x"})
         assert calls[0].url.raw_path == b"/chat/sessions/..%2F..%2Frun/agent_messages"
 
@@ -817,7 +820,10 @@ class TestRemotePeer:
         """Not the run's platform credentials: the host is one the application configured for this peer."""
         from timbal.state.config import PlatformConfig
 
-        calls = self._mock(monkeypatch, lambda _request: httpx.Response(202, json={"event_id": "e"}))
+        calls = self._mock(
+            monkeypatch,
+            lambda _request: httpx.Response(202, json={"event_id": "e", "state": "pending", "duplicate": False}),
+        )
         context = fresh()
         context.platform_config = PlatformConfig.model_validate(
             {"host": "api.timbal.ai", "auth": {"type": "bearer", "token": "t2_platformtoken"}}
@@ -1227,3 +1233,196 @@ class TestBugbotRoundOne:
             event = b._agent_message("alice", receipt["message_id"])
             await until(lambda: event.state == "delivered" and not b.busy, timeout=10)
             assert event.run_id != out.run_id
+
+
+# -- Owner review, round 1 ---------------------------------------------------------------------------------------
+
+
+class TestOwnerRoundOne:
+    async def test_a_send_replayed_after_a_pause_keeps_its_message_id(self, monkeypatch):
+        """[P1] A send and a gated tool in one batch. The peer took the message; before its answer came back, the
+        caller stopped reading at the approval card (as a chat or a /stream client does), which cut the send.
+        The resume ran the cut call again under another run id and span id, so it had a second message id, and
+        the peer took the request twice."""
+        received, answer = [], asyncio.Event()
+
+        async def bob_server(request):
+            received.append(json.loads(request.content))  # the peer has it from here on
+            if len(received) == 1:
+                await answer.wait()  # its answer is slow
+            return httpx.Response(202, json={"event_id": f"e{len(received)}", "state": "pending", "duplicate": False})
+
+        real = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx, "AsyncClient", lambda **kwargs: real(transport=httpx.MockTransport(bob_server), **kwargs)
+        )
+        send = ToolUseContent(id="t-send", name="send_to_agent", input={"to": "bob", "message": "refund order 7"})
+        pay = ToolUseContent(id="t-pay", name="pay", input={})
+        batch = Message(role="assistant", content=[send, pay], stop_reason="tool_use")
+        alice = Agent(
+            name="alice",
+            model=TestModel(responses=[batch, "done", "x"]),
+            tools=[Tool(name="pay", handler=lambda: "paid", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        directory = AgentDirectory()
+        directory.add_remote("bob", RemotePeer(url="https://bots.example", session_id="s"))
+        membership = directory.join(ChatSession(alice), "alice")
+        context = fresh(peer=membership)
+        approval = None
+        stream = alice(prompt="go")
+        async for event in stream:
+            if isinstance(event, ApprovalEvent):
+                approval = event
+                await until(lambda: received)
+                break
+        await stream.aclose()
+        answer.set()
+        fresh(context.id, peer=membership)
+        await run(alice, resume={approval.approval_id: True})
+        assert len(received) == 2  # the cut call ran again on the resume
+        assert received[0]["message_id"] == received[1]["message_id"]
+
+    async def test_the_receive_runs_on_the_loop_that_serves_the_session(self):
+        """[P1] The membership kept the loop of whoever called join (none, outside a loop): the recipient's
+        guardrails ran on the sender's loop, and _ensure_worker could start the session's worker there."""
+        import threading
+
+        loops, served, stop = [], {}, threading.Event()
+        rail = guardrail(lambda _text: loops.append(asyncio.get_running_loop()) or True, stages=["input"])
+        ready = threading.Event()
+
+        def serve():
+            async def main():
+                async with ChatSession(make_agent("bob", lambda _: "NO_REPLY", guardrails=[rail])) as session:
+                    served["session"], served["loop"] = session, asyncio.get_running_loop()
+                    ready.set()
+                    await asyncio.get_running_loop().run_in_executor(None, stop.wait, 10)
+
+            asyncio.run(main())
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            assert ready.wait(5)
+            directory = AgentDirectory()
+            await asyncio.to_thread(directory.join, served["session"], "bob")  # from a thread with no loop
+            receipt = await asyncio.wait_for(directory.send("alice", "bob", "hello"), 5)
+            assert receipt["status"] == "sent"
+            assert loops == [served["loop"]]
+        finally:
+            stop.set()
+            thread.join(10)
+
+    async def test_an_id_coalesced_by_its_text_is_remembered(self):
+        """[P2] B, sent with A's text while A was pending, got A's receipt as a duplicate. Once A was taken, a
+        retry of B was new to the session and started a second turn."""
+        directory = AgentDirectory()
+        b = ChatSession(make_agent("bob", lambda _: "NO_REPLY"))
+        directory.join(b, "bob")
+        b._hold_worker = True
+        first = await directory.send("alice", "bob", "ship it", message_id="am_A")
+        second = await directory.send("alice", "bob", "ship it", message_id="am_B")
+        assert second["duplicate"] is True and second["event_id"] == first["event_id"]
+        (event,) = b._store.drain_events(settle=False)
+        event._settle("delivered", "run-1")  # a turn took A
+        again = await directory.send("alice", "bob", "ship it", message_id="am_B")
+        assert again["duplicate"] is True and not b._store.pending_events()
+        b.withdraw(first["event_id"])  # (nothing pending to take back: the association stays with A)
+        await b.close()
+
+    async def test_a_withdrawn_message_forgets_every_id_it_stood_for(self):
+        directory = AgentDirectory()
+        b = ChatSession(make_agent("bob", lambda _: "NO_REPLY"))
+        directory.join(b, "bob")
+        b._hold_worker = True
+        first = await directory.send("alice", "bob", "ship it", message_id="am_A")
+        await directory.send("alice", "bob", "ship it", message_id="am_B")
+        assert b.withdraw(first["event_id"])
+        again = await directory.send("alice", "bob", "ship it", message_id="am_B")
+        assert again["duplicate"] is False
+        await b.close()
+
+    async def test_a_remote_success_without_a_receipt_is_unconfirmed(self, monkeypatch):
+        """[P2] A 200 with {"ok": true} was reported as sent: nothing in it says a message was queued."""
+        real = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kwargs: real(
+                transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={"ok": True})), **kwargs
+            ),
+        )
+        directory = AgentDirectory()
+        directory.add_remote("bob", RemotePeer(url="https://bots.example", session_id="s"))
+        with pytest.raises(PeerRejected) as refused:
+            await directory.send("alice", "bob", "hi")
+        assert refused.value.reason == "unconfirmed"
+
+    async def test_the_input_rails_get_the_message(self):
+        """[P2] A prompt's and a steered message's input checks pass the Message in ctx.payload; a peer's passed
+        None, so a rail that reads it raised on every delivery (and, not strict, let it through)."""
+        seen = []
+
+        def rail(_text, ctx):
+            seen.append((ctx.payload.collect_text(), ctx.payload.metadata["peer"]["from"]))
+            return Verdict.block("not from mallory") if ctx.payload.metadata["peer"]["from"] == "mallory" else True
+
+        directory = AgentDirectory()
+        b = ChatSession(make_agent("bob", lambda _: "NO_REPLY", guardrails=[guardrail(rail, stages=["input"])]))
+        directory.join(b, "bob")
+        b._hold_worker = True
+        await directory.send("alice", "bob", "hello")
+        with pytest.raises(PeerRejected) as refused:
+            await directory.send("mallory", "bob", "hello")
+        assert refused.value.reason == "blocked" and seen == [("hello", "alice"), ("hello", "mallory")]
+        await b.close()
+
+    async def test_a_pending_messages_screening_records_survive_a_restore(self):
+        """[P2] The redacted text came back from the snapshot, its guardrail record did not: the run that took it
+        could not say which rail had changed it."""
+        redact = guardrail(lambda text: text.replace("4111", "[card]"), stages=["input"], action="redact", name="cards")
+        store = InMemoryChatSessionStore()
+        agent = make_agent("bob", lambda _: "NO_REPLY", guardrails=[redact])
+        session = ChatSession(agent, session_store=store)
+        session.persist()
+        session._hold_worker = True
+        await session.receive_agent_message("card 4111", sender="alice", message_id="am_c1")
+        await session.flush()
+        await session.close(keep=True)
+        restored = await ChatSession.from_store(agent, store, session.id)
+        restored._hold_worker = True
+        try:
+            (event,) = restored._store.pending_events()
+            assert event.text == "card [card]"
+            assert [record.rail for record in event.guardrails] == ["cards"]
+        finally:
+            await restored.close()
+
+    def test_any_events_screening_records_go_with_it_into_a_snapshot(self):
+        """The same for a client event (its screening records were lost the same way); a rail's own metadata that
+        JSON cannot carry is left out, so the snapshot can still be written."""
+        import json as _json
+
+        from timbal.guardrails.runner import TriggerRecord
+        from timbal.state.background import BackgroundTaskStore, SessionEvent
+
+        event = SessionEvent("door is open", key=None, source="client")
+        event.guardrails = [
+            TriggerRecord(rail="pii", stage="input", action="replace", reason=None, latency_ms=1, shadow=False),
+            TriggerRecord(
+                rail="odd",
+                stage="input",
+                action="warn",
+                reason="x",
+                latency_ms=0,
+                shadow=False,
+                metadata={"o": object()},
+            ),
+        ]
+        data = _json.loads(_json.dumps(event.to_dict(), allow_nan=False))
+        restored = BackgroundTaskStore().restore_event(data)
+        assert [(r.rail, r.action, r.metadata) for r in restored.guardrails] == [
+            ("pii", "replace", {}),
+            ("odd", "warn", {}),
+        ]
