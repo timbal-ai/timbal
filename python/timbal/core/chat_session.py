@@ -1098,6 +1098,9 @@ class ChatSession:
             except asyncio.CancelledError:
                 task = asyncio.current_task()
                 if task is not None and task.cancelling():
+                    # The wait first: what the cancelled receive then reports goes to a settled future, not to
+                    # one nobody reads (asyncio would log it as never retrieved).
+                    waiting.cancel()
                     if not loop.is_closed():
                         handed.cancel()  # (and with it the receive on the session's loop)
                     raise  # the caller's own cancellation

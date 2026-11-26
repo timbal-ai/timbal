@@ -2055,3 +2055,48 @@ class TestOwnerRoundTwoReview:
         with pytest.raises(PeerRejected) as refused:
             await RemotePeer(url="https://bots.example", session_id="s").deliver({"from": "a", "text": "x"})
         assert refused.value.reason == "unconfirmed"
+
+    def test_a_sender_that_gives_up_leaves_nothing_logged(self, caplog):
+        """A sender on another loop that stopped waiting (a wait_for timeout) cancelled the receive there, which then
+        reported "closed" into a future nobody read: asyncio logged "Future exception was never retrieved" each
+        time."""
+        import gc
+        import threading
+
+        served, ready, stop, entered = {}, threading.Event(), threading.Event(), threading.Event()
+
+        async def slow(_text):
+            entered.set()
+            await asyncio.Event().wait()  # until the receive is cancelled
+            return True
+
+        def serve():
+            async def main():
+                agent = make_agent("bob", lambda _: "NO_REPLY", guardrails=[guardrail(slow, stages=["input"])])
+                async with ChatSession(agent) as session:
+                    session._hold_worker = True
+                    served["session"], served["loop"] = session, asyncio.get_running_loop()
+                    ready.set()
+                    await asyncio.get_running_loop().run_in_executor(None, stop.wait, 10)
+
+            asyncio.run(main())
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+
+        async def sender():
+            assert await asyncio.to_thread(ready.wait, 5)
+            receive = served["session"].receive_agent_message("hello", sender="alice")
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(receive, 0.3)
+            await asyncio.to_thread(entered.wait, 5)
+
+        try:
+            with caplog.at_level("ERROR"):
+                asyncio.run(sender())
+                gc.collect()
+        finally:
+            stop.set()
+            thread.join(10)
+        assert not [record for record in caplog.records if "never retrieved" in record.getMessage()]
+        assert served["session"]._store.pending_events() == []
