@@ -1337,16 +1337,38 @@ class TestReview6065154730:
         assert out.status.code == "success" and ran == [(6, 7)]
 
 
+class _Warnings:
+    """The agent's logger with its warnings recorded (read from the module the agent logs through, not from
+    structlog's configuration, which a test elsewhere in the process may have changed)."""
+
+    def __init__(self, inner):
+        self.inner, self.events = inner, []
+
+    def warning(self, event, *args, **kwargs):
+        self.events.append(event)
+        return self.inner.warning(event, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
 class TestAKeptNamesClash:
     """An application's tool that holds one of the agent's kept names is not offered on any step of the turn, and
     the log says so once a turn, not on every step."""
 
     @staticmethod
-    def clashes(logs, start):
-        return [log for log in logs if log.get("event", "").startswith(start)]
+    def clashes(events, start):
+        return [event for event in events if event.startswith(start)]
 
-    async def test_the_dispatchers_name_is_warned_about_once(self):
-        import structlog
+    @staticmethod
+    def recorded(monkeypatch):
+        from timbal.core import agent as agent_module
+
+        warnings = _Warnings(agent_module.logger)
+        monkeypatch.setattr(agent_module, "logger", warnings)
+        return warnings
+
+    async def test_the_dispatchers_name_is_warned_about_once(self, monkeypatch):
 
         app = Catalog()
         app.offered[:] = [
@@ -1372,13 +1394,12 @@ class TestAKeptNamesClash:
             Tool(name="lookup", handler=lambda key: key),
         ]
         fresh(parked.run_id)
-        with structlog.testing.capture_logs() as logs:
-            _, out = await run(agent, resume={approval.approval_id: True})
+        warnings = self.recorded(monkeypatch)
+        _, out = await run(agent, resume={approval.approval_id: True})
         assert out.status.code == "success" and model.call_count == 4
-        assert len(self.clashes(logs, "A tool has the name of one of the agent's own")) == 1
+        assert len(self.clashes(warnings.events, "A tool has the name of one of the agent's own")) == 1
 
-    async def test_the_salience_tools_name_is_warned_about_once(self):
-        import structlog
+    async def test_the_salience_tools_name_is_warned_about_once(self, monkeypatch):
         from timbal.guardrails import Verdict, guardrail
 
         def ask(_text, ctx):
@@ -1410,7 +1431,7 @@ class TestAKeptNamesClash:
             Tool(name="lookup", handler=lambda key: key),
         ]
         fresh(parked.run_id)
-        with structlog.testing.capture_logs() as logs:
-            _, out = await run(agent, resume={approval.approval_id: True})
+        warnings = self.recorded(monkeypatch)
+        _, out = await run(agent, resume={approval.approval_id: True})
         assert out.status.code == "success"
-        assert len(self.clashes(logs, "A tool took the name of the salience tool")) == 1
+        assert len(self.clashes(warnings.events, "A tool took the name of the salience tool")) == 1
