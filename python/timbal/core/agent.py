@@ -1956,7 +1956,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     return {"unverified": True} if run_context._resume_values else None
                 paused_span = self._own_span(parent_trace)
                 paused_calls = _paused_record(paused_span)
-                if paused_span is not None and _is_pause(paused_span.status):
+                if paused_span is not None and _is_pause(paused_span.status) and run_context._peer is not None:
                     # As on the resume below: a send cut before its answer came back keeps its id.
                     carry_sent_ids(
                         current_span, paused_span, _waiting_ids(paused_calls, self._find_pending_tool_uses(loaded))
@@ -2009,10 +2009,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if paused.get("silent"):
                     current_span.metadata["silent"] = True  # it ended its turn by staying silent
             # The ids the turn's sends to other agents used: a send cut before its answer came back runs again in
-            # this run, and must send the same message (peers._sent_message_id).
-            carry_sent_ids(
-                current_span, previous_span, _waiting_ids(paused_calls, self._find_pending_tool_uses(memory))
-            )
+            # this run, and must send the same message (peers._sent_message_id). Only in a directory, the one place
+            # the send is offered: elsewhere the record would only take the place of the agent's own key.
+            if run_context._peer is not None:
+                carry_sent_ids(
+                    current_span, previous_span, _waiting_ids(paused_calls, self._find_pending_tool_uses(memory))
+                )
         prepared = None
         if (
             self.memory_compaction is not None

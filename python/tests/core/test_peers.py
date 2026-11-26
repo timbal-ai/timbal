@@ -2247,3 +2247,39 @@ class TestOwnerRoundThree:
             finally:
                 await restored.close()
         assert "back and forth 3 times" in results[0] and received(a) == []
+
+    @pytest.mark.parametrize("via", ["history", "messages"])
+    async def test_a_resume_outside_a_directory_leaves_an_agents_own_peer_replay_alone(self, monkeypatch, via):
+        """Found reviewing the fixes above: a resume carried the paused turn's send ids into metadata["peer_replay"]
+        whether or not the run was in a directory (an HTTP resume, a restored session not joined again), writing
+        over the agent's own key; its send is then not run, and the record was dropped with the app's value."""
+        received, answer = [], asyncio.Event()
+        remote_bob(monkeypatch, received, answer)
+        send = ToolUseContent(id="t-send", name="send_to_agent", input={"to": "bob", "message": "refund order 7"})
+        pay = ToolUseContent(id="t-pay", name="pay", input={})
+        alice = Agent(
+            name="alice",
+            model=TestModel(responses=[Message(role="assistant", content=[send, pay], stop_reason="tool_use"), "done"]),
+            tools=[Tool(name="pay", handler=lambda: "paid", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+            metadata={"peer_replay": "app-value"},
+        )
+        directory = AgentDirectory()
+        directory.add_remote("bob", RemotePeer(url="https://bots.example", session_id="s"))
+        membership = directory.join(ChatSession(alice), "alice")
+        context = fresh(peer=membership)
+        stream = alice(prompt="go")
+        async for event in stream:
+            if isinstance(event, ApprovalEvent):
+                approval = event
+                await until(lambda: received)
+                break
+        await stream.aclose()
+        answer.set()
+        history = list(next(s for s in context._trace.values() if s.parent_call_id is None).memory)
+        resumed = fresh(context.id)  # no directory
+        kwargs = {"messages": history} if via == "messages" else {"prompt": "go"}
+        out = await alice(resume={approval.approval_id: True}, **kwargs).collect()
+        assert len(received) == 1  # not run again: the send is not offered outside a directory
+        assert resumed.root_span().metadata["peer_replay"] == "app-value"
+        assert out.metadata["peer_replay"] == "app-value"
