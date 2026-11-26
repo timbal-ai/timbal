@@ -342,7 +342,7 @@ class TestDurableAndRemote:
         await session.close(keep=True)
         assert directory.peers() == []  # closing leaves the directory
 
-        restored = await ChatSession.restore(agent, store, session.id)
+        restored = await ChatSession.from_store(agent, store, session.id)
         try:
             again = await restored.receive_agent_message("for later", sender="alice", message_id="am_keep")
             assert again["duplicate"] is True
