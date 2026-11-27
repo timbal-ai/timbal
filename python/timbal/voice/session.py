@@ -133,6 +133,7 @@ from .speculative import (
     transcripts_equivalent,
 )
 from .turn_detection import (
+    _ECHO_GRACE_SECS,
     CommitAction,
     CommitDecision,
     PartialDecision,
@@ -235,7 +236,10 @@ def _without_spoken_words(text: str, words: str) -> str:
 
 def _closes_utterance(commit: str, attempt: str) -> bool:
     """Whether ``commit`` is the final transcript of the utterance ``attempt`` was started on: the same
-    words, or one of them a run of the other's ("yeah" / "Yeah okay.")."""
+    text, the same words, or one of them a run of the other's ("yeah" / "Yeah okay.")."""
+    commit, attempt = (commit or "").strip(), (attempt or "").strip()
+    if commit and commit == attempt:
+        return True  # also text with no words ("..."), which the word match cannot see
     return _contains_spoken_words(commit, attempt) or _contains_spoken_words(attempt, commit)
 
 
@@ -743,6 +747,9 @@ class VoiceSession:
         self._turn_filler_spoken: list[str] = []
         self._turn_filler_spoke_at = 0.0
         self._turn_filler_text = ""
+        # The last reply whose audio played, for echo checks while a speculative reply is held, and until when.
+        self._last_heard_text = ""
+        self._last_heard_until = 0.0
         # Segments/bytes as of the last filler — "spoken since then" checks.
         self._turn_filler_segments_baseline = 0
         self._turn_filler_audio_baseline = 0
@@ -2529,6 +2536,17 @@ class VoiceSession:
             for name, after in buffers_after.items()
             if after != buffers_before[name] and _contains_spoken_words(after, text)
         }
+        held_moved = buffers_before["held"]
+        if (
+            "deferred" in appended
+            and held_moved
+            and not buffers_after["held"]
+            and _contains_spoken_words(buffers_after["deferred"], held_moved)
+        ):
+            # The eager words took a held fragment with them into the deferred buffer (a protected tool runs):
+            # it was the caller's before them, and a retraction gives it back there.
+            before, after = appended["deferred"]
+            appended["deferred"] = (_merged_deferred(before, held_moved), after)
         active_after = self._active_turn_user_text or ""
         if (
             self._eager_gate_taken
@@ -3454,6 +3472,10 @@ class VoiceSession:
     async def _maybe_start_speculative_held(self, text: str, *, source: str) -> None:
         if self._closed or self._assistant_audio_playing:
             return
+        if not _spoken_tokens(text, strict=True):
+            # No word or number ("...", "?"): nothing to answer, and no final transcript to confirm it by.
+            logger.info("speculative_skipped", reason="no_words", text_preview=text[:80])
+            return
         # A real reply is in flight. A new eager event here is a barge-in the
         # commit path handles, not another speculative start.
         if self._is_speaking and self._speculative_attempt is None:
@@ -3491,6 +3513,9 @@ class VoiceSession:
         self._speculative_attempt = attempt
         self._speculative_gate = gate
         self._audio_hold = hold
+        # No reply audio plays from here until confirmation (attempts start once playback has drained): the
+        # last heard reply's echo can land for the usual grace.
+        self._last_heard_until = time.monotonic() + _ECHO_GRACE_SECS
         self._speculative_tts_stash = []
         self._speculative_text_deltas = []
         self._speculative_final_text = None
@@ -4473,6 +4498,10 @@ class VoiceSession:
         # One clock for every LLM call in this turn, including an empty retry.
         self._turn_prompt_now = datetime.now(UTC)
         self._turn_asked_caller = False
+        if self._turn_first_audio_at is not None:
+            # The reply ending here was heard: its echo may still land while the next reply's audio is held.
+            # Its own text, not ``_spoken_assistant_text()``: a new attempt's hold is already in place.
+            self._last_heard_text = self._audible_turn_text()
         self._turn_assistant_text = ""
         self._turn_iteration_prefix = ""
         self._turn_completed_replies = []
@@ -5277,15 +5306,28 @@ class VoiceSession:
 
         An unconfirmed speculative reply is not in it: its audio is held, so
         nothing of it can echo, and a caller whose words it happens to contain
-        ("hello" against "Hello! How can I help?") is not their own echo.
+        ("hello" against "Hello! How can I help?") is not their own echo. The
+        reply heard before it is, for the echo grace after the attempt starts:
+        its echo can still be landing ("booking is confirmed").
         """
-        spoken = "" if self._speculative_unconfirmed() else self._turn_assistant_text
+        if self._speculative_unconfirmed():
+            # Nothing of this turn has played, its filler included (held too).
+            heard = self._last_heard_text if time.monotonic() <= self._last_heard_until else ""
+            return heard or self._with_echoing_greeting("")
+        return self._audible_turn_text()
+
+    def _audible_turn_text(self) -> str:
+        """This turn's filler and reply, and the greeting while it can still echo."""
+        spoken = self._with_echoing_greeting(self._turn_assistant_text)
+        if self._turn_filler_text:
+            return f"{self._turn_filler_text} {spoken}".strip()
+        return spoken
+
+    def _with_echoing_greeting(self, spoken: str) -> str:
         if self._greeting_text and (
             self._turn_index == 0 or self._greeting_speaking or self._greeting_pending_bytes() > 0
         ):
-            spoken = f"{self._greeting_text} {spoken}".strip()
-        if self._turn_filler_text:
-            return f"{self._turn_filler_text} {spoken}".strip()
+            return f"{self._greeting_text} {spoken}".strip()
         return spoken
 
     def _own_llm_path(self) -> str | None:

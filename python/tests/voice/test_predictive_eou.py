@@ -398,6 +398,32 @@ class TestEndpointerTiming:
         await ep.close()
         await predictor.close()
 
+    async def test_a_repeat_of_the_committed_words_never_votes_while_the_final_is_late(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # However late the STT's final is, a replayed partial of the committed utterance is not new speech.
+        import types
+
+        import timbal.voice.predictive_eou as predictive_eou
+
+        clock = [1000.0]
+        monkeypatch.setattr(predictive_eou, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+        scores = _Scores(0.95)
+        predictor = _predictor(scores)
+        predictor.note_partial("What is my balance?")
+        await predictor.signals()
+        predictor.on_commit_sent()
+        clock[0] += 2.05  # the provider's final is late
+        for late in ("What is my balance?", "what is my", "What is my balance today"):
+            predictor.note_partial(late)
+            predictor.kick_audio()
+            stale = await predictor.signals()
+            assert stale.p_text is None and not prediction_is_complete(stale), late
+        predictor.note_partial("Can I pay my bill?")  # other words: the next utterance
+        predictor.kick_audio()
+        assert prediction_is_complete(await predictor.signals())
+        await predictor.close()
+
     async def test_a_dip_inside_the_sentence_keeps_its_text_vote(self) -> None:
         # One silent frame between words is not a pause: the partial still describes the sentence.
         scores = _Scores(0.95)

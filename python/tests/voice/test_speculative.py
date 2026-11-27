@@ -784,6 +784,47 @@ class TestSpeculativeSession:
         assert session.speculative_generations_discarded == 0
         assert [e.text for e in session.transcript if e.role == "user"] == ["hello"]
 
+    async def test_no_attempt_starts_on_text_with_no_words(self) -> None:
+        session, stt, _tts, model = _session(["Reply."])
+        async with _Drive(session, stt):
+            await session._maybe_start_speculative("...", source="smart_turn")
+            assert session._speculative_attempt is None
+        assert model.call_count == 0
+
+    async def test_an_identical_final_closes_an_attempt_without_words(self) -> None:
+        from timbal.voice.session import _closes_utterance
+
+        assert _closes_utterance("...", "...")
+        session, stt, _tts, model = _session(["Reply."])
+        async with _Drive(session, stt) as drive:
+            async with session._user_turn_lock:
+                await session._start_speculative_held("...", source="smart_turn")
+            await _until(lambda: model.call_count >= 1)
+            await stt.inject(TranscriptEvent(type="committed", text="..."))  # IGNOREd: no words
+            await _until(lambda: session.speculative_generations_discarded == 1)
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            assert session._speculative_attempt is None
+            assert not session._is_speaking
+            assert drive.audio() == []
+
+    async def test_the_last_heard_reply_still_echoes_while_the_next_is_held(self) -> None:
+        session, stt, _tts, model = _session(["Your booking is confirmed.", "It is on Friday."])
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="committed", text="book it"))
+            await _until(lambda: drive.audio())
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            await _until(lambda: not session._assistant_audio_playing)
+            heard = len(drive.audio())
+            await stt.inject(TranscriptEvent(type="eager", text="when is my booking"))
+            await _until(lambda: model.call_count >= 2)
+            # The first reply's echo lands late, while the new reply is held.
+            await stt.inject(TranscriptEvent(type="committed", text="booking is confirmed"))
+            await stt.inject(TranscriptEvent(type="committed", text="when is my booking"))
+            await _until(lambda: len(drive.audio()) > heard)
+        assert model.call_count == 2  # the held reply was used, not regenerated with the echo
+        assert session.speculative_generations_discarded == 0
+        assert [e.text for e in session.transcript if e.role == "user"] == ["book it", "when is my booking"]
+
     async def test_an_ignored_commit_of_other_words_leaves_the_attempt(self) -> None:
         session, stt, _tts, model = _session(["Booked."])
         async with _Drive(session, stt) as drive:

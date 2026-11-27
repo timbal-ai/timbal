@@ -48,6 +48,7 @@ Omitted, the value is ``min(0.5, eot_threshold - 0.1)``.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -73,9 +74,7 @@ EAGER_SILENCE_SECS = 0.16
 # Two 32 ms VAD frames: start the audio model as the pause begins, overlapping
 # its ~50–100 ms inference with the confirmation silence.
 PREDICT_SILENCE_SECS = 0.064
-AWAIT_FINAL_SECS = 2.0
-"""Longest wait for the transcript of a commit the endpointer sent; partials meanwhile are the committed
-utterance's. An STT that answers with none would otherwise keep the text vote off."""
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 # How often to score the rolling window while speech is still active.
 ROLL_INTERVAL_SECS = 0.32
 
@@ -173,6 +172,10 @@ class EouSignals:
     """Lexical hedge, dangling token, or a trailing correction marker."""
 
 
+def _spoken_words(text: str) -> tuple[str, ...]:
+    return tuple(_WORD_RE.findall(text.casefold()))
+
+
 def prediction_is_complete(signals: EouSignals) -> bool:
     """Whether the short confirmation may replace the silence floor.
 
@@ -250,10 +253,10 @@ class SpeechEouPredictor:
         self._scored_text = ""
         self._p_text: float | None = None
         self._text_task: asyncio.Task[None] | None = None
-        # Monotonic time until which partials are the committed utterance's, not the next one's: set when
-        # the endpointer sends a commit, cleared when its transcript arrives (bounded, for an STT that sends
-        # none).
-        self._awaiting_final_until = 0.0
+        # The words of a commit the endpointer sent whose transcript has not arrived: a partial that is
+        # still those words (late, or replayed) is that utterance's, not the next one's. None when no commit
+        # is outstanding, or once a partial with other words shows the next utterance has begun.
+        self._committed_words: tuple[str, ...] | None = None
 
         self._p_rolling: float | None = None
         self._last_roll = 0.0
@@ -274,14 +277,21 @@ class SpeechEouPredictor:
     def note_partial(self, text: str) -> None:
         """Score a partial transcript. The latest text wins.
 
-        Between a commit the endpointer sent and its transcript, a partial still belongs to the committed
-        utterance (a late one), so it does not vote for the next pause.
+        While a commit the endpointer sent is outstanding, a partial that is still the committed words (the
+        same, or a prefix either way: late, or replayed after the STT's delay) does not vote: it describes the
+        utterance already committed. Other words are the next utterance, and score as usual.
         """
-        if self._closed or time.monotonic() < self._awaiting_final_until:
+        if self._closed:
             return
         text = text.strip()
         if not text or text == self._text:
             return
+        if self._committed_words is not None:
+            words = _spoken_words(text)
+            committed = self._committed_words
+            if words[: len(committed)] == committed or committed[: len(words)] == words:
+                return
+            self._committed_words = None
         self._text = text
         self._text_gen += 1
         gen = self._text_gen
@@ -358,13 +368,14 @@ class SpeechEouPredictor:
 
     def on_committed(self) -> None:
         """A commit closed the utterance. Its text must not vote on the next one."""
-        self._awaiting_final_until = 0.0
+        self._committed_words = None
         self._drop_text()
 
     def on_commit_sent(self) -> None:
         """The endpointer asked the STT to commit: the utterance is over, though its transcript is still on
-        its way. The caller may speak again before it arrives; the text vote is already the old utterance's."""
-        self._awaiting_final_until = time.monotonic() + AWAIT_FINAL_SECS
+        its way, however long that takes. The caller may speak again first; the text vote is the old
+        utterance's, and so are partials that repeat its words until the transcript arrives."""
+        self._committed_words = _spoken_words(self._text) or None
         self._drop_text()
 
     def _drop_text(self) -> None:

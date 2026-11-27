@@ -262,6 +262,24 @@ class TestRepeatedRequestWhileProtected:
         assert ran == ["friday"]
         assert [e.text for e in session.transcript if e.role == "user"][-1] == "Check the booking."
 
+    async def test_a_held_fragment_the_eager_words_took_along_is_given_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = _flux_session(monkeypatch, [], entity_patience=True)
+        _protect(session)
+        await session._handle_provider_commit("My booking code is 415 555")  # confirmed, held: an open number
+        assert session._held_user_text == "My booking code is 415 555"
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="1212, that's all.", confidence=0.9)
+        )
+        assert session._held_user_text is None
+        assert session._deferred_user_text.startswith("My booking code is 415 555")
+        await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
+        assert session._deferred_user_text == "My booking code is 415 555"
+        await session._handle_provider_commit("1213, that's all.")
+        assert session._deferred_user_text.startswith("My booking code is 415 555")
+        assert session._deferred_user_text.endswith("1213, that's all.")
+
     async def test_new_words_after_the_request_are_still_taken_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         session = _flux_session(monkeypatch, [])
         _protect(session)
