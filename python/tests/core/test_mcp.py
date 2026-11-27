@@ -1243,6 +1243,121 @@ class TestStandaloneServerClose:
             owner_loop.close()
 
 
+class TestCrossLoopClose:
+    @staticmethod
+    def owner_thread():
+        import threading
+
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever)
+        thread.start()
+
+        def stop():
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(10)
+            loop.close()
+
+        return loop, stop
+
+    def test_a_retry_from_another_loop_closes_the_session_on_its_loop_behind_its_locks(self):
+        """The session's loop holds the server's lock (work in flight there) when a close() from another loop comes:
+        the session's close runs on its own loop, waiting there for the lock, instead of failing on a lock bound
+        to that loop."""
+        owner_loop, stop = self.owner_thread()
+        server = MCPServer(transport="stdio", command="unused")
+        try:
+
+            async def install():
+                closed, free, held = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+                async def owner():
+                    await closed.wait()
+
+                async def hold():
+                    async with server._get_lock():
+                        held.set()
+                        await free.wait()
+
+                task = asyncio.ensure_future(owner())
+                server._session_task, server._session_closed = task, closed
+                asyncio.ensure_future(hold())
+                await held.wait()
+                waiter = asyncio.ensure_future(server._get_lock().acquire())  # contended there: bound to that loop
+                await asyncio.sleep(0)
+                waiter.cancel()
+                return task, free
+
+            owner, free = asyncio.run_coroutine_threadsafe(install(), owner_loop).result(10)
+
+            async def retry():
+                attempt = asyncio.ensure_future(server.close())
+                done, _ = await asyncio.wait({attempt}, timeout=0.3)
+                assert not done  # on the session's loop, waiting for its lock
+                owner_loop.call_soon_threadsafe(free.set)
+                await asyncio.wait_for(attempt, 10)
+                assert owner.done()
+
+            asyncio.run(retry())
+        finally:
+            stop()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ended", ["with a cut", "failed"])
+    async def test_how_anothers_handoff_ended_is_this_close_too(self, ended):
+        """All a close() finds is another close()'s handoff, which leaves a session open (cut there) or fails: it
+        says the session is still open, as that other close() does, instead of returning as if all were closed."""
+        import concurrent.futures
+
+        from timbal.core.mcp import _Left
+
+        handed = concurrent.futures.Future()
+        if ended == "with a cut":
+            handed.set_result(_Left(cut=1))
+        else:
+            handed.set_exception(RuntimeError("the owner loop cancelled it"))
+        service = MCPServer(transport="http", service="api")
+        service._handoffs[id(handed)] = (handed, asyncio.get_running_loop())
+        with pytest.raises(RuntimeError, match="still open"):
+            await asyncio.wait_for(service.close(), 10)
+
+    def test_a_close_waiting_on_anothers_handoff_reports_what_it_left(self):
+        """Two close() at once on one loop, the run connection on another: the second waits for the first's
+        handoff, and when a session close was cut there it says the session is still open, as the first does."""
+        import threading
+
+        from timbal.core.mcp import _RunConnection
+
+        owner_loop, stop = self.owner_thread()
+        started = threading.Event()
+
+        class Hangs:
+            async def close(self):
+                started.set()
+                await asyncio.Event().wait()
+
+        service = MCPServer(transport="http", service="api")
+        try:
+            service._run_connections["run"] = _RunConnection(Hangs(), "fingerprint", owner_loop)
+
+            async def both():
+                first = asyncio.ensure_future(service.close())
+                second = asyncio.ensure_future(service.close())
+                assert await asyncio.to_thread(started.wait, 10)
+
+                def cut():
+                    for task in list(service._close_tasks):
+                        if task.get_loop() is owner_loop:
+                            task.cancel()
+
+                owner_loop.call_soon_threadsafe(cut)
+                outcomes = await asyncio.wait_for(asyncio.gather(first, second, return_exceptions=True), 10)
+                assert all(isinstance(o, RuntimeError) and "still open" in str(o) for o in outcomes), outcomes
+
+            asyncio.run(both())
+        finally:
+            stop()
+
+
 class TestPlatformConnectionOutsideARun:
     """With the real resolver, which creates and sets a run context when there is none."""
 

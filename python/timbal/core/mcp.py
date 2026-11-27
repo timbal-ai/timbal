@@ -548,6 +548,12 @@ class _Left:
             )
 
 
+def _reachable(owner: asyncio.AbstractEventLoop | None, loop: asyncio.AbstractEventLoop) -> bool:
+    """Whether ``close()`` on ``loop`` can close what ``owner`` holds: its own loop, or another that runs."""
+    owner = owner or loop
+    return owner is loop or (not owner.is_closed() and owner.is_running())
+
+
 async def _wait_for_task(task: asyncio.Task) -> None:
     await asyncio.wait({task})
 
@@ -1070,15 +1076,24 @@ class MCPServer(ToolSet):
                         _RUN_CONNECTION_IDLE_S, self._retire_run_connection, key, entry
                     )
 
-    async def _close_elsewhere(
+    def _hand_close(
         self, entries: list[tuple[str, "_RunConnection"]], owner: asyncio.AbstractEventLoop
-    ) -> "_Left":
-        """``close()``'s part on another, running loop: handed to it, and waited for while it runs, visible to a
-        close() running beside this one meanwhile (``_handoffs``). What is left: those cut there, or all of them
-        when the loop stops before finishing (they are closed once it runs again)."""
+    ) -> "concurrent.futures.Future[Any] | None":
+        """``close()``'s part on another, running loop, handed to it and registered (``_handoffs``) at once, so a
+        close() running beside this one waits for it too."""
         handed = _hand_to(owner, self._close_run_connections(entries))
         if handed is not None:
             self._handoffs[id(handed)] = (handed, owner)
+        return handed
+
+    async def _finish_handoff(
+        self,
+        handed: "concurrent.futures.Future[Any] | None",
+        owner: asyncio.AbstractEventLoop,
+        entries: list[tuple[str, "_RunConnection"]],
+    ) -> "_Left":
+        """Wait for a ``_hand_close`` handoff while its loop runs. What is left: those cut there, or all of them
+        when the loop stops before finishing (they are closed once it runs again)."""
         try:
             finished = handed is not None and await _wait_on_owner(handed, owner)
         finally:
@@ -1103,10 +1118,12 @@ class MCPServer(ToolSet):
     async def _wait_handoff(
         self, handed: "concurrent.futures.Future[Any]", owner: asyncio.AbstractEventLoop
     ) -> "_Left":
-        """Another close()'s handoff still going: waited for too (that close() reports how it ended)."""
-        if await _wait_on_owner(handed, owner) or owner.is_closed():
-            return _Left()
-        return _Left(paused=1)
+        """Another close()'s handoff still going: waited for too, and how it ended is this close()'s as well."""
+        if await _wait_on_owner(handed, owner):
+            if _succeeded(handed):
+                return handed.result()
+            raise _HandoffFailed(1, asyncio.CancelledError() if handed.cancelled() else handed.exception())
+        return _Left() if owner.is_closed() else _Left(paused=1)
 
     async def _close_run_connections(self, entries: list[tuple[str, "_RunConnection"]]) -> "_Left":
         """On the loop that owns ``entries``: let go of them (``_retire_run_connection``) and wait for every close
@@ -1996,16 +2013,56 @@ class MCPServer(ToolSet):
         left = _Left()
         failed: list[BaseException] = []
         by_loop = self._take_run_connections(loop, left)
+        # Before any wait, so a close() running beside this one sees all of it: this loop's connections let go
+        # of, the other loops' handed over and registered (_handoffs).
         self._retire_all(by_loop.pop(loop, []))
+        earlier = list(self._handoffs.values())
+        mine = [(self._hand_close(entries, owner), owner, entries) for owner, entries in by_loop.items()]
         waits = [self._wait_loop_closes()]
-        waits += [self._close_elsewhere(entries, owner) for owner, entries in by_loop.items()]
-        waits += [self._wait_handoff(handed, owner) for handed, owner in list(self._handoffs.values())]
+        waits += [self._finish_handoff(handed, owner, entries) for handed, owner, entries in mine]
+        waits += [self._wait_handoff(handed, owner) for handed, owner in earlier]
+        waits.append(self._close_own_session(loop))
         # Shielded: a close() that is cancelled stops waiting, the closes go on (gather would cancel them).
         for result in await asyncio.shield(asyncio.gather(*waits, return_exceptions=True)):
             if isinstance(result, _Left):
                 left = left + result
             elif isinstance(result, BaseException):
                 failed.append(result)
+        left = left + await self._wait_owners_closing(loop)
+        # Whatever is still owed on a loop this close() could reach (cut meanwhile, by another close() or the
+        # loop): said, not left for the caller to find.
+        owed = sum(1 for _, entry in list(self._unclosed.values()) if _reachable(entry.loop, loop))
+        left.cut = max(left.cut, owed)
+        left.raise_if_owed(self._label, failed)
+
+    async def _close_own_session(self, loop: asyncio.AbstractEventLoop) -> "_Left":
+        """The server's own session (a standalone server's), closed on the loop that owns it: its locks and owner
+        task belong there (a retry from another loop hit them). Handed over while that loop runs; counted when it
+        does not. One whose loop has closed went with it: only the references are dropped."""
+        task = self._session_task
+        if task is None:
+            # Its refs gone (an earlier close() forgot them and is still shutting it down, holding the locks): the
+            # loop of the owner it signalled.
+            closing = [owner for owner in list(self._owners_closing) if not owner.done()]
+            task = closing[0] if closing else None
+        owner = task.get_loop() if task is not None else loop
+        if owner is loop:
+            await self._close_session_here()
+            return _Left()
+        if owner.is_closed():
+            self._forget_session()
+            return _Left()
+        handed = _hand_to(owner, self._close_session_here()) if owner.is_running() else None
+        if handed is not None and await _wait_on_owner(handed, owner):
+            if _succeeded(handed):
+                return _Left()
+            raise _HandoffFailed(1, asyncio.CancelledError() if handed.cancelled() else handed.exception())
+        if owner.is_closed():
+            self._forget_session()
+            return _Left()
+        return _Left(owners=1)
+
+    async def _close_session_here(self) -> None:
         async with self._get_tools_lock(), self._get_lock():
             task, closed = self._session_task, self._session_closed
             self._forget_session()
@@ -2013,12 +2070,10 @@ class MCPServer(ToolSet):
                 self._owners_closing.add(task)
                 task.add_done_callback(self._owners_closing.discard)
                 await self._shutdown_owner(task, closed)
-            left = left + await self._wait_owners_closing(loop)
             self._tools_cache = None
             self._tools_cache_run_id = None
             self._tools_stale = False
             self._inflight.clear()
-        left.raise_if_owed(self._label, failed)
 
     def _take_run_connections(
         self, loop: asyncio.AbstractEventLoop, left: "_Left"
