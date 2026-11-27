@@ -469,6 +469,23 @@ def _trace_claims(context: Mapping[str, Any]) -> dict[str, str]:
     return claims
 
 
+# Taken around every write to a server's run-connection pool and close records (an insert, a remove-if-still-this-
+# one, a run's drop, a close's record): close() on two threads, or a run's end beside a close(), may both find one
+# to remove, and neither may remove a replacement put in meanwhile. One for the module, not one per server: a lock in
+# a server's state would stop an unopened server from being copied or pickled (a field default, model_copy(deep=True)).
+# The writes it guards are a few dict operations.
+_RUN_STATE_LOCK = threading.Lock()
+
+
+def _fresh_run_state_lock() -> None:
+    """A forked child's own lock: one another thread of the parent held at the fork would never be released there."""
+    global _RUN_STATE_LOCK
+    _RUN_STATE_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_fresh_run_state_lock)
+
 # A run's platform connection outlives its last call this long (background children after the run's end).
 _RUN_CONNECTION_IDLE_S = 60.0
 # The run's end waits this long at most for its connections to close (a session's teardown has no bound of its own:
@@ -986,10 +1003,6 @@ class MCPServer(ToolSet):
     _inflight_seq: int = PrivateAttr(default=0)
     # service="api": a run's root call id -> that run's platform connection (see _project_connection).
     _run_connections: dict[str, "_RunConnection"] = PrivateAttr(default_factory=dict)
-    # Taken around every write to the pool (an insert, a remove-if-still-this-one in _unpool, a run's drop): close()
-    # on two threads, or a run's end beside a close(), may both find one connection to remove, and neither may remove
-    # a replacement put in meanwhile.
-    _pool_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # Closes of run connections still going (``close()`` waits for them), and those of each run's (its end waits).
     _close_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
     _run_closes: dict[str, set[asyncio.Task]] = PrivateAttr(default_factory=dict)
@@ -1103,7 +1116,7 @@ class MCPServer(ToolSet):
             entry = None
         if entry is None:
             entry = _RunConnection(self._new_project_server(url, headers), fingerprint, asyncio.get_running_loop())
-            with self._pool_lock:
+            with _RUN_STATE_LOCK:
                 self._run_connections[key] = entry
             # Refused once the run's root has ended (a background child's call): the idle close closes it then.
             if key not in self._run_hooked and run_context.on_end(functools.partial(self._run_ended, key)):
@@ -1260,7 +1273,8 @@ class MCPServer(ToolSet):
         for ident, (kept_key, _) in list(self._unclosed.items()):
             if kept_key == key and (pair := self._unclosed.pop(ident, None)) is not None:
                 self._retire_run_connection(*pair)
-        closes = self._run_closes.pop(key, None)
+        with _RUN_STATE_LOCK:
+            closes = self._run_closes.pop(key, None)
         return _wait_all_closed(closes, self._label, _RUN_END_CLOSE_S) if closes else None
 
     def _retire_run_connection(self, key: str, entry: "_RunConnection | None" = None) -> asyncio.Task | None:
@@ -1278,7 +1292,8 @@ class MCPServer(ToolSet):
         if entry.close_task is None:
             entry.close_task = task = asyncio.get_running_loop().create_task(entry.server.close())
             self._close_tasks.add(task)
-            self._run_closes.setdefault(key, set()).add(task)
+            with _RUN_STATE_LOCK:
+                self._run_closes.setdefault(key, set()).add(task)
             task.add_done_callback(functools.partial(self._close_done, key, entry))
             task.add_done_callback(_log_close_failure)
         return entry.close_task
@@ -1287,7 +1302,7 @@ class MCPServer(ToolSet):
         """Take ``entry`` out of the pool if it is still the one under ``key``. Atomic: close() on another thread
         doing the same cannot pass the check too and then fail on the delete, and a replacement put in meanwhile
         (a pool insert takes the same lock) is never the one removed."""
-        with self._pool_lock:
+        with _RUN_STATE_LOCK:
             if self._run_connections.get(key) is not entry:
                 return False
             del self._run_connections[key]
@@ -1296,9 +1311,9 @@ class MCPServer(ToolSet):
     def _drop_run(self, key: str) -> None:
         """Forget everything of the run ``key`` (its loop closed, taking its sessions): its connection, its closes,
         and its cut connections, which hold their credential headers."""
-        with self._pool_lock:  # as every write to the pool: an _unpool on another thread checks, then deletes
+        with _RUN_STATE_LOCK:  # as every write to the pool: an _unpool on another thread checks, then deletes
             self._run_connections.pop(key, None)
-        self._run_closes.pop(key, None)
+            self._run_closes.pop(key, None)
         for ident, (kept_key, _) in list(self._unclosed.items()):
             if kept_key == key:
                 self._unclosed.pop(ident, None)
@@ -1317,18 +1332,23 @@ class MCPServer(ToolSet):
         """Drop a close (its loop closed) from both collections, ``_close_done``'s callback never having run."""
         self._close_tasks.discard(task)
         for key in [key for key, closes in list(self._run_closes.items()) if task in closes]:
-            closes = self._run_closes[key]
+            self._discard_close(key, task)
+
+    def _discard_close(self, key: str, task: asyncio.Task) -> None:
+        """Take ``task`` off the run ``key``'s close records, and the record once empty. Under the lock: close() on
+        another thread may be doing the same, and find the record gone (it took it), and a run's loop may be adding
+        a close to it."""
+        with _RUN_STATE_LOCK:
+            closes = self._run_closes.get(key)
+            if closes is None:
+                return
             closes.discard(task)
             if not closes:
                 del self._run_closes[key]
 
     def _close_done(self, key: str, entry: "_RunConnection", task: asyncio.Task) -> None:
         self._close_tasks.discard(task)
-        closes = self._run_closes.get(key)
-        if closes is not None:
-            closes.discard(task)
-            if not closes:
-                del self._run_closes[key]
+        self._discard_close(key, task)
         if (task.cancelled() or task.exception() is not None) and not task.get_loop().is_closed():
             # Cut, or failed (the server's close() raised: what it could not close is still open), before the session
             # had closed: it may still be open. Kept out of the pool (a later call of the run must not reuse it and

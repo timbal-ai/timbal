@@ -167,9 +167,10 @@ async def _relay_until(agen: Any, deadline: float, path: str, timeout: float) ->
             raise RunTimeout(path, timeout)
 
 
-def _left_of(deadline: float | None) -> float | None:
-    """Seconds left before ``deadline`` (a loop time), 0 once it has passed; None for no deadline."""
-    return None if deadline is None else max(0.0, deadline - asyncio.get_running_loop().time())
+def _left_of(deadline: float | None, loop: asyncio.AbstractEventLoop | None) -> float | None:
+    """Seconds left before ``deadline``, a time of ``loop``'s clock (the loop that set it: a stream closed from another
+    loop ends there, and that loop's clock may have another origin); 0 once it has passed; None for no deadline."""
+    return None if deadline is None or loop is None else max(0.0, deadline - loop.time())
 
 
 async def _await_until(awaitable: Coroutine[Any, Any, Any], deadline: float, path: str, timeout: float) -> Any:
@@ -2408,8 +2409,10 @@ class Runnable(ABC, BaseModel):
         # first so finally closes *this* object, not the child's.
         emit_sink = None
         spawned_background = False
-        # The foreground deadline, once the handler's budget starts (below); the end hooks get what is left of it.
+        # The foreground deadline, once the handler's budget starts (below), and the loop whose clock it is on: the
+        # end hooks get what is left of it.
         deadline: float | None = None
+        deadline_loop: asyncio.AbstractEventLoop | None = None
         # Installed last, with nothing that can raise before the ``try`` whose ``finally`` takes them
         # back off: a call that fails while it is being set up leaves neither on the context.
         previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
@@ -2524,7 +2527,9 @@ class Runnable(ABC, BaseModel):
             run_timeout = self.timeout if self.timeout is not None and self.timeout > 0 else None
             if run_in_background:
                 run_timeout = None
-            deadline = None if run_timeout is None else asyncio.get_running_loop().time() + run_timeout
+            if run_timeout is not None:
+                deadline_loop = asyncio.get_running_loop()
+                deadline = deadline_loop.time() + run_timeout
 
             # pre_hook runs only when we're actually going to execute the
             # handler. We deliberately defer it past the approval gate so
@@ -2981,7 +2986,7 @@ class Runnable(ABC, BaseModel):
                     if _new_parent_call_id is None:
                         if run_context._end_hooks:
                             with contextlib.suppress(BaseException):
-                                await run_context._run_end_hooks(_new_call_id, _left_of(deadline))
+                                await run_context._run_end_hooks(_new_call_id, _left_of(deadline, deadline_loop))
                         else:
                             run_context.__dict__["_end_hooks"] = ()
                     set_parent_call_id(_parent_call_id)
@@ -3023,7 +3028,7 @@ class Runnable(ABC, BaseModel):
                     # not: one added later would never run.
                     if run_context._end_hooks:
                         # Within what is left of the runnable's timeout (none left: not waited for at all).
-                        await run_context._run_end_hooks(_new_call_id, _left_of(deadline))
+                        await run_context._run_end_hooks(_new_call_id, _left_of(deadline, deadline_loop))
                     else:
                         run_context.__dict__["_end_hooks"] = ()
             finally:

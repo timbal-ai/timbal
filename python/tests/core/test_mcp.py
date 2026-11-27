@@ -72,6 +72,32 @@ class TestMCPServerValidation:
             MCPServer(transport="http")
 
 
+class TestMCPServerCopies:
+    """An unopened server is configuration: it copies and pickles, as it did before connections were per run (no lock
+    nor loop in its state until it connects)."""
+
+    @pytest.mark.parametrize(
+        "config",
+        [{"transport": "stdio", "command": "npx", "args": ["server"]}, {"transport": "http", "service": "api"}],
+    )
+    def test_an_unopened_server_copies_and_pickles(self, config):
+        import copy
+        import pickle
+
+        from pydantic import BaseModel
+
+        server = MCPServer(**config)
+        for copied in (copy.deepcopy(server), server.model_copy(deep=True), pickle.loads(pickle.dumps(server))):
+            assert copied.model_dump() == server.model_dump() and copied is not server
+
+        class Holder(BaseModel):
+            server: MCPServer = MCPServer(**config)  # a field default: copied for each instance
+
+        assert Holder().server.model_dump() == server.model_dump()
+        agent = Agent(name="agent", model="openai/gpt-4o-mini", tools=[server])
+        assert agent.model_copy(deep=True).name == "agent"
+
+
 class TestMCPServerResolve:
     @pytest.mark.asyncio
     async def test_resolve_returns_tools_with_server_schema(self, stdio_server):
@@ -2235,14 +2261,17 @@ class TestCrossLoopClose:
             stop()
 
     @staticmethod
-    def race_at_the_pool_check(service, connections, other):
-        """Install ``connections`` as ``service``'s pool and run ``other`` on a thread of its own right after this
-        thread's first look at it, going on once ``other`` has finished or waits on the pool lock this thread holds
-        (where another thread's removal would land). Returns a list that holds that thread once it started."""
+    def race_at(monkeypatch, service, attribute, mapping, other, other_first=False):
+        """Install ``mapping`` as ``service``'s ``attribute`` and run ``other`` on a thread of its own at this thread's
+        first look into it (after the look, or before it with ``other_first``), going on once ``other`` has finished
+        or waits on the run-state lock this thread holds: where another thread's change would land. Returns a list
+        that holds that thread once it started."""
         import threading
 
+        from timbal.core import mcp as mcp_module
+
         class ObservedLock:
-            """The pool lock, saying when a second taker waits on it."""
+            """The run-state lock, saying when a second taker waits on it."""
 
             def __init__(self):
                 self.lock, self.waited = threading.Lock(), threading.Event()
@@ -2258,23 +2287,35 @@ class TestCrossLoopClose:
 
         lock, armed, started = ObservedLock(), [True], []
 
-        class Pool(dict):
+        def race():
+            if armed and threading.current_thread() is threading.main_thread():
+                armed.clear()  # this thread is looking; the other one goes now
+                started.append(threading.Thread(target=other))
+                started[0].start()
+                for _ in range(1000):  # until it is done, or waits on the lock this thread holds
+                    if not started[0].is_alive() or lock.waited.wait(0.01):
+                        break
+
+        class Watched(dict):
             def get(self, key, default=None):
+                if other_first:
+                    race()
                 value = super().get(key, default)
-                if armed and threading.current_thread() is threading.main_thread():
-                    armed.clear()  # this thread has looked; the other one goes now
-                    started.append(threading.Thread(target=other))
-                    started[0].start()
-                    for _ in range(1000):  # until it is done, or waits on the lock this thread holds
-                        if not started[0].is_alive() or lock.waited.wait(0.01):
-                            break
+                race()
                 return value
 
-        service.__pydantic_private__["_run_connections"] = Pool(connections)
-        service.__pydantic_private__["_pool_lock"] = lock
+            def __getitem__(self, key):
+                if other_first:
+                    race()
+                value = super().__getitem__(key)
+                race()
+                return value
+
+        service.__pydantic_private__[attribute] = Watched(mapping)
+        monkeypatch.setattr(mcp_module, "_RUN_STATE_LOCK", lock, raising=False)
         return started
 
-    def test_two_closes_on_two_threads_take_a_closed_loops_connection_once(self):
+    def test_two_closes_on_two_threads_take_a_closed_loops_connection_once(self, monkeypatch):
         """close() on two threads both find a connection whose loop has closed: one takes it out of the pool and the
         other finds it gone, instead of passing the check too and failing on the delete (``KeyError``, which ended
         its cleanup)."""
@@ -2296,12 +2337,94 @@ class TestCrossLoopClose:
             except BaseException as error:
                 results.append(error)
 
-        other = self.race_at_the_pool_check(service, {"run": _RunConnection(Server(), "fingerprint", gone)}, close_here)
+        pool = {"run": _RunConnection(Server(), "fingerprint", gone)}
+        other = self.race_at(monkeypatch, service, "_run_connections", pool, close_here)
         close_here()
         other[0].join(10)
         assert results == [None, None] and not service._run_connections
 
-    def test_a_run_dropped_while_close_takes_its_connection_is_taken_once(self):
+    def test_two_closes_on_two_threads_forget_a_closed_loops_close_record_once(self, monkeypatch):
+        """A close finished on a loop that then closed before its callback ran: its record is left, with no pooled
+        connection. close() on two threads both took that close to forget it, and both found its record; whichever
+        looks it up second finds it gone instead of failing on the lookup (``KeyError``, which ended its cleanup).
+        The other close() is run from that point: its ``_forget_close``, at this one's lookup."""
+        gone = asyncio.new_event_loop()
+        record = gone.create_future()  # the close, its loop closed under it
+        gone.close()
+        service = MCPServer(transport="http", service="api")
+        service._close_tasks.add(record)
+        errors = []
+
+        def the_other_close():
+            try:
+                service._forget_close(record)
+            except BaseException as error:
+                errors.append(error)
+
+        other = self.race_at(monkeypatch, service, "_run_closes", {"run": {record}}, the_other_close, other_first=True)
+        asyncio.run(asyncio.wait_for(service.close(), 10))
+        other[0].join(10)
+        assert not errors and not service._run_closes and not service._close_tasks
+
+    def test_the_run_budget_left_is_read_on_the_clock_that_set_it(self, monkeypatch):
+        """A root Tool's stream is closed from another loop, whose clock has another origin (120 s behind), once its
+        budget has run out: the run returns at once, the close of its platform connection going on behind it.
+        Read on the closing loop's clock, the budget looked 120 s long and the run waited for the close."""
+        import threading
+
+        from timbal import Tool
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        closing, closed = threading.Event(), threading.Event()
+
+        class SlowTeardown:
+            async def close(self):
+                closing.set()
+                await asyncio.to_thread(release.wait, 30)
+                closed.set()
+
+        release = threading.Event()
+        monkeypatch.setattr(
+            "timbal.platform.utils._resolve_url_and_headers",
+            lambda *_: ("https://api.example.test/mcp", {"Authorization": "Bearer run-a"}),
+        )
+        monkeypatch.setattr(MCPServer, "_new_project_server", lambda _self, _url, _headers: SlowTeardown())
+        service = MCPServer(transport="http", service="api")
+
+        async def streamer():
+            async with service._project_connection():
+                pass  # the run's connection, kept for its next call
+            yield "first"
+            await asyncio.Event().wait()
+
+        class Behind(asyncio.SelectorEventLoop):
+            def time(self):
+                return super().time() - 120
+
+        owner_loop, stop = self.owner_thread()
+        try:
+
+            async def read_first():
+                set_run_context(None)
+                set_call_id(None)
+                set_parent_call_id(None)
+                stream = Tool(name="streamer", handler=streamer, timeout=0.05)._stream()
+                async for event in stream:
+                    if event.type == "DELTA":
+                        return stream, asyncio.get_running_loop().time()
+
+            stream, read_at = asyncio.run_coroutine_threadsafe(read_first(), owner_loop).result(30)
+            while owner_loop.time() < read_at + 0.1:  # the budget, set before that, has run out on its own clock
+                threading.Event().wait(0.01)
+            with asyncio.Runner(loop_factory=Behind) as runner:
+                runner.run(asyncio.wait_for(stream.aclose(), 5))  # back at once, no budget left to wait in
+            assert closing.wait(10) and not closed.is_set()  # the close goes on, behind the run
+        finally:
+            release.set()
+            assert closed.wait(10)
+            stop()
+
+    def test_a_run_dropped_while_close_takes_its_connection_is_taken_once(self, monkeypatch):
         """The run's loop closed: its end hook drops the run (``_drop_run``) on one thread while close() on another
         takes the run's connection out of the pool. Both take the pool lock, so whichever comes second finds it gone
         instead of failing on the delete (``KeyError``, which ended close()'s cleanup)."""
@@ -2322,7 +2445,8 @@ class TestCrossLoopClose:
             except BaseException as error:
                 errors.append(error)
 
-        other = self.race_at_the_pool_check(service, {"run": _RunConnection(Server(), "fingerprint", gone)}, drop)
+        pool = {"run": _RunConnection(Server(), "fingerprint", gone)}
+        other = self.race_at(monkeypatch, service, "_run_connections", pool, drop)
         asyncio.run(asyncio.wait_for(service.close(), 10))
         other[0].join(10)
         assert not errors and not service._run_connections
