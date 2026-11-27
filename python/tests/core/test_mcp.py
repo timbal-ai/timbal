@@ -807,6 +807,22 @@ class TestPlatformConnectionLifetime:
         return ClosingLoop()
 
     @pytest.mark.asyncio
+    async def test_a_loop_that_closes_during_the_handoff_takes_its_cut_connections_with_it(self):
+        """A cut connection of another loop is left in _unclosed for that loop; the loop closes as close() hands it
+        over: the row goes too, credential headers included, instead of staying until a later close()."""
+        from timbal.core.mcp import _RunConnection
+
+        class Server:
+            async def close(self):
+                raise AssertionError("closed on the wrong loop")
+
+        service = MCPServer(transport="http", service="api")
+        entry = _RunConnection(Server(), "fingerprint", self.closing_loop())
+        service._unclosed[id(entry)] = ("run", entry)
+        await asyncio.wait_for(service.close(), 10)
+        assert not service._unclosed
+
+    @pytest.mark.asyncio
     async def test_an_owner_that_closes_before_the_handoff_takes_its_sessions_with_it(self):
         """close() and the run's end hook drop a connection whose loop closed between their check and the handoff,
         as when it was closed at the check, instead of failing or leaving it cached."""

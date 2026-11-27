@@ -1147,6 +1147,9 @@ class MCPServer(ToolSet):
             for key, entry in entries:
                 if self._run_connections.get(key) is entry:
                     del self._run_connections[key]
+            for ident, (_, entry) in list(self._unclosed.items()):  # its cut ones too, credential headers included
+                if entry.loop is owner:
+                    self._unclosed.pop(ident, None)
             for task in [task for task in self._close_tasks if task.get_loop() is owner]:
                 self._forget_close(task)
             return _Left()
