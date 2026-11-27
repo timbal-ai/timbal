@@ -1058,7 +1058,11 @@ def _schemas_found(memory: list[Message]) -> set[str]:
                 result = json.loads("".join(t.text for t in c.content if isinstance(t, TextContent)))
             except ValueError:
                 continue
-            found.update(t["name"] for t in result.get("found") or () if isinstance(t, dict) and "name" in t)
+            # Another tool may hold one of the search names (an unprefixed MCP server's own search_tools):
+            # anything but the search's own shape shows no schema.
+            listed = result.get("found") if isinstance(result, dict) else None
+            if isinstance(listed, list):
+                found.update(t["name"] for t in listed if isinstance(t, dict) and isinstance(t.get("name"), str))
     return found
 
 

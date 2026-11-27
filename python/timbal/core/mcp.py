@@ -14,6 +14,7 @@ import types
 import unicodedata
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
+import contextlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import cached_property, partial
@@ -37,6 +38,7 @@ from pydantic import BaseModel, Field, PrivateAttr, computed_field, model_valida
 
 from ..errors import RunCancelled
 from ..state import _suspension_id_for, get_call_id, get_run_context, suspend
+from ..state.background import current_background_task_id
 from ..types.approval import Cancel
 from ..types.content import FileContent, TextContent
 from ..types.file import File
@@ -404,8 +406,9 @@ def _pseudonym(origin: str, value: str) -> str:
     Keyed by ``TIMBAL_PROVENANCE_SECRET`` (set it for pseudonyms that hold across processes), else by a
     random per-process key."""
     secret = os.environ.get(PROVENANCE_SECRET_ENV)
-    key = secret.encode() if secret else _PROCESS_SECRET
-    return hmac.new(key, f"{origin}\n{value}".encode(), hashlib.sha256).hexdigest()[:32]
+    # surrogatepass: a command line read with surrogateescape still hashes, and the call never fails here.
+    key = secret.encode("utf-8", "surrogatepass") if secret else _PROCESS_SECRET
+    return hmac.new(key, f"{origin}\n{value}".encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()[:32]
 
 
 def _ambient_trace_context() -> dict[str, str]:
@@ -428,7 +431,10 @@ def _timbal_trace_context(run_id: str, call_id: str | None) -> dict[str, str]:
         return {}
     from ..state.tracing.exporters.otel import OTelExporter
 
-    return {"traceparent": f"00-{OTelExporter._trace_id(run_id)}-{OTelExporter._span_id(call_id)}-01"}
+    try:
+        return {"traceparent": f"00-{OTelExporter._trace_id(run_id)}-{OTelExporter._span_id(call_id)}-01"}
+    except UnicodeError:  # a run id given with a lone surrogate (``context.id``): no trace, never a failed call
+        return {}
 
 
 # W3C Trace Context as the platform keeps it (monolith ``src/mcp/meta.rs``): it drops a ``traceparent`` of another
@@ -464,14 +470,15 @@ _RUN_CONNECTION_IDLE_S = 60.0
 class _RunConnection:
     """One run's ``service="api"`` connection (``MCPServer._project_connection``)."""
 
-    __slots__ = ("closing", "ended", "fingerprint", "idle", "server", "users")
+    __slots__ = ("close_task", "ended", "fingerprint", "idle", "server", "users")
 
     def __init__(self, server: "MCPServer", fingerprint: str) -> None:
         self.server = server
         self.fingerprint = fingerprint
         self.users = 0
+        # The run ended (or ``MCPServer.close()`` let go of it): its last user closes it.
         self.ended = False
-        self.closing = False
+        self.close_task: asyncio.Task | None = None
         self.idle: asyncio.TimerHandle | None = None
 
     def cancel_idle(self) -> None:
@@ -483,6 +490,27 @@ class _RunConnection:
 def _log_close_failure(task: asyncio.Task) -> None:
     if not task.cancelled() and task.exception() is not None:
         logger.warning("MCP run connection close failed", error=str(task.exception()))
+
+
+async def _wait_closed(task: asyncio.Task) -> None:
+    """Wait for a connection's close; a cut ends the wait, not the close, and a failed close (logged by
+    ``_log_close_failure``) does not fail the run or the call that waited."""
+    with contextlib.suppress(Exception):
+        await asyncio.shield(task)
+
+
+def _live_run(run_context: Any) -> Any:
+    """``run_context`` while a run goes on in it: its root has not ended, or the caller is one of its background
+    children. None for a context no run started (the platform resolver creates one when there is none) and for a
+    run that has ended: a call there opens and closes its own connection, as outside a run."""
+    if run_context is None:
+        return None
+    root = run_context.root_span()
+    if root is None:
+        return None
+    if root.t1 is not None and current_background_task_id() is None:
+        return None
+    return run_context
 
 
 class MCPTool(Tool):
@@ -798,8 +826,9 @@ class MCPServer(ToolSet):
     one; for the platform, otherwise the tool's span as ``OTelExporter`` exports it (see
     ``_trace_claims``). A third-party server that opts in (``True``) gets per-origin pseudonyms (HMAC,
     keyed by ``TIMBAL_PROVENANCE_SECRET`` or a per-process key) instead of our ids, and only an
-    ambient trace context: it can correlate its own calls, not link them across servers. Never any
-    credential."""
+    ambient trace context. It can correlate its own calls; our ids do not link them across servers
+    (an ambient ``traceparent`` does, as any OpenTelemetry-instrumented request's headers would).
+    Never any credential."""
 
     sampling_model: Any = None
     """Timbal model string (e.g. ``"anthropic/claude-haiku-4-5"``) or a ``TestModel`` used
@@ -822,6 +851,8 @@ class MCPServer(ToolSet):
     _inflight_seq: int = PrivateAttr(default=0)
     # service="api": run id -> that run's platform connection (see _project_connection).
     _run_connections: dict[str, "_RunConnection"] = PrivateAttr(default_factory=dict)
+    # Closes of run connections still going (``close()`` waits for them).
+    _close_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
 
     def _provider_identity(self) -> tuple:
         # Its name, where it is reached and who it is reached as (headers, env, auth: two tenants of one endpoint are
@@ -892,17 +923,19 @@ class MCPServer(ToolSet):
 
     @asynccontextmanager
     async def _project_connection(self):
-        """The platform connection of the calling run: opened on its first call, reused by the rest, closed
-        when the run ends (or ``_RUN_CONNECTION_IDLE_S`` after its last call, for background children that
-        outlive it). Never shared across runs: the platform takes each call's principal and party from this
-        connection's credential (monolith#565), so another run on it would act as the wrong caller. A run whose
-        credential changes (a refreshed token) gets a new connection."""
+        """The platform connection of the calling run: opened on its first call, reused by the rest, closed when
+        the run ends, or ``_RUN_CONNECTION_IDLE_S`` after a call when no other follows (between two calls of a run,
+        or for background children that outlive it). Never shared across runs: the platform takes each call's
+        principal and party from this connection's credential (monolith#565), so another run on it would act as
+        the wrong caller. A run whose credential changes (a refreshed token) gets a new connection. A call outside
+        a run that goes on (``_live_run``) opens and closes its own."""
+        # Read before resolving: the resolver creates and sets a run context when there is none.
+        run_context = _live_run(get_run_context())
         # Resolve BEFORE opening the transport's fresh-context owner task. It
         # must inherit the caller's identity, never a process service secret.
         from ..platform.utils import _resolve_url_and_headers
 
         url, headers = _resolve_url_and_headers("api", "mcp", {})
-        run_context = get_run_context()
         if run_context is None:
             server = self._new_project_server(url, headers)
             try:
@@ -918,6 +951,7 @@ class MCPServer(ToolSet):
             entry = None
         if entry is None:
             entry = self._run_connections[key] = _RunConnection(self._new_project_server(url, headers), fingerprint)
+            # Refused once the run's root has ended (a background child's call): the idle close closes it then.
             run_context.on_end(functools.partial(self._run_connection_ended, key, entry))
         entry.users += 1
         entry.cancel_idle()
@@ -927,31 +961,43 @@ class MCPServer(ToolSet):
             entry.users -= 1
             if entry.users == 0:
                 if entry.ended or self._run_connections.get(key) is not entry:
-                    self._retire_run_connection(key, entry)
+                    # Its run ended, or it was replaced or let go of: closed now, as a call outside a run closes.
+                    task = self._retire_run_connection(key, entry)
+                    if task is not None:
+                        await _wait_closed(task)
                 else:
                     entry.idle = asyncio.get_running_loop().call_later(
                         _RUN_CONNECTION_IDLE_S, self._retire_run_connection, key, entry
                     )
 
-    def _run_connection_ended(self, key: str, entry: "_RunConnection") -> None:
+    def _run_connection_ended(self, key: str, entry: "_RunConnection") -> Awaitable[None] | None:
+        """The run's end hook: the connection is closed before the run returns (a loop that ends with the run, as
+        under ``asyncio.run``, would cancel a close left to the background). One still in use is closed by its
+        last user."""
         entry.ended = True
-        if entry.users == 0:
-            self._retire_run_connection(key, entry)
+        task = self._retire_run_connection(key, entry)
+        return _wait_closed(task) if task is not None else None
 
-    def _retire_run_connection(self, key: str, entry: "_RunConnection | None" = None) -> None:
-        """Forget a run's connection and close it once nothing uses it (in the background: callers don't wait)."""
+    def _retire_run_connection(self, key: str, entry: "_RunConnection | None" = None) -> asyncio.Task | None:
+        """Forget a run's connection and, if nothing uses it, start closing it (``close()`` waits for the close;
+        a caller that can wait gets the task). One still in use is closed by its last user."""
         current = self._run_connections.get(key)
         if entry is None:
             entry = current
         if entry is None:
-            return
+            return None
         if current is entry:
             del self._run_connections[key]
         entry.cancel_idle()
-        if entry.users == 0 and not entry.closing:
-            entry.closing = True
-            task = asyncio.get_running_loop().create_task(entry.server.close())
+        if entry.users:
+            entry.ended = True
+            return None
+        if entry.close_task is None:
+            entry.close_task = task = asyncio.get_running_loop().create_task(entry.server.close())
+            self._close_tasks.add(task)
+            task.add_done_callback(self._close_tasks.discard)
             task.add_done_callback(_log_close_failure)
+        return entry.close_task
 
     # ------------------------------------------------------------------ session
 
@@ -1530,9 +1576,19 @@ class MCPServer(ToolSet):
         return {key: value for key, value in claims.items() if value is not None} or None
 
     def _origin(self) -> str:
+        """What a pseudonym is keyed to: ``scheme://host:port`` (default port filled in, credentials in the URL
+        left out, so one server gets one set of pseudonyms however its URL is written), or ``stdio:{command}``."""
         if self.transport == "http" and self.url:
             parts = urlsplit(self.url)
-            return f"{parts.scheme}://{parts.netloc}".lower()
+            scheme = parts.scheme.lower()
+            try:
+                port = parts.port
+            except ValueError:
+                port = None
+            port = port or {"http": 80, "https": 443}.get(scheme)
+            host = parts.hostname or ""
+            host = f"[{host}]" if ":" in host else host
+            return f"{scheme}://{host}:{port}" if port else f"{scheme}://{host}"
         return "stdio:" + " ".join([self.command or "", *self.args])
 
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
@@ -1676,12 +1732,14 @@ class MCPServer(ToolSet):
 
     async def close(self) -> None:
         """Close the MCP server connection. Safe from any task, in any order."""
-        connections, self._run_connections = list(self._run_connections.values()), {}
-        for entry in connections:
-            entry.cancel_idle()
-            if not entry.closing:
-                entry.closing = True
-                await entry.server.close()
+        # Run connections: closed now when idle; one a call still uses is closed by that call's end, as a call's
+        # own connection was (a call in flight is not cut). Then every close still going, earlier ones included.
+        for key in list(self._run_connections):
+            self._retire_run_connection(key)
+        loop = asyncio.get_running_loop()
+        closing = [task for task in self._close_tasks if task.get_loop() is loop]
+        if closing:
+            await asyncio.gather(*closing, return_exceptions=True)
         async with self._get_tools_lock(), self._get_lock():
             task, closed = self._session_task, self._session_closed
             self._forget_session()

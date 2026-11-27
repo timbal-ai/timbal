@@ -1778,3 +1778,37 @@ class TestTraceDumpedVersions:
                 if "complex nesting" in dump_content:
                     assert "[OUTER-PRE]" not in dump_content
                     assert "[INNER-PRE]" not in dump_content
+
+class TestRunEndHooks:
+    async def test_they_run_once_when_the_root_ends_and_none_is_kept_after(self):
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+        from timbal.state import get_run_context
+
+        ran, contexts = [], []
+
+        def tool() -> str:
+            context = get_run_context()
+            contexts.append(context)
+            assert context.on_end(lambda: ran.append("sync"))
+
+            async def later():
+                ran.append("async")
+
+            assert context.on_end(later)
+            return "ok"
+
+        model = TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="t1", name="tool", input={})], stop_reason="tool_use"),
+                "done",
+            ]
+        )
+        out = await Agent(name="agent", model=model, tools=[tool])(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        assert ran == ["sync", "async"]
+        context = contexts[0]
+        assert context.on_end(lambda: ran.append("late")) is False  # the root has ended: it would never run
+        assert not context._end_hooks
+        await context._run_end_hooks()  # a second end runs nothing
+        assert ran == ["sync", "async"]

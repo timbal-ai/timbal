@@ -458,6 +458,65 @@ class TestPlatformConnectionPerRun:
         await service.close()
 
     @pytest.mark.asyncio
+    async def test_the_connection_is_closed_before_the_run_returns(self, platform):
+        """The end hook waits for the close: a loop that ends with the run (``asyncio.run``) cancels nothing."""
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        opened, _ = platform
+        service = MCPServer(transport="http", service="api")
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        out = await Agent(name="agent", model=TestModel(handler=self.calls(2)), tools=[service])(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        assert len(opened) == 1 and opened[0][0]._session is None and not service._run_connections
+        assert not service._close_tasks
+        await service.close()
+
+    @pytest.mark.asyncio
+    async def test_close_leaves_a_connection_in_use_to_its_call(self, platform, monkeypatch):
+        """``close()`` does not cut a call in flight (a per-call connection was the call's own); its end closes it."""
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+
+        opened, _ = platform
+        monkeypatch.setattr("timbal.core.mcp._live_run", lambda context: context, raising=False)  # a run going on
+        set_run_context(RunContext())
+        service = MCPServer(transport="http", service="api")
+        try:
+            async with service._project_connection() as server:
+                await server.resolve()
+                assert server._session is not None
+                await service.close()
+                assert server._session is not None  # still the call's
+                assert [t.name for t in await server.resolve()] == ["echo_meta"]
+            assert server._session is None and not service._run_connections and len(opened) == 1
+        finally:
+            set_run_context(None)
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_close_waits_for_the_closes_already_started(self):
+        """A connection let go of earlier (its run ended, its credential changed) is closed when ``close()`` returns."""
+        from timbal.core.mcp import _RunConnection
+
+        release, closed = asyncio.Event(), []
+
+        class SlowClose:
+            async def close(self):
+                await release.wait()
+                closed.append(True)
+
+        service = MCPServer(transport="http", service="api")
+        service._run_connections["run"] = _RunConnection(SlowClose(), "fingerprint")
+        service._retire_run_connection("run")  # started, not waited for
+        asyncio.get_running_loop().call_soon(release.set)
+        await asyncio.wait_for(service.close(), 30)
+        assert closed == [True]
+        assert not service._close_tasks
+
+    @pytest.mark.asyncio
     async def test_outside_a_run_each_call_closes_its_own(self, platform):
         opened, _ = platform
         service = MCPServer(transport="http", service="api")
@@ -467,6 +526,50 @@ class TestPlatformConnectionPerRun:
         tools = await service.resolve()
         assert [t.name for t in tools] == ["echo_meta"]
         assert len(opened) == 1 and opened[0][0]._session is None and not service._run_connections
+
+
+class TestPlatformConnectionOutsideARun:
+    """With the real resolver, which creates and sets a run context when there is none."""
+
+    @pytest.fixture
+    def platform(self, tmp_path, monkeypatch):
+        script = tmp_path / "meta_server.py"
+        script.write_text(META_SERVER_SCRIPT)
+        for name in [name for name in os.environ if name.startswith("TIMBAL_")]:
+            monkeypatch.delenv(name)
+        monkeypatch.setenv("HOME", str(tmp_path))  # no ~/.timbal credentials
+        monkeypatch.setenv("TIMBAL_START_API_PORT", "1")
+        opened = []
+
+        def new(_self, url, _headers):
+            assert url == "http://localhost:1/mcp"  # the real resolver ran
+            server = MCPServer(transport="stdio", command=sys.executable, args=[str(script)])
+            server._first_party = True
+            opened.append(server)
+            return server
+
+        monkeypatch.setattr(MCPServer, "_new_project_server", new)
+        return opened
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("context", ["none", "set by hand"])
+    async def test_each_call_opens_and_closes_its_own(self, platform, context):
+        from timbal.state import get_run_context, set_call_id, set_run_context
+        from timbal.state.context import RunContext
+
+        set_run_context(None if context == "none" else RunContext())
+        set_call_id(None)
+        service = MCPServer(transport="http", service="api")
+        try:
+            tools = await service.resolve()
+            assert get_run_context() is not None  # the resolver set one: not a run all the same
+            assert isinstance(await tools[0].handler(), str)  # the call went through
+            assert len(platform) == 2 and all(server._session is None for server in platform)
+            assert not service._run_connections
+            assert not get_run_context()._end_hooks  # nothing left waiting for an end that never comes
+        finally:
+            set_run_context(None)
+            await service.close()
 
 
 class TestMCPToolNamespacing:

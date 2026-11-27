@@ -536,6 +536,33 @@ class TestTraceClaims:
         )
         assert "traceparent" not in third and "tracestate" not in third
 
+    def test_a_run_id_that_cannot_be_encoded_never_fails_the_call(self):
+        """``context.id`` is the caller's: one with a lone surrogate is left out, trace included."""
+
+        def unencodable():
+            context = platform_context()
+            context.id = "\ud800"
+            return context
+
+        meta = meta_of(unencodable())
+        assert PROVENANCE_RUN_KEY not in meta and "traceparent" not in meta
+        platform_read(meta)
+        json.dumps(meta).encode()  # what goes on the wire
+        third = meta_of(unencodable(), server=MCPServer(transport="http", url="https://x.test/mcp", provenance=True))
+        assert PROVENANCE_RUN_KEY not in third
+
+    def test_one_server_gets_one_set_of_pseudonyms_however_its_url_is_written(self):
+        def pseudonym(url):  # of the same call id (meta_of's), from a run context of its own
+            return meta_of(platform_context(), server=MCPServer(transport="http", url=url, provenance=True))[
+                PROVENANCE_CALL_KEY
+            ]
+
+        urls = ["https://tools.example.com/mcp", "https://TOOLS.example.com:443/other", "https://u:p@tools.example.com"]
+        seen = {pseudonym(url) for url in urls}
+        assert len(seen) == 1
+        other = {PROVENANCE_CALL_KEY: pseudonym("https://tools.example.com:8443")}
+        assert other[PROVENANCE_CALL_KEY] not in seen
+
     def test_a_third_party_gets_pseudonyms_only_of_ids_the_claims_carry(self):
         context = platform_context()
         context.parent_id = "not an id"

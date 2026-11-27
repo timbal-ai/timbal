@@ -194,6 +194,28 @@ class TestDispatch:
         first, second = (ast.literal_eval(text) for text in seen)
         assert "parameters" in first and "parameters" not in second
 
+    @pytest.mark.parametrize("result", ["[1, 2]", "null", "3", '{"found": 5}', '{"found": [1, {"name": 2}]}'])
+    async def test_an_own_tool_named_like_the_search_does_not_break_the_run(self, result):
+        """An agent's own ``search_tools`` (an unprefixed MCP server's) may answer any JSON."""
+        ran = []
+
+        def search_tools(query: str) -> str:  # noqa: ARG001 (the model calls it by this name)
+            return result
+
+        def convert(amount: int) -> str:
+            ran.append(amount)
+            return "ok"
+
+        tools = [
+            Tool(name="search_tools", handler=search_tools),
+            Tool(name="convert", description="Convert currency.", handler=convert, defer_loading=True),
+        ]
+        responses = iter([call("search_tools", query="docs"), dispatch("convert", "c2", arguments={"amount": 3})])
+        model = TestModel(handler=lambda _messages: next(responses, "done"))
+        out = await agent(model, tools, tool_search="dispatch")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        assert ran == [3]
+
     async def test_bad_arguments_after_a_search_get_no_schema_back(self):
         seen = []
         responses = iter(

@@ -907,17 +907,23 @@ class RunContext(BaseModel):
         span._emit_sink = sink
         return sink
 
-    def on_end(self, hook: Callable[[], Any]) -> None:
-        """Call ``hook()`` (sync, or returning an awaitable) once the run's root has ended and its end is stored.
+    def on_end(self, hook: Callable[[], Any]) -> bool:
+        """Call ``hook()`` (sync, or returning an awaitable, which is awaited) once the run's root has ended, after
+        its end was saved or the save failed. Background children may still be running then.
 
-        Background children may still be running then. Hooks added after the root ended never run.
+        False, and the hook is not kept, once the root has ended: it would never run.
         """
-        if self._end_hooks is None:
-            self._end_hooks = []
-        self._end_hooks.append(hook)
+        hooks = self._end_hooks
+        if hooks is None:
+            hooks = self._end_hooks = []
+        elif isinstance(hooks, tuple):  # () once they ran: see _run_end_hooks
+            return False
+        hooks.append(hook)
+        return True
 
     async def _run_end_hooks(self) -> None:
-        hooks, self._end_hooks = self._end_hooks, None
+        # () from here on: falsy for the check in Runnable._stream, and on_end refuses new hooks.
+        hooks, self._end_hooks = self._end_hooks, ()
         for hook in hooks or ():
             try:
                 result = hook()
