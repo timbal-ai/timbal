@@ -897,7 +897,9 @@ class MCPServer(ToolSet):
     _run_closes: dict[str, set[asyncio.Task]] = PrivateAttr(default_factory=dict)
     # Run connections whose close was cut before the session had closed: out of the pool (no call reuses them),
     # closed again by the next close() or the end of their run.
-    _unclosed: list[tuple[str, "_RunConnection"]] = PrivateAttr(default_factory=list)
+    # By id(entry): taken with an atomic pop, so the run's end and a close() on another loop never both take one,
+    # nor fail on one the other took.
+    _unclosed: dict[int, tuple[str, "_RunConnection"]] = PrivateAttr(default_factory=dict)
     # Runs whose end hook is registered, with the run's loop: one hook per run, which finds the run's connection
     # when the run ends (a connection let go of earlier is not kept alive by it), on that loop.
     _run_hooked: dict[str, asyncio.AbstractEventLoop] = PrivateAttr(default_factory=dict)
@@ -1071,8 +1073,7 @@ class MCPServer(ToolSet):
         if owner is None or owner is loop:
             return self._end_run_here(key)
         if owner.is_closed():
-            self._run_connections.pop(key, None)
-            self._run_closes.pop(key, None)
+            self._drop_run(key)
             return None
         if not owner.is_running():
             entry = self._run_connections.get(key)
@@ -1088,8 +1089,7 @@ class MCPServer(ToolSet):
         if finished and _succeeded(handed):
             return
         if owner.is_closed():  # closed meanwhile, before or after the handoff: it took the run's sessions with it
-            self._run_connections.pop(key, None)
-            self._run_closes.pop(key, None)
+            self._drop_run(key)
             return
         entry = self._run_connections.get(key)
         if entry is not None:
@@ -1110,9 +1110,9 @@ class MCPServer(ToolSet):
         if entry is not None:
             entry.ended = True
             self._retire_run_connection(key, entry)
-        for pair in [pair for pair in self._unclosed if pair[0] == key]:
-            self._unclosed.remove(pair)
-            self._retire_run_connection(*pair)
+        for ident, (kept_key, _) in list(self._unclosed.items()):
+            if kept_key == key and (pair := self._unclosed.pop(ident, None)) is not None:
+                self._retire_run_connection(*pair)
         closes = self._run_closes.pop(key, None)
         return _wait_all_closed(closes) if closes else None
 
@@ -1138,6 +1138,15 @@ class MCPServer(ToolSet):
             task.add_done_callback(_log_close_failure)
         return entry.close_task
 
+    def _drop_run(self, key: str) -> None:
+        """Forget everything of the run ``key`` (its loop closed, taking its sessions): its connection, its closes,
+        and its cut connections, which hold their credential headers."""
+        self._run_connections.pop(key, None)
+        self._run_closes.pop(key, None)
+        for ident, (kept_key, _) in list(self._unclosed.items()):
+            if kept_key == key:
+                self._unclosed.pop(ident, None)
+
     def _keep_unclosed(self, entries: list[tuple[str, "_RunConnection"]]) -> None:
         """Keep, for a later close(), the cut ones among ``entries`` that are not closing (the pool keeps its own)."""
         for key, entry in entries:
@@ -1145,8 +1154,7 @@ class MCPServer(ToolSet):
                 entry.close_task is not None and not entry.close_task.done()
             ):
                 continue
-            if all(kept is not entry for _, kept in self._unclosed):
-                self._unclosed.append((key, entry))
+            self._unclosed.setdefault(id(entry), (key, entry))
 
     def _forget_close(self, task: asyncio.Task) -> None:
         """Drop a close (its loop closed) from both collections, ``_close_done``'s callback never having run."""
@@ -1169,7 +1177,7 @@ class MCPServer(ToolSet):
             # must not reuse it and open a second session on its server) for the next close() or end of the run.
             entry.close_task = None
             entry.ended = True
-            self._unclosed.append((key, entry))
+            self._unclosed[id(entry)] = (key, entry)
 
     # ------------------------------------------------------------------ session
 
@@ -1917,7 +1925,7 @@ class MCPServer(ToolSet):
         by_loop: dict[asyncio.AbstractEventLoop, list[tuple[str, _RunConnection]]] = {}
         paused = 0
         failed: list[_HandoffFailed] = []
-        unclosed, self._unclosed = self._unclosed, []
+        unclosed = [pair for ident in list(self._unclosed) if (pair := self._unclosed.pop(ident, None)) is not None]
         for key, entry in [*self._run_connections.items(), *unclosed]:
             owner = entry.loop or loop
             if owner.is_closed():

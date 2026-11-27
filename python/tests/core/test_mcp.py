@@ -920,9 +920,67 @@ class TestPlatformConnectionLifetime:
         task.cancel()
         await asyncio.wait({task})
         await until(lambda: service._unclosed)  # kept, out of the pool
-        assert service._unclosed[0][1].ended and not service._run_connections
+        assert next(iter(service._unclosed.values()))[1].ended and not service._run_connections
         await asyncio.wait_for(service.close(), 10)
         assert closed == [True] and not service._run_connections and not service._unclosed
+
+    @staticmethod
+    async def cut(service, key, entry):
+        """``entry``'s close cut before it closed: kept for a later close (``_close_done`` of a cancelled close)."""
+        task = asyncio.ensure_future(asyncio.sleep(30))
+        task.cancel()
+        await asyncio.wait({task})
+        service._close_done(key, entry, task)
+
+    @pytest.mark.asyncio
+    async def test_the_run_end_and_a_close_elsewhere_never_both_take_a_cut_close(self, monkeypatch):
+        """close() on another loop takes the cut connections while the run's end is going through them: the end
+        skips the ones taken, instead of failing on them, and takes none twice."""
+        from timbal.core.mcp import _RunConnection
+
+        class Server:
+            async def close(self):
+                pass
+
+        service = MCPServer(transport="http", service="api")
+        loop = asyncio.get_running_loop()
+        for _ in range(2):
+            await self.cut(service, "run", _RunConnection(Server(), "fingerprint", loop))
+        retire, taken = MCPServer._retire_run_connection, []
+
+        def retire_while_close_takes_the_rest(self, key, entry=None):
+            if not taken:
+                self._unclosed.clear()  # what close() on the other loop does meanwhile
+            taken.append(entry)
+            return retire(self, key, entry)
+
+        monkeypatch.setattr(MCPServer, "_retire_run_connection", retire_while_close_takes_the_rest)
+        waiting = service._end_run_here("run")
+        if waiting is not None:
+            await asyncio.wait_for(waiting, 10)
+        assert len(taken) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_closed_run_loop_drops_the_runs_cut_connections(self):
+        """The run's loop closed (and took its sessions): its cut connections go too, credentials included."""
+        from timbal.core.mcp import _RunConnection
+
+        class Server:
+            async def close(self):
+                pass
+
+        service = MCPServer(transport="http", service="api")
+        gone = asyncio.new_event_loop()
+        gone.close()
+        await self.cut(service, "run", _RunConnection(Server(), "fingerprint", gone))
+        service._run_hooked["run"] = gone
+        assert service._run_ended("run") is None
+        assert not service._unclosed
+        owner = self.closing_loop()  # closes during the handoff instead
+        await self.cut(service, "other", _RunConnection(Server(), "fingerprint", owner))
+        service._run_hooked["other"] = owner
+        await asyncio.wait_for(service._run_ended("other"), 10)
+        assert not service._unclosed
 
     @pytest.mark.asyncio
     async def test_a_later_call_of_the_run_does_not_reuse_a_cut_connection(self, monkeypatch):
