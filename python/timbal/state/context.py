@@ -929,7 +929,8 @@ class RunContext(BaseModel):
         for hook in hooks or ():
             try:
                 result = hook()
-            except Exception:
+            except (Exception, asyncio.CancelledError):
+                # A sync call cannot be cut: a CancelledError here is the hook's own (a cancelled future's result).
                 _get_logger().exception("run_end_hook_failed", run_id=self.id)
                 continue
             if inspect.isawaitable(result):
@@ -946,7 +947,7 @@ class RunContext(BaseModel):
         if waiting.cancelled():
             return
         for result in waiting.result():
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 _get_logger().error("run_end_hook_failed", run_id=self.id, error=repr(result))
 
     def update_usage(self, key: str, value: int) -> None:

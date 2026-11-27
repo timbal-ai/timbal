@@ -1892,6 +1892,72 @@ class TestRunEndHooks:
         assert out.status.code == "success", out.error
         assert seen == {"same": True}
 
+    async def test_hooks_run_in_the_finishing_runs_context(self):
+        """A run started inside a call: its hooks see its own run context and call id (a hook may read its
+        credentials or record on its trace), and the caller has its own back afterwards."""
+        seen = {}
+
+        async def outer() -> str:
+            def register() -> str:
+                context = get_run_context()
+                seen["run"] = context
+                context.on_end(lambda: seen.update(hook=(get_run_context(), get_call_id())))
+                return "ok"
+
+            inner = Agent(
+                name="inner",
+                model=TestModel(
+                    responses=[
+                        Message(
+                            role="assistant",
+                            content=[ToolUseContent(id="r1", name="register", input={})],
+                            stop_reason="tool_use",
+                        ),
+                        "done",
+                    ]
+                ),
+                tools=[register],
+            )
+            before = (get_run_context(), get_call_id())
+            await inner(prompt="x").collect()
+            seen["after"] = (get_run_context(), get_call_id()) == before
+            return "ok"
+
+        model = TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="o1", name="outer", input={})], stop_reason="tool_use"),
+                "done",
+            ]
+        )
+        out = await Agent(name="agent", model=model, tools=[outer])(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        hook_context, hook_call_id = seen["hook"]
+        assert hook_context is seen["run"]
+        assert hook_call_id == seen["run"].root_span().call_id
+        assert seen["after"] is True
+
+    async def test_a_sync_hook_raising_cancelled_error_stops_neither_the_rest_nor_the_run(self):
+        """``.result()`` of a cancelled future raises CancelledError inside the hook: the hook's own error."""
+        ran = []
+
+        def tool() -> str:
+            cancelled = asyncio.get_running_loop().create_future()
+            cancelled.cancel()
+            context = get_run_context()
+            context.on_end(cancelled.result)
+            context.on_end(lambda: ran.append("cleanup"))
+            return "ok"
+
+        model = TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="t1", name="tool", input={})], stop_reason="tool_use"),
+                "done",
+            ]
+        )
+        out = await Agent(name="agent", model=model, tools=[tool])(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        assert ran == ["cleanup"]
+
     async def test_they_run_once_when_the_root_ends_and_none_is_kept_after(self):
         from timbal import Agent
         from timbal.core.test_model import TestModel

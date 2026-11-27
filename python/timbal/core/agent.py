@@ -1052,30 +1052,24 @@ def _native_tool_search(model: Any) -> bool:
     return True
 
 
-def _arguments_invalid(tool: Any, arguments: Any) -> bool:
-    """Whether ``arguments`` (the call's input as resolved, ``OutputEvent.input``) fail ``tool``'s parameters.
-
-    Validation runs before the handler and gives the same answer for the same input: True means the call failed
-    there and its handler never ran, so asking for a retry cannot repeat anything. A ``ValidationError`` the
-    handler raised itself (parsing a receipt after a write) leaves the arguments valid: no retry is suggested.
-    """
-    try:
-        tool.params_model.model_validate(arguments)
-    except ValidationError:
-        return True
-    except Exception:
-        return False
-    return False
+def _arguments_failed(run_context: Any, event: Any) -> bool:
+    """Whether the call ``event`` ended failed its arguments, before its handler ran: marked on its span where the
+    check failed (``Runnable._stream``). Only then can a retry repeat nothing. Not decided again here: a check can
+    depend on more than the arguments (a ``FilePath`` the handler moved), and a ``ValidationError`` the handler
+    raised itself (parsing a receipt after a write) is the handler's."""
+    span = run_context._trace.get(event.call_id)
+    return getattr(span, "_arguments_invalid", False) is True
 
 
-def _schemas_found(memory: list[Message]) -> set[str]:
+def _schemas_found(memory: list[Message], own_names: Collection[str] = ()) -> set[str]:
     """Tools whose schema a ``search_tools`` result in ``memory`` showed the model (``tool_search="dispatch"``)."""
     search_ids = {
         c.id
         for m in memory
         if m.role == "assistant"
         for c in m.content
-        if isinstance(c, ToolUseContent) and _is_search_tools_name(c.name)  # numbered ones too (_unused_name)
+        # Numbered ones too (_unused_name). Not a tool of the agent's own: the search never takes one's name.
+        if isinstance(c, ToolUseContent) and _is_search_tools_name(c.name) and c.name not in own_names
     }
     found: set[str] = set()
     for m in memory:
@@ -1088,11 +1082,16 @@ def _schemas_found(memory: list[Message]) -> set[str]:
                 result = json.loads("".join(t.text for t in c.content if isinstance(t, TextContent)))
             except ValueError:
                 continue
-            # Another tool may hold one of the search names (an unprefixed MCP server's own search_tools):
-            # anything but the search's own shape shows no schema.
+            # Only entries that show their schema count (the search lists each found tool's anthropic_schema).
             listed = result.get("found") if isinstance(result, dict) else None
             if isinstance(listed, list):
-                found.update(t["name"] for t in listed if isinstance(t, dict) and isinstance(t.get("name"), str))
+                found.update(
+                    t["name"]
+                    for t in listed
+                    if isinstance(t, dict)
+                    and isinstance(t.get("name"), str)
+                    and isinstance(t.get("input_schema"), dict)
+                )
     return found
 
 
@@ -4977,7 +4976,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     unseen is not None
                     and isinstance(content, dict)
                     and content.get("type") == "ValidationError"
-                    and _arguments_invalid(unseen, event.input)
+                    and _arguments_failed(run_context, event)
                 ):
                     content = {
                         **content,
@@ -6110,7 +6109,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     # Dispatch never loads: a deferred tool's schema is only ever in a search result.
                     called = {self._dispatched(tools, call).name for call in tool_calls}
                     deferred = [t for t in tools if t.name in called and getattr(t, "defer_loading", False)]
-                    shown = _schemas_found(current_span.memory) if deferred else _NO_NAMES
+                    if deferred:
+                        own = {t.name for t in tools if not getattr(t, "_builtin", None)}
+                        shown = _schemas_found(current_span.memory, own)
+                    else:
+                        shown = _NO_NAMES
                     schemaless_calls = {t.name: t for t in deferred if t.name not in shown}
                 elif schemaless_calls:
                     schemaless_calls = {}

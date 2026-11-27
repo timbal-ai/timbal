@@ -20,6 +20,7 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     computed_field,
     field_validator,
     model_serializer,
@@ -2456,7 +2457,12 @@ class Runnable(ABC, BaseModel):
             span._input_dump = await dump(input)
 
             # Pydantic model_validate() does not mutate the input dict
-            validated_input = dict(self.params_model.model_validate(input))
+            try:
+                validated_input = dict(self.params_model.model_validate(input))
+            except ValidationError:
+                # The arguments failed, so the handler never ran: Agent's schema hint may suggest a retry.
+                object.__setattr__(span, "_arguments_invalid", True)
+                raise
 
             # tool_args guardrails: after validation, before the approval gate — so an
             # escalate verdict can force that gate, and a block spends nothing.
@@ -3002,34 +3008,37 @@ class Runnable(ABC, BaseModel):
                         del run_context._background_handoff_control
                 else:
                     run_context._background_handoff_control = previous_handoff_control
-            set_parent_call_id(_parent_call_id)
-            set_call_id(_call_id)
-            if _entry_call_id is not None:
-                # Nested invocation: restore the caller's run context. A
-                # top-level runnable invoked from a handler may have swapped in
-                # a fresh RunContext above; with direct in-task iteration
-                # (agent tool fast path, linear workflow steps) that swap would
-                # otherwise leak into the caller's run. Top-level invocations
-                # (entry call id None) deliberately leave their context set so
-                # sequential same-task runs chain sessions implicitly.
-                set_run_context(_entry_run_context)
-                if _call_id is None and run_context.__dict__.get("_invoker") is not None:
-                    # This was a run of its own, started by a call's code, and that code goes on: it is
-                    # still inside its call. Without its ids back, the next run it starts would look like
-                    # one nobody's code started (no link, no tool policy inherited, and an approval
-                    # reviewer reading its prompt as a person's). The context set may be one the handler
-                    # swapped in, which these ids are not from: as it was before this run started
-                    # (``RunContext.update_usage`` records on that context's root then).
-                    set_parent_call_id(_entry_parent_call_id)
-                    set_call_id(_entry_call_id)
-            if _new_parent_call_id is None:
-                # Last: the run is over (a per-run MCP connection closes here), after the caller has its context
-                # back: a cut while the hooks are waited for leaves it right. Every finished root closes
-                # registration, hooks or not: one added later would never run.
-                if run_context._end_hooks:
-                    await run_context._run_end_hooks()
-                else:
-                    run_context.__dict__["_end_hooks"] = ()
+            try:
+                if _new_parent_call_id is None:
+                    # Last: the run is over (a per-run MCP connection closes here). In the run's own context: a
+                    # hook may read its credentials or record on its trace. The caller gets its context back in the
+                    # finally, also when a cut ends the wait. Every finished root closes registration, hooks or
+                    # not: one added later would never run.
+                    if run_context._end_hooks:
+                        await run_context._run_end_hooks()
+                    else:
+                        run_context.__dict__["_end_hooks"] = ()
+            finally:
+                set_parent_call_id(_parent_call_id)
+                set_call_id(_call_id)
+                if _entry_call_id is not None:
+                    # Nested invocation: restore the caller's run context. A
+                    # top-level runnable invoked from a handler may have swapped in
+                    # a fresh RunContext above; with direct in-task iteration
+                    # (agent tool fast path, linear workflow steps) that swap would
+                    # otherwise leak into the caller's run. Top-level invocations
+                    # (entry call id None) deliberately leave their context set so
+                    # sequential same-task runs chain sessions implicitly.
+                    set_run_context(_entry_run_context)
+                    if _call_id is None and run_context.__dict__.get("_invoker") is not None:
+                        # This was a run of its own, started by a call's code, and that code goes on: it is
+                        # still inside its call. Without its ids back, the next run it starts would look like
+                        # one nobody's code started (no link, no tool policy inherited, and an approval
+                        # reviewer reading its prompt as a person's). The context set may be one the handler
+                        # swapped in, which these ids are not from: as it was before this run started
+                        # (``RunContext.update_usage`` records on that context's root then).
+                        set_parent_call_id(_entry_parent_call_id)
+                        set_call_id(_entry_call_id)
             # Flush any still-buffered RunContext.emit() events (post_hook,
             # error paths, plain handlers) so every emission is ordered
             # before this call's OUTPUT. Close first: a racing off-loop emit

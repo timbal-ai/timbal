@@ -584,6 +584,51 @@ class TestPlatformConnectionPerRun:
         await service.close()
 
     @pytest.mark.asyncio
+    async def test_close_from_another_loop_closes_each_session_on_its_own(self, platform):
+        """``close()`` through ``asyncio.run`` in a worker thread: the run's session is closed on the run's loop."""
+        from timbal import Tool
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        opened, _ = platform
+        service = MCPServer(transport="http", service="api")
+        outcome = []
+
+        def offloaded() -> str:
+            try:
+                asyncio.run(asyncio.wait_for(service.close(), 20))
+                outcome.append("closed" if opened[0][0]._session is None else "still open")
+            except TimeoutError:
+                outcome.append("timed out")
+            return "done"
+
+        responses = iter(
+            [
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="a", name="echo_meta", input={})],
+                    stop_reason="tool_use",
+                ),
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="b", name="offloaded", input={})],
+                    stop_reason="tool_use",
+                ),
+            ]
+        )
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        tools = [service, Tool(name="offloaded", handler=offloaded, offload_blocking=True)]
+        model = TestModel(handler=lambda _messages: next(responses, "done"))
+        out = await Agent(name="agent", model=model, tools=tools)(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        assert outcome == ["closed"]  # closed by the time close() returned in the worker
+        # The run's next step listed tools again on a new connection, closed at the run's end.
+        assert all(server._session is None for server, _ in opened) and not service._run_connections
+        await service.close()
+
+    @pytest.mark.asyncio
     async def test_two_runs_with_one_context_id_do_not_share_a_connection(self, platform):
         """``context.id`` is the caller's: two concurrent runs may carry the same one."""
         from timbal import Tool

@@ -470,11 +470,13 @@ _RUN_CONNECTION_IDLE_S = 60.0
 class _RunConnection:
     """One run's ``service="api"`` connection (``MCPServer._project_connection``)."""
 
-    __slots__ = ("close_task", "ended", "fingerprint", "idle", "server", "users")
+    __slots__ = ("close_task", "ended", "fingerprint", "idle", "loop", "server", "users")
 
-    def __init__(self, server: "MCPServer", fingerprint: str) -> None:
+    def __init__(self, server: "MCPServer", fingerprint: str, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self.server = server
         self.fingerprint = fingerprint
+        # The run's loop, which owns the session: it is closed there (MCPServer.close() may run on another).
+        self.loop = loop
         self.users = 0
         # The run ended (or ``MCPServer.close()`` let go of it): its last user closes it.
         self.ended = False
@@ -956,7 +958,9 @@ class MCPServer(ToolSet):
             self._retire_run_connection(key)
             entry = None
         if entry is None:
-            entry = self._run_connections[key] = _RunConnection(self._new_project_server(url, headers), fingerprint)
+            entry = self._run_connections[key] = _RunConnection(
+                self._new_project_server(url, headers), fingerprint, asyncio.get_running_loop()
+            )
             # Refused once the run's root has ended (a background child's call): the idle close closes it then.
             run_context.on_end(functools.partial(self._run_connection_ended, key, entry))
         entry.users += 1
@@ -975,6 +979,16 @@ class MCPServer(ToolSet):
                     entry.idle = asyncio.get_running_loop().call_later(
                         _RUN_CONNECTION_IDLE_S, self._retire_run_connection, key, entry
                     )
+
+    async def _close_run_connections(self, entries: list[tuple[str, "_RunConnection"]]) -> None:
+        """On the loop that owns ``entries``: let go of them (``_retire_run_connection``) and wait for every close
+        of this loop still going, theirs and earlier ones."""
+        for key, entry in entries:
+            self._retire_run_connection(key, entry)
+        loop = asyncio.get_running_loop()
+        closing = [task for task in self._close_tasks if task.get_loop() is loop]
+        if closing:
+            await asyncio.gather(*closing, return_exceptions=True)
 
     def _run_connection_ended(self, key: str, entry: "_RunConnection") -> Awaitable[None] | None:
         """The run's end hook: the connection is closed before the run returns (a loop that ends with the run, as
@@ -1743,13 +1757,34 @@ class MCPServer(ToolSet):
         """Close the MCP server connection. Safe from any task, in any order."""
         # Run connections: closed now when idle; one a call still uses is closed by that call's end, as a call's
         # own connection was (a call in flight is not cut). Then every close still going, earlier ones included.
-        for key in list(self._run_connections):
-            self._retire_run_connection(key)
+        # Each on the loop that owns its session (a close() run through asyncio.run elsewhere would hang on it);
+        # one whose loop has closed went with it.
         loop = asyncio.get_running_loop()
-        closing = [task for task in self._close_tasks if task.get_loop() is loop]
-        if closing:
+        by_loop: dict[asyncio.AbstractEventLoop, list[tuple[str, _RunConnection]]] = {}
+        for key, entry in list(self._run_connections.items()):
+            owner = entry.loop or loop
+            if owner.is_closed():
+                if self._run_connections.get(key) is entry:
+                    del self._run_connections[key]
+                continue
+            by_loop.setdefault(owner, []).append((key, entry))
+        for task in list(self._close_tasks):
+            owner = task.get_loop()
+            if owner.is_closed():
+                self._close_tasks.discard(task)
+            else:
+                by_loop.setdefault(owner, [])
+        waits = []
+        for owner, entries in by_loop.items():
+            if owner is loop:
+                waits.append(self._close_run_connections(entries))
+            else:
+                waits.append(
+                    asyncio.wrap_future(asyncio.run_coroutine_threadsafe(self._close_run_connections(entries), owner))
+                )
+        if waits:
             # Shielded: a close() that is cancelled stops waiting, the closes go on (gather would cancel them).
-            await asyncio.shield(asyncio.gather(*closing, return_exceptions=True))
+            await asyncio.shield(asyncio.gather(*waits, return_exceptions=True))
         async with self._get_tools_lock(), self._get_lock():
             task, closed = self._session_task, self._session_closed
             self._forget_session()

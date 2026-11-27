@@ -41,6 +41,9 @@ class Span(SlotModel):
         "_session_dump",
         "_emit_sink",
         "_extra",
+        # Set (True) only when the call's arguments failed its parameters, before the handler ran (Runnable._stream).
+        # Never dumped; unset otherwise.
+        "_arguments_invalid",
     )
 
     _FIELDS = (

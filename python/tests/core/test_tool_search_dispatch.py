@@ -246,6 +246,64 @@ class TestDispatch:
         assert result["type"] == "ValidationError" and "parameters" not in result and "hint" not in result
         assert writes == ["book"]
 
+    async def test_arguments_valid_when_checked_get_no_hint_once_the_handler_changed_them(self, tmp_path):
+        """Checked before the handler ran, and marked there: a ``FilePath`` the handler then moved would fail a
+        check made afterwards, and the move succeeded. The handler's own ValidationError suggests no retry."""
+        from pydantic import BaseModel, FilePath
+
+        class Receipt(BaseModel):
+            moved_to: int
+
+        source = tmp_path / "report.txt"
+        source.write_text("x")
+
+        def archive(path: FilePath) -> str:
+            path.rename(tmp_path / "archived.txt")
+            Receipt.model_validate({"moved_to": "not a number"})
+            return "ok"
+
+        tools = [Tool(name="archive", description="Archive a file.", handler=archive, defer_loading=True)]
+        seen = []
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                seen.append(messages[-1].content[0].content[0].text)
+                return "Sorry."
+            return call("archive", path=str(source))
+
+        out = await agent(TestModel(handler=handler), tools, tool_search="client")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        result = ast.literal_eval(seen[0])
+        assert result["type"] == "ValidationError" and "parameters" not in result
+        assert not source.exists() and (tmp_path / "archived.txt").exists()
+
+    async def test_an_own_search_tool_listing_names_shows_no_schema(self):
+        """The agent's own ``search_tools`` (the built-in one is renamed) lists a name without its schema: a later
+        bad call to that tool still gets its parameters back."""
+        seen = []
+
+        def search_tools(query: str) -> str:  # noqa: ARG001 (the model calls it by this name)
+            return '{"found": [{"name": "convert"}]}'
+
+        def convert(amount: int) -> str:
+            return f"{amount}"
+
+        tools = [
+            Tool(name="search_tools", handler=search_tools),
+            Tool(name="convert", description="Convert currency.", handler=convert, defer_loading=True),
+        ]
+        responses = iter([call("search_tools", query="money"), dispatch("convert", "c2", arguments={"amount": "lots"})])
+
+        def handler(messages):
+            if messages[-1].role == "tool" and len(seen) < 2:
+                seen.append(messages[-1].content[0].content[0].text)
+            return next(responses, "Oops.")
+
+        out = await agent(TestModel(handler=handler), tools, tool_search="dispatch")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        result = ast.literal_eval(seen[1])
+        assert result["type"] == "ValidationError" and "amount" in result["parameters"]["properties"]
+
     async def test_bad_arguments_after_a_search_get_no_schema_back(self):
         seen = []
         responses = iter(
