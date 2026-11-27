@@ -1,4 +1,6 @@
 import asyncio
+import concurrent.futures
+import contextlib
 import contextvars
 import functools
 import hashlib
@@ -14,8 +16,6 @@ import types
 import unicodedata
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
-import concurrent.futures
-import contextlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import cached_property, partial
