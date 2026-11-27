@@ -2992,6 +2992,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             session._tool_interruption_modes = {
                 tool.name: mode for tool in tools if (mode := getattr(tool, "interruption_mode", "allow")) != "allow"
             }
+            # What a call_tool dispatch can run: the session counts a dispatched call under its target only then.
+            session._resolved_tool_names = frozenset(tool.name for tool in tools)
         return tools, commands, tools_names, tool_providers
 
     def _tell_alike_sets_apart(self, sets: list[tuple[str, list[str], list[int]]], providers: dict[int, str]) -> None:

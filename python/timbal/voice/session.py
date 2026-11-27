@@ -233,6 +233,24 @@ def _without_spoken_words(text: str, words: str) -> str:
     return f"{text[:begin].rstrip()} {text[end:].lstrip()}".strip()
 
 
+def _closes_utterance(commit: str, attempt: str) -> bool:
+    """Whether ``commit`` is the final transcript of the utterance ``attempt`` was started on: the same
+    words, or one of them a run of the other's ("yeah" / "Yeah okay.")."""
+    return _contains_spoken_words(commit, attempt) or _contains_spoken_words(attempt, commit)
+
+
+def _merged_deferred(prev: str, text: str) -> str:
+    """``prev`` (a deferred buffer) with ``text`` added: a refinement replaces it, a new fragment is appended."""
+    text = (text or "").strip()
+    if not prev:
+        return text
+    if not text:
+        return prev
+    if text.startswith(prev) or _is_same_user_utterance_refinement(prev, text):
+        return text if len(text) >= len(prev) else prev
+    return f"{prev.rstrip()} {text.lstrip()}"
+
+
 def _taken_back(current: str, words: str, before: str, after: str) -> str:
     """``current`` without what ``words`` added to it, when they turned the buffer from ``before`` into ``after``.
 
@@ -668,6 +686,9 @@ class VoiceSession:
         # Name → non-allow interruption_mode of this call's tools as its agent last resolved them (set by
         # ``Agent._resolve_tools`` on this session, not on the Agent that concurrent calls share).
         self._tool_interruption_modes: dict[str, str] = {}
+        # Names of the tools the agent resolved for this call's latest step (``Agent._resolve_tools``): what a
+        # ``call_tool`` dispatch can run. None until a step resolved them.
+        self._resolved_tool_names: frozenset[str] | None = None
         # Holds the tools of a turn an EagerEndOfTurn started until EndOfTurn confirms it (the speculative gate,
         # without holding audio): TurnResumed then discards it, so no tool of a cancelled turn has run.
         self._eager_gate: SpeculativeGate | None = None
@@ -2522,6 +2543,16 @@ class VoiceSession:
         else:
             self._eager_gate = None  # not accepted: no turn waits on it
 
+    def _eager_turn_prefix(self, final_text: str) -> str:
+        """What a turn starting on the eager words keeps if they are retracted: the buffer it came from as it
+        was before the eager event ("Check the booking." under a refinement "Check the booking today."), else
+        the text in front of the eager words."""
+        words = self._eager_gate_text
+        for before, after in self._eager_appended.values():
+            if before and (final_text == after or final_text.startswith(before)):
+                return _taken_back(final_text, words, before, after)
+        return _text_before_spoken_words(final_text, words)
+
     def _settle_eager_gate(self, *, confirm: bool) -> None:
         """Release (EndOfTurn) or cancel (TurnResumed, a different final) the tools of an eager-started turn."""
         if confirm:
@@ -2967,7 +2998,7 @@ class VoiceSession:
                 if self._interruptions_suppressed():
                     # The fragment is real speech. Do not cut the protected tool
                     # or the uninterruptible reply to deliver it.
-                    self._defer_user_speech(held)
+                    self._defer_held_user_speech(held)
                     return
                 with self._scheduler.holding():
                     if self._speculative_matches(held):
@@ -3038,7 +3069,9 @@ class VoiceSession:
         if gate is not None:
             self._eager_turn_task = task
             self._eager_row = self._transcript[-1] if self._transcript else None
-            self._eager_prefix = _text_before_spoken_words(final_text, self._eager_gate_text)
+            self._eager_prefix = self._eager_turn_prefix(final_text)
+            # The words now live in this turn's row: a retraction takes them back from there.
+            self._eager_appended = {}
         task.add_done_callback(self._turn_task_done)
         self._current_turn_task = task
         logger.debug(
@@ -3116,6 +3149,9 @@ class VoiceSession:
         A dispatch is a call of the step's dispatcher (``step_tools``, the tools
         that model call was given): an agent tool of its own named ``call_tool``
         takes the name, the dispatcher another, and a call of that tool runs it.
+        A dispatch the agent would not rewrite (no such tool, arguments that are
+        not an object) is not counted either: the dispatcher answers it itself,
+        and its own start and output count it then.
         """
         if not name or not call_id or call_id in self._turn_tool_call_ids:
             return
@@ -3124,16 +3160,38 @@ class VoiceSession:
             and is_call_tool_name(name)
             and (step_tools is None or is_dispatcher(step_tools, name))
         ):
-            if isinstance(arguments, str):
-                with contextlib.suppress(ValueError):
-                    arguments = json.loads(arguments)
-            target = arguments.get("name") if isinstance(arguments, dict) else None
-            if not isinstance(target, str) or not target:
+            target = self._dispatch_target(arguments)
+            if target is None:
                 return
             name = target
         self._turn_tool_call_ids.add(call_id)
         self._turn_unmatched_arms[name] = self._turn_unmatched_arms.get(name, 0) + 1
         self._arm_tool_batch(name)
+
+    def _dispatch_target(self, arguments: Any) -> str | None:
+        """The tool a ``call_tool`` dispatch runs, checked as ``Agent._dispatched`` checks it, or None.
+
+        None while the arguments are still streaming, and for a call the agent leaves to the dispatcher: a
+        name that is not one of the run's tools (``_resolved_tool_names``, set where the agent resolves
+        them), or ``arguments`` that are not an object (left out or null is an empty one).
+        """
+        if isinstance(arguments, str):
+            with contextlib.suppress(ValueError):
+                arguments = json.loads(arguments)
+        if not isinstance(arguments, dict):
+            return None
+        target, inner = arguments.get("name"), arguments.get("arguments")
+        if not isinstance(target, str) or not target:
+            return None
+        if isinstance(inner, str):
+            with contextlib.suppress(ValueError):
+                inner = json.loads(inner)
+        if inner is not None and not isinstance(inner, dict):
+            return None
+        known = self._resolved_tool_names
+        if known is not None and target not in known:
+            return None
+        return target
 
     def _model_call_tools(self, llm_call_id: str | None) -> list | None:
         """The tools the model call ``llm_call_id`` was given (its span's input), or None when not known."""
@@ -3238,14 +3296,20 @@ class VoiceSession:
 
     def _merge_deferred_user_text(self, text: str) -> None:
         """Add ``text`` to the deferred buffer: a refinement replaces, a new fragment is appended."""
-        text = text.strip()
-        prev = self._deferred_user_text
-        if not prev:
-            self._deferred_user_text = text
-        elif text.startswith(prev) or _is_same_user_utterance_refinement(prev, text):
-            self._deferred_user_text = text if len(text) >= len(prev) else prev
-        else:
-            self._deferred_user_text = f"{prev.rstrip()} {text.lstrip()}"
+        self._deferred_user_text = _merged_deferred(self._deferred_user_text, text)
+
+    def _defer_held_user_speech(self, held: str) -> None:
+        """A hold expired while barge-in is off: its words wait in the deferred buffer, and so does what an
+        unconfirmed eager event added to them, so a ``TurnResumed`` still takes exactly those words back."""
+        record = self._eager_appended.pop("held", None) if self._eager_unconfirmed else None
+        deferred_before = self._deferred_user_text
+        self._defer_user_speech(held)
+        if record is not None:
+            held_before, held_after = record
+            self._eager_appended["deferred"] = (
+                _merged_deferred(deferred_before, held_before) if held_before else deferred_before,
+                _merged_deferred(deferred_before, held_after),
+            )
 
     def _take_deferred_prefix(self, text: str) -> str:
         """Prepend speech captured during a protected window, then clear it."""
@@ -3894,11 +3958,14 @@ class VoiceSession:
                 and self._speculative_attempt is pending_attempt
                 and not pending_attempt.settled
                 and decision.reason not in ("refinement", "early_duplicate", "speculative_confirm_superseded")
+                and _closes_utterance(decision.text or text, pending_attempt.text)
                 and not (self._held_user_text is not None and self._speculative_matches(self._held_user_text))
             ):
-                # The commit that closes the attempt's utterance was dropped (backchannel, echo, noise,
-                # hesitation): it is not a turn, and nothing else would confirm or discard the attempt, which
-                # keeps the line busy. A hold on the same words still settles it when it expires.
+                # The commit that closes the attempt's utterance (its words, or more or fewer of them) was
+                # dropped (backchannel, echo, noise, hesitation): it is not a turn, and nothing else would
+                # confirm or discard the attempt, which keeps the line busy. Another commit (an echo of the
+                # last reply arriving late) leaves the attempt to its own. A hold on the same words still
+                # settles it when it expires.
                 await self._discard_speculative(reason=decision.reason or "ignored")
             # Timer was cancelled at the top of this method; re-arm so a noise/
             # hesitation commit mid-hold does not freeze the fragment forever.
@@ -5207,8 +5274,12 @@ class VoiceSession:
         ``_likely_stt_echo`` suppresses any verbatim substring, so a permanent
         entry would silently swallow a caller who later says a phrase the
         opener happened to contain ("your appointment").
+
+        An unconfirmed speculative reply is not in it: its audio is held, so
+        nothing of it can echo, and a caller whose words it happens to contain
+        ("hello" against "Hello! How can I help?") is not their own echo.
         """
-        spoken = self._turn_assistant_text
+        spoken = "" if self._speculative_unconfirmed() else self._turn_assistant_text
         if self._greeting_text and (
             self._turn_index == 0 or self._greeting_speaking or self._greeting_pending_bytes() > 0
         ):

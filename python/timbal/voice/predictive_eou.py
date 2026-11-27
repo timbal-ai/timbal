@@ -73,6 +73,9 @@ EAGER_SILENCE_SECS = 0.16
 # Two 32 ms VAD frames: start the audio model as the pause begins, overlapping
 # its ~50–100 ms inference with the confirmation silence.
 PREDICT_SILENCE_SECS = 0.064
+AWAIT_FINAL_SECS = 2.0
+"""Longest wait for the transcript of a commit the endpointer sent; partials meanwhile are the committed
+utterance's. An STT that answers with none would otherwise keep the text vote off."""
 # How often to score the rolling window while speech is still active.
 ROLL_INTERVAL_SECS = 0.32
 
@@ -247,6 +250,10 @@ class SpeechEouPredictor:
         self._scored_text = ""
         self._p_text: float | None = None
         self._text_task: asyncio.Task[None] | None = None
+        # Monotonic time until which partials are the committed utterance's, not the next one's: set when
+        # the endpointer sends a commit, cleared when its transcript arrives (bounded, for an STT that sends
+        # none).
+        self._awaiting_final_until = 0.0
 
         self._p_rolling: float | None = None
         self._last_roll = 0.0
@@ -265,8 +272,12 @@ class SpeechEouPredictor:
         self._roll_task = None
 
     def note_partial(self, text: str) -> None:
-        """Score a partial transcript. The latest text wins."""
-        if self._closed:
+        """Score a partial transcript. The latest text wins.
+
+        Between a commit the endpointer sent and its transcript, a partial still belongs to the committed
+        utterance (a late one), so it does not vote for the next pause.
+        """
+        if self._closed or time.monotonic() < self._awaiting_final_until:
             return
         text = text.strip()
         if not text or text == self._text:
@@ -347,6 +358,13 @@ class SpeechEouPredictor:
 
     def on_committed(self) -> None:
         """A commit closed the utterance. Its text must not vote on the next one."""
+        self._awaiting_final_until = 0.0
+        self._drop_text()
+
+    def on_commit_sent(self) -> None:
+        """The endpointer asked the STT to commit: the utterance is over, though its transcript is still on
+        its way. The caller may speak again before it arrives; the text vote is already the old utterance's."""
+        self._awaiting_final_until = time.monotonic() + AWAIT_FINAL_SECS
         self._drop_text()
 
     def _drop_text(self) -> None:

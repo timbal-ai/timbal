@@ -224,6 +224,44 @@ class TestRepeatedRequestWhileProtected:
         await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
         assert session._deferred_user_text == ""
 
+    async def test_eager_words_whose_hold_expired_behind_the_tool_are_taken_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ran: list[str] = []
+        session = _flux_session(monkeypatch, ran, entity_patience=True, entity_patience_secs=0.1)
+        _protect(session)
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="My booking code is 415 555", confidence=0.9)
+        )
+        assert session._held_user_text == "My booking code is 415 555"  # an open number: held
+        await _until(lambda: session._deferred_user_text == "My booking code is 415 555")  # expired, deferred
+        await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
+        assert session._deferred_user_text == ""
+        session._turn_tool_batch_inflight = 0  # the protected tool ends
+        await _until(lambda: session._deferred_turn_task is None or session._deferred_turn_task.done())
+        assert session._current_turn_task is None
+        assert ran == []
+
+    async def test_a_refinement_that_starts_the_queued_turn_gives_the_request_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ran: list[str] = []
+        session = _flux_session(monkeypatch, ran)
+        session.hold_timeout_secs = 0.1
+        _protect(session)
+        await session._handle_provider_commit("Check the booking.")
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Check the booking today.", confidence=0.9)
+        )
+        assert session._deferred_user_text == "Check the booking today."
+        session._turn_tool_batch_inflight = 0  # the queued turn starts on the refinement, before TurnResumed
+        await _until(lambda: session._eager_turn_task is not None)
+        await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
+        # The refinement is retracted; the confirmed request is held again and runs when the hold expires.
+        await _until(lambda: ran)
+        assert ran == ["friday"]
+        assert [e.text for e in session.transcript if e.role == "user"][-1] == "Check the booking."
+
     async def test_new_words_after_the_request_are_still_taken_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         session = _flux_session(monkeypatch, [])
         _protect(session)
@@ -480,6 +518,94 @@ class TestToolModesAndDispatch:
         assert ran == ["call_tool:reserve"]
         assert suppressed_after == [False]
         assert "reserve" not in session._turn_open_tools
+
+
+    @pytest.mark.parametrize(
+        "call_input",
+        [
+            {"name": "reserve", "arguments": "oops"},
+            {"name": "reserve", "arguments": [1, 2]},
+            {"name": "no_such_tool", "arguments": {}},
+        ],
+    )
+    async def test_a_dispatch_the_agent_does_not_run_is_not_counted(self, call_input: dict) -> None:
+        """The dispatcher answers a malformed call itself: its target never runs and must not stay counted."""
+        from timbal import Tool
+        from timbal.voice import VoiceSession
+
+        from .test_session import MockSTT, MockTTS
+
+        ran: list[str] = []
+        suppressed_after: list[bool] = []
+        open_after: list[int] = []
+        session: VoiceSession | None = None
+
+        def reserve() -> str:
+            """Reserve a table."""
+            ran.append("reserve")
+            return "reserved"
+
+        def reply(messages: list) -> Message | str:
+            if messages[-1].role == "user":
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="call_tool", input=call_input)],
+                    stop_reason="tool_use",
+                )
+            assert session is not None
+            suppressed_after.append(session._interruptions_suppressed())  # the dispatcher has answered
+            open_after.append(session._turn_tool_batch_inflight)
+            return "Done."
+
+        agent = Agent(
+            name="voice_test",
+            model=TestModel(handler=reply),
+            tools=[Tool(handler=reserve, defer_loading=True, interruption_mode="disable_during_tool")],
+            tool_search="dispatch",
+        )
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector="heuristic")
+        await session._begin_user_turn("reserve it", replace_user_entry=False)
+        await asyncio.wait_for(session._current_turn_task, timeout=30)
+        assert ran == []
+        assert suppressed_after == [False]
+        assert open_after == [0]  # nothing left counted as running
+        assert "reserve" not in session._turn_open_tools
+
+    async def test_a_valid_dispatch_is_still_counted_under_its_target(self) -> None:
+        from timbal import Tool
+        from timbal.voice import VoiceSession
+
+        from .test_session import MockSTT, MockTTS
+
+        suppressed_during: list[bool] = []
+        session: VoiceSession | None = None
+
+        def reserve() -> str:
+            """Reserve a table."""
+            assert session is not None
+            suppressed_during.append(session._interruptions_suppressed())
+            return "reserved"
+
+        def reply(messages: list) -> Message | str:
+            if messages[-1].role == "user":
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="call_tool", input={"name": "reserve", "arguments": {}})],
+                    stop_reason="tool_use",
+                )
+            return "Done."
+
+        agent = Agent(
+            name="voice_test",
+            model=TestModel(handler=reply),
+            tools=[Tool(handler=reserve, defer_loading=True, interruption_mode="disable_during_tool")],
+            tool_search="dispatch",
+        )
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector="heuristic")
+        await session._begin_user_turn("reserve it", replace_user_entry=False)
+        await asyncio.wait_for(session._current_turn_task, timeout=30)
+        assert suppressed_during == [True]
+        assert session._turn_tool_batch_inflight == 0
 
 
 class TestAnthropicSystemOverride:

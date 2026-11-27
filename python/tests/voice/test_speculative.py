@@ -772,6 +772,29 @@ class TestSpeculativeSession:
             assert session._audio_hold is None
             assert drive.audio() == []
 
+    async def test_words_the_held_reply_contains_are_not_its_echo(self) -> None:
+        """The attempt's reply is held, so a confirming "hello" is the caller, not an echo of "Hello! …"."""
+        session, stt, _tts, model = _session(["Hello! How can I help?"])
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="hello"))
+            await _until(lambda: model.call_count >= 1)
+            await _until(lambda: "Hello! How can I help?" in session._turn_assistant_text)
+            await stt.inject(TranscriptEvent(type="committed", text="hello"))
+            await _until(lambda: drive.audio())
+        assert session.speculative_generations_discarded == 0
+        assert [e.text for e in session.transcript if e.role == "user"] == ["hello"]
+
+    async def test_an_ignored_commit_of_other_words_leaves_the_attempt(self) -> None:
+        session, stt, _tts, model = _session(["Booked."])
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: model.call_count >= 1)
+            await stt.inject(TranscriptEvent(type="committed", text="um"))  # IGNOREd, not this utterance
+            await stt.inject(TranscriptEvent(type="committed", text="book a table"))
+            await _until(lambda: drive.audio())
+        assert session.speculative_generations_discarded == 0
+        assert model.call_count == 1  # the attempt's reply was used, not regenerated
+
     async def test_an_unconfirmed_attempt_that_times_out_says_nothing(self) -> None:
         ran: list[str] = []
 

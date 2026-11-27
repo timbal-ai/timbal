@@ -373,6 +373,31 @@ class TestEndpointerTiming:
         await ep.close()
         await predictor.close()
 
+    async def test_speech_before_the_sent_commit_returns_does_not_reuse_its_text(self) -> None:
+        # The endpointer commits "What's my balance?"; the caller speaks again before the STT's final for it
+        # arrives (the endpoint task is done, so nothing is pending), then pauses: no second predictive
+        # commit on the old text.
+        scores = _Scores(0.95)
+        predictor = _predictor(scores, eager_silence_secs=0.096, predict_silence_secs=0.064)
+        gate = _Gate()
+        ep = self._endpointer(predictor)
+        await _armed(ep, gate)
+        predictor.note_partial("What's my balance?")
+        await asyncio.sleep(0)
+        ep.push(b"SS" + b"\x00" * 3)
+        await _until_commits(gate, 1)
+        assert ep.last_predictive is True
+        predictor.note_partial("What's my balance?")  # a late partial of the committed utterance
+        ep.push(b"SS" + b"\x00" * 3)
+        stale = await predictor.signals()
+        assert stale.p_text is None and stale.text_veto
+        assert not prediction_is_complete(stale)
+        ep.notify_committed()  # the final arrives: partials count again
+        predictor.note_partial("And my card?")
+        assert (await predictor.signals()).text_fresh
+        await ep.close()
+        await predictor.close()
+
     async def test_a_dip_inside_the_sentence_keeps_its_text_vote(self) -> None:
         # One silent frame between words is not a pause: the partial still describes the sentence.
         scores = _Scores(0.95)

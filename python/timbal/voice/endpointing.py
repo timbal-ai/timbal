@@ -482,6 +482,8 @@ class VadEndpointer:
             self._last_commit_sent_at = now
             self.last_predictive = early
             logger.info("vad_endpoint_commit", p=round(p, 3), predictive=early)
+            if self._predictor is not None:
+                self._predictor.on_commit_sent()
             await self._commit()
         except asyncio.CancelledError:
             raise
