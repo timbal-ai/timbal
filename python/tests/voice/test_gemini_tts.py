@@ -239,3 +239,25 @@ def test_client_accent_reaches_only_gemini(provider, kept):
     )
     assert ("accent" in session.audio_output.extra) is kept
     assert session.audio_output.extra["speed"] == 1.1
+
+
+@pytest.mark.parametrize(("provider", "kept"), [("gemini", True), ("elevenlabs", False), ("deepgram", False)])
+def test_server_gemini_extras_do_not_follow_a_call_to_another_provider(provider, kept):
+    """A Gemini agent's ``director_notes`` / ``prefetch`` are server config: a client that picks ElevenLabs or
+    Deepgram must not carry them into that provider's query string."""
+    from timbal import Agent
+    from timbal.core.test_model import TestModel
+    from timbal.server.voice import build_voice_session
+    from timbal.voice import VoiceConfig
+
+    session, _ = build_voice_session(
+        Agent(name="voice_test", model=TestModel(responses=["Hola"]), tools=[]),
+        VoiceConfig(
+            turn_detector="heuristic",
+            tts_provider="gemini",
+            tts_extra={"accent": "rioplatense", "director_notes": "Habla despacio.", "prefetch": 3},
+        ),
+        {"tts_provider": provider},
+    )
+    for key in ("accent", "director_notes", "prefetch"):
+        assert (key in session.audio_output.extra) is kept, key
