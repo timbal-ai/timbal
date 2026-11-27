@@ -516,6 +516,8 @@ def retos_voice_config(model: str | None = None) -> dict[str, Any]:
         "voice": _PABLO,
         "tts_model": "eleven_v3_conversational",
         "keyterms": ["Luzia Energía", "kilovatios", "potencia contratada", "DNI", "NIE", "reclamación"],
+        # Escritas así la voz las dice siempre igual; como siglas, unas veces de corrido y otras letra a letra.
+        "pronunciations": {"DNI": "deneí", "NIE": "níe"},
         "ignore_backchannels": True,
         "speculative_generation": {"enabled": preset.enabled, "preemptive_tts": preset.preemptive_tts},
         "max_tts_pause_secs": 0.55,

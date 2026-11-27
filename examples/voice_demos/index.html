@@ -553,6 +553,8 @@ btnMicro.onclick = () => {
 
 // ---- Conversación ----------------------------------------------------------------------------------------------
 let burbujaAgente = null, ultimaAgente = null, burbujasTurno = [], respuestaHecha = false, parcial = null;
+/** Los «ajá» que el agente ha dicho mientras hablabas, hasta que tu frase aparece entera. */
+let escuchas = [];
 
 const ACOTACIONES = new Set([
   'relieved', 'laughs', 'laughing', 'chuckles', 'giggles', 'sighs', 'gasps', 'curious', 'excited', 'sad', 'angry',
@@ -598,6 +600,22 @@ function ponerParcial(texto) {
 function limpiarConversacion() {
   chat.innerHTML = '';
   burbujaAgente = null; ultimaAgente = null; burbujasTurno = []; respuestaHecha = false; parcial = null;
+  escuchas = [];
+}
+
+/** Debajo de tu frase, lo que el agente dijo mientras la decías. No son respuestas: no están en la conversación. */
+function anotarEscuchas(mia) {
+  if (!escuchas.length || !mia) return;
+  let nota = mia.querySelector('.escucha');
+  if (!nota) {
+    nota = document.createElement('small');
+    nota.className = 'escucha';
+    nota._dichos = [];
+    mia.appendChild(nota);
+  }
+  nota._dichos.push(...escuchas);
+  escuchas = [];
+  nota.textContent = `Mientras hablabas, el agente dijo: ${nota._dichos.map((t) => `«${t.replace(/[.!]+$/, '')}»`).join(' ')}`;
 }
 
 /** Tiempo desde que dejaste de hablar hasta el primer audio: transcripción más respuesta. */
@@ -628,10 +646,15 @@ function recibir(msg) {
       // ultimaAgente a null: el tiempo de respuesta de este turno solo se anota en una burbuja de este turno.
       burbujasTurno = []; respuestaHecha = true; burbujaAgente = null; ultimaAgente = null;
       const mias = chat.querySelectorAll('.msg.tu:not(.parcial)');
-      if (msg.replace && mias.length) mias[mias.length - 1]._texto.textContent = msg.text;
-      else burbuja('tu', msg.text);
+      let mia = null;
+      if (msg.replace && mias.length) { mia = mias[mias.length - 1]; mia._texto.textContent = msg.text; }
+      else mia = burbuja('tu', msg.text);
+      anotarEscuchas(mia);
       break;
     }
+    case 'backchannel':
+      if (typeof msg.text === 'string' && msg.text) escuchas.push(msg.text);
+      break;
     case 'filler':
       burbuja('agente', msg.text);
       break;

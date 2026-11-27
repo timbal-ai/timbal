@@ -48,16 +48,41 @@ def test_default_variant_starts_the_demo_as_it_is_configured(hub) -> None:
 
 def test_model_and_naturalness_reach_the_demo_through_its_env(hub) -> None:
     demo = {"id": "d", "import_spec": "x.py::agent", "model_env": "D_MODEL", "tuning_env": "D_TUNING"}
-    env, hello = hub.plan_de_arranque(demo, "gemini-2.5-flash", "ambos")
+    env, hello = hub.plan_de_arranque(demo, "gemini-2.5-flash", "todo")
     assert env["D_MODEL"] == "google/gemini-2.5-flash"
     tuning = json.loads(env["D_TUNING"])
     assert tuning["tts_rhythm"] is True
     assert tuning["hesitation"]["rate"] == hub.HESITATION_RATE
     assert tuning["hesitation"]["openers"]
+    assert tuning["backchannel"] == {"rate": hub.BACKCHANNEL_RATE}
+    assert tuning["entity_patience"] is True
+    assert tuning["adaptive_tempo"] is True and tuning["audio_tags"] is True
     assert hello == {}
 
+    off = {"hesitation": False, "tts_rhythm": False, "backchannel": False, "adaptive_tempo": False, "audio_tags": False}
     env, _ = hub.plan_de_arranque(demo, "", "ninguno")
-    assert json.loads(env["D_TUNING"]) == {"hesitation": False, "tts_rhythm": False}
+    assert json.loads(env["D_TUNING"]) == off
+    # One behaviour alone turns the others off, so each can be heard on its own.
+    env, _ = hub.plan_de_arranque(demo, "", "adapta")
+    assert json.loads(env["D_TUNING"]) == {**off, "adaptive_tempo": True}
+
+
+def test_every_naturalness_option_is_a_voice_config_the_framework_takes(hub) -> None:
+    from timbal.voice import VoiceConfig
+
+    demo = {"id": "d", "import_spec": "x.py::agent", "tuning_env": "D_TUNING"}
+    options = next(group for group in hub.VARIANTES if group["id"] == "naturalidad")["opciones"]
+    for option in options:
+        env, _ = hub.plan_de_arranque(demo, "", option["id"])
+        if not option["id"]:
+            assert env == {}
+            continue
+        config = VoiceConfig.model_validate({"language": "es", **json.loads(env["D_TUNING"])})
+        assert (config.backchannel is not None) is bool(option.get("aja")), option["id"]
+        assert (config.adaptive_tempo is not None) is bool(option.get("adapta")), option["id"]
+        assert (config.audio_tags is not None) is bool(option.get("risas")), option["id"]
+        assert (config.hesitation is not None) is bool(option.get("titubeos")), option["id"]
+        assert (config.tts_rhythm is not None) is bool(option.get("ritmo")), option["id"]
 
 
 def test_a_demo_without_a_model_variable_gets_the_model_in_the_call_hello(hub) -> None:

@@ -15,8 +15,9 @@ Qué cambia cada variante:
   navegador): basta colgar y volver a llamar. La voz se elige entre las del proveedor: ``GET /api/voces`` da las de
   la cuenta de ElevenLabs (las pide este proceso con ``ELEVENLABS_API_KEY``; la clave no llega al navegador) y las
   de Gemini. La velocidad es ``tts_tempo``, que vale para cualquier proveedor.
-- Modelo y Naturalidad son configuración del agente (``hesitation`` y ``tts_rhythm`` no se pueden pedir desde el
-  navegador), así que se pasan como variables de entorno a la demo y hay que rearrancarla.
+- Modelo y Naturalidad son configuración del agente (``hesitation``, ``tts_rhythm``, ``backchannel``,
+  ``adaptive_tempo`` y ``audio_tags`` no se pueden pedir desde el navegador), así que se pasan como variables de
+  entorno a la demo y hay que rearrancarla.
 
 Solo biblioteca estándar, como el playground.
 """
@@ -100,12 +101,24 @@ VARIANTES: list[dict[str, Any]] = [
         "id": "naturalidad",
         "titulo": "Naturalidad",
         "aplica": "arranque",
+        # Cada opción enciende lo que nombra y apaga lo demás: así se oye cada cosa por separado.
         "opciones": [
             {"id": "", "nombre": "Por defecto"},
-            {"id": "titubeos", "nombre": "Titubeos", "titubeos": True, "ritmo": False},
-            {"id": "ritmo", "nombre": "Ritmo de pausas", "titubeos": False, "ritmo": True},
-            {"id": "ambos", "nombre": "Los dos", "titubeos": True, "ritmo": True},
-            {"id": "ninguno", "nombre": "Ninguno", "titubeos": False, "ritmo": False},
+            {"id": "titubeos", "nombre": "Titubeos", "titubeos": True},
+            {"id": "ritmo", "nombre": "Ritmo de pausas", "ritmo": True},
+            {"id": "aja", "nombre": "«Ajá» mientras hablas", "aja": True},
+            {"id": "adapta", "nombre": "Se adapta a tu ritmo", "adapta": True},
+            {"id": "risas", "nombre": "Risas y suspiros (voz v3)", "risas": True},
+            {
+                "id": "todo",
+                "nombre": "Todo",
+                "titubeos": True,
+                "ritmo": True,
+                "aja": True,
+                "adapta": True,
+                "risas": True,
+            },
+            {"id": "ninguno", "nombre": "Ninguno"},
         ],
     },
     {
@@ -135,8 +148,12 @@ VARIANTES: list[dict[str, Any]] = [
 
 HESITATION_RATE = 0.6
 """Con el 0,15 de ``hesitation=True`` una llamada corta puede no tener ningún titubeo: en la demo se tienen que oír.
-Solo titubean las respuestas que empiezan por una frase de tres palabras o más, y nunca dos seguidas, así que con
-0,35 salían entre cero y dos en una llamada de cinco frases."""
+Nunca titubean dos respuestas seguidas, así que con 0,35 salían entre cero y dos en una llamada de cinco frases.
+El sonido va delante de la primera frase de tres palabras o más, también detrás de un «Perfecto.» o un «Vale, Marta,»."""
+
+BACKCHANNEL_RATE = 1.0
+"""Por lo mismo: con el 0,7 de ``backchannel=True`` una pausa de cada tres se queda sin «ajá». En la demo, todas las
+que toca. Siguen mandando el mínimo de tres segundos entre dos y el máximo de tres por turno."""
 
 
 PROVEEDOR_DE_VOZ = "elevenlabs"
@@ -331,10 +348,17 @@ def plan_de_arranque(demo: dict[str, Any], modelo: str, naturalidad: str) -> tup
             raise ValueError("Esta demo no admite cambiar la naturalidad.")
         ajuste: dict[str, Any] = {
             "hesitation": (
-                {"rate": HESITATION_RATE, "openers": demo.get("titubeos") or TITUBEOS} if nat["titubeos"] else False
+                {"rate": HESITATION_RATE, "openers": demo.get("titubeos") or TITUBEOS} if nat.get("titubeos") else False
             ),
-            "tts_rhythm": bool(nat["ritmo"]),
+            "tts_rhythm": bool(nat.get("ritmo")),
+            "backchannel": {"rate": BACKCHANNEL_RATE} if nat.get("aja") else False,
+            "adaptive_tempo": bool(nat.get("adapta")),
+            "audio_tags": bool(nat.get("risas")),
         }
+        if nat.get("aja"):
+            # Sin esto la llamada da el turno por acabado en la primera pausa de un número dictado, y no hay
+            # pausa en la que decir «ajá».
+            ajuste["entity_patience"] = True
         env[demo["tuning_env"]] = json.dumps(ajuste, ensure_ascii=False)
     return env, hello
 
