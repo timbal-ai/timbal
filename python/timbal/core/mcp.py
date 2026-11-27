@@ -517,9 +517,12 @@ class _Left:
     paused: int = 0
     cut: int = 0
     owners: int = 0
+    sessions: int = 0
 
     def __add__(self, other: "_Left") -> "_Left":
-        return _Left(self.paused + other.paused, self.cut + other.cut, self.owners + other.owners)
+        return _Left(
+            self.paused + other.paused, self.cut + other.cut, self.owners + other.owners, self.sessions + other.sessions
+        )
 
     def raise_if_owed(self, label: str, failed: list[BaseException]) -> None:
         problems = []
@@ -534,13 +537,16 @@ class _Left:
                 f"{self.owners} session(s) of this server are still shutting down on an event loop that is not "
                 "running. Call close() on that loop to wait for them."
             )
-        owed = self.cut + sum(getattr(f, "count", 1) for f in failed)
-        if owed:
-            cause = next((getattr(f, "cause", f) for f in failed), None)
+        cause = next((getattr(f, "cause", f) for f in failed), None)
+        why = f" ({cause!r})" if cause is not None else ""
+        if self.cut:
             problems.append(
-                f"{owed} platform connection(s) are still open: their close was cancelled or failed"
-                + (f" ({cause!r})" if cause is not None else "")
-                + ". Call close() again."
+                f"{self.cut} platform connection(s) are still open: their close was cancelled or failed{why}. "
+                "Call close() again."
+            )
+        if self.sessions:
+            problems.append(
+                f"The server's session is still open: its close was cancelled or failed{why}. Call close() again."
             )
         if problems:
             raise RuntimeError(f"MCP server {label!r}: " + " ".join(problems)) from next(
@@ -1425,6 +1431,8 @@ class MCPServer(ToolSet):
             if task is None or self._session_task is not task:
                 return  # somebody else already replaced or dropped it
             closed = self._session_closed
+            self._owners_closing.add(task)  # before the refs go, as in close()
+            task.add_done_callback(self._owners_closing.discard)
             self._forget_session()
             if closed is not None:
                 await self._shutdown_owner(task, closed)
@@ -2010,9 +2018,10 @@ class MCPServer(ToolSet):
         running (an ``asyncio.Runner`` between two ``run()`` calls: call close() on that loop), or because a close
         was cancelled or failed (call close() again). One whose loop has closed went with it."""
         loop = asyncio.get_running_loop()
-        left = _Left()
+        session = self._session_task
         failed: list[BaseException] = []
-        by_loop = self._take_run_connections(loop, left)
+        by_loop = self._take_run_connections(loop, _Left())
+        taken = {id(entry) for entries in by_loop.values() for _, entry in entries}
         # Before any wait, so a close() running beside this one sees all of it: this loop's connections let go
         # of, the other loops' handed over and registered (_handoffs).
         self._retire_all(by_loop.pop(loop, []))
@@ -2024,16 +2033,42 @@ class MCPServer(ToolSet):
         waits.append(self._close_own_session(loop))
         # Shielded: a close() that is cancelled stops waiting, the closes go on (gather would cancel them).
         for result in await asyncio.shield(asyncio.gather(*waits, return_exceptions=True)):
-            if isinstance(result, _Left):
-                left = left + result
-            elif isinstance(result, BaseException):
-                failed.append(result)
-        left = left + await self._wait_owners_closing(loop)
-        # Whatever is still owed on a loop this close() could reach (cut meanwhile, by another close() or the
-        # loop): said, not left for the caller to find.
-        owed = sum(1 for _, entry in list(self._unclosed.values()) if _reachable(entry.loop, loop))
-        left.cut = max(left.cut, owed)
-        left.raise_if_owed(self._label, failed)
+            if isinstance(result, BaseException):
+                failed.append(result)  # its cause is said; what it left is counted below, once
+        await self._wait_owners_closing(loop)
+        self._owed(loop, taken, session).raise_if_owed(self._label, failed)
+
+    def _owed(self, loop: asyncio.AbstractEventLoop, taken: set[int], session: asyncio.Task | None) -> "_Left":
+        """What is still owed once close() has done what it could, from the state it ends in: each connection,
+        close or session once, whichever step left it. ``taken``: the connections this close() set out to close;
+        ``session``: the server's own session when it began (not one a call opened since)."""
+        left = _Left()
+
+        def paused(owner: asyncio.AbstractEventLoop | None) -> bool:
+            owner = owner or loop
+            return not owner.is_closed() and owner is not loop and not owner.is_running()
+
+        for entry in list(self._run_connections.values()):
+            if paused(entry.loop):
+                left.paused += 1
+            elif id(entry) in taken and not (entry.loop or loop).is_closed():
+                left.cut += 1  # set out to close it, and it is still there (its handoff ended without doing it)
+        for _, entry in list(self._unclosed.values()):
+            if paused(entry.loop):
+                left.paused += 1
+            elif not (entry.loop or loop).is_closed():
+                left.cut += 1
+        for task in list(self._close_tasks):
+            if not task.done() and paused(task.get_loop()):
+                left.paused += 1
+        owners = {owner for owner in list(self._owners_closing) if not owner.done() and paused(owner.get_loop())}
+        if session is not None and session is self._session_task and not session.done():
+            if paused(session.get_loop()):
+                owners.add(session)
+            else:
+                left.sessions += 1  # its close was handed over and did not happen
+        left.owners = len(owners)
+        return left
 
     async def _close_own_session(self, loop: asyncio.AbstractEventLoop) -> "_Left":
         """The server's own session (a standalone server's), closed on the loop that owns it: its locks and owner
@@ -2059,16 +2094,18 @@ class MCPServer(ToolSet):
             raise _HandoffFailed(1, asyncio.CancelledError() if handed.cancelled() else handed.exception())
         if owner.is_closed():
             self._forget_session()
-            return _Left()
-        return _Left(owners=1)
+        return _Left()  # what is left is counted by _owed, once
 
     async def _close_session_here(self) -> None:
         async with self._get_tools_lock(), self._get_lock():
             task, closed = self._session_task, self._session_closed
-            self._forget_session()
-            if task is not None and closed is not None:
+            if task is not None:
+                # Recorded before the refs go: a close() on another thread sees the session or its owner, never
+                # neither (it would take the locks on its own loop).
                 self._owners_closing.add(task)
                 task.add_done_callback(self._owners_closing.discard)
+            self._forget_session()
+            if task is not None and closed is not None:
                 await self._shutdown_owner(task, closed)
             self._tools_cache = None
             self._tools_cache_run_id = None

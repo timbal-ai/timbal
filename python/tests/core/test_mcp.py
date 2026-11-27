@@ -1304,21 +1304,94 @@ class TestCrossLoopClose:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("ended", ["with a cut", "failed"])
     async def test_how_anothers_handoff_ended_is_this_close_too(self, ended):
-        """All a close() finds is another close()'s handoff, which leaves a session open (cut there) or fails: it
-        says the session is still open, as that other close() does, instead of returning as if all were closed."""
+        """All a close() finds is another close()'s handoff, still going: it waits for it, and when that one leaves
+        a session open (its close cut there, or the handoff failed) it says so, as that other close() does."""
         import concurrent.futures
 
-        from timbal.core.mcp import _Left
+        from timbal.core.mcp import _Left, _RunConnection
 
+        class Server:
+            async def close(self):
+                pass
+
+        loop = asyncio.get_running_loop()
         handed = concurrent.futures.Future()
-        if ended == "with a cut":
-            handed.set_result(_Left(cut=1))
-        else:
-            handed.set_exception(RuntimeError("the owner loop cancelled it"))
         service = MCPServer(transport="http", service="api")
-        service._handoffs[id(handed)] = (handed, asyncio.get_running_loop())
-        with pytest.raises(RuntimeError, match="still open"):
+        service._handoffs[id(handed)] = (handed, loop)
+        entry = _RunConnection(Server(), "fingerprint", loop)
+
+        def finish():  # what the other close()'s handoff leaves: the connection kept for a later close()
+            service._unclosed[id(entry)] = ("run", entry)
+            if ended == "with a cut":
+                handed.set_result(_Left(cut=1))
+            else:
+                handed.set_exception(RuntimeError("the owner loop cancelled it"))
+
+        loop.call_later(0.05, finish)
+        with pytest.raises(RuntimeError, match="1 platform connection"):
             await asyncio.wait_for(service.close(), 10)
+
+    @pytest.mark.asyncio
+    async def test_the_owner_is_recorded_before_the_session_is_forgotten(self, monkeypatch):
+        """A close() on another thread must see the session or its owner, never neither: the owner is in
+        _owners_closing by the time the refs go."""
+        server = MCPServer(transport="stdio", command="unused")
+        closed = asyncio.Event()
+
+        async def owner():
+            await closed.wait()
+
+        server._session_task, server._session_closed = asyncio.ensure_future(owner()), closed
+        forget, seen = MCPServer._forget_session, []
+
+        def watched(self):
+            if self._session_task is not None:
+                seen.append(self._session_task in self._owners_closing)
+            return forget(self)
+
+        monkeypatch.setattr(MCPServer, "_forget_session", watched)
+        await asyncio.wait_for(server.close(), 10)
+        assert seen == [True]
+
+    def test_a_retried_connection_whose_handoff_fails_is_counted_once(self):
+        """A cut connection retried by close(), its handoff cancelled by its loop: one connection still open."""
+        from timbal.core.mcp import _RunConnection
+
+        owner_loop, stop = self.owner_thread()
+
+        def cancelling(loop, coro, **kwargs):
+            task = asyncio.Task(coro, loop=loop, **kwargs)
+            task.cancel()
+            return task
+
+        class Server:
+            async def close(self):
+                pass
+
+        service = MCPServer(transport="http", service="api")
+        try:
+            owner_loop.set_task_factory(cancelling)
+            entry = _RunConnection(Server(), "fingerprint", owner_loop)
+            service._unclosed[id(entry)] = ("run", entry)
+            with pytest.raises(RuntimeError, match=r"MCP server 'http': 1 platform connection\(s\) are still open"):
+                asyncio.run(asyncio.wait_for(service.close(), 10))
+        finally:
+            stop()
+
+    def test_a_signalled_owner_on_a_paused_loop_is_counted_once(self):
+        """A standalone server whose earlier close() forgot the session and was cut: its owner, on a paused loop, is
+        one session still shutting down, whichever step finds it."""
+        server = MCPServer(transport="stdio", command="unused")
+        with asyncio.Runner() as runner:
+
+            async def start():
+                return asyncio.ensure_future(asyncio.Event().wait())
+
+            owner = runner.run(start())
+            server._owners_closing.add(owner)  # its refs already forgotten
+            with pytest.raises(RuntimeError) as failure:
+                asyncio.run(asyncio.wait_for(server.close(), 10))
+            assert "1 session(s) of this server are still shutting down" in str(failure.value)
 
     def test_a_close_waiting_on_anothers_handoff_reports_what_it_left(self):
         """Two close() at once on one loop, the run connection on another: the second waits for the first's
