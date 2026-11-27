@@ -389,7 +389,8 @@ class TestPlatformClaims:
             PROVENANCE_REV_KEY,
             PROVENANCE_PATH_KEY,
         }
-        assert set(meta) == everything - {left_out}
+        # And the tool span's trace context, derived from the run and call ids (see TestTraceClaims).
+        assert set(meta) == (everything - {left_out}) | {"traceparent"}
 
     @pytest.mark.parametrize(
         ("value", "kept"),
@@ -442,6 +443,104 @@ def echo_meta(ctx: Context) -> str:
 
 mcp.run()
 """
+
+
+def platform_keeps(meta: dict) -> dict:
+    """The trace context the platform keeps from ``meta`` (monolith ``src/mcp/meta.rs``: ``traceparent()``,
+    ``is_tracestate``): a malformed ``traceparent`` is dropped with its ``tracestate``, never refused."""
+    traceparent = meta.get("traceparent")
+    shape = re.fullmatch(r"([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})", traceparent or "")
+    if not shape or shape[1] != "00" or not shape[2].strip("0") or not shape[3].strip("0"):
+        return {}
+    kept = {"traceparent": traceparent}
+    tracestate = meta.get("tracestate")
+    if isinstance(tracestate, str) and len(tracestate) <= 512 and all(c == "\t" or " " <= c <= "~" for c in tracestate):
+        kept["tracestate"] = tracestate
+    return kept
+
+
+TRACEPARENT = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+
+class TestTraceClaims:
+    """W3C trace context in ``_meta``: what is sent is what the platform keeps, and never makes it refuse a call."""
+
+    def test_the_platform_gets_the_tool_span_when_no_span_is_active(self):
+        from timbal.state.tracing.exporters.otel import OTelExporter
+
+        context = platform_context()
+        meta = meta_of(context)
+        call_id = "06af0701-77aa-7c1e-8000-1b2c3d4e5f60"
+        expected = f"00-{OTelExporter._trace_id(context.id)}-{OTelExporter._span_id(call_id)}-01"
+        assert meta["traceparent"] == expected and "tracestate" not in meta
+        platform_read(meta)
+        assert platform_keeps(meta) == {"traceparent": expected}
+
+    @pytest.mark.parametrize(
+        "tracestate",
+        [
+            "Bearer abc",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+            "t2_" + "a" * 40,
+            "k=" + "v" * 511,
+            "k=v\n",
+            "k=\u00f1",
+            "   ",
+        ],
+    )
+    def test_a_tracestate_the_platform_would_refuse_or_drop_is_left_out(self, monkeypatch, tracestate):
+        monkeypatch.setattr(
+            "timbal.core.mcp._ambient_trace_context", lambda: {"traceparent": TRACEPARENT, "tracestate": tracestate}
+        )
+        meta = meta_of(platform_context())
+        assert meta["traceparent"] == TRACEPARENT and "tracestate" not in meta
+        platform_read(meta)  # nothing refused
+
+    def test_a_credential_shaped_tracestate_is_what_the_platform_refuses(self):
+        """The oracle side of the test above: sent as is, the whole call would fail."""
+        with pytest.raises(Refused):
+            platform_read({"traceparent": TRACEPARENT, "tracestate": "Bearer abc"})
+
+    def test_an_acceptable_tracestate_rides_along(self, monkeypatch):
+        monkeypatch.setattr(
+            "timbal.core.mcp._ambient_trace_context", lambda: {"traceparent": TRACEPARENT, "tracestate": "rojo=00f0\tx=1"}
+        )
+        meta = meta_of(platform_context())
+        platform_read(meta)
+        assert platform_keeps(meta) == {"traceparent": TRACEPARENT, "tracestate": "rojo=00f0\tx=1"}
+        assert {key: meta[key] for key in ("traceparent", "tracestate")} == platform_keeps(meta)
+
+    @pytest.mark.parametrize(
+        "traceparent",
+        [
+            "ff-" + "a" * 32 + "-" + "b" * 16 + "-01",
+            "00-" + "0" * 32 + "-" + "b" * 16 + "-01",
+            "00-" + "a" * 32 + "-" + "0" * 16 + "-01",
+            "00-" + "A" * 32 + "-" + "b" * 16 + "-01",
+            TRACEPARENT + "-extra",
+            "Bearer " + "a" * 40,
+            None,
+        ],
+    )
+    def test_a_caller_span_the_platform_would_drop_falls_back_to_the_tool_span(self, monkeypatch, traceparent):
+        monkeypatch.setattr(
+            "timbal.core.mcp._ambient_trace_context", lambda: {"traceparent": traceparent, "tracestate": "k=v"}
+        )
+        meta = meta_of(platform_context())
+        platform_read(meta)
+        assert meta["traceparent"] != traceparent and "tracestate" not in meta
+        assert platform_keeps(meta)["traceparent"] == meta["traceparent"]
+        third = meta_of(platform_context(), server=MCPServer(transport="http", url="https://x.test/mcp", provenance=True))
+        assert "traceparent" not in third and "tracestate" not in third
+
+    def test_a_third_party_gets_pseudonyms_only_of_ids_the_claims_carry(self):
+        context = platform_context()
+        context.parent_id = "not an id"
+        third = meta_of(context, server=MCPServer(transport="http", url="https://x.test/mcp", provenance=True))
+        assert PROVENANCE_PARENT_KEY not in third
+        assert {PROVENANCE_RUN_KEY, PROVENANCE_CALL_KEY, PROVENANCE_SESSION_KEY} <= set(third)
+        assert context.id not in third.values()  # pseudonyms, not our ids
+        assert not {PROVENANCE_APP_KEY, PROVENANCE_REV_KEY, PROVENANCE_PATH_KEY} & set(third)
 
 
 class TestOverTheWire:

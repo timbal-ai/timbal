@@ -1517,11 +1517,15 @@ class MCPServer(ToolSet):
         if self._first_party or self.service == "api":
             claims = {key: _claim_id(value) for key, value in ids.items()}
             claims.update(_platform_claims(run_context, call_id))
-            claims.update(_trace_claims(_ambient_trace_context() or _timbal_trace_context(run_context.id, call_id)))
+            # The caller's span when it is one the platform keeps, else the tool's own.
+            claims.update(
+                _trace_claims(_ambient_trace_context()) or _trace_claims(_timbal_trace_context(run_context.id, call_id))
+            )
         else:
             # A third party that opted in: ids it can correlate among its own calls, but not across servers.
             origin = self._origin()
-            claims = {key: _pseudonym(origin, value) for key, value in ids.items() if isinstance(value, str) and value}
+            # Only ids the claims would carry (``_claim_id``), as for the platform: the same keys either way.
+            claims = {key: _pseudonym(origin, value) for key, value in ids.items() if _claim_id(value) is not None}
             claims.update(_trace_claims(_ambient_trace_context()))
         return {key: value for key, value in claims.items() if value is not None} or None
 

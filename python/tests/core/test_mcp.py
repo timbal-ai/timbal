@@ -304,6 +304,16 @@ def platform_server():
     return server
 
 
+async def until(condition, timeout=30.0):
+    """Wait for ``condition()``. The budget is for a slow machine: one where it never holds fails here."""
+
+    async def poll():
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
 class TestPlatformConnectionPerRun:
     @pytest.fixture
     def platform(self, tmp_path, monkeypatch):
@@ -355,10 +365,11 @@ class TestPlatformConnectionPerRun:
             agent = Agent(name="agent", model=TestModel(handler=self.calls(3, parallel)), tools=[service])
             out = await agent(prompt="go").collect()
             assert out.status.code == "success", out.error
-        await asyncio.sleep(0.2)  # closing happens in the background
-        # tools/list on every step and five tool calls across two runs: one connection each.
+        # tools/list on every step and five tool calls across two runs: one connection each, closed in the
+        # background once its run ended.
         assert len(opened) == 2
-        assert all(server._session is None for server, _ in opened) and not service._run_connections
+        await until(lambda: all(server._session is None for server, _ in opened))
+        assert not service._run_connections
         await service.close()
 
     @pytest.mark.asyncio
@@ -379,9 +390,69 @@ class TestPlatformConnectionPerRun:
 
         out = await Agent(name="agent", model=TestModel(handler=handler), tools=[service])(prompt="go").collect()
         assert out.status.code == "success", out.error
-        await asyncio.sleep(0.2)
         assert [auth for _, auth in opened] == ["Bearer run-a", "Bearer run-a-refreshed"]
-        assert all(server._session is None for server, _ in opened)
+        await until(lambda: all(server._session is None for server, _ in opened))
+        await service.close()
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_run_still_closes_its_connection(self, platform):
+        """The run-end hooks run in ``_stream``'s ``finally``: a run cut while it ends does not leak its connection."""
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        opened, _ = platform
+        service = MCPServer(transport="http", service="api")
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        task = None
+
+        def handler(messages):
+            if any(m.role == "tool" for m in messages):
+                task.cancel()  # lands at the run's next await, after the connection was used
+                return "done"
+            return self.calls(1)(messages)
+
+        agent = Agent(name="agent", model=TestModel(handler=handler), tools=[service])
+        task = asyncio.ensure_future(agent(prompt="go").collect())
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 30)
+        assert len(opened) == 1
+        await until(lambda: opened[0][0]._session is None and not service._run_connections)
+        await service.close()
+
+    @pytest.mark.asyncio
+    async def test_a_run_cut_while_its_end_is_saved_still_closes_its_connection(self, platform):
+        """A cut that lands in the run's last save goes through ``_stream``'s ``except``: the hooks still run."""
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        opened, _ = platform
+        holding, release = asyncio.Event(), asyncio.Event()
+
+        class HoldsTheEnd(InMemoryTracingProvider):
+            @classmethod
+            async def _store(cls, run_context):
+                root = next(s for s in run_context._trace.values() if s.parent_call_id is None)
+                if root.t1 is not None and not holding.is_set():
+                    holding.set()
+                    await release.wait()  # cut here
+                await super()._store(run_context)
+
+        service = MCPServer(transport="http", service="api")
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        agent = Agent(name="agent", model=TestModel(handler=self.calls(1)), tools=[service], tracing_provider=HoldsTheEnd)
+        task = asyncio.ensure_future(agent(prompt="go").collect())
+        await asyncio.wait_for(holding.wait(), 30)
+        assert len(opened) == 1 and service._run_connections  # used, and not idle-closed yet
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 30)
+        assert not service._run_connections  # retired by the end hook, not left to the 60 s idle close
+        await until(lambda: opened[0][0]._session is None)
         await service.close()
 
     @pytest.mark.asyncio
