@@ -4216,6 +4216,44 @@ class TestAStoreThatHangs:
         assert (await store.load("s1")).session_id == "s1"  # started again by the next call
         assert await store.list_ids() == ["s1"]
 
+    async def test_a_call_through_a_moved_link_queues_with_the_file_it_names_now(self, tmp_path):
+        """A store's calls run in the order they were made, on the thread of the file its path names when the
+        call is made. A link moved from one file to another sends the next call to the new file's queue, behind
+        or ahead of that file's other calls as they were made, never to the old file's (busy) thread."""
+        import os
+        import threading
+
+        first_dir, second_dir, link = tmp_path / "first", tmp_path / "second", tmp_path / "link"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        try:
+            os.symlink(first_dir, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("no symbolic links here (Windows without the privilege)")
+        through_link = SqliteChatSessionStore(link / "s.db")
+        first, second = SqliteChatSessionStore(first_dir / "s.db"), SqliteChatSessionStore(second_dir / "s.db")
+        await through_link.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)  # the first file
+        assert await second.load("s1") is None  # the second file, opened
+        link.unlink()
+        os.symlink(second_dir, link, target_is_directory=True)
+        stuck, release = threading.Event(), threading.Event()
+        held = asyncio.ensure_future(first._run(lambda _conn: (stuck.set(), release.wait(30))))
+        try:
+            await asyncio.wait_for(asyncio.to_thread(stuck.wait, 30), 30)  # the first file's thread is busy
+            # Made in this order: tasks start in the order they were created, and each queues its call before
+            # its first await.
+            saved = asyncio.ensure_future(
+                through_link.save(SessionSnapshot(session_id="s2", agent="agent"), expect_version=None)
+            )
+            loaded = asyncio.ensure_future(second.load("s2"))
+            snapshot = await asyncio.wait_for(loaded, 30)
+            assert snapshot is not None and snapshot.session_id == "s2"  # the save went first, in the same queue
+            assert await asyncio.wait_for(saved, 30) == 1
+        finally:
+            release.set()
+        await asyncio.wait_for(held, 30)
+        assert await first.load("s2") is None  # and not into the file the link named before
+
     @pytest.mark.parametrize("ended_by", ["an error", "a cancellation"])
     async def test_a_restore_that_fails_does_not_wait_past_its_lease_to_let_it_go(self, db, ended_by):
         """It lets go of the lease it took, through the store. One that does not answer is waited for only

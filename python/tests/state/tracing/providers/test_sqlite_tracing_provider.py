@@ -760,8 +760,8 @@ class TestPerSpanStorage:
         assert resolves == [str(path)]
 
     def test_a_relative_path_follows_the_working_directory(self, tmp_path, monkeypatch):
-        """A relative path names another file once the working directory changes: the connection, and the
-        session store's thread after the call that finds it, are that file's, as when it was resolved per call."""
+        """A relative path names another file once the working directory changes: the connection and the session
+        store's thread are that file's from the next call on, as when the path was resolved on every call."""
         from pathlib import Path
 
         from timbal.state import chat_store
@@ -777,12 +777,23 @@ class TestPerSpanStorage:
             here / "follows-the-cwd.db"
         )
         monkeypatch.chdir(there)
-        theirs = sqlite_module.database("follows-the-cwd.db")
-        assert theirs is not mine and theirs.names(there / "follows-the-cwd.db")
-        assert sqlite_module.database(here / "follows-the-cwd.db") is mine  # still the other file's
+        # The thread first, before any database() call: it is chosen when a store call is made.
         assert chat_store._store_thread(Path("follows-the-cwd.db")) is chat_store._store_thread(
             there / "follows-the-cwd.db"
         )
+        theirs = sqlite_module.database("follows-the-cwd.db")
+        assert theirs is not mine and theirs.names(there / "follows-the-cwd.db")
+        assert sqlite_module.database(here / "follows-the-cwd.db") is mine  # still the other file's
+
+    def test_a_path_with_a_trailing_slash_keeps_its_connection(self, tmp_path):
+        """SQLite opens ``Path(path)``, which drops a trailing slash; a stat of the path as given fails on it.
+        The file is checked by the name it was opened by, so the one connection is kept."""
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        path = tmp_path / "slash.db"
+        first = sqlite_module.database(f"{path}/")
+        assert sqlite_module.database(f"{path}/") is first
+        assert sqlite_module.database(path) is first
 
     def test_a_path_through_a_moved_link_reaches_the_file_it_names_now(self, tmp_path):
         import os

@@ -120,34 +120,53 @@ def _file_at(path: Path | str) -> tuple[int, int] | None:
     return (found.st_dev, found.st_ino)
 
 
-# Per spelling of a path, as given (relative, through a link, in another case): Path.resolve()'s answer, which
+# Per spelling of a path, as given (relative, through a link, in another case, with a trailing slash): the name
+# SQLite opens it by (``str(Path(spelling))``, which drops that slash) and Path.resolve()'s answer, which
 # database() keys its connection by and chat_store._store_thread() its thread. Resolving reads the file system,
 # a call per component and a stat, and on Windows it opens the file (~250 us); every store and trace call asks
-# for its database. Made once per spelling, and again whenever database() finds that the spelling no longer
-# names the file of the connection that answer keys (the working directory changed under a relative path, a
-# link was moved, the file was deleted): it stats the spelling on every call anyway, which is how it tells a
-# file deleted and written again. Plain data, so a forked child keeps it; thread safe as a dict.
-_RESOLVED: dict[str, str] = {}
+# for its database. Made once per spelling, and again whenever the name no longer names the file of the
+# connection the remembered key has (the working directory changed under a relative path, a link was moved, the
+# file was deleted): one stat per call, which database() made anyway to tell a file deleted and written again.
+# Plain data, so a forked child keeps it; thread safe as a dict.
+_RESOLVED: dict[str, tuple[str, str]] = {}
 _RESOLVED_MAX = 4096  # spellings; past it they are all resolved again
 
 
-def resolved(path: Path | str) -> str:
-    """``str(Path(path).resolve())``: the path :func:`database` keys the connection for ``path`` by.
-
-    Remembered per spelling, without looking at the file system again: a caller that must not get a stale
-    answer (the path came to name another file since) gets it through :func:`database`, which checks it.
-    """
-    spelling = os.fspath(path)
-    known = _RESOLVED.get(spelling)
-    return _resolve(spelling) if known is None else known
-
-
-def _resolve(spelling: str) -> str:
-    found = str(Path(spelling).resolve())
+def _resolve(spelling: str) -> tuple[str, str]:
+    target = Path(spelling)
+    found = (str(target), str(target.resolve()))
     if len(_RESOLVED) >= _RESOLVED_MAX:
         _RESOLVED.clear()
     _RESOLVED[spelling] = found
     return found
+
+
+def _registered(spelling: str, mode: str) -> tuple[str, str, "_Database | None", bool]:
+    """For a spelling of a path: the name SQLite opens it by, the registry key (its resolved path), the
+    connection registered under that key in ``mode`` (None when there is none), and whether the name names that
+    connection's file now, which is the stat a call costs.
+
+    A remembered key is used only while it does. Otherwise the spelling is resolved again, as it was on every call
+    before: whatever it names now is what the caller gets, and a path that came to name another file is never
+    answered with the old file's connection, or the old file's key.
+    """
+    known = _RESOLVED.get(spelling)
+    if known is not None:
+        name, key = known
+        with _DATABASES_LOCK:
+            db = _DATABASES.get((key, mode))
+        if db is not None and db.names(name):
+            return name, key, db, True
+    name, key = _resolve(spelling)
+    with _DATABASES_LOCK:
+        db = _DATABASES.get((key, mode))
+    return name, key, db, db is not None and db.names(name)
+
+
+def resolved(path: Path | str, synchronous: str = "NORMAL") -> str:
+    """``str(Path(path).resolve())``: the path :func:`database` keys the connection for ``path`` by, checked as
+    :func:`database` checks it (a stat, while its ``synchronous`` connection is open; resolved again otherwise)."""
+    return _registered(os.fspath(path), synchronous.upper())[1]
 
 
 _DATABASES: dict[tuple[str, str], _Database] = {}
@@ -244,23 +263,15 @@ def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
     mode = synchronous.upper()
     if mode not in ("NORMAL", "FULL"):
         raise ValueError(f"synchronous must be 'NORMAL' or 'FULL', got {synchronous!r}")
-    spelling = os.fspath(path)
-    known = _RESOLVED.get(spelling)
-    if known is not None:
-        with _DATABASES_LOCK:
-            db = _DATABASES.get((known, mode))
-        # The connection the spelling's remembered resolution keys, while the spelling names its file: the one
-        # stat every call makes (a file deleted and written again is another file). Otherwise resolved again.
-        if db is not None and db.names(spelling):
-            return db
-    key = (_resolve(spelling), mode)
-    with _DATABASES_LOCK:
-        db = _DATABASES.get(key)
-    if db is not None and db.names(spelling):  # not: the file was deleted under us, don't write to the old inode
+    # The connection under the path's key, while the path names its file (a file deleted and written again is
+    # another file: don't write to the old inode).
+    name, resolved_path, db, names_it = _registered(os.fspath(path), mode)
+    if names_it:
         return db
+    key = (resolved_path, mode)
     # Opened outside the registry's lock, which every database of the process goes through: a file that
     # cannot be opened now (a stalled mount) holds up its own callers, not those of every other file.
-    opened = _Database(Path(path), mode)
+    opened = _Database(Path(name), mode)
     with _DATABASES_LOCK:
         ident = opened._file if opened._file is not None else key[0]
         order = _ORDERS.get(ident)
@@ -268,7 +279,7 @@ def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
             order = _ORDERS[ident] = _FileOrder()
         opened.order, opened.writing, opened.writing_lock = order, order.writing, order.lock
         current = _DATABASES.get(key)
-        if current is not None and current is not db and current.names(spelling):
+        if current is not None and current is not db and current.names(name):
             # Another thread opened it meanwhile: one connection per file, theirs. Only while theirs is
             # still to the file at the path: one that went stale since (the file deleted under it) is
             # replaced by this one, as a stale one always is.

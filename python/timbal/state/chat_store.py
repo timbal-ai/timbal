@@ -363,14 +363,14 @@ _STORE_THREADS: dict[str, _StoreThread] = {}
 _STORE_THREADS_LOCK = threading.Lock()
 
 
-def _store_thread(path: Path) -> _StoreThread:
+def _store_thread(path: Path, synchronous: str = "NORMAL") -> _StoreThread:
     from .tracing.providers.sqlite import resolved
 
-    # The key database() opens the file's connection under, remembered per spelling of the path: asked on the
-    # event loop for every call, where resolving again would read the file system each time (it opens the file
-    # on Windows). The call itself goes through database(), which resolves the spelling again once it names
-    # another file than that key's connection, and the calls after it then come here under the new key.
-    key = resolved(path)
+    # The key database() opens the file's connection under, checked as database() checks it: a stat of the path
+    # against that connection's file, instead of resolving the path on every call (it opens the file on
+    # Windows). Checked when the call is made, not when it runs: a path that came to name another file (a link
+    # moved) queues the call with that file's other calls, in the order they were made.
+    key = resolved(path, synchronous)
     with _STORE_THREADS_LOCK:
         thread = _STORE_THREADS.get(key)
         if thread is None:
@@ -418,7 +418,7 @@ class SqliteChatSessionStore(ChatSessionStore):
                 return fn(db.conn)
 
         # On the file's own thread (_StoreThread), never the loop's shared pool.
-        return await _store_thread(self.path).call(locked)
+        return await _store_thread(self.path, self.synchronous).call(locked)
 
     async def load(self, session_id: str) -> SessionSnapshot | None:
         def query(conn):
