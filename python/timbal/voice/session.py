@@ -3463,22 +3463,21 @@ class VoiceSession:
     def _merge_deferred_user_text(self, text: str) -> None:
         """Add ``text`` to the deferred buffer: a refinement replaces, a new fragment is appended.
 
-        Text other than the eager event's own (a typed answer, a confirmed commit) that replaces the buffer
-        as a refinement of it ("Record 5 * 3" over the eager "Record 5 - 3", or "Record 5 - 3 please"
-        restating it) supersedes the eager words: ``TurnResumed`` has nothing left to take back there. A
-        fragment appended after them leaves them the eager event's.
+        Text other than the eager event's own (a typed answer, a confirmed commit) that the buffer becomes
+        (it replaced it: "Record 5 * 3" over the eager "Record 5 - 3", "Record 5 - 3 please"; or it says the
+        same: "Record 150" over the eager "Record 150") is the caller's answer, and the eager words in it are
+        theirs: ``TurnResumed`` has nothing left to take back there, and a turn started on it does not wait
+        on the eager gate. A fragment appended after them leaves them the eager event's.
         """
         prev = self._deferred_user_text
         merged = _merged_deferred(prev, text)
-        if (
-            "deferred" in self._eager_appended
-            and not self._eager_commit
-            and prev
-            and merged != prev
-            and merged == text.strip()
-        ):
+        if "deferred" in self._eager_appended and not self._eager_commit and prev and merged == text.strip():
             self._eager_appended.pop("deferred", None)
             logger.info("flux_eager_superseded", buffer="deferred", text_preview=text[:80])
+            if not self._eager_appended and self._eager_turn_task is None:
+                # Nothing of the eager event is left anywhere: no turn may wait on its gate (EndOfTurn with the
+                # same words still settles it as confirmed, TurnResumed finds nothing to retract).
+                self._settle_eager_gate(confirm=False)
         self._deferred_user_text = merged
 
     def _defer_held_user_speech(self, held: str) -> None:

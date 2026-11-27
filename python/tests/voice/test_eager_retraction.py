@@ -36,7 +36,7 @@ def _recording_session(monkeypatch: pytest.MonkeyPatch, got: list[str]):
     def reply(messages: list) -> Message | str:
         last = messages[-1]
         if last.role == "user":
-            value = last.collect_text().split("Record", 1)[-1].strip(" .")
+            value = last.collect_text().split("Record", 1)[-1].strip(" .:")
             return Message(
                 role="assistant",
                 content=[ToolUseContent(id="call-1", name="record", input={"value": value})],
@@ -96,6 +96,39 @@ class TestACorrectionOfAConfirmedValue:
         session._turn_tool_batch_inflight = 0
         await _until(lambda: got)
         assert got == [value]
+
+    async def test_a_typed_answer_that_starts_its_turn_before_turn_resumed_is_kept(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        got: list[str] = []
+        session = _recording_session(monkeypatch, got)
+        session.hold_timeout_secs = 0.1
+        _protect(session)
+        await session._handle_provider_commit("Record 1250")
+        await session._handle_provider_prediction(_eager("Record 1.250"))
+        session.started_at = 1.0
+        assert await session.submit_user_text("Record: 1.250 kg")
+        session._turn_tool_batch_inflight = 0  # the queued turn starts on the typed answer
+        await _until(lambda: any(e.role == "user" and e.text == "Record: 1.250 kg" for e in session.transcript))
+        await session._handle_provider_prediction(_resumed())
+        await _until(lambda: got)
+        await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+        assert got == ["1.250 kg"]
+        assert [e.text for e in session.transcript if e.role == "user"][-1] == "Record: 1.250 kg"
+
+    async def test_a_typed_answer_that_repeats_the_prediction_is_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        got: list[str] = []
+        session = _recording_session(monkeypatch, got)
+        _protect(session)
+        await session._handle_provider_commit("Record 100")
+        await session._handle_provider_prediction(_eager("Record 150"))
+        session.started_at = 1.0
+        assert await session.submit_user_text("Record 150")
+        await session._handle_provider_prediction(_resumed())  # before the protected tool ends
+        assert session._deferred_user_text == "Record 150"
+        session._turn_tool_batch_inflight = 0
+        await _until(lambda: got)
+        assert got == ["150"]
 
 
 class TestARefinementThatRewritesAConfirmedWord:
