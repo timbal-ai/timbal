@@ -167,6 +167,11 @@ async def _relay_until(agen: Any, deadline: float, path: str, timeout: float) ->
             raise RunTimeout(path, timeout)
 
 
+def _left_of(deadline: float | None) -> float | None:
+    """Seconds left before ``deadline`` (a loop time), 0 once it has passed; None for no deadline."""
+    return None if deadline is None else max(0.0, deadline - asyncio.get_running_loop().time())
+
+
 async def _await_until(awaitable: Coroutine[Any, Any, Any], deadline: float, path: str, timeout: float) -> Any:
     """Await ``awaitable`` under ``deadline``; ``RunTimeout`` once it has passed.
 
@@ -2403,6 +2408,8 @@ class Runnable(ABC, BaseModel):
         # first so finally closes *this* object, not the child's.
         emit_sink = None
         spawned_background = False
+        # The foreground deadline, once the handler's budget starts (below); the end hooks get what is left of it.
+        deadline: float | None = None
         # Installed last, with nothing that can raise before the ``try`` whose ``finally`` takes them
         # back off: a call that fails while it is being set up leaves neither on the context.
         previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
@@ -2974,7 +2981,7 @@ class Runnable(ABC, BaseModel):
                     if _new_parent_call_id is None:
                         if run_context._end_hooks:
                             with contextlib.suppress(BaseException):
-                                await run_context._run_end_hooks(_new_call_id)
+                                await run_context._run_end_hooks(_new_call_id, _left_of(deadline))
                         else:
                             run_context.__dict__["_end_hooks"] = ()
                     set_parent_call_id(_parent_call_id)
@@ -3015,7 +3022,8 @@ class Runnable(ABC, BaseModel):
                     # finally, also when a cut ends the wait. Every finished root closes registration, hooks or
                     # not: one added later would never run.
                     if run_context._end_hooks:
-                        await run_context._run_end_hooks(_new_call_id)
+                        # Within what is left of the runnable's timeout (none left: not waited for at all).
+                        await run_context._run_end_hooks(_new_call_id, _left_of(deadline))
                     else:
                         run_context.__dict__["_end_hooks"] = ()
             finally:

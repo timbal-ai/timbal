@@ -946,20 +946,21 @@ class RunContext(BaseModel):
         hooks.append(hook)
         return True
 
-    async def _run_end_hooks(self, call_id: str | None = None) -> None:
+    async def _run_end_hooks(self, call_id: str | None = None, timeout: float | None = None) -> None:
         """Run the end hooks (``on_end``) in this run's own context, ``call_id`` being its root call's, whichever
-        task ends it: a stream another task closes runs this in that task. That task's context is put back after."""
+        task ends it: a stream another task closes runs this in that task. That task's context is put back after.
+        ``timeout``: how long the run waits for them (what is left of its root's timeout), None for no bound."""
         from . import _call_id, _parent_call_id, _run_context_var
 
         tokens = (_run_context_var.set(self), _call_id.set(call_id), _parent_call_id.set(None))
         try:
-            await self._call_end_hooks()
+            await self._call_end_hooks(timeout)
         finally:
             _parent_call_id.reset(tokens[2])
             _call_id.reset(tokens[1])
             _run_context_var.reset(tokens[0])
 
-    async def _call_end_hooks(self) -> None:
+    async def _call_end_hooks(self, timeout: float | None = None) -> None:
         # () from here on: falsy for the check in Runnable._stream, and on_end refuses new hooks.
         hooks = self._end_hooks
         self.__dict__["_end_hooks"] = ()
@@ -975,12 +976,13 @@ class RunContext(BaseModel):
                 waits.append(result)
         if not waits:
             return
-        # Every hook is called before any is waited for, and the waits are shielded: a cut while waiting (the
-        # run cancelled as it ends) ends the wait, never a hook's work, and no hook is left uncalled.
+        # Every hook is called before any is waited for, and the wait never cuts them: a cut while waiting (the
+        # run cancelled as it ends), or ``timeout`` passing (the run's deadline), ends the wait, never a hook's work,
+        # and no hook is left uncalled. wait(), not wait_for() nor a bare await, which would cancel them.
         # Each in a task first: gather hashes what it is given, and an awaitable a hook returns need not be hashable.
         waiting = asyncio.gather(*(asyncio.ensure_future(_awaited(w)) for w in waits), return_exceptions=True)
         waiting.add_done_callback(self._log_end_hook_failures)
-        await asyncio.shield(waiting)
+        await asyncio.wait({waiting}, timeout=timeout)
 
     def _log_end_hook_failures(self, waiting: "asyncio.Future[list[Any]]") -> None:
         if waiting.cancelled():

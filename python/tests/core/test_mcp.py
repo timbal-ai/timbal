@@ -762,6 +762,46 @@ class TestPlatformConnectionPerRun:
         await until(lambda: opened[0][0]._session is None)
         await asyncio.wait_for(service.close(), 10)
 
+    @pytest.mark.asyncio
+    async def test_a_runnable_out_of_time_does_not_wait_for_its_close(self, monkeypatch):
+        """A root Tool with a 200 ms timeout used the platform connection, then ran past its budget: its timeout result
+        comes back at once, the close going on behind it. A call's own close ran inside the budget before connections
+        were per run; a fresh 10 s wait at the run's end after the budget had run out broke that."""
+        from timbal.core.tool import Tool
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        closing, release = asyncio.Event(), asyncio.Event()
+
+        class SlowTeardown:
+            async def close(self):
+                closing.set()
+                await release.wait()
+
+        monkeypatch.setattr(
+            "timbal.platform.utils._resolve_url_and_headers",
+            lambda *_: ("https://api.example.test/mcp", {"Authorization": "Bearer run-a"}),
+        )
+        monkeypatch.setattr(MCPServer, "_new_project_server", lambda _self, _url, _headers: SlowTeardown())
+        service = MCPServer(transport="http", service="api")
+
+        async def handler():
+            async with service._project_connection():
+                pass  # the run's connection: opened, and kept for the run's next call
+            await asyncio.Event().wait()  # then the tool runs past its timeout
+
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        try:
+            out = await asyncio.wait_for(Tool(name="slow", handler=handler, timeout=0.2)().collect(), 5)
+            assert out.status.code == "timeout"
+            await until(closing.is_set)
+            assert service._close_tasks  # still closing, behind the result
+        finally:
+            release.set()
+        await until(lambda: not service._close_tasks)
+        await asyncio.wait_for(service.close(), 10)
+
 
 class TestPlatformConnectionLifetime:
     def test_close_says_so_when_a_connection_belongs_to_a_paused_loop(self):
@@ -2149,6 +2189,107 @@ class TestCrossLoopClose:
             assert not service._unclosed
         finally:
             stop()
+
+    def test_a_busy_owner_loop_does_not_hold_the_run_end_past_its_bound(self, monkeypatch):
+        """The run's stream is closed from another loop while the run's loop is busy in a callback that does not yield:
+        the end hook waits for the cleanup it hands over at most ``_RUN_END_CLOSE_S``, counted on the calling loop
+        (the bound kept on the owner's loop has not started). The cleanup stays queued and runs once that loop is
+        free."""
+        import threading
+
+        from timbal.core import mcp as mcp_module
+        from timbal.core.mcp import _RunConnection
+
+        closed = []
+
+        class Server:
+            async def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(mcp_module, "_RUN_END_CLOSE_S", 0.2)
+        owner_loop, stop = self.owner_thread()
+        service = MCPServer(transport="http", service="api")
+        busy, free = threading.Event(), threading.Event()
+        try:
+            service._run_connections["run"] = _RunConnection(Server(), "fingerprint", owner_loop)
+            service._run_hooked["run"] = owner_loop
+
+            def hold():  # a callback that does not yield
+                busy.set()
+                free.wait(30)
+
+            owner_loop.call_soon_threadsafe(hold)
+            assert busy.wait(10)
+
+            async def end_the_run():  # the run's end hook, on the loop that closed its stream
+                waiting = service._run_ended("run")
+                if waiting is not None:
+                    await waiting
+
+            asyncio.run(asyncio.wait_for(end_the_run(), 5))  # back within its bound
+            assert closed == [] and service._run_connections["run"].ended  # queued there, not done yet
+            free.set()
+            asyncio.run(until(lambda: closed == [True] and not service._run_connections))  # done there once free
+        finally:
+            free.set()
+            stop()
+
+    def test_two_closes_on_two_threads_take_a_closed_loops_connection_once(self):
+        """close() on two threads both find a connection whose loop has closed: one takes it out of the pool and the
+        other finds it gone, instead of passing the check too and failing on the delete (``KeyError``, which ended
+        its cleanup)."""
+        import threading
+
+        from timbal.core.mcp import _RunConnection
+
+        class Server:
+            async def close(self):
+                pass
+
+        class ObservedLock:
+            """The pool lock, saying when a second taker waits on it."""
+
+            def __init__(self):
+                self.lock, self.waited = threading.Lock(), threading.Event()
+
+            def __enter__(self):
+                if not self.lock.acquire(blocking=False):
+                    self.waited.set()
+                    self.lock.acquire()
+                return self
+
+            def __exit__(self, *_):
+                self.lock.release()
+
+        gone = asyncio.new_event_loop()
+        gone.close()
+        service = MCPServer(transport="http", service="api")
+        lock, results, armed, others = ObservedLock(), [], [True], []
+
+        def close_here():
+            try:
+                asyncio.run(asyncio.wait_for(service.close(), 10))
+                results.append(None)
+            except BaseException as error:
+                results.append(error)
+
+        class Pool(dict):
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                if armed and threading.current_thread() is threading.main_thread():
+                    armed.clear()  # this close() has looked; the other one, on its own thread, goes now
+                    others.append(threading.Thread(target=close_here))
+                    others[0].start()
+                    for _ in range(1000):  # until it is done, or waits on the lock this close() holds
+                        if not others[0].is_alive() or lock.waited.wait(0.01):
+                            break
+                return value
+
+        service.__pydantic_private__["_run_connections"] = Pool(run=_RunConnection(Server(), "fingerprint", gone))
+        service.__pydantic_private__["_pool_lock"] = lock
+        close_here()
+        others[0].join(10)
+        assert results == [None, None] and not service._run_connections
 
 
 class TestPlatformConnectionOutsideARun:

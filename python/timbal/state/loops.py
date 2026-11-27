@@ -23,13 +23,19 @@ def hand_to(owner: asyncio.AbstractEventLoop, coroutine: Any) -> "concurrent.fut
         return None
 
 
-async def wait_on_owner(handed: "concurrent.futures.Future[Any]", owner: asyncio.AbstractEventLoop) -> bool:
-    """Wait for work handed to ``owner`` while ``owner`` runs. False when it stops before the work is done (the work
-    goes on once it runs again): a wait for a paused loop would never end. True means only that it is done: whether
-    it succeeded, was cancelled there or raised is the future's."""
+async def wait_on_owner(
+    handed: "concurrent.futures.Future[Any]", owner: asyncio.AbstractEventLoop, timeout: float | None = None
+) -> bool:
+    """Wait for work handed to ``owner`` while ``owner`` runs, for at most ``timeout`` seconds, kept on the waiting
+    loop: a loop that runs but is busy (a callback that does not yield) may not even start the work. False when it
+    stops before the work is done, or the time is up (the work goes on there): a wait for a paused loop would never
+    end. True means only that it is done: whether it succeeded, was cancelled there or raised is the future's."""
+    end = None if timeout is None else asyncio.get_running_loop().time() + timeout
     while not handed.done():
         if owner.is_closed() or not owner.is_running():
             return handed.done()
+        if end is not None and asyncio.get_running_loop().time() >= end:
+            return False
         await asyncio.sleep(POLL_S)
     return True
 

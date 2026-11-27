@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import string
+import threading
 import types
 import unicodedata
 import weakref
@@ -985,6 +986,9 @@ class MCPServer(ToolSet):
     _inflight_seq: int = PrivateAttr(default=0)
     # service="api": a run's root call id -> that run's platform connection (see _project_connection).
     _run_connections: dict[str, "_RunConnection"] = PrivateAttr(default_factory=dict)
+    # Taken around a pool insert and a remove-if-still-this-one (_unpool): close() on two threads may both find one
+    # connection to remove, and neither may remove a replacement put in meanwhile.
+    _pool_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # Closes of run connections still going (``close()`` waits for them), and those of each run's (its end waits).
     _close_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
     _run_closes: dict[str, set[asyncio.Task]] = PrivateAttr(default_factory=dict)
@@ -1097,9 +1101,9 @@ class MCPServer(ToolSet):
             self._retire_run_connection(key)
             entry = None
         if entry is None:
-            entry = self._run_connections[key] = _RunConnection(
-                self._new_project_server(url, headers), fingerprint, asyncio.get_running_loop()
-            )
+            entry = _RunConnection(self._new_project_server(url, headers), fingerprint, asyncio.get_running_loop())
+            with self._pool_lock:
+                self._run_connections[key] = entry
             # Refused once the run's root has ended (a background child's call): the idle close closes it then.
             if key not in self._run_hooked and run_context.on_end(functools.partial(self._run_ended, key)):
                 self._run_hooked[key] = entry.loop
@@ -1150,8 +1154,7 @@ class MCPServer(ToolSet):
             return handed.result()
         if owner.is_closed():  # closed meanwhile, before or after the handoff: its sessions went with it
             for key, entry in entries:
-                if self._run_connections.get(key) is entry:
-                    del self._run_connections[key]
+                self._unpool(key, entry)
             for ident, (_, entry) in list(self._unclosed.items()):  # its cut ones too, credential headers included
                 if entry.loop is owner:
                     self._unclosed.pop(ident, None)
@@ -1222,7 +1225,9 @@ class MCPServer(ToolSet):
 
     async def _end_run_elsewhere(self, key: str, owner: asyncio.AbstractEventLoop) -> None:
         handed = _hand_to(owner, self._end_run_on_owner(key))
-        finished = handed is not None and await _wait_on_owner(handed, owner)
+        # Bounded here, on the calling loop: a busy owner loop (a callback that does not yield) has not started the
+        # work, nor the bound the work keeps there. Past it the work stays queued for the owner, which still does it.
+        finished = handed is not None and await _wait_on_owner(handed, owner, _RUN_END_CLOSE_S)
         if finished and _succeeded(handed):
             return
         if owner.is_closed():  # closed meanwhile, before or after the handoff: it took the run's sessions with it
@@ -1234,6 +1239,10 @@ class MCPServer(ToolSet):
         if finished:  # cancelled or failed there: the close never happened
             cause = "cancelled" if handed.cancelled() else repr(handed.exception())
             logger.warning(_HANDOFF_FAILED_WARNING, server=self._label, error=cause)
+        elif owner.is_running():  # the time is up, the owner busy: the close is queued there
+            logger.warning(
+                "MCP run connection close still running at the run's end", server=self._label, seconds=_RUN_END_CLOSE_S
+            )
         else:
             logger.warning(_PAUSED_LOOP_WARNING, server=self._label)
 
@@ -1256,13 +1265,11 @@ class MCPServer(ToolSet):
     def _retire_run_connection(self, key: str, entry: "_RunConnection | None" = None) -> asyncio.Task | None:
         """Forget a run's connection and, if nothing uses it, start closing it (``close()`` waits for the close;
         a caller that can wait gets the task). One still in use is closed by its last user."""
-        current = self._run_connections.get(key)
         if entry is None:
-            entry = current
+            entry = self._run_connections.get(key)
         if entry is None:
             return None
-        if current is entry:
-            del self._run_connections[key]
+        self._unpool(key, entry)
         entry.cancel_idle()
         if entry.users:
             entry.ended = True
@@ -1274,6 +1281,16 @@ class MCPServer(ToolSet):
             task.add_done_callback(functools.partial(self._close_done, key, entry))
             task.add_done_callback(_log_close_failure)
         return entry.close_task
+
+    def _unpool(self, key: str, entry: "_RunConnection") -> bool:
+        """Take ``entry`` out of the pool if it is still the one under ``key``. Atomic: close() on another thread
+        doing the same cannot pass the check too and then fail on the delete, and a replacement put in meanwhile
+        (a pool insert takes the same lock) is never the one removed."""
+        with self._pool_lock:
+            if self._run_connections.get(key) is not entry:
+                return False
+            del self._run_connections[key]
+            return True
 
     def _drop_run(self, key: str) -> None:
         """Forget everything of the run ``key`` (its loop closed, taking its sessions): its connection, its closes,
@@ -2235,8 +2252,7 @@ class MCPServer(ToolSet):
         for key, entry in list(self._run_connections.items()):
             owner = entry.loop or loop
             if owner.is_closed():
-                if self._run_connections.get(key) is entry:
-                    del self._run_connections[key]
+                self._unpool(key, entry)  # (another close() on another thread may be taking it too)
                 continue
             if owner is not loop and not owner.is_running():
                 left.paused += 1
