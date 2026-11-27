@@ -388,3 +388,59 @@ class TestThousandsSeparators:
         assert _without_spoken_words("I want room 1,000 now", "room 1000") == "I want now"
         # A decimal point is not a thousands separator.
         assert not transcripts_equivalent("order 150", "order 1.50")
+
+
+class TestRetractionAndHoldEnd:
+    async def test_a_heard_reply_keeps_its_row_and_its_prefix_is_not_held_again(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Part of the reply was heard: it stays with its request, and the words before the eager ones are in
+        that row already, so holding them again would repeat them in the next turn."""
+        from timbal.voice import TranscriptEntry
+
+        ran: list[str] = []
+        session = _flux_session(monkeypatch, ran)
+        session.turn_detector.hold_unfinished_secs = 5.0
+        await session._handle_provider_commit("I want to")
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="cancel my booking.", confidence=0.9)
+        )
+        await _until(lambda: any(key.startswith("start:") for key in session._turn_tool_call_ids))
+        # What the caller heard of the reply before its tool (the interrupt's truncation writes the same).
+        session._transcript.append(TranscriptEntry(role="assistant", text="Let me check that."))
+        await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
+        assert [e.text for e in session.transcript if e.role == "user"] == ["I want to cancel my booking."]
+        assert session._held_user_text is None
+        assert ran == []
+
+    async def test_the_hold_stays_until_a_running_flush_has_drained(self) -> None:
+        from timbal.voice import VoiceSession
+
+        from .test_session import MockSTT, MockTTS
+
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector="heuristic")
+        hold = AudioHold()
+        session._audio_hold = hold
+        await session._deliver_pcm(b"AA", ["", 0], turnless=False)
+        gate = asyncio.Event()
+        played: list[bytes] = []
+        original = session._emit_pcm
+
+        async def slow_emit(chunk: bytes, rec: list, *, turnless: bool) -> None:
+            played.append(chunk)
+            await gate.wait()  # the confirmation's flush is still draining
+            await original(chunk, rec, turnless=turnless)
+
+        session._emit_pcm = slow_emit  # type: ignore[method-assign]
+        hold.release()
+        flush = asyncio.create_task(session._flush_audio_hold())
+        await _until(lambda: hold.flushing)
+        end = asyncio.create_task(session._settle_audio_hold_at_turn_end())
+        await asyncio.sleep(0)
+        assert session._audio_hold is hold  # not dropped while the flush drains
+        await session._deliver_pcm(b"BB", ["", 0], turnless=False)  # synthesis goes on: it queues behind
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(flush, end), 3.0)
+        assert played == [b"AA", b"BB"]
+        assert session._audio_hold is None

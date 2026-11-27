@@ -2327,9 +2327,10 @@ class VoiceSession:
 
         Takes them back wherever they are, and only there:
 
-        * a turn started on them (alone, or merged with a held fragment or a deferred prefix): that turn is
-          interrupted, its transcript row and its memory entry are retracted, and the words it carried
-          before the eager ones go back on hold, so the caller's final transcript joins them again;
+        * a turn started on them (alone, or merged with a held fragment or a deferred prefix), still the
+          latest: it is interrupted if it still runs. While none of its reply reached the caller, its row and
+          memory entry are retracted and the words it carried before the eager ones go back on hold, so the
+          caller's final transcript joins them again; a reply they heard keeps the row, as said;
         * a hold keeps them: they leave the held text (the hold and its timer go if nothing else is left);
         * they wait behind a protected tool (deferred): they leave the deferred text, and the turn that owns
           the tool is not touched.
@@ -2355,17 +2356,24 @@ class VoiceSession:
                 self._cancel_hold()
                 self._held_user_text = None
                 self._hold_armed_timeout_secs = None
-        if turn is None or turn.done() or turn is not self._current_turn_task:
-            return  # no turn of these words runs now: nothing to interrupt
+        if turn is None or turn is not self._current_turn_task:
+            return  # the words started no turn, or a later turn has taken over: nothing of theirs to retract
         timeout = self._hold_armed_timeout_secs or self.hold_timeout_secs
-        await self.interrupt()
-        if row is not None and self._transcript and self._transcript[-1] is row:
-            self._transcript.pop()
-            await self._emit(TranscriptCommitted(text="", replace=True))
-            await self._align_continue_memory(fragment_user_text=row.text)
+        if not turn.done():
+            await self.interrupt()
+        # Retracted only while nothing of its reply reached the caller: the row is still the last line. A reply
+        # they heard (in full, or what the interrupt's truncation kept) stays on screen and in memory with the
+        # request it answered, so the history says what the call said.
+        if row is None or not self._transcript or self._transcript[-1] is not row:
+            if row is not None:
+                logger.info("flux_eager_cancel_kept", reason="reply_heard", text_preview=row.text[:80])
+            return
+        self._transcript.pop()
+        await self._emit(TranscriptCommitted(text="", replace=True))
+        await self._align_continue_memory(fragment_user_text=row.text)
         if prefix and not self._closed:
             # What the caller said before the eager words is still theirs: held again, so the final transcript
-            # (or the hold's own timeout) makes the turn.
+            # (or the hold's own timeout) makes the turn. Only with the row gone: a kept row already says it.
             await self._arm_hold(prefix, timeout)
 
     async def _handle_provider_prediction(self, event: TranscriptEvent) -> None:
@@ -3520,6 +3528,23 @@ class VoiceSession:
         record[1] += len(chunk)
         await self._emit(AudioOutput(data=chunk))
         self.playback.on_audio_emitted(len(chunk))
+
+    async def _settle_audio_hold_at_turn_end(self) -> None:
+        """At a turn's end: confirmed audio still queued plays (after a flush in progress, the one confirmation
+        started), a cut turn's is dropped, and the hold goes only once it is drained or discarded. Dropping it
+        earlier would let later chunks emit directly, ahead of the queued ones."""
+        hold = self._audio_hold
+        if hold is None:
+            return
+        if hold.released and not hold.discarded and not hold.drained:
+            if self._cancel_turn.is_set():
+                hold.discard()  # a cut turn: its queued audio never plays
+            else:
+                while hold.flushing:
+                    await asyncio.sleep(0.01)
+                await self._flush_audio_hold()
+        if self._audio_hold is hold and (hold.discarded or hold.drained):
+            self._audio_hold = None
 
     async def _flush_audio_hold(self) -> None:
         hold = self._audio_hold
@@ -4975,19 +5000,7 @@ class VoiceSession:
                 self._active_turn_user_text = ""
                 self._turn_speculative = False
                 self._drop_speculative_context = False
-                hold = self._audio_hold
-                if (
-                    hold is not None
-                    and hold.released
-                    and not hold.drained
-                    and not hold.flushing
-                    and not hold.discarded
-                    and not self._cancel_turn.is_set()
-                ):
-                    # Confirmed audio still queued (nothing flushed it after the last chunk): out before the hold goes.
-                    await self._flush_audio_hold()
-                if hold is not None and (hold.discarded or hold.released):
-                    self._audio_hold = None
+                await self._settle_audio_hold_at_turn_end()
                 self._turn_is_event = False
                 self._turn_asked_caller = False
                 ran, self._turn_run_context = self._turn_run_context, None
