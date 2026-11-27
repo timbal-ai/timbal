@@ -2974,7 +2974,7 @@ class Runnable(ABC, BaseModel):
                     if _new_parent_call_id is None:
                         if run_context._end_hooks:
                             with contextlib.suppress(BaseException):
-                                await run_context._run_end_hooks()
+                                await run_context._run_end_hooks(_new_call_id)
                         else:
                             run_context.__dict__["_end_hooks"] = ()
                     set_parent_call_id(_parent_call_id)
@@ -3015,7 +3015,7 @@ class Runnable(ABC, BaseModel):
                     # finally, also when a cut ends the wait. Every finished root closes registration, hooks or
                     # not: one added later would never run.
                     if run_context._end_hooks:
-                        await run_context._run_end_hooks()
+                        await run_context._run_end_hooks(_new_call_id)
                     else:
                         run_context.__dict__["_end_hooks"] = ()
             finally:

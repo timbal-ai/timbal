@@ -684,6 +684,70 @@ class TestPlatformConnectionPerRun:
         assert len(opened) == 1 and opened[0][0]._session is None and not service._run_connections
 
 
+class TestPlatformConnectionLifetime:
+    def test_close_says_so_when_a_connection_belongs_to_a_paused_loop(self):
+        """An ``asyncio.Runner`` between two ``run()`` calls owns the session: ``close()`` from another loop cannot
+        close it there and says so instead of waiting; ``close()`` on that loop closes it."""
+        from timbal.core.mcp import _RunConnection
+
+        closed = []
+
+        class Fake:
+            async def close(self):
+                closed.append(True)
+
+        service = MCPServer(transport="http", service="api")
+        with asyncio.Runner() as runner:
+            service._run_connections["run"] = _RunConnection(Fake(), "fingerprint", runner.get_loop())
+            with pytest.raises(RuntimeError, match="not running"):
+                asyncio.run(asyncio.wait_for(service.close(), 10))
+            assert closed == [] and "run" in service._run_connections
+            runner.run(service.close())
+        assert closed == [True] and not service._run_connections
+
+    @pytest.mark.asyncio
+    async def test_connections_let_go_of_are_not_kept_alive_by_the_run(self, monkeypatch):
+        """One end hook per run, which finds the connection at the run's end: the hooks keep no server (with its
+        credential headers) that a credential change or close() already let go of."""
+        import gc
+        import weakref
+
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+
+        refs, credential = [], {"n": 0}
+
+        class Fake:
+            async def close(self):
+                pass
+
+        def new(_self, _url, _headers):
+            server = Fake()
+            refs.append(weakref.ref(server))
+            return server
+
+        monkeypatch.setattr(
+            "timbal.platform.utils._resolve_url_and_headers",
+            lambda *_: ("https://api.example.test/mcp", {"Authorization": f"Bearer {credential['n']}"}),
+        )
+        monkeypatch.setattr(MCPServer, "_new_project_server", new)
+        monkeypatch.setattr("timbal.core.mcp._run_connection_key", lambda _context: "run")
+        context = RunContext()
+        set_run_context(context)
+        service = MCPServer(transport="http", service="api")
+        try:
+            for n in range(5):
+                credential["n"] = n  # a refreshed credential: a new connection each time
+                async with service._project_connection():
+                    pass
+            await service.close()
+            gc.collect()
+            assert len(refs) == 5 and [ref() for ref in refs] == [None] * 5
+            assert len(context._end_hooks) == 1
+        finally:
+            set_run_context(None)
+
+
 class TestPlatformConnectionOutsideARun:
     """With the real resolver, which creates and sets a run context when there is none."""
 

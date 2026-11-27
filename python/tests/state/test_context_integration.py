@@ -1958,6 +1958,37 @@ class TestRunEndHooks:
         assert out.status.code == "success", out.error
         assert ran == ["cleanup"]
 
+    async def test_a_stream_closed_by_another_task_runs_its_hooks_in_its_own_context(self):
+        """One task reads the first delta, another closes the stream: the hooks still see the run's context and
+        root call id, and the closing task keeps its own."""
+        seen = {}
+
+        async def streamer():
+            context = get_run_context()
+            seen["run"] = context
+            context.on_end(lambda: seen.update(hook=(get_run_context(), get_call_id())))
+            yield "first"
+            await asyncio.Event().wait()
+            yield "never"
+
+        stream = Tool(name="streamer", handler=streamer)._stream()
+
+        async def read_first():
+            async for event in stream:
+                if event.type == "DELTA":
+                    return
+
+        async def close_it():
+            await stream.aclose()
+            return (get_run_context(), get_call_id())
+
+        await asyncio.wait_for(asyncio.ensure_future(read_first()), 30)
+        closer_after = await asyncio.wait_for(asyncio.ensure_future(close_it()), 30)
+        hook_context, hook_call_id = seen["hook"]
+        assert hook_context is seen["run"]
+        assert hook_call_id == seen["run"].root_span().call_id
+        assert closer_after == (None, None)
+
     async def test_they_run_once_when_the_root_ends_and_none_is_kept_after(self):
         from timbal import Agent
         from timbal.core.test_model import TestModel

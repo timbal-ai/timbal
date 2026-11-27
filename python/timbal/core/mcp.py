@@ -494,6 +494,12 @@ def _log_close_failure(task: asyncio.Task) -> None:
         logger.warning("MCP run connection close failed", error=str(task.exception()))
 
 
+async def _wait_all_closed(tasks: set[asyncio.Task]) -> None:
+    """``_wait_closed`` for several closes at once."""
+    with contextlib.suppress(Exception):
+        await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
+
+
 async def _wait_closed(task: asyncio.Task) -> None:
     """Wait for a connection's close; a cut ends the wait, not the close, and a failed close (logged by
     ``_log_close_failure``) does not fail the run or the call that waited."""
@@ -859,8 +865,12 @@ class MCPServer(ToolSet):
     _inflight_seq: int = PrivateAttr(default=0)
     # service="api": a run's root call id -> that run's platform connection (see _project_connection).
     _run_connections: dict[str, "_RunConnection"] = PrivateAttr(default_factory=dict)
-    # Closes of run connections still going (``close()`` waits for them).
+    # Closes of run connections still going (``close()`` waits for them), and those of each run's (its end waits).
     _close_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
+    _run_closes: dict[str, set[asyncio.Task]] = PrivateAttr(default_factory=dict)
+    # Runs whose end hook is registered: one per run, which finds the run's connection when the run ends, so a
+    # connection let go of earlier (a credential change, close()) is not kept alive by its hook.
+    _run_hooked: set[str] = PrivateAttr(default_factory=set)
 
     def _provider_identity(self) -> tuple:
         # Its name, where it is reached and who it is reached as (headers, env, auth: two tenants of one endpoint are
@@ -962,7 +972,8 @@ class MCPServer(ToolSet):
                 self._new_project_server(url, headers), fingerprint, asyncio.get_running_loop()
             )
             # Refused once the run's root has ended (a background child's call): the idle close closes it then.
-            run_context.on_end(functools.partial(self._run_connection_ended, key, entry))
+            if key not in self._run_hooked and run_context.on_end(functools.partial(self._run_ended, key)):
+                self._run_hooked.add(key)
         entry.users += 1
         entry.cancel_idle()
         try:
@@ -990,13 +1001,18 @@ class MCPServer(ToolSet):
         if closing:
             await asyncio.gather(*closing, return_exceptions=True)
 
-    def _run_connection_ended(self, key: str, entry: "_RunConnection") -> Awaitable[None] | None:
-        """The run's end hook: the connection is closed before the run returns (a loop that ends with the run, as
-        under ``asyncio.run``, would cancel a close left to the background). One still in use is closed by its
-        last user."""
-        entry.ended = True
-        task = self._retire_run_connection(key, entry)
-        return _wait_closed(task) if task is not None else None
+    def _run_ended(self, key: str) -> Awaitable[None] | None:
+        """The run's end hook (one per run): its connection is let go of, and the run waits for every close of its
+        connections still going, earlier ones included, so they are closed before the run returns (a loop that
+        ends with the run, as under ``asyncio.run``, would cancel a close left to the background). One still in
+        use is closed by its last user."""
+        self._run_hooked.discard(key)
+        entry = self._run_connections.get(key)
+        if entry is not None:
+            entry.ended = True
+            self._retire_run_connection(key, entry)
+        closes = self._run_closes.pop(key, None)
+        return _wait_all_closed(closes) if closes else None
 
     def _retire_run_connection(self, key: str, entry: "_RunConnection | None" = None) -> asyncio.Task | None:
         """Forget a run's connection and, if nothing uses it, start closing it (``close()`` waits for the close;
@@ -1015,9 +1031,18 @@ class MCPServer(ToolSet):
         if entry.close_task is None:
             entry.close_task = task = asyncio.get_running_loop().create_task(entry.server.close())
             self._close_tasks.add(task)
-            task.add_done_callback(self._close_tasks.discard)
+            self._run_closes.setdefault(key, set()).add(task)
+            task.add_done_callback(functools.partial(self._close_done, key))
             task.add_done_callback(_log_close_failure)
         return entry.close_task
+
+    def _close_done(self, key: str, task: asyncio.Task) -> None:
+        self._close_tasks.discard(task)
+        closes = self._run_closes.get(key)
+        if closes is not None:
+            closes.discard(task)
+            if not closes:
+                del self._run_closes[key]
 
     # ------------------------------------------------------------------ session
 
@@ -1759,20 +1784,26 @@ class MCPServer(ToolSet):
         # own connection was (a call in flight is not cut). Then every close still going, earlier ones included.
         # Each on the loop that owns its session (a close() run through asyncio.run elsewhere would hang on it);
         # one whose loop has closed went with it.
+        # One whose loop is not running now (an asyncio.Runner between two run() calls) cannot be closed from here:
+        # it stays, close() says so once it has closed the rest, and a close() on that loop closes it.
         loop = asyncio.get_running_loop()
         by_loop: dict[asyncio.AbstractEventLoop, list[tuple[str, _RunConnection]]] = {}
+        paused = 0
         for key, entry in list(self._run_connections.items()):
             owner = entry.loop or loop
             if owner.is_closed():
                 if self._run_connections.get(key) is entry:
                     del self._run_connections[key]
                 continue
+            if owner is not loop and not owner.is_running():
+                paused += 1
+                continue
             by_loop.setdefault(owner, []).append((key, entry))
         for task in list(self._close_tasks):
             owner = task.get_loop()
             if owner.is_closed():
                 self._close_tasks.discard(task)
-            else:
+            elif owner is loop or owner.is_running():
                 by_loop.setdefault(owner, [])
         waits = []
         for owner, entries in by_loop.items():
@@ -1794,6 +1825,12 @@ class MCPServer(ToolSet):
             self._tools_cache_run_id = None
             self._tools_stale = False
             self._inflight.clear()
+        if paused:
+            raise RuntimeError(
+                f"MCP server {self._label!r}: {paused} platform connection(s) belong to an event loop that is not "
+                "running, so they cannot be closed from this one. Call close() on that loop (for example "
+                "runner.run(server.close()) for an asyncio.Runner) to close them."
+            )
 
     def __del__(self):
         session = getattr(self, "_session", None)

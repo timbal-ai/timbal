@@ -921,7 +921,20 @@ class RunContext(BaseModel):
         hooks.append(hook)
         return True
 
-    async def _run_end_hooks(self) -> None:
+    async def _run_end_hooks(self, call_id: str | None = None) -> None:
+        """Run the end hooks (``on_end``) in this run's own context, ``call_id`` being its root call's, whichever
+        task ends it: a stream another task closes runs this in that task. That task's context is put back after."""
+        from . import _call_id, _parent_call_id, _run_context_var
+
+        tokens = (_run_context_var.set(self), _call_id.set(call_id), _parent_call_id.set(None))
+        try:
+            await self._call_end_hooks()
+        finally:
+            _parent_call_id.reset(tokens[2])
+            _call_id.reset(tokens[1])
+            _run_context_var.reset(tokens[0])
+
+    async def _call_end_hooks(self) -> None:
         # () from here on: falsy for the check in Runnable._stream, and on_end refuses new hooks.
         hooks = self._end_hooks
         self.__dict__["_end_hooks"] = ()
