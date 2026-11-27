@@ -2013,6 +2013,41 @@ class TestRunEndHooks:
         await context._run_end_hooks()
         assert sorted(ran) == ["first", "second"]
 
+    async def test_a_hook_returning_another_loops_task_is_awaited_on_that_loop(self):
+        """A producer's pending flush, a task of its own loop, returned by a hook while another loop ends the run: the
+        end waits for it there instead of failing on 'attached to a different loop'."""
+        import threading
+
+        from timbal.state.context import RunContext
+
+        owner = asyncio.new_event_loop()
+        thread = threading.Thread(target=owner.run_forever)
+        thread.start()
+        try:
+
+            async def make():
+                release = asyncio.Event()
+
+                async def flush():
+                    await release.wait()
+                    return "flushed"
+
+                return release, asyncio.ensure_future(flush())
+
+            release, flush = asyncio.run_coroutine_threadsafe(make(), owner).result(10)
+            context = RunContext()
+            context.on_end(lambda: flush)
+            hooks = asyncio.ensure_future(context._run_end_hooks())
+            done, _ = await asyncio.wait({hooks}, timeout=0.3)
+            assert not done  # waiting for the flush, on its loop
+            owner.call_soon_threadsafe(release.set)
+            await asyncio.wait_for(hooks, 10)
+            assert flush.done() and flush.result() == "flushed"
+        finally:
+            owner.call_soon_threadsafe(owner.stop)
+            thread.join(10)
+            owner.close()
+
     async def test_they_run_once_when_the_root_ends_and_none_is_kept_after(self):
         from timbal import Agent
         from timbal.core.test_model import TestModel

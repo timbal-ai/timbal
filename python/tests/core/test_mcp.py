@@ -245,6 +245,7 @@ class TestProvenance:
         assert meta["traceparent"] == f"00-{OTelExporter._trace_id(ctx.id)}-{OTelExporter._span_id('call-1')}-01"
 
     def test_an_active_otel_span_wins_and_reaches_third_parties_too(self, monkeypatch):
+        """In the W3C format whatever the global propagator is: one configured for B3 writes no traceparent."""
         import types
 
         from timbal.state import set_call_id, set_run_context
@@ -253,16 +254,26 @@ class TestProvenance:
         valid = types.SimpleNamespace(is_valid=True)
         trace_mod = types.ModuleType("opentelemetry.trace")
         trace_mod.get_current_span = lambda: types.SimpleNamespace(get_span_context=lambda: valid)
-        propagate_mod = types.ModuleType("opentelemetry.propagate")
-        propagate_mod.inject = lambda carrier: carrier.update(
-            traceparent="00-" + "a" * 32 + "-" + "b" * 16 + "-01", tracestate="k=v"
-        )
+        propagate_mod = types.ModuleType("opentelemetry.propagate")  # the global propagator: B3 here
+        propagate_mod.inject = lambda carrier: carrier.update(b3="a" * 32 + "-" + "b" * 16 + "-1")
+        tracecontext_mod = types.ModuleType("opentelemetry.trace.propagation.tracecontext")
+
+        class TraceContextTextMapPropagator:
+            def inject(self, carrier):
+                carrier.update(traceparent="00-" + "a" * 32 + "-" + "b" * 16 + "-01", tracestate="k=v")
+
+        tracecontext_mod.TraceContextTextMapPropagator = TraceContextTextMapPropagator
+        propagation_mod = types.ModuleType("opentelemetry.trace.propagation")
+        propagation_mod.tracecontext = tracecontext_mod
+        trace_mod.propagation = propagation_mod
         root = types.ModuleType("opentelemetry")
         root.trace, root.propagate = trace_mod, propagate_mod
         for name, module in (
             ("opentelemetry", root),
             ("opentelemetry.trace", trace_mod),
             ("opentelemetry.propagate", propagate_mod),
+            ("opentelemetry.trace.propagation", propagation_mod),
+            ("opentelemetry.trace.propagation.tracecontext", tracecontext_mod),
         ):
             monkeypatch.setitem(sys.modules, name, module)
         set_run_context(RunContext())
@@ -815,6 +826,65 @@ class TestPlatformConnectionLifetime:
         service._run_hooked["ended"] = owner
         await asyncio.wait_for(service._run_ended("ended"), 10)
         assert not service._run_connections and "ended" not in service._run_closes
+
+    def test_a_handoff_the_owner_cancels_is_reported_and_the_connection_kept(self):
+        """The owner cancelled the handed work before it started (a loop cancelling its tasks as it shuts down): the
+        future is done, but nothing was closed. close() says the connection is still open; the end hook keeps it."""
+        import threading
+
+        from timbal.core.mcp import _RunConnection
+
+        owner = asyncio.new_event_loop()
+
+        def cancelling(loop, coro, **kwargs):
+            task = asyncio.Task(coro, loop=loop, **kwargs)
+            task.cancel()
+            return task
+
+        owner.set_task_factory(cancelling)
+        thread = threading.Thread(target=owner.run_forever)
+        thread.start()
+
+        class Session:
+            async def close(self):
+                raise AssertionError("never started")
+
+        service = MCPServer(transport="http", service="api")
+        try:
+            service._run_connections["run"] = _RunConnection(Session(), "fingerprint", owner)
+            with pytest.raises(RuntimeError, match="still open"):
+                asyncio.run(asyncio.wait_for(service.close(), 10))
+            assert "run" in service._run_connections  # the cleanup is still owed
+            service._run_hooked["run"] = owner
+
+            async def end_the_run():  # the run's end hook, on another loop than the run's
+                waiting = service._run_ended("run")
+                if waiting is not None:
+                    await waiting
+
+            asyncio.run(asyncio.wait_for(end_the_run(), 10))
+            assert service._run_connections["run"].ended  # kept, for a close() later
+        finally:
+            owner.call_soon_threadsafe(owner.stop)
+            thread.join(10)
+            owner.close()
+
+    def test_closes_of_a_closed_loop_leave_both_collections(self):
+        """A close that finished on a loop that stopped before its done callback ran: dropped from the per-run sets
+        too, so the run keeps neither the task nor its loop."""
+        gone = asyncio.new_event_loop()
+
+        async def nothing():
+            pass
+
+        task = gone.create_task(nothing())
+        gone.run_until_complete(task)
+        gone.close()
+        service = MCPServer(transport="http", service="api")
+        service._close_tasks.add(task)
+        service._run_closes["run"] = {task}
+        asyncio.run(asyncio.wait_for(service.close(), 10))
+        assert not service._close_tasks and not service._run_closes
 
     def test_close_says_so_when_the_owner_stops_after_the_handoff(self):
         """The owner ran when close() handed it the work, then stopped before the session was closed: close() says so

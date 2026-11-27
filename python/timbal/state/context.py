@@ -236,7 +236,23 @@ def _own_copy(value: Any) -> Any:
 
 
 async def _awaited(awaitable: Any) -> Any:
+    """Await what an end hook returned. A future or task of another loop (a producer's pending flush, the run ended
+    by a stream closed from elsewhere) is awaited on that loop while it runs; one whose loop is not running cannot
+    finish from here, which is raised (and logged as the hook's failure)."""
+    if asyncio.isfuture(awaitable):
+        owner = awaitable.get_loop()
+        if owner is not asyncio.get_running_loop():
+            from .loops import hand_to, wait_on_owner
+
+            handed = None if owner.is_closed() or not owner.is_running() else hand_to(owner, _settle(awaitable))
+            if handed is None or not await wait_on_owner(handed, owner):
+                raise RuntimeError(f"an end hook returned {awaitable!r}, of an event loop that is not running")
+            return handed.result()
     return await awaitable
+
+
+async def _settle(future: Any) -> Any:
+    return await future
 
 
 class RunContext(BaseModel):
