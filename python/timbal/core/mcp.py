@@ -966,9 +966,11 @@ class MCPServer(ToolSet):
     # The per-run connection a ``service="api"`` server opens to the platform: it sends the platform's claims.
     _first_party: bool = PrivateAttr(default=False)
     _session_task: asyncio.Task | None = PrivateAttr(default=None)
-    # The owner task of a session whose handshake is under way (published as _session_task once it is done): a
-    # close() meanwhile closes it on its loop, or says so when that loop is not running.
-    _opening_task: asyncio.Task | None = PrivateAttr(default=None)
+    # The session's owner task, from the start of its handshake until the session is forgotten (a failed handshake,
+    # close(), a reset, its owner ending): the one reference close() reads for it, closing it on its loop or saying
+    # so when that loop is not running. Not one field for the handshake and another once published: a close() on
+    # another thread could read the first before the publish and the second after the other was cleared.
+    _owner_task: asyncio.Task | None = PrivateAttr(default=None)
     # Owner tasks a close() signalled to shut down and has not seen end (it was cut while waiting): the next close()
     # waits for them, its session refs being gone by then.
     _owners_closing: set[asyncio.Task] = PrivateAttr(default_factory=set)
@@ -1433,12 +1435,18 @@ class MCPServer(ToolSet):
                 return
             raise
 
-    def _forget_session(self) -> None:
-        """Drop references to the current session without closing anything (the owner is already done)."""
+    def _forget_session(self, owner: asyncio.Task | None = None) -> None:
+        """Drop references to the current session without closing anything (the owner is already done, or its
+        shutdown is the caller's, which recorded it in ``_owners_closing`` first). ``owner``: the owner task let go
+        of, when it is not the published session's (a handshake on a loop that closed). The owner reference goes
+        only if it is that one: a handshake started since keeps its own."""
+        owner = owner or self._session_task
         self._session = None
         self._session_task = None
         self._session_closed = None
         self._get_session_id = None
+        if owner is not None and self._owner_task is owner:
+            self._owner_task = None
 
     def _on_session_task_done(self, task: asyncio.Task) -> None:
         """Forget a session whose owner task ended on its own (transport died).
@@ -1497,7 +1505,7 @@ class MCPServer(ToolSet):
             name=f"mcp-session:{self.name or self.transport}",
             context=contextvars.Context(),
         )
-        self._opening_task = task
+        self._owner_task = task
         try:
             if self.connect_timeout is not None:
                 done, _ = await asyncio.wait({ready}, timeout=self.connect_timeout)
@@ -1515,15 +1523,16 @@ class MCPServer(ToolSet):
             try:
                 await asyncio.wait({task})
             finally:  # also when this wait is cut too (a connect cancelled twice)
-                if self._opening_task is task:
-                    self._opening_task = None
+                if not task.done():  # signalled and still shutting down: the next close() waits for it
+                    self._owners_closing.add(task)
+                    task.add_done_callback(self._owners_closing.discard)
+                if self._owner_task is task:
+                    self._owner_task = None
             raise
+        # The owner reference stays as it was: the same task from the handshake on.
         self._session = session
         self._session_task = task
         self._session_closed = closed
-        # Only now: a close() on another thread finds the owner in one field or the other, never in neither.
-        if self._opening_task is task:
-            self._opening_task = None
         task.add_done_callback(self._on_session_task_done)
         return session
 
@@ -2073,9 +2082,8 @@ class MCPServer(ToolSet):
         running (an ``asyncio.Runner`` between two ``run()`` calls: call close() on that loop), or because a close
         was cancelled or failed (call close() again). One whose loop has closed went with it."""
         loop = asyncio.get_running_loop()
-        # The server's session's owner task, at whichever stage it is: a handshake under way publishes the same task
-        # as _session_task once it is done, maybe while this close() runs.
-        session = self._session_task or self._opening_task
+        # The server's session's owner task, at whichever stage it is (handshake or published): one read.
+        session = self._owner_task
         failed: list[BaseException] = []
         # The closes this close() waits for: those going when it began, and those it starts (here or handed over).
         # One still going after its waits is owed; one a call starts later is that call's.
@@ -2153,35 +2161,27 @@ class MCPServer(ToolSet):
                 left.closing += 1  # one this close() waited for, still going: its waits were cut
         # Any other close still running on a reachable loop is not owed: one a call started since (a connection in
         # use is left to its call) or another close()'s.
-        owners = set()
-        for owner in list(self._owners_closing):
+        # The session close() began with, while it is still the server's (its close, or handshake, did not happen),
+        # and the owners a close() signalled that are still shutting down (the wait for them was cut). The owner
+        # reference is read first: a close moves the owner to _owners_closing before it lets go of the reference,
+        # so one of the two reads finds it; each counted once. A handshake started since is a new connection (a call
+        # reconnecting after this close() let go of the old one), not this close()'s to report.
+        still = {session} if session is not None and session is self._owner_task else set()
+        still.update(list(self._owners_closing))
+        for owner in still:
             if owner.done() or owner.get_loop().is_closed():
                 continue
             if paused(owner.get_loop()):
-                owners.add(owner)
+                left.owners += 1  # its close (or handshake) waits for that loop: close() has to happen there
             else:
-                left.sessions += 1  # still shutting down after the wait for it (that wait was cut)
-        # The session close() began with (its handshake maybe published since), while it is still the server's: one
-        # forgotten was closed, or is an owner counted above. A handshake started since is a new connection (a call
-        # reconnecting after this close() let go of the old one), not this close()'s to report.
-        if (
-            session is not None
-            and not session.done()
-            and not session.get_loop().is_closed()
-            and session in (self._session_task, self._opening_task)
-        ):
-            if paused(session.get_loop()):
-                owners.add(session)  # its close (or handshake) waits for that loop: close() has to happen there
-            else:
-                left.sessions += 1  # its close was handed over and did not happen
-        left.owners = len(owners)
+                left.sessions += 1
         return left
 
     async def _close_own_session(self, loop: asyncio.AbstractEventLoop) -> "_Left":
         """The server's own session (a standalone server's), closed on the loop that owns it: its locks and owner
         task belong there (a retry from another loop hit them). Handed over while that loop runs; counted when it
         does not. One whose loop has closed went with it: only the references are dropped."""
-        task = self._session_task or self._opening_task  # (a handshake under way: its owner task)
+        task = self._owner_task  # (a handshake under way, or the published session: one read)
         if task is None:
             # Its refs gone (an earlier close() forgot them and is still shutting it down, holding the locks): the
             # loop of the owner it signalled.
@@ -2193,7 +2193,7 @@ class MCPServer(ToolSet):
             await self._close_session_here()
             return _Left()
         if owner.is_closed():  # its calls in flight died with it: the caches go too, as in _close_session_here
-            self._forget_session()
+            self._forget_session(task)
             self._drop_caches()
             return _Left()
         handed = _hand_to(owner, self._close_session_here()) if owner.is_running() else None
@@ -2202,7 +2202,7 @@ class MCPServer(ToolSet):
                 return _Left()
             raise _SessionCloseFailed(1, asyncio.CancelledError() if handed.cancelled() else handed.exception())
         if owner.is_closed():
-            self._forget_session()
+            self._forget_session(task)
             self._drop_caches()
         return _Left()  # what is left is counted by _owed, once
 

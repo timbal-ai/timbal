@@ -1133,6 +1133,7 @@ class TestPlatformConnectionLifetime:
 
         owner_task = asyncio.ensure_future(owner())
         server._session_task, server._session_closed = owner_task, closed
+        server._owner_task = server._session_task  # as _open_session leaves them
         first = asyncio.ensure_future(server.close())
         await asyncio.wait_for(closed.wait(), 10)  # signalled
         first.cancel()
@@ -1355,6 +1356,7 @@ class TestStandaloneServerClose:
 
                 task = asyncio.ensure_future(owner())
                 server._session_task, server._session_closed = task, closed
+                server._owner_task = server._session_task  # as _open_session leaves them
                 return task, closed, release
 
             owner, closed, release = asyncio.run_coroutine_threadsafe(install(), owner_loop).result(10)
@@ -1397,6 +1399,7 @@ class TestStandaloneServerClose:
 
         server = MCPServer(transport="stdio", command="unused")
         server._session_task = Owner()
+        server._owner_task = server._session_task  # as _open_session leaves them
         server._tools_cache, server._tools_cache_run_id, server._tools_stale = [object()], "run", True
         server._inflight[1] = object()  # a call that died with its loop
         await asyncio.wait_for(server.close(), 10)
@@ -1451,6 +1454,7 @@ class TestCrossLoopClose:
 
                 task = asyncio.ensure_future(owner())
                 server._session_task, server._session_closed = task, closed
+                server._owner_task = server._session_task  # as _open_session leaves them
                 asyncio.ensure_future(hold())
                 await held.wait()
                 waiter = asyncio.ensure_future(server._get_lock().acquire())  # contended there: bound to that loop
@@ -1512,13 +1516,15 @@ class TestCrossLoopClose:
         async def owner():
             await closed.wait()
 
-        server._session_task, server._session_closed = asyncio.ensure_future(owner()), closed
+        task = asyncio.ensure_future(owner())
+        server._session_task, server._session_closed = task, closed
+        server._owner_task = server._session_task  # as _open_session leaves them
         forget, seen = MCPServer._forget_session, []
 
-        def watched(self):
+        def watched(self, *args):
             if self._session_task is not None:
                 seen.append(self._session_task in self._owners_closing)
-            return forget(self)
+            return forget(self, *args)
 
         monkeypatch.setattr(MCPServer, "_forget_session", watched)
         await asyncio.wait_for(server.close(), 10)
@@ -1783,7 +1789,7 @@ class TestCrossLoopClose:
                 await server.close()
 
             runner.run(asyncio.wait_for(finish(), 10))
-        assert server._session is None and server._opening_task is None
+        assert server._session is None and server._owner_task is None
 
     def test_a_handshake_that_publishes_while_close_runs_and_then_pauses_is_reported(self, monkeypatch):
         """close() begins during a first handshake on another loop; the handshake publishes its session and that loop
@@ -1843,27 +1849,119 @@ class TestCrossLoopClose:
             running.join(10)
             owner_loop.close()
 
-    @pytest.mark.asyncio
-    async def test_the_opening_owner_is_cleared_only_once_the_session_is_published(self, monkeypatch):
-        """One owner reference across startup and publication: _opening_task goes only after _session_task is set,
-        so a close() on another thread never finds both empty."""
-        seen = []
+    def test_a_close_that_looks_up_the_owner_as_the_handshake_publishes_still_finds_it(self, monkeypatch):
+        """close() on another thread looks up the session's owner just as the handshake publishes the session, and the
+        owner's loop pauses right after: the lookup still finds the owner, so close() says the session is left on a
+        loop that is not running. With one field for the handshake and another once published, it read the first
+        before the publish and the second after the publish had cleared it, and returned as if nothing were open."""
+        import threading
 
-        class Watched(MCPServer):
-            def __setattr__(self, name, value):
-                if name == "_opening_task" and value is None:
-                    seen.append(self._session_task is not None)
-                super().__setattr__(name, value)
+        owner_loop = asyncio.new_event_loop()
+        first = threading.Thread(target=owner_loop.run_forever)
+        shaking, gates, connecting = threading.Event(), {}, {}
+
+        async def run_session(_self, ready, closed):  # the transport: its handshake waits for the test
+            gates["release"] = asyncio.Event()
+            shaking.set()
+            await gates["release"].wait()
+            ready.set_result(object())
+            await closed.wait()
+
+        closer, armed = threading.current_thread(), []
+
+        class Raced(MCPServer):
+            def __getattr__(self, name):
+                value = super().__getattr__(name)
+                owner_fields = ("_owner_task", "_opening_task", "_session_task")
+                if armed and name in owner_fields and threading.current_thread() is closer:
+                    armed.clear()  # close()'s first look at the owner; before its next one:
+                    owner_loop.call_soon_threadsafe(gates["release"].set)
+                    connecting["future"].result(10)  # the handshake published the session
+                    owner_loop.call_soon_threadsafe(owner_loop.stop)
+                    first.join(10)  # and its loop paused
+                return value
+
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        server = Raced(transport="stdio", command="unused")
+        first.start()
+        running = first
+        try:
+            connecting["future"] = asyncio.run_coroutine_threadsafe(server._connect(), owner_loop)
+            assert shaking.wait(10)
+            armed.append(True)
+            with pytest.raises(RuntimeError, match="not running"):
+                asyncio.run(asyncio.wait_for(server.close(), 10))
+            assert not armed and not owner_loop.is_running()
+        finally:
+            armed.clear()
+            first.join(10)
+            running = first if first.is_alive() else threading.Thread(target=owner_loop.run_forever)
+            if running is not first:
+                running.start()
+
+            async def settle():  # on its own loop: the close happens there, then whatever is left is cancelled
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(server.close(), 10)
+                others = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+                for task in others:
+                    task.cancel()
+                await asyncio.gather(*others, return_exceptions=True)
+
+            asyncio.run_coroutine_threadsafe(settle(), owner_loop).result(20)
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+            running.join(10)
+            owner_loop.close()
+        assert server._session is None
+
+    @pytest.mark.asyncio
+    async def test_what_close_owes_reads_the_owner_before_the_owners_shutting_down(self):
+        """A close on the session's loop moves its owner to ``_owners_closing`` and then lets go of the reference.
+        close() on another thread reads the reference first, so it finds the owner in one of the two even when that
+        move happens between its two reads (reading ``_owners_closing`` first, it found neither)."""
+        paused = asyncio.new_event_loop()  # the owner's loop, not running
+        owner = paused.create_future()
+        closer, armed = asyncio.get_running_loop(), [True]
+
+        class Raced(MCPServer):
+            def __getattr__(self, name):
+                value = super().__getattr__(name)
+                if armed and name == "_owners_closing":
+                    armed.clear()
+                    before = set(value)  # what this read sees; then, on the owner's loop, the move:
+                    value.add(owner)
+                    self._forget_session()
+                    return before
+                return value
+
+        server = Raced(transport="stdio", command="unused")
+        server.__pydantic_private__.update(_session_task=owner, _owner_task=owner)
+        try:
+            left = server._owed(closer, {}, owner, set())
+            assert left.owners == 1 and not armed
+        finally:
+            paused.close()
+
+    @pytest.mark.asyncio
+    async def test_one_owner_reference_from_the_handshake_to_the_sessions_end(self, monkeypatch):
+        """The owner task is the server's owner reference as soon as it exists, stays it when the session is
+        published, and goes only once close() has recorded it as shutting down."""
+        gates = {"release": asyncio.Event()}
 
         async def run_session(_self, ready, closed):
+            await gates["release"].wait()
             ready.set_result(object())
             await closed.wait()
 
         monkeypatch.setattr(MCPServer, "_run_session", run_session)
-        server = Watched(transport="stdio", command="unused")
-        await asyncio.wait_for(server._connect(), 10)
+        server = MCPServer(transport="stdio", command="unused")
+        connecting = asyncio.ensure_future(server._connect())
+        await until(lambda: server._owner_task is not None)
+        owner = server._owner_task
+        gates["release"].set()
+        await asyncio.wait_for(connecting, 10)
+        assert server._owner_task is owner is server._session_task  # the same reference once published
         await asyncio.wait_for(server.close(), 10)
-        assert seen == [True]
+        assert server._owner_task is None and owner.done()
 
     @pytest.mark.asyncio
     async def test_a_connect_cut_twice_during_its_handshake_leaves_no_opening_owner(self, monkeypatch):
@@ -1879,15 +1977,16 @@ class TestCrossLoopClose:
         monkeypatch.setattr(MCPServer, "_run_session", run_session)
         server = MCPServer(transport="stdio", command="unused")
         connecting = asyncio.ensure_future(server._connect())
-        await until(lambda: server._opening_task is not None)
-        owner = server._opening_task
+        await until(lambda: server._owner_task is not None)
+        owner = server._owner_task
         connecting.cancel()
         await asyncio.wait_for(closing.wait(), 10)  # waiting for its owner's teardown
         connecting.cancel()
         with pytest.raises(asyncio.CancelledError):
             await connecting
         try:
-            assert server._opening_task is None
+            assert server._owner_task is None
+            assert owner in server._owners_closing  # still shutting down: a later close() waits for it
         finally:
             release.set()
             await asyncio.wait_for(asyncio.wait({owner}), 10)
@@ -1913,7 +2012,7 @@ class TestCrossLoopClose:
             await wait_owners(self, loop)
             gates["release"] = asyncio.Event()
             reconnect["task"] = asyncio.ensure_future(self._connect())
-            await until(lambda: self._opening_task is not None)  # its handshake under way as close() counts
+            await until(lambda: self._owner_task is not None)  # its handshake under way as close() counts
 
         monkeypatch.setattr(MCPServer, "_wait_owners_closing", then_a_call_reconnects)
         await asyncio.wait_for(server.close(), 10)
