@@ -6713,9 +6713,14 @@ class VoiceSession:
         ``tool_name`` is None while the model is still thinking, before any call.
         """
         if self._filler_agent is None:
+            model = self.filler.model or self.model or self.agent.model
+            # The turn agent's params (reasoning off) come along with its model:
+            # a thinking model spends the 64 tokens before it writes the phrase.
+            same_model = model == getattr(self.agent, "model", None)
             self._filler_agent = Agent(
                 name="voice_filler",
-                model=self.filler.model or self.model or self.agent.model,
+                model=model,
+                model_params=dict(getattr(self.agent, "model_params", None) or {}) if same_model else {},
                 system_prompt=self.filler.system_prompt,
                 max_tokens=64,
                 tracing_provider=None,
@@ -6738,6 +6743,10 @@ class VoiceSession:
         ).collect()
         if out.status.code != "success" or out.output is None:
             logger.debug("filler_generation_failed", status=out.status.code, error=out.error)
+            return None
+        if getattr(out.output, "stop_reason", None) in ("length", "max_tokens"):
+            # A phrase cut at the token cap ("Un", "Un momento,") is worse than silence.
+            logger.info("filler_generation_truncated", text=out.output.collect_text()[:40])
             return None
         return out.output.collect_text().strip().strip('"').strip() or None
 
