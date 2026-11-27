@@ -503,6 +503,16 @@ _PAUSED_LOOP_WARNING = (
 )
 
 
+def _hand_to(owner: asyncio.AbstractEventLoop, coroutine: Any) -> "concurrent.futures.Future[Any] | None":
+    """``run_coroutine_threadsafe(coroutine, owner)``, or None when ``owner`` closed after the caller saw it run (the
+    call raises then): the coroutine is closed, never left unawaited."""
+    try:
+        return asyncio.run_coroutine_threadsafe(coroutine, owner)
+    except RuntimeError:
+        coroutine.close()
+        return None
+
+
 async def _wait_on_owner(handed: "concurrent.futures.Future[Any]", owner: asyncio.AbstractEventLoop) -> bool:
     """Wait for work handed to ``owner`` (``run_coroutine_threadsafe``) while ``owner`` runs. False when it stops
     before the work is done (the work goes on once it runs again): a wait for a paused loop would never end.
@@ -1016,8 +1026,17 @@ class MCPServer(ToolSet):
     ) -> int:
         """``close()``'s part on another, running loop: handed to it, and waited for while it runs. How many are
         left when that loop stops before finishing (they are closed once it runs again): 0 once done."""
-        handed = asyncio.run_coroutine_threadsafe(self._close_run_connections(entries), owner)
-        return 0 if await _wait_on_owner(handed, owner) else max(len(entries), 1)
+        handed = _hand_to(owner, self._close_run_connections(entries))
+        if handed is not None and await _wait_on_owner(handed, owner):
+            return 0
+        if owner.is_closed():  # closed meanwhile, before or after the handoff: its sessions went with it
+            for key, entry in entries:
+                if self._run_connections.get(key) is entry:
+                    del self._run_connections[key]
+            for task in [task for task in self._close_tasks if task.get_loop() is owner]:
+                self._close_tasks.discard(task)
+            return 0
+        return max(len(entries), 1)
 
     async def _close_run_connections(self, entries: list[tuple[str, "_RunConnection"]]) -> None:
         """On the loop that owns ``entries``: let go of them (``_retire_run_connection``) and wait for every close
@@ -1056,8 +1075,17 @@ class MCPServer(ToolSet):
         return self._end_run_elsewhere(key, owner)
 
     async def _end_run_elsewhere(self, key: str, owner: asyncio.AbstractEventLoop) -> None:
-        if not await _wait_on_owner(asyncio.run_coroutine_threadsafe(self._end_run_on_owner(key), owner), owner):
-            logger.warning(_PAUSED_LOOP_WARNING, server=self._label)
+        handed = _hand_to(owner, self._end_run_on_owner(key))
+        if handed is not None and await _wait_on_owner(handed, owner):
+            return
+        if owner.is_closed():  # closed meanwhile, before or after the handoff: it took the run's sessions with it
+            self._run_connections.pop(key, None)
+            self._run_closes.pop(key, None)
+            return
+        entry = self._run_connections.get(key)
+        if entry is not None:
+            entry.ended = True
+        logger.warning(_PAUSED_LOOP_WARNING, server=self._label)
 
     async def _end_run_on_owner(self, key: str) -> None:
         waiting = self._end_run_here(key)

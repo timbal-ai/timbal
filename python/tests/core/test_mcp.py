@@ -773,6 +773,49 @@ class TestPlatformConnectionLifetime:
             runner.run(finish())
         assert closed == [True] and not service._close_tasks
 
+    @staticmethod
+    def closing_loop():
+        """A loop that ran when it was checked and had closed by the time work was handed to it."""
+
+        class ClosingLoop:
+            def __init__(self):
+                self.loop = asyncio.new_event_loop()
+                self.loop.close()
+                self.handed = False
+
+            def is_closed(self):
+                return self.handed
+
+            def is_running(self):
+                return not self.handed
+
+            def call_soon_threadsafe(self, *args, **kwargs):
+                self.handed = True
+                return self.loop.call_soon_threadsafe(*args, **kwargs)  # raises: closed
+
+        return ClosingLoop()
+
+    @pytest.mark.asyncio
+    async def test_an_owner_that_closes_before_the_handoff_takes_its_sessions_with_it(self):
+        """close() and the run's end hook drop a connection whose loop closed between their check and the handoff,
+        as when it was closed at the check, instead of failing or leaving it cached."""
+        from timbal.core.mcp import _RunConnection
+
+        class Session:
+            async def close(self):
+                raise AssertionError("closed on the wrong loop")
+
+        service = MCPServer(transport="http", service="api")
+        service._run_connections["run"] = _RunConnection(Session(), "fingerprint", self.closing_loop())
+        await asyncio.wait_for(service.close(), 10)
+        assert not service._run_connections
+
+        owner = self.closing_loop()
+        service._run_connections["ended"] = _RunConnection(Session(), "fingerprint", owner)
+        service._run_hooked["ended"] = owner
+        await asyncio.wait_for(service._run_ended("ended"), 10)
+        assert not service._run_connections and "ended" not in service._run_closes
+
     def test_close_says_so_when_the_owner_stops_after_the_handoff(self):
         """The owner ran when close() handed it the work, then stopped before the session was closed: close() says so
         instead of waiting for it to run again, and the close ends once it does."""
