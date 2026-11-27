@@ -255,6 +255,30 @@ class TestApplyEntityPatience:
         )
         assert decision.action is CommitAction.HOLD
 
+    @pytest.mark.parametrize(("waited", "expected"), [(0.0, 2.5), (1.0, 1.5), (3.0, 0.0)])
+    def test_silence_already_heard_counts_against_the_budget(self, waited: float, expected: float) -> None:
+        decision = apply_entity_patience(
+            _new("my number is 415 555 1212"),
+            "my number is 415 555 1212",
+            _state(),
+            enabled=True,
+            hold_secs=2.5,
+            waited_secs=waited,
+        )
+        assert decision.action is CommitAction.HOLD
+        assert decision.hold_timeout_secs == pytest.approx(expected)
+
+    def test_detector_hold_keeps_its_own_timeout_after_the_budget_is_spent(self) -> None:
+        detector = CommitDecision(
+            action=CommitAction.HOLD, text="es 52 87 13 46 g", reason="audio_hold_text_complete", hold_timeout_secs=1.2
+        )
+        decision = apply_entity_patience(
+            detector, "es 52 87 13 46 g", _state(), enabled=True, hold_secs=2.5, waited_secs=2.6
+        )
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_hold_text_complete"
+        assert decision.hold_timeout_secs == pytest.approx(1.2)
+
 
 class TestHeldFragmentHelpers:
     @pytest.mark.parametrize("partial", ["seis", "Z", "1", "678"])
@@ -394,6 +418,46 @@ class TestEntityPatienceSession:
         )
         assert session._held_user_text is None
         assert session.transcript[0].text == "my number is 415 555 1212"
+        await self._finish(stt)
+
+    @pytest.mark.parametrize("silent_secs", [2.5, 0.0])
+    async def test_patience_counts_silence_already_waited(self, silent_secs: float) -> None:
+        """One budget from the caller's last speech, however late the commit lands.
+
+        Nova + local VAD committed a dictated DNI after the endpointer's 2.5 s
+        floor (or the stale-partial rescue) and then held another 2.5 s: ~5 s
+        of silence live. A commit right after speech still waits the window.
+        """
+        last_speech = time.monotonic() - silent_secs
+
+        class _Endpointer:
+            patience_floor_secs: float | None = None
+            last_predictive = False
+
+            def notify_committed(self) -> None:
+                pass
+
+            def last_speech_at(self) -> float:
+                return last_speech
+
+            def speech_secs_in_window(self, _window_secs: float) -> None:
+                return None
+
+        stt = _RecordingSTT()
+        session = _session(stt, patience=True)
+        events = await self._run(session)
+        session._endpointer = _Endpointer()
+        await stt.inject(TranscriptEvent(type="committed", text="my number is 415 555 1212"))
+        if silent_secs:
+            await _until(
+                lambda: any(getattr(e, "type", None) == "transcript_committed" for e in events),
+                msg="commit",
+            )
+            assert session._held_user_text is None
+        else:
+            await _until(lambda: session._held_user_text is not None, msg="hold")
+            assert not any(getattr(e, "type", None) == "transcript_committed" for e in events)
+        session._endpointer = None
         await self._finish(stt)
 
     async def test_off_does_not_hold_or_touch_eager(self) -> None:

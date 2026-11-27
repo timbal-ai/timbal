@@ -230,6 +230,7 @@ def apply_entity_patience(
     enabled: bool,
     hold_secs: float,
     provider_patience_live: bool = False,
+    waited_secs: float = 0.0,
 ) -> CommitDecision:
     """Raise a hold while ``decision`` still ends inside an entity.
 
@@ -238,6 +239,12 @@ def apply_entity_patience(
     EndOfTurn of an open entity *is* the timeout and must start the turn
     instead of waiting again. A hold the detector asked for on its own
     (unfinished phrase, audio incomplete) is never released here.
+
+    ``waited_secs`` is the silence already heard since the caller's last
+    speech. The budget counts it: a commit that lands after the local
+    endpointer's patience floor or the stale-partial rescue does not wait the
+    whole window again (that doubled the pause after a dictated ID, ~5 s live
+    on Nova). A detector's own hold keeps at least its own timeout.
     """
     if not enabled or decision.action is CommitAction.IGNORE:
         return decision
@@ -267,9 +274,10 @@ def apply_entity_patience(
             return decision
         return CommitDecision(action=CommitAction.CONTINUE_TURN, text=piece, reason=decision.reason)
 
-    timeout = hold_secs
-    if decision.action is CommitAction.HOLD and decision.hold_timeout_secs is not None:
-        timeout = max(decision.hold_timeout_secs, hold_secs)
+    timeout = max(0.0, hold_secs - waited_secs)
+    if decision.action is CommitAction.HOLD:
+        own = decision.hold_timeout_secs
+        timeout = hold_secs if own is None else max(own, timeout)
     reason = decision.reason if decision.action is CommitAction.HOLD else "entity_patience"
     return CommitDecision(
         action=CommitAction.HOLD,

@@ -194,6 +194,27 @@ class TestTurnPrompt:
         assert line == "¿Sigues ahí?"
         assert "Reply in Spanish (es)." in seen.kwargs[-1]["system_prompt"]
 
+    async def test_filler_cut_at_the_token_cap_is_not_spoken(self) -> None:
+        from timbal.types.content import TextContent
+        from timbal.types.message import Message
+        from timbal.voice import FillerConfig
+
+        session = _session(language="es")
+        cut = Message(role="assistant", content=[TextContent(text="Un")], stop_reason="length")
+        session.filler = FillerConfig(model=TestModel(responses=[cut]))
+        session._active_turn_user_text = "Es cincuenta y dos, ochenta y siete."
+        assert await session._generate_filler("buscar_cliente") is None
+
+    async def test_filler_on_the_turn_model_keeps_its_params(self) -> None:
+        from timbal.voice import FillerConfig
+
+        session = _session(language="es", responses=["Un momento."])
+        session.agent.model_params = {"reasoning_effort": "none"}
+        session.filler = FillerConfig()
+        session._active_turn_user_text = "¿Tenéis hueco hoy?"
+        assert await session._generate_filler("buscar_taller") == "Un momento."
+        assert session._filler_agent.model_params == {"reasoning_effort": "none"}
+
 
 class TestSetLanguage:
     async def test_flux_configure_replaces_a_sticky_es_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:

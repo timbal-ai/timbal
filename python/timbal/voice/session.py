@@ -3739,6 +3739,12 @@ class VoiceSession:
             self._hold_task.cancel()
         self._hold_task = None
 
+    def _silence_since_speech(self) -> float:
+        """Seconds since the local VAD last heard the caller; 0 without VAD evidence."""
+        last_speech_at = getattr(self._endpointer, "last_speech_at", None)
+        last_speech = last_speech_at() if callable(last_speech_at) else None
+        return 0.0 if last_speech is None else max(0.0, time.monotonic() - last_speech)
+
     async def _arm_hold(self, text: str, timeout_secs: float) -> None:
         """Defer starting a turn until more speech arrives or ``timeout_secs`` elapses."""
         self._cancel_hold()
@@ -4763,6 +4769,7 @@ class VoiceSession:
             enabled=self.entity_patience,
             hold_secs=self.entity_patience_secs,
             provider_patience_live=bool(getattr(self.stt, "patient_thresholds_live", False)),
+            waited_secs=self._silence_since_speech(),
         )
         # The detector await yields to the event loop (local audio EOU runs on
         # the executor; a cold model load can take seconds) and close() may land
