@@ -36,7 +36,7 @@ import re
 import time
 import unicodedata
 from collections import deque
-from collections.abc import AsyncIterable, AsyncIterator, Coroutine
+from collections.abc import AsyncIterable, AsyncIterator, Collection, Coroutine
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -45,7 +45,7 @@ from urllib.parse import urlsplit
 import structlog
 from uuid_extensions import uuid7
 
-from ..core.agent import Agent, _render_sections, is_call_tool_name
+from ..core.agent import Agent, _render_sections, is_call_tool_name, is_dispatcher
 from ..core.llm.prompt_cache import (
     SystemPrompt,
     bind_prompt_cache_key,
@@ -128,10 +128,9 @@ from .speculative import (
     SpeculativeAttempt,
     SpeculativeGate,
     install_speculative_gate,
+    number_spans,
     reset_speculative_gate,
-    spoken_numbers,
     transcripts_equivalent,
-    ungroup_numbers,
 )
 from .turn_detection import (
     CommitAction,
@@ -170,47 +169,97 @@ _SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _SPOKEN_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
+def _spoken_tokens(text: str, *, strict: bool) -> list[tuple[str, int, int]]:
+    """Words and numbers of ``text``, each ``(key, start, end)`` in the original string.
+
+    A number is one token with its sign and units ("-20", "$12", "12%"), keyed by its value (``strict``)
+    or by the words it is said with (also "1,000" as "1000"): :func:`~.speculative.number_spans`.
+    Words are casefolded; punctuation between them is not a token.
+    """
+    text = text or ""
+    tokens: list[tuple[str, int, int]] = []
+    pos = 0
+    for number in number_spans(text):
+        tokens.extend(
+            (m.group(0).lower(), m.start(), m.end()) for m in _SPOKEN_WORD_RE.finditer(text, pos, number.start)
+        )
+        tokens.append(("#" + (number.value if strict else number.spoken), number.start, number.end))
+        pos = number.end
+    tokens.extend((m.group(0).lower(), m.start(), m.end()) for m in _SPOKEN_WORD_RE.finditer(text, pos))
+    return tokens
+
+
 def _same_spoken_words(a: str, b: str) -> bool:
-    """True when two transcripts are the same words, ignoring case and punctuation."""
-    left = " ".join(_SPOKEN_WORD_RE.findall(ungroup_numbers(a).lower()))
-    right = " ".join(_SPOKEN_WORD_RE.findall(ungroup_numbers(b).lower()))
-    # Punctuation is ignored, but not inside a number: "-20" is not "20", "1.50" is not "150".
-    return bool(left) and left == right and spoken_numbers(a) == spoken_numbers(b)
+    """True when two transcripts say the same thing, ignoring case and punctuation between words.
+
+    Not inside a number: "-20" is not "20", "1.50" is not "150", "$12" is not "12%", and "1.250" is not
+    "1250" (a separator that could change the quantity keeps them apart).
+    """
+    left = [key for key, _, _ in _spoken_tokens(a, strict=True)]
+    return bool(left) and left == [key for key, _, _ in _spoken_tokens(b, strict=True)]
+
+
+def _last_spoken_run(text: str, words: str) -> tuple[int, int] | None:
+    """Span of the last run of ``words`` in ``text`` (any case or punctuation, "1,000" found as "1000")."""
+    needle = [key for key, _, _ in _spoken_tokens(words, strict=False)]
+    tokens = _spoken_tokens(text, strict=False)
+    if not needle or len(needle) > len(tokens):
+        return None
+    keys = [key for key, _, _ in tokens]
+    for start in range(len(tokens) - len(needle), -1, -1):
+        if keys[start : start + len(needle)] == needle:
+            begin = tokens[start][1]
+            end = tokens[start + len(needle) - 1][2]
+            # The run's own closing punctuation goes with it, up to the next word.
+            nxt = tokens[start + len(needle)][1] if start + len(needle) < len(tokens) else len(text)
+            tail = text[end:nxt]
+            return begin, end + len(tail) - len(tail.lstrip(".,;:!?…¿¡\"'»”"))
+    return None
 
 
 def _contains_spoken_words(text: str, words: str) -> bool:
     """True when ``words`` appear in ``text`` as consecutive words, ignoring case and punctuation."""
-    inner = " ".join(_SPOKEN_WORD_RE.findall(ungroup_numbers(words).lower()))
-    outer = " ".join(_SPOKEN_WORD_RE.findall(ungroup_numbers(text).lower()))
-    if not inner or f" {inner} " not in f" {outer} ":
-        return False
-    # Numbers as written, sign and decimal point included, appear in ``text`` in the same order.
-    needed = spoken_numbers(words)
-    if not needed:
-        return True
-    found = spoken_numbers(text)
-    return any(found[i : i + len(needed)] == needed for i in range(len(found) - len(needed) + 1))
+    return _last_spoken_run(text or "", words or "") is not None
 
 
 def _without_spoken_words(text: str, words: str) -> str:
     """``text`` without its last run of ``words`` (same words, any case or punctuation), and the
-    punctuation that closed that run. ``text`` unchanged when the words are not in it."""
-    text, words = ungroup_numbers(text), ungroup_numbers(words)  # "1,000" is one word, like "1000"
-    needle = [w.lower() for w in _SPOKEN_WORD_RE.findall(words)]
-    tokens = list(_SPOKEN_WORD_RE.finditer(text))
-    if not needle or len(needle) > len(tokens):
+    punctuation that closed that run. The rest is ``text`` as written. ``text`` unchanged when the words
+    are not in it."""
+    run = _last_spoken_run(text, words)
+    if run is None:
         return text
-    lowered = [m.group(0).lower() for m in tokens]
-    for start in range(len(tokens) - len(needle), -1, -1):
-        if lowered[start : start + len(needle)] == needle:
-            begin = tokens[start].start()
-            end = tokens[start + len(needle) - 1].end()
-            # The run's own closing punctuation goes with it, up to the next word.
-            nxt = tokens[start + len(needle)].start() if start + len(needle) < len(tokens) else len(text)
-            tail = text[end:nxt]
-            end += len(tail) - len(tail.lstrip(".,;:!?…¿¡\"'»”"))
-            return f"{text[:begin].rstrip()} {text[end:].lstrip()}".strip()
-    return text
+    begin, end = run
+    return f"{text[:begin].rstrip()} {text[end:].lstrip()}".strip()
+
+
+def _taken_back(current: str, words: str, before: str, after: str) -> str:
+    """``current`` without what ``words`` added to it, when they turned the buffer from ``before`` into ``after``.
+
+    Unchanged since: ``before``. Grown or rewritten since: ``words`` leave the part after ``before`` (an STT
+    may have reformatted them), never ``before`` itself, which held them already as another request.
+    """
+    if current == after:
+        return before
+    if before and current.startswith(before):
+        tail = current[len(before) :]
+        if not _contains_spoken_words(tail, words):
+            return current
+        return f"{before.rstrip()} {_without_spoken_words(tail, words)}".strip()
+    return _without_spoken_words(current, words)
+
+
+def _text_before_spoken_words(text: str, words: str) -> str:
+    """What ``text`` says before ``words`` when it ends with them: the fragment a merged turn added in
+    front of them. ``""`` when ``text`` is only those words; :func:`_without_spoken_words` when they are
+    not at its end."""
+    run = _last_spoken_run(text, words)
+    if run is None:
+        return text
+    begin, end = run
+    if text[end:].strip(" \t\n.,;:!?…¿¡\"'»”"):
+        return _without_spoken_words(text, words)
+    return text[:begin].rstrip()
 
 
 # Wall-clock cap on a single agent turn (LLM stream + in-turn TTS drains).
@@ -472,6 +521,7 @@ class VoiceSession:
         greeting: GreetingConfig | dict[str, Any] | str | None = None,
         user_idle: UserIdleConfig | dict[str, Any] | None = None,
         call_context: dict[str, str] | None = None,
+        prompt_call_context_keys: Collection[str] | None = None,
         parent_run_id: str | None = None,
         announce_background_results: bool = False,
         client_events: bool = False,
@@ -590,6 +640,9 @@ class VoiceSession:
         self._speculative_discarded_run_id: str | None = None
         self._drop_speculative_context = False
         self._turn_speculative = False
+        # The confirmed wording replaced the attempt's user message in memory: the turn's last save
+        # re-serializes memory, which serializing providers store instead of the live messages.
+        self._turn_memory_reconciled = False
         self._caller_speech_started_at: float | None = None
         self._turn_deadline: float | None = None
         # VAD endpointing fast path (Silero speech-stop → audio EOU → stt.commit()).
@@ -626,6 +679,9 @@ class VoiceSession:
         self._eager_turn_task: asyncio.Task | None = None
         self._eager_row: TranscriptEntry | None = None
         self._eager_prefix = ""
+        # What the eager words added to the held / deferred buffer: ``{name: (before, after)}``. A buffer
+        # that already said them (an earlier, confirmed request they repeat) is not theirs to take back.
+        self._eager_appended: dict[str, tuple[str, str]] = {}
         self._eager_commit = False
         # Mic PCM for a Smart Turn vote when the turn detector does not buffer
         # (provider mode on Flux). Unused when the detector already has audio.
@@ -737,6 +793,14 @@ class VoiceSession:
         # the session bag. Do not pass these as agent(prompt=..., rep_id=...);
         # leftover kwargs leak into ``_llm._stream(**kwargs)``.
         self.call_context: dict[str, str] = dict(call_context or {})
+        # The call_context fields each turn's system prompt shows. None: no
+        # field (the whole bag stays in session data for a callable prompt).
+        # It can hold tokens and caller-supplied text, so the server opts in.
+        if isinstance(prompt_call_context_keys, str) or not all(
+            isinstance(key, str) for key in prompt_call_context_keys or ()
+        ):
+            raise TypeError("prompt_call_context_keys must be a collection of strings")
+        self.prompt_call_context_keys: tuple[str, ...] = tuple(prompt_call_context_keys or ())
 
         # Run id this call continues from (text → voice). Session identity, not
         # a voice knob: it says which conversation the caller is joining, so it
@@ -885,11 +949,10 @@ class VoiceSession:
         self._turn_tool_batch_inflight = 0
         self._turn_tool_batch_mode = "allow"
         # Latched once a disable_during_tool_and_turn tool finishes, until this
-        # turn's playback ends. Also set for the rest of a turn that paused on
-        # approval / ask_user, and carried into the next turn so the reply
-        # after the caller answers is protected.
+        # turn's playback ends. A tool that paused (approval / ask_user) has not
+        # finished: the turn that resumes it runs it again, sees its START and
+        # OUTPUT, and latches the reply the caller hears after answering.
         self._turn_uninterruptible_reply = False
-        self._and_turn_after_pause = False
         # Caller speech accepted while barge-in was suppressed. Opens the next
         # turn once the protected tool and (if latched) its reply have played.
         self._deferred_user_text = ""
@@ -1733,11 +1796,13 @@ class VoiceSession:
         # A HOLD during a protected window lives in ``_held_user_text``, not
         # the deferred buffer. Merge it the same way a later commit would
         # (refinement replaces, a new fragment is appended) before the hold
-        # is cancelled. Do this before ``_closed`` so the merge is not skipped.
+        # is cancelled. Only then: any other hold (likely echo or noise the
+        # detector parked while the agent spoke, or a fragment no turn took)
+        # was never caller speech a turn was going to carry.
         held = (self._held_user_text or "").strip()
         self._held_user_text = None
-        if held:
-            self._defer_user_speech(held)
+        if held and (self._deferred_user_text or self._interruptions_suppressed()):
+            self._merge_deferred_user_text(held)
         self._closed = True
         self._cancel_hold()
         self._held_user_text = None
@@ -2343,13 +2408,12 @@ class VoiceSession:
         turn, self._eager_turn_task = self._eager_turn_task, None
         row, self._eager_row = self._eager_row, None
         prefix, self._eager_prefix = self._eager_prefix, ""
+        appended, self._eager_appended = self._eager_appended, {}
         logger.info("flux_eager_cancelled")
-        deferred = self._deferred_user_text
-        if deferred and _contains_spoken_words(deferred, text):
-            self._deferred_user_text = _without_spoken_words(deferred, text)
-        held = self._held_user_text
-        if held and _contains_spoken_words(held, text):
-            rest = _without_spoken_words(held, text)
+        if "deferred" in appended:
+            self._deferred_user_text = _taken_back(self._deferred_user_text, text, *appended["deferred"])
+        if "held" in appended and self._held_user_text:
+            rest = _taken_back(self._held_user_text, text, *appended["held"])
             if rest:
                 self._held_user_text = rest  # the timer reads it when it fires
             else:
@@ -2359,7 +2423,9 @@ class VoiceSession:
         if turn is None or turn is not self._current_turn_task:
             return  # the words started no turn, or a later turn has taken over: nothing of theirs to retract
         timeout = self._hold_armed_timeout_secs or self.hold_timeout_secs
-        if not turn.done():
+        # Generation may be over while its audio still waits to play: that reply is cut too, and the
+        # transcript and memory keep only what the caller heard (nothing, when no byte was played).
+        if not turn.done() or self._assistant_active:
             await self.interrupt()
         # Retracted only while nothing of its reply reached the caller: the row is still the last line. A reply
         # they heard (in full, or what the interrupt's truncation kept) stays on screen and in memory with the
@@ -2415,6 +2481,13 @@ class VoiceSession:
         self._eager_gate_text = text
         self._eager_gate_taken = False
         self._eager_commit = True
+        buffers_before = {"held": self._held_user_text or "", "deferred": self._deferred_user_text or ""}
+        if self._eager_unconfirmed:
+            # An earlier eager event is still unconfirmed: its words are no more the caller's than these, so what
+            # a retraction gives back is the buffer from before that one.
+            for name, (before, _after) in self._eager_appended.items():
+                buffers_before[name] = before
+        active_before = self._active_turn_user_text or ""
         try:
             logger.info(
                 "flux_eager_commit",
@@ -2426,15 +2499,26 @@ class VoiceSession:
         finally:
             self._eager_commit = False
         # Only an accepted turn (not IGNORE / echo / hesitation) may suppress
-        # the later EndOfTurn. Set this after the detector decides.
-        if self._eager_gate_taken or any(
-            _contains_spoken_words(kept or "", text)
-            for kept in (self._active_turn_user_text, self._held_user_text, self._deferred_user_text)
+        # the later EndOfTurn. Set this after the detector decides, from what the
+        # words changed: a buffer or turn that already said them (a repeat of a
+        # confirmed request, deduplicated) gained nothing that TurnResumed may take.
+        buffers_after = {"held": self._held_user_text or "", "deferred": self._deferred_user_text or ""}
+        appended = {
+            name: (buffers_before[name], after)
+            for name, after in buffers_after.items()
+            if after != buffers_before[name] and _contains_spoken_words(after, text)
+        }
+        active_after = self._active_turn_user_text or ""
+        if (
+            self._eager_gate_taken
+            or appended
+            or (active_after != active_before and _contains_spoken_words(active_after, text))
         ):
             # A turn started on these words (merged with a held fragment or a deferred prefix, too), a hold keeps
             # them, or they wait for a protected tool to finish (deferred): EndOfTurn with the same words releases
             # the tools of the turn they start, anything else cancels them.
             self._eager_unconfirmed = text
+            self._eager_appended = appended
         else:
             self._eager_gate = None  # not accepted: no turn waits on it
 
@@ -2445,6 +2529,7 @@ class VoiceSession:
             self._eager_turn_task = None
             self._eager_row = None
             self._eager_prefix = ""
+            self._eager_appended = {}
         gate, self._eager_gate = self._eager_gate, None
         if gate is None:
             return
@@ -2953,7 +3038,7 @@ class VoiceSession:
         if gate is not None:
             self._eager_turn_task = task
             self._eager_row = self._transcript[-1] if self._transcript else None
-            self._eager_prefix = _without_spoken_words(final_text, self._eager_gate_text)
+            self._eager_prefix = _text_before_spoken_words(final_text, self._eager_gate_text)
         task.add_done_callback(self._turn_task_done)
         self._current_turn_task = task
         logger.debug(
@@ -2965,9 +3050,8 @@ class VoiceSession:
     def _reset_tool_interruption(self) -> None:
         """Clear this turn's barge-in latch. Carried caller speech stays.
 
-        ``_and_turn_after_pause`` is not spent here. A deferred turn for words
-        said while the tool ran must not use up the protection owed to the
-        reply after the caller answers an approval or ``ask_user``.
+        A paused ``disable_during_tool_and_turn`` tool owes nothing here: the
+        turn that resumes it latches its own reply when the tool finishes.
         """
         self._release_unfinished_tool_batch()
         self._turn_uninterruptible_reply = False
@@ -3016,7 +3100,9 @@ class VoiceSession:
             return None
         return rest
 
-    def _note_tool_call(self, name: str, call_id: str, arguments: Any = None) -> None:
+    def _note_tool_call(
+        self, name: str, call_id: str, arguments: Any = None, *, step_tools: list | None = None
+    ) -> None:
         """Count one LLM tool call toward this turn's parallel batch.
 
         Called when the call is announced, before the tool starts, so a barge-in
@@ -3027,10 +3113,17 @@ class VoiceSession:
         finishes as its target: it is counted under the target's name, once its
         arguments name it. Until they do (a delta still streaming) it is not
         counted: the call on the output message, or the target's start, does it.
+        A dispatch is a call of the step's dispatcher (``step_tools``, the tools
+        that model call was given): an agent tool of its own named ``call_tool``
+        takes the name, the dispatcher another, and a call of that tool runs it.
         """
         if not name or not call_id or call_id in self._turn_tool_call_ids:
             return
-        if getattr(self.agent, "tool_search", None) == "dispatch" and is_call_tool_name(name):
+        if (
+            getattr(self.agent, "tool_search", None) == "dispatch"
+            and is_call_tool_name(name)
+            and (step_tools is None or is_dispatcher(step_tools, name))
+        ):
             if isinstance(arguments, str):
                 with contextlib.suppress(ValueError):
                     arguments = json.loads(arguments)
@@ -3041,6 +3134,18 @@ class VoiceSession:
         self._turn_tool_call_ids.add(call_id)
         self._turn_unmatched_arms[name] = self._turn_unmatched_arms.get(name, 0) + 1
         self._arm_tool_batch(name)
+
+    def _model_call_tools(self, llm_call_id: str | None) -> list | None:
+        """The tools the model call ``llm_call_id`` was given (its span's input), or None when not known."""
+        ctx = self._turn_run_context
+        if ctx is None or not llm_call_id:
+            return None
+        span = ctx._trace.get(llm_call_id)
+        inputs = getattr(span, "input", None)
+        if not isinstance(inputs, dict):
+            return None
+        tools = inputs.get("tools")
+        return list(tools) if isinstance(tools, list | tuple) else []
 
     def _note_tool_start(self, path: str, call_id: str) -> None:
         """Count a tool execution that had no preceding tool-call announcement.
@@ -3084,14 +3189,10 @@ class VoiceSession:
         else:
             self._turn_open_tools[name] = open_count - 1
         self._turn_tool_batch_inflight = max(0, self._turn_tool_batch_inflight - 1)
-        if self._tool_interruption_mode(name) == "disable_during_tool_and_turn":
-            if paused:
-                # The caller has to be able to answer. Remember the mode; the
-                # turn that actually finishes the tool latches its reply.
-                self._and_turn_after_pause = True
-            else:
-                self._turn_uninterruptible_reply = True
-                self._and_turn_after_pause = False
+        # Paused: the caller has to be able to answer. The turn that resumes the
+        # tool runs it again and latches its reply when it finishes.
+        if not paused and self._tool_interruption_mode(name) == "disable_during_tool_and_turn":
+            self._turn_uninterruptible_reply = True
         if self._turn_tool_batch_inflight == 0:
             self._turn_tool_batch_mode = "allow"
 
@@ -3126,13 +3227,7 @@ class VoiceSession:
         text = text.strip()
         if not text or self._closed:
             return
-        prev = self._deferred_user_text
-        if not prev:
-            self._deferred_user_text = text
-        elif text.startswith(prev) or _is_same_user_utterance_refinement(prev, text):
-            self._deferred_user_text = text if len(text) >= len(prev) else prev
-        else:
-            self._deferred_user_text = f"{prev.rstrip()} {text.lstrip()}"
+        self._merge_deferred_user_text(text)
         logger.info(
             "stt_commit_deferred",
             text_preview=self._deferred_user_text[:160],
@@ -3140,6 +3235,17 @@ class VoiceSession:
             **_trace_debug_fields(),
         )
         self._schedule_deferred_turn()
+
+    def _merge_deferred_user_text(self, text: str) -> None:
+        """Add ``text`` to the deferred buffer: a refinement replaces, a new fragment is appended."""
+        text = text.strip()
+        prev = self._deferred_user_text
+        if not prev:
+            self._deferred_user_text = text
+        elif text.startswith(prev) or _is_same_user_utterance_refinement(prev, text):
+            self._deferred_user_text = text if len(text) >= len(prev) else prev
+        else:
+            self._deferred_user_text = f"{prev.rstrip()} {text.lstrip()}"
 
     def _take_deferred_prefix(self, text: str) -> str:
         """Prepend speech captured during a protected window, then clear it."""
@@ -3338,8 +3444,32 @@ class VoiceSession:
         self._scheduler.turn_started()
         task = self._spawn_session_task(self._run_turn(text, speculative=True), name="speculative-turn")
         task.add_done_callback(self._turn_task_done)
+        # Also for a task cancelled before its first step, whose finally (which settles the hold) never runs.
+        task.add_done_callback(lambda _task, hold=hold: self._drop_discarded_hold(hold))
         self._current_turn_task = task
         attempt.task = task
+
+    def _abandon_own_unconfirmed_attempt(self, *, reason: str) -> bool:
+        """From a speculative turn's own task: drop its attempt if it ends (timeout, error) before confirmation.
+
+        It was never the caller's turn, so it reports nothing and speaks nothing: an apology would only wait in
+        its hold, unheard. Left live, the confirming commit would release a hold with no reply in it, and the
+        caller would get silence; dropped, that commit starts a normal turn. True when it was dropped.
+        """
+        attempt = self._speculative_attempt
+        if attempt is None or attempt.settled or attempt.task is not asyncio.current_task():
+            return False
+        self._abandon_speculative_attempt(reason=reason)
+        return True
+
+    def _drop_discarded_hold(self, hold: AudioHold) -> None:
+        """Forget ``hold`` once it is discarded and its turn can no longer emit through it.
+
+        Left in place, the next turn's audio would be offered to it and dropped (``_deliver_pcm``): a discarded
+        hold takes nothing. It queues nothing either, so forgetting it loses no audio.
+        """
+        if self._audio_hold is hold and hold.discarded:
+            self._audio_hold = None
 
     async def _discard_speculative(self, *, reason: str) -> None:
         async with self._user_turn_lock:
@@ -3359,6 +3489,9 @@ class VoiceSession:
         self.speculative_generations_discarded += 1
         attempt.gate.discard()
         attempt.hold.discard()
+        if attempt.task is None or attempt.task.done():
+            # Its turn already ended (an LLM error before confirmation): no finally will settle the hold now.
+            self._drop_discarded_hold(attempt.hold)
         self._speculative_tts_stash.clear()
         self._speculative_text_deltas.clear()
         self._speculative_final_text = None
@@ -3487,7 +3620,9 @@ class VoiceSession:
         LiveKit copies the finalized user message onto the preemptive one so
         history keeps the confirmed wording when only punctuation or case
         differed. The next provider call re-dumps memory, so the cache must
-        drop with the reassignment.
+        drop with the reassignment. The span's stored dump does not: the turn's
+        last save re-serializes it (``_turn_memory_reconciled``), or serializing
+        providers would keep the attempt's wording.
         """
         final = self._speculative_final_text
         if not final:
@@ -3506,6 +3641,7 @@ class VoiceSession:
                 continue
             if current != final:
                 message.content = [TextContent(text=final)]
+                self._turn_memory_reconciled = True
             self._speculative_final_text = None
             return
 
@@ -3635,9 +3771,11 @@ class VoiceSession:
         # while ``on_committed`` yields, and the decision was scored against
         # this utterance.
         pending_speculative = None
+        pending_attempt = None
         pending_turn = self._current_turn_task
         if self._speculative_attempt is not None and not self._speculative_attempt.settled:
-            pending_speculative = self._speculative_attempt.text
+            pending_attempt = self._speculative_attempt
+            pending_speculative = pending_attempt.text
         self._partials_since_last_commit = 0
         # Cancel the hold *timer* before awaiting the detector. Local audio EOU
         # yields to the event loop (executor), and a racing hold-expiry task can
@@ -3751,6 +3889,17 @@ class VoiceSession:
                 reason=decision.reason,
                 text_preview=text[:160],
             )
+            if (
+                pending_attempt is not None
+                and self._speculative_attempt is pending_attempt
+                and not pending_attempt.settled
+                and decision.reason not in ("refinement", "early_duplicate", "speculative_confirm_superseded")
+                and not (self._held_user_text is not None and self._speculative_matches(self._held_user_text))
+            ):
+                # The commit that closes the attempt's utterance was dropped (backchannel, echo, noise,
+                # hesitation): it is not a turn, and nothing else would confirm or discard the attempt, which
+                # keeps the line busy. A hold on the same words still settles it when it expires.
+                await self._discard_speculative(reason=decision.reason or "ignored")
             # Timer was cancelled at the top of this method; re-arm so a noise/
             # hesitation commit mid-hold does not freeze the fragment forever.
             if self._held_user_text is not None and (self._hold_task is None or self._hold_task.done()):
@@ -4244,6 +4393,7 @@ class VoiceSession:
         speculative_token = None
         voice_token = None
         self._turn_speculative = speculative
+        self._turn_memory_reconciled = False
         if speculative:
             # Confirmation stamps this. Until then the eou clocks stay unset
             # so a discarded attempt does not inherit the previous turn's.
@@ -4523,7 +4673,12 @@ class VoiceSession:
                     # Arm before the emit await so a barge-in cannot land in the
                     # gap between "the model called the tool" and the tool starting.
                     if (own_llm_path is None or event.path == own_llm_path) and not event.item.is_server_tool_use:
-                        self._note_tool_call(event.item.name, event.item.id, getattr(event.item, "input", None))
+                        self._note_tool_call(
+                            event.item.name,
+                            event.item.id,
+                            getattr(event.item, "input", None),
+                            step_tools=self._model_call_tools(event.call_id),
+                        )
                     # Dead air while a tool runs — surface it so the playground
                     # doesn't look hung (live: get_datetime slept 3–5s with no UI).
                     await self._emit(AgentStatus(text=f"Calling {event.item.name}…"))
@@ -4723,9 +4878,10 @@ class VoiceSession:
                             # above so spoken text this turn suppresses it.
                             # Also the backup UI status when there was no
                             # ToolUse delta.
+                            step_tools = self._model_call_tools(event.call_id)
                             for block in out.content:
                                 if isinstance(block, ToolUseContent) and block.name and not block.is_server_tool_use:
-                                    self._note_tool_call(block.name, block.id, block.input)
+                                    self._note_tool_call(block.name, block.id, block.input, step_tools=step_tools)
                             for block in out.content:
                                 if isinstance(block, ToolUseContent) and block.name:
                                     await self._emit(AgentStatus(text=f"Calling {block.name}…"))
@@ -4836,6 +4992,9 @@ class VoiceSession:
                 await asyncio.gather(*tasks, return_exceptions=True)
             self._tts_tail = None
             await self._abort_tts_stream()
+            if self._abandon_own_unconfirmed_attempt(reason="turn_timeout"):
+                turn_phase = "cancelled_during_speculative_timeout"  # reported as interrupted, like any discard
+                return
             logger.error(
                 "turn_timeout",
                 timeout_secs=self.turn_timeout_secs,
@@ -4863,6 +5022,10 @@ class VoiceSession:
                     logger.warning("turn_timeout_fallback_failed", error=str(e), exc_info=True)
         except Exception as e:
             turn_phase = "exception"
+            if self._abandon_own_unconfirmed_attempt(reason="turn_error"):
+                turn_phase = "cancelled_during_speculative_error"  # reported as interrupted, like any discard
+                logger.warning("speculative_turn_error", error=str(e), exc_info=True)
+                return
             logger.error("turn_error", error=str(e), exc_info=True)
             await self._emit(SessionError(message=f"Turn failed: {e}"))
         finally:
@@ -4988,7 +5151,9 @@ class VoiceSession:
                     # one put() per span completion and keep the latest snapshot per
                     # run id, so an extra save is consistent with their contract.
                     try:
-                        await asyncio.shield(self._save_turn_trace(ctx, rewritten=truncated))
+                        await asyncio.shield(
+                            self._save_turn_trace(ctx, rewritten=truncated or self._turn_memory_reconciled)
+                        )
                     except asyncio.CancelledError:
                         pass
                     except Exception as e:
@@ -6108,6 +6273,7 @@ class VoiceSession:
         return compose_voice_system_prompt(
             resolved,
             call_context=self.call_context,
+            call_context_keys=self.prompt_call_context_keys,
             now=now,
             greeting_note=note,
             reply_language=reply_language_instruction(self.audio_input.language),

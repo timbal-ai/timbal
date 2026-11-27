@@ -53,6 +53,18 @@ from .test_turn_detection import _state
         ("ene e ese", "spelling"),
         ("jota o", "spelling"),
         ("aitch jay", "spelling"),
+        ("ese ele", "spelling"),
+        ("ese, ese", "spelling"),
+        ("double u", "spelling"),
+        ("my name is double u", "spelling"),
+        ("four double five", "digits"),
+        ("Dame ese.", None),
+        ("Quiero ese", None),
+        ("My name is Jay.", None),
+        ("So do I.", None),
+        ("Make it a double.", None),
+        ("No entiendo ni jota.", None),
+        ("Ni jota.", None),
         ("415-555-0199", "digits"),
         ("415.555.1212", "digits"),
         ("the code is 4 1 5", "digits"),
@@ -318,7 +330,7 @@ class TestEntityPatienceSession:
 
     async def _finish(self, stt: _RecordingSTT) -> None:
         await stt.finish()
-        await self._task
+        await asyncio.wait_for(self._task, timeout=30)
 
     async def test_dictation_is_held_then_finished_entity_commits(self) -> None:
         stt = _RecordingSTT()

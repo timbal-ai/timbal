@@ -56,6 +56,38 @@ def _flux_session(monkeypatch: pytest.MonkeyPatch, ran: list[str], **config):
     return session
 
 
+def _amount_agent(got: list[str]) -> Agent:
+    """An agent whose ``record`` tool gets the last word of the user's message as its argument."""
+
+    def record(amount: str) -> str:
+        got.append(amount)
+        return "recorded"
+
+    def reply(messages: list) -> Message | str:
+        last = messages[-1]
+        if last.role == "user":
+            amount = last.collect_text().split()[-1]
+            return Message(
+                role="assistant",
+                content=[ToolUseContent(id="call-1", name="record", input={"amount": amount})],
+                stop_reason="tool_use",
+            )
+        return "Done."
+
+    return Agent(name="voice_test", model=TestModel(handler=reply), tools=[record])
+
+
+# Eager words, then a final transcript that differs only inside a number: its unit, or a separator that
+# reads as thousands in one locale and as three decimals in another.
+_CHANGED_QUANTITIES = [
+    ("set discount to $12", "set discount to 12%"),
+    ("set discount to 12", "set discount to 12%"),
+    ("set discount to 12\u00a0€", "set discount to 12\u00a0%"),
+    ("record 1250", "record 1.250"),
+    ("record 1000", "record 1,000"),
+]
+
+
 def _protect(session) -> None:
     """A protected (``disable_during_tool``) tool runs: caller speech is deferred."""
     session._turn_tool_batch_inflight = 1
@@ -123,6 +155,101 @@ class TestNumbersInTranscripts:
         assert [e.text for e in session.transcript if e.role == "user"] == ["record value 20"]
 
 
+class _UnplayedTracker:
+    """A client that has queued every byte and played none of it yet."""
+
+    def __init__(self) -> None:
+        self.emitted = 0
+        self.interrupted = False
+
+    def on_audio_emitted(self, num_bytes: int) -> None:
+        self.emitted += num_bytes
+
+    def on_interrupted(self) -> None:
+        self.interrupted = True
+
+    def on_playback_ack(self, _played_ms: float) -> None:
+        return None
+
+    ack_received = False
+    played_bytes = 0
+
+    @property
+    def is_playing(self) -> bool:
+        return self.emitted > 0 and not self.interrupted
+
+
+class TestRepeatedRequestWhileProtected:
+    """A confirmed request deferred behind a protected tool, then the same words again as an eager event."""
+
+    async def test_turn_resumed_keeps_the_confirmed_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ran: list[str] = []
+        session = _flux_session(monkeypatch, ran)
+        _protect(session)
+        await session._handle_provider_commit("Check the booking.")
+        assert session._deferred_user_text == "Check the booking."
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Check the booking.", confidence=0.9)
+        )
+        await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
+        assert session._deferred_user_text == "Check the booking."
+        session._turn_tool_batch_inflight = 0  # the protected tool ends: the request runs, its tool too
+        await _until(lambda: ran)
+        assert ran == ["friday"]
+
+    async def test_the_confirmed_request_does_not_wait_on_the_repeat(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ran: list[str] = []
+        session = _flux_session(monkeypatch, ran)
+        _protect(session)
+        await session._handle_provider_commit("Check the booking.")
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Check the booking.", confidence=0.9)
+        )
+        session._turn_tool_batch_inflight = 0  # the deferred turn starts before TurnResumed
+        await _until(lambda: ran)
+        await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
+        assert ran == ["friday"]
+        assert [e.text for e in session.transcript if e.role == "user"] == ["Check the booking."]
+
+    async def test_two_eager_events_before_turn_resumed_are_both_taken_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = _flux_session(monkeypatch, [])
+        _protect(session)
+        await session._handle_provider_prediction(TranscriptEvent(type="eager", text="Check the", confidence=0.9))
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Check the booking", confidence=0.9)
+        )
+        assert session._deferred_user_text == "Check the booking"
+        await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
+        assert session._deferred_user_text == ""
+
+    async def test_new_words_after_the_request_are_still_taken_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        session = _flux_session(monkeypatch, [])
+        _protect(session)
+        await session._handle_provider_commit("Check the booking.")
+        await session._handle_provider_prediction(TranscriptEvent(type="eager", text="and cancel it", confidence=0.9))
+        assert session._deferred_user_text == "Check the booking. and cancel it"
+        await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
+        assert session._deferred_user_text == "Check the booking."
+
+
+class TestRetractedReplyStillQueued:
+    async def test_unplayed_audio_is_cut_and_the_reply_leaves_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        session = _flux_session(monkeypatch, [])
+        tracker = _UnplayedTracker()
+        session.playback = tracker  # type: ignore[assignment]
+        await session._handle_provider_prediction(TranscriptEvent(type="eager", text="Hello there.", confidence=0.9))
+        turn = session._current_turn_task
+        assert turn is not None
+        await asyncio.wait_for(turn, timeout=30)  # generation is over; its 8 bytes wait unplayed
+        assert tracker.emitted > 0 and tracker.is_playing
+        assert [e.role for e in session.transcript] == ["user", "assistant"]
+        await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
+        assert tracker.interrupted
+        assert session.transcript == []
+
+
 class TestEagerCancellation:
     async def test_turn_resumed_clears_an_unfinished_hold(self, monkeypatch: pytest.MonkeyPatch) -> None:
         ran: list[str] = []
@@ -154,7 +281,7 @@ class TestEagerCancellation:
         assert session._deferred_user_text == ""
         assert not lookup.done()
         release.set()
-        await lookup
+        await asyncio.wait_for(lookup, timeout=30)
 
     async def test_a_merged_eager_turn_gives_its_prefix_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         ran: list[str] = []
@@ -190,7 +317,7 @@ class TestSpeculativeDiscard:
         await session._discard_speculative(reason="turn_resumed")
         assert not confirmed.done()
         release.set()
-        await confirmed
+        await asyncio.wait_for(confirmed, timeout=30)
 
     async def test_a_mismatched_attempt_is_discarded_before_speech_is_deferred(self) -> None:
         from timbal.voice import VoiceSession
@@ -309,6 +436,51 @@ class TestToolModesAndDispatch:
         assert session._turn_tool_batch_inflight == 0
         assert not session._interruptions_suppressed()
 
+    async def test_an_agent_tool_named_call_tool_is_not_a_dispatch(self) -> None:
+        """The application's own ``call_tool`` takes the name; the dispatcher gets another and is not called."""
+        from timbal import Tool
+        from timbal.voice import VoiceSession
+
+        from .test_session import MockSTT, MockTTS
+
+        ran: list[str] = []
+        suppressed_after: list[bool] = []
+        session: VoiceSession | None = None
+
+        def call_tool(name: str) -> str:
+            """The application's own tool."""
+            ran.append(f"call_tool:{name}")
+            return "ok"
+
+        def reserve() -> str:
+            """Reserve a table."""
+            ran.append("reserve")
+            return "reserved"
+
+        def reply(messages: list) -> Message | str:
+            if messages[-1].role == "user":
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="call_tool", input={"name": "reserve"})],
+                    stop_reason="tool_use",
+                )
+            assert session is not None
+            suppressed_after.append(session._interruptions_suppressed())  # call_tool has returned
+            return "Done."
+
+        agent = Agent(
+            name="voice_test",
+            model=TestModel(handler=reply),
+            tools=[call_tool, Tool(handler=reserve, defer_loading=True, interruption_mode="disable_during_tool")],
+            tool_search="dispatch",
+        )
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector="heuristic")
+        await session._begin_user_turn("reserve it", replace_user_entry=False)
+        await asyncio.wait_for(session._current_turn_task, timeout=30)
+        assert ran == ["call_tool:reserve"]
+        assert suppressed_after == [False]
+        assert "reserve" not in session._turn_open_tools
+
 
 class TestAnthropicSystemOverride:
     async def test_provider_params_system_wins(self) -> None:
@@ -379,15 +551,121 @@ class TestConfirmedSpeculativeAudio:
 
 
 class TestThousandsSeparators:
-    def test_grouped_and_plain_thousands_are_one_value(self) -> None:
-        from timbal.voice.session import _contains_spoken_words, _same_spoken_words, _without_spoken_words
+    def test_a_separator_that_could_change_the_quantity_is_a_different_value(self) -> None:
+        from timbal.voice.session import _same_spoken_words
 
-        assert transcripts_equivalent("pay 1,000 euros", "pay 1000 euros")
-        assert _same_spoken_words("pay 1,000 euros", "pay 1000 euros")
-        assert _contains_spoken_words("I want room 1,000 now", "room 1000")
-        assert _without_spoken_words("I want room 1,000 now", "room 1000") == "I want now"
+        # "1,000" is a thousand in English and one in Spanish: never confirmed as "1000".
+        for first, second in [("pay 1,000 euros", "pay 1000 euros"), ("record 1.250", "record 1250")]:
+            assert not transcripts_equivalent(first, second)
+            assert not _same_spoken_words(first, second)
+        # Unambiguous forms are one value.
+        for first, second in [
+            ("pay 1,000,000", "pay 1000000"),
+            ("pay 1.000.000", "pay 1000000"),
+            ("pay 1,000.50", "pay 1000.50"),
+            ("pay 1,50", "pay 1.50"),
+        ]:
+            assert transcripts_equivalent(first, second), (first, second)
+            assert _same_spoken_words(first, second), (first, second)
         # A decimal point is not a thousands separator.
         assert not transcripts_equivalent("order 150", "order 1.50")
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            # A currency sign belongs to one number.
+            ("buy 3 $5 tickets", "buy 3$ 5 tickets"),
+            ("add 2$ 50 items", "add 2 $50 items"),
+            # A unit after a no-break or narrow no-break space (French typography).
+            ("set discount to 12\u00a0€", "set discount to 12\u00a0%"),
+            ("set discount to 12\u202f€", "set discount to 12\u202f%"),
+            ("set discount to 12\u00a0€", "set discount to 12"),
+            # How two numbers combine.
+            ("what is 5 + 3", "what is 5 - 3"),
+            ("what is 5 * 3", "what is 5 / 3"),
+            ("what is 5+3", "what is 5-3"),
+        ],
+    )
+    def test_a_unit_or_operator_change_is_a_different_value(self, first: str, second: str) -> None:
+        from timbal.voice.session import _same_spoken_words
+
+        assert not transcripts_equivalent(first, second)
+        assert not _same_spoken_words(first, second)
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [("what is 5 - 3", "What is 5-3?"), ("what is 5 -3", "what is 5 - 3"), ("pay 12\u00a0€", "pay 12 €")],
+    )
+    def test_spacing_around_a_unit_or_operator_is_not_a_change(self, first: str, second: str) -> None:
+        from timbal.voice.session import _same_spoken_words
+
+        assert _same_spoken_words(first, second)
+
+    def test_the_same_spoken_words_are_found_whatever_their_grouping(self) -> None:
+        from timbal.voice.session import _contains_spoken_words, _without_spoken_words
+
+        assert _contains_spoken_words("I want room 1,000 now", "room 1000")
+        assert _without_spoken_words("I want room 1,000 now", "room 1000") == "I want now"
+
+    @pytest.mark.parametrize(
+        ("text", "words", "left"),
+        [
+            # The caller's numbers come back as they said them.
+            ("The total is 2.500 euros and my card ends 4", "my card ends 4", "The total is 2.500 euros and"),
+            ("Pay 1,000 euros. Cancel it", "cancel it", "Pay 1,000 euros."),
+            ("nothing 1,000 here", "cancel", "nothing 1,000 here"),
+            # A number goes whole, sign and unit included.
+            ("-20", "-20", ""),
+            ("Charge $12.", "charge $12", ""),
+            ("Set it to 12% please and then", "and then", "Set it to 12% please"),
+            ("Set it to 5 -3 degrees", "-3 degrees", "Set it to 5"),
+        ],
+    )
+    def test_removing_words_keeps_the_rest_as_written(self, text: str, words: str, left: str) -> None:
+        from timbal.voice.session import _without_spoken_words
+
+        assert _without_spoken_words(text, words) == left
+
+
+class TestChangedQuantityRegeneratesTheCall:
+    @pytest.mark.parametrize(("eager", "final"), _CHANGED_QUANTITIES)
+    async def test_flux_eager_turn(self, monkeypatch: pytest.MonkeyPatch, eager: str, final: str) -> None:
+        from timbal.server.voice import build_voice_session
+
+        got: list[str] = []
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(_amount_agent(got), VoiceConfig(predict_during_speech=True), {})
+        _stub_tts(session)
+        await session._handle_provider_prediction(TranscriptEvent(type="eager", text=eager, confidence=0.9))
+        assert session._eager_unconfirmed == eager
+        await session._handle_provider_commit(final)
+        await _until(lambda: got)
+        await asyncio.wait_for(session._current_turn_task, timeout=30)
+        assert got == [final.split()[-1]]
+        assert [e.text for e in session.transcript if e.role == "user"] == [final]
+
+    @pytest.mark.parametrize(("eager", "final"), _CHANGED_QUANTITIES)
+    async def test_speculative_attempt(self, eager: str, final: str) -> None:
+        from timbal.voice import VoiceSession
+
+        from .test_speculative import ScriptedSTT, ScriptedTTS, _Drive
+
+        got: list[str] = []
+        stt = ScriptedSTT()
+        session = VoiceSession(
+            agent=_amount_agent(got),
+            stt=stt,
+            tts=ScriptedTTS(),
+            turn_detector="heuristic",
+            speculative_generation=True,
+        )
+        async with _Drive(session, stt):
+            await stt.inject(TranscriptEvent(type="eager", text=eager))
+            await _until(lambda: session._speculative_attempt is not None)
+            await stt.inject(TranscriptEvent(type="committed", text=final))
+            await _until(lambda: got)
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+        assert got == [final.split()[-1]]
 
 
 class TestRetractionAndHoldEnd:

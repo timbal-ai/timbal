@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import re
 import string
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -59,8 +60,9 @@ __all__ = [
     "SpeculativeGate",
     "install_speculative_gate",
     "reset_speculative_gate",
+    "NumberSpan",
+    "number_spans",
     "spoken_numbers",
-    "ungroup_numbers",
     "transcripts_equivalent",
     "wait_for_turn_confirmation",
 ]
@@ -96,9 +98,10 @@ def transcripts_equivalent(first: str, second: str | None) -> bool:
 
     Adapted from LiveKit Agents ``_transcripts_equivalent`` (Apache-2.0):
     identical strings match; otherwise casefolded words, punctuation ignored,
-    CJK and Thai split into characters. Numbers must match as written, sign
-    and decimal point included (``spoken_numbers``): a changed value is a new
-    turn, never a reused reply or tool call. An empty word list never matches,
+    CJK and Thai split into characters. Numbers must match as values, sign,
+    units and any separator that could change the quantity included
+    (``spoken_numbers``): a changed value is a new turn, never a reused reply
+    or tool call. An empty word list never matches,
     so a blank attempt cannot be reused.
     """
     if first == second:
@@ -112,33 +115,139 @@ def transcripts_equivalent(first: str, second: str | None) -> bool:
 # A number as written, sign and decimal / thousands separators included: ignoring punctuation must not make
 # "1.50" the same as "150", or "-20" the same as "20". A separator counts only between digits ("20." is 20).
 _NUMBER = re.compile(r"(?<![\w.,])[-+\u2212]?\d+(?:[.,]\d+)*")
+# Units written against a number. Punctuation is ignored between words, so without them "$12" and "12%"
+# would both be "12". A currency sign may sit before the number (after its sign, or before it) or after it,
+# "%" and the like only after, with one space at most (any space character: "12\u00a0€" in French
+# typography). A sign belongs to one number: "3 $5" is 3 and $5, "3$ 5" is 3$ and 5.
+_CURRENCY = "$€£¥₹₩¢₽₺₪₫₱₦฿₴₲₵₡₭₮₸₼₾"
+_SUFFIX_UNITS = "%‰‱°"
+_SIGNS = "-+\u2212"
+# Between two numbers, an operator says how they combine: "5 + 3" is not "5 - 3", "5 * 3" not "5 / 3".
+_OPERATORS = {"+": "+", "-": "-", "\u2212": "-", "*": "*", "×": "*", "/": "/", "÷": "/", "=": "="}
 
 
-# Only thousands groups ("1,000", "1.500.000"): every separator is followed by exactly three digits.
-_GROUPED = re.compile(r"[-+]?\d{1,3}(?:[.,]\d{3})+")
+@dataclass(frozen=True)
+class NumberSpan:
+    """One number in a transcript: where it is (units and sign included) and what it says.
+
+    ``value`` is strict: two spans with the same ``value`` mean the same quantity in every locale.
+    ``"1.250"`` and ``"1,000"`` keep their separator (thousands in one locale, three decimals in another),
+    while ``"1,000,000"`` / ``"1.000.000"`` / ``"1000000"`` are one value and ``"1,50"`` is ``"1.50"``. It
+    also carries the operator that joins it to the number before ("5 - 3": ``-`` then 3).
+    ``spoken`` is the same words: it also reads a three-digit group as thousands ("1,000" is said like
+    "1000"), and has no operator, for finding words again in a buffer an STT may have formatted differently.
+    """
+
+    start: int
+    end: int
+    value: str
+    spoken: str
 
 
-def ungroup_numbers(text: str) -> str:
-    """``text`` with thousands separators taken out of its numbers ("1,000" → "1000"), nothing else changed."""
-    return _NUMBER.sub(
-        lambda m: m.group(0).replace(",", "").replace(".", "") if _GROUPED.fullmatch(m.group(0)) else m.group(0),
-        text or "",
-    )
+def _is_space(ch: str) -> bool:
+    return unicodedata.category(ch) == "Zs"
+
+
+def _starts_number(text: str, at: int) -> bool:
+    """A number (or its sign) starts at ``at``: the unit there is that number's, not the one before."""
+    if at < len(text) and text[at].isdigit():
+        return True
+    return at + 1 < len(text) and text[at] in _SIGNS and text[at + 1].isdigit()
+
+
+def number_spans(text: str) -> list[NumberSpan]:
+    """The numbers in ``text`` in order, each with its sign and the units written against it."""
+    text = text or ""
+    spans: list[NumberSpan] = []
+    taken = 0  # where the previous span ends: a unit before it is that span's
+    for match in _NUMBER.finditer(text):
+        start, end = match.span()
+        body = match.group(0)
+        sign = ""
+        if body[0] in _SIGNS:
+            sign, body = ("+" if body[0] == "+" else "-"), body[1:]
+        units: list[str] = []
+        # Before: "$12", "$ 12", "-$12", "$-12".
+        if start - 1 >= taken and text[start - 1] in _CURRENCY:
+            units.append(text[start - 1])
+            start -= 1
+        elif start - 2 >= taken and _is_space(text[start - 1]) and text[start - 2] in _CURRENCY:
+            units.append(text[start - 2])
+            start -= 2
+        if not sign and units and start - 1 >= taken and text[start - 1] in _SIGNS:
+            sign = "+" if text[start - 1] == "+" else "-"
+            start -= 1
+        # After: "12%", "12 %", "12€", "12 €", unless that sign opens the next number ("3 $5").
+        if end < len(text) and (text[end] in _SUFFIX_UNITS or text[end] in _CURRENCY):
+            if text[end] in _SUFFIX_UNITS or not _starts_number(text, end + 1):
+                units.append(text[end])
+                end += 1
+        elif (
+            end + 1 < len(text)
+            and _is_space(text[end])
+            and (text[end + 1] in _SUFFIX_UNITS or text[end + 1] in _CURRENCY)
+            and (text[end + 1] in _SUFFIX_UNITS or not _starts_number(text, end + 2))
+        ):
+            units.append(text[end + 1])
+            end += 2
+        unit = "".join(sorted(units))
+        spoken = f"{sign}{_quantity(body, three_digit_group_is_thousands=True)}{unit}"
+        operator = ""
+        if spans:
+            gap = text[spans[-1].end : start]
+            if sign and not gap.strip():
+                operator, sign = sign, ""  # "5 -3", "5 - 3" and "5-3" are one subtraction
+            elif gap.strip() in _OPERATORS:
+                operator = _OPERATORS[gap.strip()]
+        quantity = _quantity(body, three_digit_group_is_thousands=False)
+        spans.append(
+            NumberSpan(
+                start=start,
+                end=end,
+                value=f"{operator}~{quantity}{unit}" if operator else f"{sign}{quantity}{unit}",
+                spoken=spoken,
+            )
+        )
+        taken = end
+    return spans
+
+
+def _quantity(body: str, *, three_digit_group_is_thousands: bool) -> str:
+    """Digits with ``.`` as the decimal point, or ``body`` as written when the separators are ambiguous."""
+    seps = [ch for ch in body if ch in ".,"]
+    if not seps:
+        return body
+    if len(set(seps)) == 2:
+        # "1,000.50" / "1.000,50": the last separator is the decimal point, the other groups thousands.
+        point = seps[-1]
+        whole, frac = body.rsplit(point, 1)
+        groups = whole.split("," if point == "." else ".")
+        if point not in whole and _thousands(groups):
+            return "".join(groups) + "." + frac
+        return body
+    groups = re.split(r"[.,]", body)
+    if len(groups) > 2:
+        # "1,000,000": a decimal point appears once, so repeated separators group thousands.
+        return "".join(groups) if _thousands(groups) else body
+    whole, frac = groups
+    if len(frac) != 3:
+        return f"{whole}.{frac}"  # "1.50", "1,5": no locale groups two digits
+    if three_digit_group_is_thousands and _thousands(groups):
+        return whole + frac
+    return body  # "1,000", "1.250": thousands in one locale, three decimals in another
+
+
+def _thousands(groups: list[str]) -> bool:
+    return 1 <= len(groups[0]) <= 3 and all(len(group) == 3 for group in groups[1:])
 
 
 def spoken_numbers(text: str) -> list[str]:
-    """The numbers in ``text``, in order, each with its sign and decimal point (``−`` read as ``-``).
+    """The numbers in ``text``, in order, each with its sign, units and decimal point (``−`` read as ``-``).
 
-    Thousands separators are dropped ("1,000" and "1000" are one value); any other separator is a decimal
-    point and stays ("1.50" is not "150").
+    Strict (:attr:`NumberSpan.value`): a separator that could change the quantity keeps the number apart
+    ("1.250" is not "1250", "1,000" is not "1000"), and so does a unit ("$12" is not "12%" or "12").
     """
-    numbers = []
-    for match in _NUMBER.findall(text or ""):
-        number = match.replace("\u2212", "-")
-        if _GROUPED.fullmatch(number):
-            number = number.replace(",", "").replace(".", "")
-        numbers.append(number)
-    return numbers
+    return [span.value for span in number_spans(text)]
 
 
 def _words(text: str) -> list[str]:

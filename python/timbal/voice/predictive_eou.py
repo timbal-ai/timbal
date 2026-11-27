@@ -317,13 +317,22 @@ class SpeechEouPredictor:
         pause = self._pause_gen
         self._audio_task = asyncio.create_task(self._run_audio(gen, pause))
 
-    def on_speech_resumed(self) -> None:
-        """The pause was not a turn. Drop the pause-onset score and any Flux flag.
+    def on_speech_resumed(self, *, after_endpoint: bool = False) -> None:
+        """The pause was not a turn. Drop the pause-onset score and any Flux flag, and the text vote
+        after a pause that armed an endpoint.
 
         ``TurnResumed`` vetoes the pause it cancelled. It must not stick to the
         next pause, or one continued sentence would disable the short wait for
         the rest of the call. The in-flight endpoint is cancelled by the VAD
         at the same time, so clearing the flag here cannot authorize that pause.
+
+        ``after_endpoint``: the pause lasted until an endpoint was armed, and
+        speech cut it. The text vote then describes the words before it, not
+        the ones said since: kept, "What's my balance?" would vote for the next
+        pause of "…and my card" until a partial covered it; dropped, the empty
+        text vetoes the short wait instead. A dip of a frame or two inside or
+        between words arms nothing: the partial still describes the sentence,
+        and dropping it would lose the short wait at its end.
         """
         self._pause_gen += 1
         self._audio_gen += 1
@@ -333,6 +342,22 @@ class SpeechEouPredictor:
             task.cancel()
         self._flux_state = "none"
         self._p_flux = None
+        if after_endpoint:
+            self._drop_text()
+
+    def on_committed(self) -> None:
+        """A commit closed the utterance. Its text must not vote on the next one."""
+        self._drop_text()
+
+    def _drop_text(self) -> None:
+        self._text = ""
+        self._scored_text = ""
+        self._p_text = None
+        self._text_gen += 1
+        task = self._text_task
+        self._text_task = None
+        if task is not None and not task.done():
+            task.cancel()
 
     async def signals(self) -> EouSignals:
         """Wait briefly for the in-flight scores and return the snapshot."""

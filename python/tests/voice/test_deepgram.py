@@ -191,10 +191,14 @@ class TestFluxEventMapping:
         stt = DeepgramFluxSTT()
         stt._ws = _SlowFakeWs()
         send = asyncio.create_task(stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True))
-        while stt._ws.in_flight == 0:
-            await asyncio.sleep(0)
+
+        async def _sending() -> None:
+            while stt._ws.in_flight == 0:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(_sending(), timeout=30)
         await stt._handle_message({"type": "ConfigureSuccess"})  # answered before send() returned
-        await send
+        await asyncio.wait_for(send, timeout=30)
         assert stt.patient_thresholds_live is True
         assert not stt._configure_acks
 
@@ -207,10 +211,14 @@ class TestFluxEventMapping:
         stt = DeepgramFluxSTT()
         stt._ws = _AnsweredThenFails()
         send = asyncio.create_task(stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True))
-        while stt._ws.in_flight == 0:
-            await asyncio.sleep(0)
+
+        async def _sending() -> None:
+            while stt._ws.in_flight == 0:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(_sending(), timeout=30)
         await stt._handle_message({"type": "ConfigureSuccess"})
-        await send  # no IndexError
+        await asyncio.wait_for(send, timeout=30)  # no IndexError
         assert not stt._configure_acks
         # A later Configure is still matched to its own answer.
         stt._ws = _FakeWs()

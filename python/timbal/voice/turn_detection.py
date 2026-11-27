@@ -853,6 +853,145 @@ def _cuts_through_backchannels(text: str) -> bool:
     return _is_interrupt_command(text) or _is_si_pero(text)
 
 
+def _verb_forms(*heads: str) -> frozenset[str]:
+    """Regular inflections: turn(s/ed/ing), log → logged, come → coming, try → tried, pass → passes."""
+    forms: set[str] = set()
+    for head in heads:
+        forms.add(head)
+        if head.endswith("y") and head[-2] not in "aeiou":
+            forms.update((head[:-1] + "ies", head[:-1] + "ied", head + "ing"))
+            continue
+        forms.add(head + "es" if head.endswith(("s", "sh", "ch", "x", "z", "o")) else head + "s")
+        if head.endswith("e"):
+            forms.update((head + "d", head[:-1] + "ing"))
+            continue
+        forms.update((head + "ed", head + "ing"))
+        if len(head) >= 3 and head[-1] not in "aeiouwxy" and head[-2] in "aeiou" and head[-3] not in "aeiou":
+            forms.update((head + head[-1] + "ed", head + head[-1] + "ing"))
+    return frozenset(forms)
+
+
+# Words of ``_UNFINISHED_TRAILING`` that also end finished sentences. Each one
+# stays open unless the words before it close it, and only contexts that are
+# rarely a fragment are listed: a context left out costs a short wait (the
+# hold), one listed wrongly answers half a sentence.
+#
+# Particles: "Turn it on.", "Count me in.", "Hold on.", "It's over.", "Turn the
+# lights on." versus "It depends on", "I'll see you on", "My appointment is
+# on", "Can I come in" + "on Monday". "about" and "to" are not particles here:
+# "Tell me about" and "I want to" are the fragments the hold exists for, so
+# the elliptical "I'd like to." waits it out.
+_PARTICLE_TAILS = frozenset({"in", "on", "over", "by"})
+# Particle verbs complete with the particle straight after them ("log in").
+_INTRANSITIVE_PARTICLE_VERBS: dict[str, frozenset[str]] = {
+    "in": _verb_forms("log", "sign", "check", "opt", "chime", "join", "give", "cave", "pop", "jump", "drop")
+    | {"gave", "given"},
+    "on": _verb_forms("hold", "hang", "carry", "move", "log", "sign") | {"held", "hung"},
+    "over": _verb_forms("start", "come", "move", "sleep", "pull", "roll", "take") | {"came", "took", "taken", "slept"},
+    "by": _verb_forms("stand", "stop", "drop", "come", "swing", "pass", "walk") | {"stood", "came", "swung"},
+}
+# Particle verbs that take their object between verb and particle: a pronoun
+# ("turn it on") or a determiner and one word ("turn the lights on"). Right
+# after the verb ("Can you turn on") the particle still waits for its object,
+# and a preposition there ("talk about it over") is not an object. Verbs whose
+# particle usually goes on to a place, a time or a means are left out: "put
+# my name on", "do it over", "leave a message on", "check the status in",
+# "bring the papers in".
+_SEPARABLE_PARTICLE_VERBS: dict[str, frozenset[str]] = {
+    "in": _verb_forms("plug", "fill", "hand", "let", "count", "log", "sign", "turn") | {"let"},
+    "on": _verb_forms("turn", "switch", "try", "pass"),
+    "over": _verb_forms("hand", "think", "talk", "look", "pass", "turn", "start") | {"thought"},
+}
+_OBJECT_PRONOUNS = frozenset({"it", "me", "them", "him", "her", "us", "you", "this", "that", "these", "those"})
+_DETERMINERS = frozenset(
+    {"the", "a", "an", "my", "your", "his", "her", "its", "our", "their", "this", "that", "these", "those"}
+)
+# A bare letter after one of these is the letter's name ("option a", "vitamin
+# e"), not the article or the Spanish conjunction.
+_LETTER_TAILS = frozenset({"a", "e", "o", "u", "y"})
+_LETTER_LABELS = frozenset(
+    {
+        "option",
+        "plan",
+        "letter",
+        "vitamin",
+        "type",
+        "grade",
+        "class",
+        "section",
+        "row",
+        "gate",
+        "seat",
+        "block",
+        "zone",
+        "level",
+        "tier",
+        "unit",
+        "door",
+        "terminal",
+        "platform",
+        "part",
+        "opción",
+        "letra",
+        "vitamina",
+        "tipo",
+        "fila",
+        "puerta",
+        "nivel",
+        "zona",
+        "bloque",
+    }
+)
+_SENTENCE_END = (".", "!", "?", "…", "¡", "¿")
+# Closers that end a finished sentence after these words: "I think so.",
+# "Okay then.", "I'd like that.". "and so", "and then", "I think that" and
+# "the problem is that" stay open.
+_CLOSED_AFTER: dict[str, frozenset[str]] = {
+    "so": _verb_forms("think", "hope", "guess", "believe", "suppose", "say", "imagine", "expect", "reckon", "figure")
+    | {"thought", "said", "afraid", "told"},
+    "then": frozenset({"okay", "ok", "alright", "right", "fine", "bye", "goodbye", "until", "since", "by", "back"})
+    | {"even", "you", "good", "great", "sure"},
+    "that": _verb_forms("like", "love", "take", "want", "need", "try", "prefer", "buy", "choose", "pick", "use")
+    | _verb_forms("hate", "remember", "do", "get")
+    | {"did", "done", "got", "took", "chose", "bought", "saw"}
+    | {"for", "with", "about", "of", "on", "at", "from", "all"},
+}
+_RAW_WORD_RE = re.compile(r"[\w']+", re.UNICODE)
+
+
+def _tail_closes_phrase(words: list[str], raw: str) -> bool:
+    """Whether the trailing function word ends a finished sentence here.
+
+    ``words`` is the normalized commit (two words or more), ``raw`` the commit
+    as the STT wrote it, case kept.
+    """
+    last, prev = words[-1], words[-2]
+    if last in _PARTICLE_TAILS:
+        if prev in _INTRANSITIVE_PARTICLE_VERBS[last]:
+            return True
+        # "It's over." Not "is on" / "is in": a date or a place usually follows.
+        if last == "over" and (prev in {"is", "are", "was", "were"} or prev.endswith(("'s", "'re"))):
+            return True
+        heads = _SEPARABLE_PARTICLE_VERBS.get(last)
+        if heads is None:
+            return False
+        # "turn it on": verb, pronoun, particle. "turn the lights on": verb, determiner, word, particle.
+        if len(words) >= 3 and words[-3] in heads and prev in _OBJECT_PRONOUNS:
+            return True
+        return len(words) >= 4 and words[-4] in heads and words[-3] in _DETERMINERS and prev not in _UNFINISHED_TRAILING
+    if last in _LETTER_TAILS:
+        if prev in _LETTER_LABELS:
+            return True
+        # STT capitalizes a spelled letter ("I'll take A."), not the article or
+        # "y" / "o". At the start of a sentence the capital says nothing.
+        tokens = _RAW_WORD_RE.findall(raw)
+        if not tokens or tokens[-1] != last.upper():
+            return False
+        return not raw[: raw.rfind(tokens[-1])].rstrip().endswith(_SENTENCE_END)
+    closers = _CLOSED_AFTER.get(last)
+    return closers is not None and prev in closers
+
+
 def _ends_unfinished(text: str) -> bool:
     """Commit ends on a trailing function word, so the phrase is still open.
 
@@ -860,6 +999,9 @@ def _ends_unfinished(text: str) -> bool:
     writes "because." on a fragment. A lone acknowledgement ("sí") is an
     answer even though "si" is also the conjunction "if". Accents stay, so
     "creo que sí" and "es él" are finished while "no sé si" and "dame el" are not.
+    A word that also ends finished sentences is open only where its context
+    does not close it (:func:`_tail_closes_phrase`): "Turn it on.", "Option A.",
+    "I think so." are turns; "It depends on", "I want a", "and so" are held.
     """
     stripped = text.strip()
     if not stripped or stripped.endswith(("?", "？")):
@@ -869,7 +1011,7 @@ def _ends_unfinished(text: str) -> bool:
         return False
     if len(words) == 1:
         return words[0] in _UNFINISHED_SINGLE
-    return True
+    return not _tail_closes_phrase(words, stripped)
 
 
 def _merge_cumulative(held: str, new: str) -> str:

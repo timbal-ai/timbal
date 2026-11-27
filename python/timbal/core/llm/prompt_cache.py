@@ -116,11 +116,11 @@ def voice_prompt(static: str, dynamic: str = "") -> SystemPrompt:
     ``static`` is spoken behavior that stays byte-for-byte the same on every
     call. ``dynamic`` is an extra per-call fact, such as a plan or an open
     order you already looked up. On a voice turn the suffix is, in order:
-    the caller and customer fields from the call, ``dynamic``, the UTC time
-    for this turn, and on the first turn a note that the greeting was already
-    heard. Per-call lines come before per-turn lines so the longest unchanged
-    span stays cacheable. Do not repeat the caller id in ``dynamic``; the
-    call context already supplies it.
+    the call-context fields named in ``VoiceConfig.prompt_call_context_keys``
+    (none by default), ``dynamic``, the UTC time for this turn, and on the
+    first turn a note that the greeting was already heard. Per-call lines come
+    before per-turn lines so the longest unchanged span stays cacheable. Do not
+    repeat a named field in ``dynamic``.
     """
     return SystemPrompt(static=static, dynamic=dynamic)
 

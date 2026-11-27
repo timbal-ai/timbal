@@ -93,6 +93,14 @@ class _Gate:
         return True
 
 
+async def _until_commits(gate: _Gate, n: int, timeout: float = 30.0) -> None:
+    async def _wait() -> None:
+        while gate.commits < n:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_wait(), timeout=timeout)
+
+
 def _predictor(scores: _Scores, **kwargs: float) -> SpeechEouPredictor:
     return SpeechEouPredictor(score_audio=scores.audio, score_text=scores.text, **kwargs)
 
@@ -222,6 +230,55 @@ class TestPredictor:
         assert prediction_is_complete(nxt)
         await predictor.close()
 
+    async def test_resumed_speech_drops_the_text_of_the_words_before_it(self) -> None:
+        # The previous sentence must not vote for the pause in the next one.
+        scores = _Scores(0.91)
+        predictor = _predictor(scores)
+        predictor.note_partial("What's my balance?")
+        assert (await predictor.signals()).text_fresh
+        predictor.kick_audio()
+        predictor.on_speech_resumed(after_endpoint=True)  # a pause that was not the end: "…and my card"
+        predictor.kick_audio()  # and pauses again before a partial covers it
+        stale = await predictor.signals()
+        assert stale.p_text is None
+        assert not stale.text_fresh
+        assert stale.text_veto
+        assert not prediction_is_complete(stale)
+        # The same words again (an STT re-sending them) are scored again.
+        predictor.note_partial("What's my balance?")
+        assert prediction_is_complete(await predictor.signals())
+        await predictor.close()
+
+    async def test_a_commit_drops_the_text_vote(self) -> None:
+        scores = _Scores(0.91)
+        predictor = _predictor(scores)
+        predictor.note_partial("What's my balance?")
+        assert (await predictor.signals()).text_fresh
+        predictor.on_committed()
+        predictor.kick_audio()
+        after = await predictor.signals()
+        assert after.p_text is None and after.text_veto
+        assert not prediction_is_complete(after)
+        await predictor.close()
+
+    async def test_a_text_score_in_flight_at_the_resume_does_not_land(self) -> None:
+        release = asyncio.Event()
+
+        async def slow_text(_text: str) -> float:
+            await release.wait()
+            return 0.95
+
+        scores = _Scores(0.91)
+        predictor = SpeechEouPredictor(score_audio=scores.audio, score_text=slow_text, score_timeout_secs=0.05)
+        predictor.note_partial("What's my balance?")
+        predictor.on_speech_resumed(after_endpoint=True)
+        release.set()
+        await asyncio.sleep(0)
+        predictor.kick_audio()
+        after = await predictor.signals()
+        assert after.p_text is None and not after.text_fresh
+        await predictor.close()
+
     async def test_resumed_speech_drops_the_pause_score(self) -> None:
         scores = _Scores(0.91, delay=0.05)
         predictor = _predictor(scores)
@@ -277,6 +334,57 @@ class TestEndpointerTiming:
         await asyncio.sleep(0.35)
         assert gate.commits == 1
         assert ep.last_predictive is False
+        await ep.close()
+        await predictor.close()
+
+    async def test_the_previous_utterance_does_not_vote_for_the_next_pause(self) -> None:
+        # Turn 1 "What's my balance?" was committed; the caller then starts a new
+        # utterance and pauses before the STT's first partial for it.
+        scores = _Scores(0.95)
+        predictor = _predictor(scores, eager_silence_secs=0.096, predict_silence_secs=0.032)
+        gate = _Gate()
+        ep = self._endpointer(predictor)
+        await _armed(ep, gate)
+        predictor.note_partial("What's my balance?")
+        await asyncio.sleep(0)
+        ep.notify_committed()
+        ep.push(b"SS" + b"\x00" * 3)
+        await asyncio.sleep(0.05)
+        assert gate.commits == 0  # no 96 ms cut on the stale text
+        await _until_commits(gate, 1)
+        assert ep.last_predictive is False
+        await ep.close()
+        await predictor.close()
+
+    async def test_a_pause_cut_by_more_speech_drops_its_text_vote(self) -> None:
+        # "What's my balance?" pauses long enough to arm an endpoint, then "…and my card" goes on and pauses
+        # before a partial covers it: the old text must not vote for that pause.
+        scores = _Scores(0.95, delay=0.15)  # unconfident in time: the endpoint is still pending at the resume
+        predictor = _predictor(scores, eager_silence_secs=0.096, predict_silence_secs=0.064)
+        gate = _Gate()
+        ep = self._endpointer(predictor)
+        await _armed(ep, gate)
+        predictor.note_partial("What's my balance?")
+        await asyncio.sleep(0)
+        ep.push(b"SS" + b"\x00" * 3)  # the endpoint is armed
+        ep.push(b"SS")  # speech cuts it
+        stale = await predictor.signals()
+        assert stale.p_text is None and stale.text_veto
+        await ep.close()
+        await predictor.close()
+
+    async def test_a_dip_inside_the_sentence_keeps_its_text_vote(self) -> None:
+        # One silent frame between words is not a pause: the partial still describes the sentence.
+        scores = _Scores(0.95)
+        predictor = _predictor(scores, eager_silence_secs=0.096, predict_silence_secs=0.064)
+        gate = _Gate()
+        ep = self._endpointer(predictor)
+        await _armed(ep, gate)
+        predictor.note_partial("Hello there.")
+        await asyncio.sleep(0)
+        ep.push(b"SS" + b"\x00" + b"SS" + b"\x00" * 3)
+        await _until_commits(gate, 1)
+        assert ep.last_predictive is True
         await ep.close()
         await predictor.close()
 

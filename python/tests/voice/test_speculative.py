@@ -21,6 +21,7 @@ from timbal.voice import (
     AudioInputConfig,
     AudioOutput,
     AudioOutputConfig,
+    SessionError,
     SessionInterrupted,
     SpeculativeGeneration,
     SpeechToText,
@@ -151,7 +152,7 @@ class _Drive:
     async def __aexit__(self, *exc: object) -> None:
         await self.stt.finish()
         assert self._task is not None
-        await self._task
+        await asyncio.wait_for(self._task, timeout=30)
 
     def audio(self) -> list:
         return [e for e in self.events if isinstance(e, AudioOutput)]
@@ -644,10 +645,11 @@ class TestSpeculativeSession:
             task = session._current_turn_task
             assert task is not None and not task.done()
             task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            # A hang guard: a finally that never returns fails here, not at the 300 s backstop.
+            done, _ = await asyncio.wait({task}, timeout=30)
+            assert task in done, "the cancelled turn did not finish"
+            if not task.cancelled():
+                task.exception()
             assert session._scheduler.head == prior
             await stt.inject(TranscriptEvent(type="committed", text="something else entirely"))
             await _until(
@@ -684,6 +686,159 @@ class TestSpeculativeSession:
             assert session._speculative_discarded_run_id != real
             await session.interrupt()
             assert session._scheduler.head == real
+
+    async def test_an_attempt_cancelled_before_it_ran_does_not_mute_the_next_turn(self) -> None:
+        session, stt, _tts, model = _session(["After."])
+        original = session._spawn_session_task
+
+        def _cancel_speculative(coro, *, name: str | None = None):
+            task = original(coro, name=name)
+            if name == "speculative-turn":
+                task.cancel()  # before its first step: _run_turn's finally never runs
+            return task
+
+        session._spawn_session_task = _cancel_speculative
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await stt.inject(TranscriptEvent(type="resumed", text=""))
+            await _until(lambda: session.speculative_generations_discarded == 1)
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            assert session._audio_hold is None
+            session._spawn_session_task = original
+            await stt.inject(TranscriptEvent(type="committed", text="something else entirely"))
+            await _until(lambda: drive.audio())
+
+    async def test_a_typed_message_right_after_an_attempt_starts_is_heard(self) -> None:
+        session, stt, _tts, _model = _session(["Typed reply."])
+        async with _Drive(session, stt) as drive:
+            await session._maybe_start_speculative("book a table", source="smart_turn")
+            attempt_task = session._current_turn_task
+            assert attempt_task is not None and not attempt_task.done()
+            # No yield in between: the attempt's task has not taken its first step.
+            await session.submit_user_text("typed instead")
+            assert attempt_task.cancelled()
+            await _until(lambda: drive.audio())
+
+    async def test_an_attempt_whose_task_ended_is_dropped_with_its_hold_when_discarded(self) -> None:
+        session, stt, _tts, _model = _session(["After."])
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: session._speculative_attempt is not None)
+            attempt = session._speculative_attempt
+            # Its task is over while the attempt is still live (the paths that end it early abandon it too).
+            attempt.task.cancel()
+            await asyncio.wait({attempt.task}, timeout=30)
+            assert session._speculative_attempt is attempt and not attempt.settled
+            await stt.inject(TranscriptEvent(type="resumed", text=""))
+            await _until(lambda: session.speculative_generations_discarded == 1)
+            assert session._audio_hold is None
+            await stt.inject(TranscriptEvent(type="committed", text="something else entirely"))
+            await _until(lambda: drive.audio())
+
+    async def test_an_attempt_that_fails_before_confirmation_is_retried_on_the_commit(self) -> None:
+        session, stt, _tts, model = _session(["Booked."])
+        real_wait = session._wait_speculative_release
+        failures: list[str] = []
+
+        async def failing_once() -> None:
+            if not failures:
+                failures.append("x")
+                raise RuntimeError("provider down")
+            await real_wait()
+
+        session._wait_speculative_release = failing_once  # type: ignore[method-assign]
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: session.speculative_generations_discarded == 1)
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            assert session._audio_hold is None
+            assert not any(isinstance(e, SessionError) for e in drive.events)
+            # The same words commit: a normal turn answers them, instead of a confirmed hold with nothing in it.
+            await stt.inject(TranscriptEvent(type="committed", text="book a table"))
+            await _until(lambda: drive.audio())
+        assert model.call_count == 2
+
+    async def test_an_ignored_commit_discards_the_attempt_it_closes(self) -> None:
+        session, stt, _tts, model = _session(["A reply nobody asked for."])
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="um"))
+            await _until(lambda: session._speculative_attempt is not None)
+            await _until(lambda: model.call_count >= 1)
+            await stt.inject(TranscriptEvent(type="committed", text="um"))  # IGNOREd: hesitation
+            await _until(lambda: session.speculative_generations_discarded == 1)
+            assert session._speculative_attempt is None
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            assert not session._is_speaking  # the line is free for idle prompts and event turns
+            assert session._audio_hold is None
+            assert drive.audio() == []
+
+    async def test_an_unconfirmed_attempt_that_times_out_says_nothing(self) -> None:
+        ran: list[str] = []
+
+        async def lookup() -> str:
+            """Look up the table."""
+            ran.append("lookup")
+            return "blue"
+
+        stt = ScriptedSTT()
+        session = VoiceSession(
+            agent=Agent(
+                name="speculative_voice", model=TestModel(responses=[_tool_call("lookup"), "Done."]), tools=[lookup]
+            ),
+            stt=stt,
+            tts=ScriptedTTS(),
+            turn_detector="heuristic",
+            speculative_generation=True,
+            turn_timeout_secs=0.2,
+        )
+        async with _Drive(session, stt) as drive:
+            # The tool waits for a confirmation that never comes, until the turn deadline.
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: session.speculative_generations_discarded == 1)
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            assert session._audio_hold is None
+            assert not any(isinstance(e, SessionError) for e in drive.events)
+            assert [e.text for e in session.transcript] == []
+            assert drive.audio() == []
+            metrics = [e.metrics for e in drive.events if isinstance(e, TurnMetricsEvent)]
+            assert all(m.interrupted for m in metrics)  # a discard, not a finished turn
+        assert ran == []
+
+    async def test_the_stored_trace_keeps_the_confirmed_wording(self, tmp_path) -> None:
+        import json
+
+        from timbal.state.tracing.providers import JsonlTracingProvider
+
+        path = tmp_path / "traces.jsonl"
+        model = TestModel(responses=["Done."])
+        agent = Agent(
+            name="speculative_voice",
+            model=model,
+            tools=[],
+            tracing_provider=JsonlTracingProvider.configured(_path=path),
+        )
+        stt = ScriptedSTT()
+        session = VoiceSession(
+            agent=agent, stt=stt, tts=ScriptedTTS(), turn_detector="heuristic", speculative_generation=True
+        )
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table for 4"))
+            await _until(lambda: model.call_count >= 1)
+            await stt.inject(TranscriptEvent(type="committed", text="Book a table for 4."))
+            await _until(lambda: drive.audio())
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+        stored = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        run = stored[-1]
+        spans = run["spans"] if isinstance(run, dict) and "spans" in run else run
+        roots = [span for span in spans if span.get("path") == "speculative_voice"]
+        users = [
+            block.get("text")
+            for message in roots[-1]["memory"]
+            if message.get("role") == "user"
+            for block in message.get("content", [])
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        assert users == ["Book a table for 4."]
 
     async def test_confirm_appends_when_the_caller_repeats_the_previous_line(self) -> None:
         session, stt, _tts, model = _session(["First.", "Second."])
@@ -847,6 +1002,42 @@ class TestEndpointScoreHook:
         assert scores[0][1] is False
         endpointer.push(b"SS")
         await _until(lambda: resumes)
+        await endpointer.close()
+
+    async def test_incomplete_text_is_reported_when_the_delay_is_already_past_the_floor(self) -> None:
+        # min_delay_secs above the 1.2 s text floor: the floor never raises the
+        # delay, but the text scorer still called the fragment incomplete.
+        scores: list[tuple[float, bool]] = []
+
+        async def score() -> float:
+            return 0.6
+
+        async def text_score() -> float:
+            return 0.1
+
+        async def commit() -> None:
+            return None
+
+        endpointer = VadEndpointer(
+            _FakeVad(),
+            stop_silence_secs=0.064,
+            min_speech_secs=0.064,
+            min_delay_secs=1.5,
+            max_delay_secs=3.0,
+            min_commit_interval_secs=0.0,
+        )
+        endpointer.bind(
+            score=score,
+            commit=commit,
+            should_commit=lambda: True,
+            text_score=text_score,
+            on_score=lambda p, incomplete: _record(scores, (p, incomplete)),
+        )
+        await endpointer.start(sample_rate=16_000)
+        endpointer.push(b"SS")
+        endpointer.push(b"..")
+        await _until(lambda: scores)
+        assert scores[0] == (pytest.approx(0.6), True)
         await endpointer.close()
 
 

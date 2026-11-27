@@ -284,7 +284,7 @@ class VadEndpointer:
                     if self._resume_pending:
                         self._resume_pending = False
                         if self._predictor is not None:
-                            self._predictor.on_speech_resumed()
+                            self._predictor.on_speech_resumed(after_endpoint=had_pending)
                     if had_pending and self._on_speech_resume is not None:
                         self._on_speech_resume()
                 self._utterance_speech += _FRAME_SECS
@@ -325,8 +325,10 @@ class VadEndpointer:
 
     def notify_committed(self) -> None:
         """A committed transcript arrived (ours or provider debounce) — any
-        pending endpoint is now stale."""
+        pending endpoint is now stale, and so is the predictor's text vote."""
         self._cancel_pending()
+        if self._predictor is not None:
+            self._predictor.on_committed()
 
     def last_speech_at(self) -> float | None:
         """Monotonic time of the last frame Silero called speech, or ``None``.
@@ -460,8 +462,12 @@ class VadEndpointer:
             # "Smart Turn says the pause is probably complete". ``remaining``
             # was already sized above, including the short predictive wait.
             if driver == "audio" and self._on_score is not None:
+                # The text scorer's verdict, not whether it raised the delay:
+                # with ``min_delay_secs`` past the floor the bump never fires,
+                # and an incomplete fragment would still start a reply.
+                text_incomplete = p_text is not None and p_text < self.TEXT_INCOMPLETE_THRESHOLD
                 try:
-                    await self._on_score(p, text_bumped)
+                    await self._on_score(p, text_incomplete)
                 except Exception as e:
                     logger.warning("vad_speculative_score_failed", error=str(e))
             if remaining > 0:

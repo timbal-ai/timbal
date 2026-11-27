@@ -22,9 +22,17 @@ agent = Agent(
 )
 ```
 
-`voice_prompt` takes the stable instructions first and one per-call fact second. On each voice turn the suffix is, in order: the caller and customer fields from the call, that fact, the UTC time for this turn, and on the first turn a note that the greeting was already heard. Caller and customer lines are sorted and stay the same for the whole call, so they extend the cached prefix. The time is fixed for every model call in the turn, including tools, and changes on the next turn, so it stays after the per-call lines. Do not put the caller id in the second argument; Timbal already appends it. Do not paste the date or the caller at the top of the instructions. The reused prefix stops at the first byte that changed.
+`voice_prompt` takes the stable instructions first and one per-call fact second. On each voice turn the suffix is, in order: the call fields you chose to show, that fact, the UTC time for this turn, and on the first turn a note that the greeting was already heard. The time is fixed for every model call in the turn, including tools, and changes on the next turn, so it stays after the per-call lines. Do not paste the date or the caller at the top of the instructions. The reused prefix stops at the first byte that changed.
 
-A callable system prompt can return `voice_prompt(...)` when the per-call fact comes from your own lookup. Return the instructions as a plain string when you have no extra fact; Timbal still appends the call context and the time.
+A call's `call_context` (telephony `from`, `to`, `call_id`, and every custom parameter, tokens included) is not shown to the model unless you name its fields in `prompt_call_context_keys`:
+
+```python fragment
+voice_config={"language": "en", "prompt_call_context_keys": ["from", "customer_name"]}
+```
+
+Those fields become sorted `key: value` lines that stay the same for the whole call, so they extend the cached prefix. Each value is flattened to one line of at most 200 characters, and the block is labelled as call data rather than instructions. A caller hello cannot change the list. Do not repeat a field you named in the second argument of `voice_prompt`. The other fields stay in session data, where a callable system prompt can read the ones it needs.
+
+A callable system prompt can return `voice_prompt(...)` when the per-call fact comes from your own lookup. Return the instructions as a plain string when you have no extra fact; Timbal still appends the named call fields and the time.
 
 ## Move rare rules onto the tool
 

@@ -507,6 +507,31 @@ class TestDefaultPipeline:
         assert session.turn_detector.ignore_backchannels is True
         assert getattr(session.turn_detector, "hold_unfinished_secs", None) is None
 
+    def test_prompt_call_context_keys_reach_the_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = self._session(VoiceConfig(turn_detector="heuristic", prompt_call_context_keys=["from"]))
+        assert session.prompt_call_context_keys == ("from",)
+        session, _ = self._session(VoiceConfig(turn_detector="heuristic"))
+        assert session.prompt_call_context_keys == ()
+
+    def test_hello_cannot_choose_call_context_for_the_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+
+        out = voice_routes.merge_client_voice_overrides(VoiceConfig(), {"prompt_call_context_keys": ["crm_token"]})
+        assert out.prompt_call_context_keys is None
+        agent = Agent(name="voice_test", model=TestModel(responses=["hi"]), tools=[])
+        session, _ = voice_routes.build_voice_session(
+            agent, VoiceConfig(turn_detector="heuristic"), {"prompt_call_context_keys": ["crm_token"]}
+        )
+        assert session.prompt_call_context_keys == ()
+
+    @pytest.mark.parametrize("key", ["", " from", "a\nb"])
+    def test_prompt_call_context_keys_are_plain(self, key: str) -> None:
+        with pytest.raises(ValueError):
+            VoiceConfig(prompt_call_context_keys=[key])
+
     def test_client_cannot_enable_turn_taking_knobs(self) -> None:
         out = voice_routes.merge_client_voice_overrides(
             VoiceConfig(ignore_backchannels=True, hold_unfinished_secs=1.2),

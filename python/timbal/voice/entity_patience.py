@@ -94,28 +94,22 @@ _NUMBER_WORDS = frozenset(
     }
 )
 
-# Letter names that are not also everyday function words ("a", "i", "de",
-# "en", "te"). A single one of these opens a spelling hold. Bare letters
-# still need two, so a sentence ending in "o" or "a" does not.
+# Letter names that are not also everyday words ("a", "i", "de", "en",
+# "te"). A single one of these opens a spelling hold. Bare letters still need
+# two, so a sentence ending in "o" or "a" does not.
 _LETTER_NAMES = frozenset(
     {
         "aitch",
-        "jay",
-        "kay",
         "zee",
-        "zed",
         "wye",
-        "double",
         "jota",
         "hache",
         "ene",
-        "ese",
         "efe",
         "ele",
         "eme",
         "eñe",
         "erre",
-        "equis",
         "zeta",
         "uve",
         "ge",
@@ -123,6 +117,16 @@ _LETTER_NAMES = frozenset(
         "cu",
     }
 )
+# Letter names that are also words: "ese" (Spanish "that": "Dame ese."), the
+# names "Jay" / "Kay" / "Zed", "equis" ("equis cantidad"), and the pronoun "I"
+# ("So do I."). They count toward a spelling of two letters ("ese ele") but
+# never open one alone, after other words or not.
+_WORD_LETTER_NAMES = frozenset({"ese", "jay", "kay", "zed", "equis"})
+# Sayings that end on a letter name: "No entiendo ni jota." is not a spelling.
+_LETTER_SAYINGS = frozenset({("ni", "jota")})
+# "double" spells only with a letter or digit after it ("double u", "double
+# five"). At the end of a sentence it is the word ("Make it a double.").
+_DOUBLE = "double"
 
 
 def entity_capture(text: str) -> str | None:
@@ -143,6 +147,9 @@ def entity_capture(text: str) -> str | None:
     if not tokens:
         return None
 
+    if len(tokens) >= 2 and (_fold_token(tokens[-2]), _fold_token(tokens[-1])) in _LETTER_SAYINGS:
+        return None
+
     email = _email_state(tokens[-1])
     if email == "done":
         return None
@@ -152,9 +159,24 @@ def entity_capture(text: str) -> str | None:
     digits = 0
     letters = 0
     letter_names = 0
+    bare_letters = 0
     saw_code = False
     consumed = 0
+    follower: str | None = None
     for tok in reversed(tokens):
+        if _fold_token(tok) == _DOUBLE:
+            # "double u" is a letter name, "double five" two digits. Nothing
+            # spelled after it: the span ends here.
+            if follower in ("letter", "letter_name", "word_letter"):
+                letters += 1
+                letter_names += 1
+            elif follower == "digit":
+                digits += 1
+            else:
+                break
+            consumed += 1
+            follower = "double"
+            continue
         atom = _atom(tok)
         if atom is None:
             break
@@ -163,19 +185,23 @@ def entity_capture(text: str) -> str | None:
         letters += n_letters
         if kind == "letter_name":
             letter_names += 1
+        elif kind == "letter":
+            bare_letters += 1
         saw_code = saw_code or kind == "code"
         consumed += 1
+        follower = kind
     if consumed == 0:
         return None
     if saw_code or (digits >= 1 and letters >= 1):
         return "code"
     if digits >= 2:
         return "digits"
-    # A named letter ("jota", "aitch") is already a spelling. Two bare letters
-    # ("J O") are too. One bare letter alone is a word ("a", "I", "o"). A
-    # bare letter after other words is how providers write a spelled name
-    # ("apellido J" for "jota").
-    if letter_names >= 1 or letters >= 2 or (letters == 1 and len(tokens) > consumed):
+    # A named letter ("jota", "aitch") is already a spelling. Two letters
+    # ("J O", "ese ele") are too. One bare letter alone is a word ("a", "o").
+    # A bare letter after other words is how providers write a spelled name
+    # ("apellido J" for "jota"); a letter name that is also a word ("Dame
+    # ese.", "So do I.") is not.
+    if letter_names >= 1 or letters >= 2 or (bare_letters == 1 and letters == 1 and len(tokens) > consumed):
         return "spelling"
     return None
 
@@ -330,6 +356,8 @@ def _atom(token: str) -> tuple[str, int, int] | None:
         return ("digit", 1, 0)
     if folded in _LETTER_NAMES:
         return ("letter_name", 0, 1)
+    if folded in _WORD_LETTER_NAMES or core == "I":
+        return ("word_letter", 0, 1)
     if len(core) == 1 and core.isalpha():
         return ("letter", 0, 1)
     if _CODE_RUN.fullmatch(core) and any(c.isalpha() for c in core) and any(c.isdigit() for c in core):

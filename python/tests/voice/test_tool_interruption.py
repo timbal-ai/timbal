@@ -398,16 +398,14 @@ def test_and_turn_pause_waits_for_the_turn_that_finishes_the_tool() -> None:
     # Parked: the caller can speak, including over leftover playback.
     session.playback._playing_until = session.playback._clock() + 5
     assert not session._interruptions_suppressed()
-    # Words captured during the tool open their own turn and leave the flag.
+    # Words captured during the tool open their own turn, which is not protected.
     session._reset_tool_interruption()
     session._is_speaking = True
-    assert session._and_turn_after_pause
     assert not session._interruptions_suppressed()
     # The turn that finishes the tool protects the reply, and only that reply.
     session._note_tool_call("wire", "c2")
     session._note_tool_output("voice_events.wire", paused=False)
     assert session._interruptions_suppressed()
-    assert not session._and_turn_after_pause
 
 
 def test_unfinished_tool_batch_does_not_lock_the_call() -> None:
@@ -431,6 +429,28 @@ async def test_hangup_keeps_speech_held_during_a_protected_window() -> None:
     await session.close()
     # The hold is a refinement of the deferred fragment, not a second copy.
     assert [entry.text for entry in session.transcript if entry.role == "user"] == [DURING_TOOL]
+
+
+@pytest.mark.asyncio
+async def test_hangup_keeps_a_hold_made_while_a_protected_tool_runs() -> None:
+    script = _Script()
+    session, _stt = _voice(script, [])
+    session._tool_interruption_modes = {"wire": "disable_during_tool"}
+    session._is_speaking = True
+    session._note_tool_call("wire", "c1")
+    session._held_user_text = DURING_TOOL
+    await session.close()
+    assert [entry.text for entry in session.transcript if entry.role == "user"] == [DURING_TOOL]
+
+
+@pytest.mark.asyncio
+async def test_hangup_drops_a_hold_nothing_was_carrying() -> None:
+    """An echo-like fragment the detector parked while the agent spoke is not a user line."""
+    script = _Script()
+    session, _stt = _voice(script, [])
+    session._held_user_text = "Hello, hello."
+    await session.close()
+    assert [entry for entry in session.transcript if entry.role == "user"] == []
 
 
 def test_dict_tool_definition_accepts_interruption_mode() -> None:

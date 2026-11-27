@@ -224,19 +224,19 @@ async def change_tempo(
         while True:
             if pending is None:
                 pending = asyncio.ensure_future(agen.__anext__())
+            if seen and not pending.done():
+                # The idle timer only flushes. Whether the read finished is read off the read
+                # itself, so one that completes on the timer's tick is a chunk, an end or an error
+                # like any other, never dropped.
+                await asyncio.wait({pending}, timeout=IDLE_FLUSH_SECS)
+                if not pending.done():
+                    for out in _blocks(engine, buf, frame_n, cap_n, force=True):
+                        yield out
+                    continue
             try:
-                if not seen:
-                    chunk = await pending
-                else:
-                    chunk = await asyncio.wait_for(asyncio.shield(pending), IDLE_FLUSH_SECS)
-            except TimeoutError:
-                if pending.done():
-                    # The source itself timed out (a provider read): its error, not our idle timer.
-                    failed, pending = pending, None
-                    failed.result()
-                for out in _blocks(engine, buf, frame_n, cap_n, force=True):
-                    yield out
-                continue
+                # Done or (first read) awaited here: a provider error, its own TimeoutError
+                # included, is raised as it is.
+                chunk = await pending
             except StopAsyncIteration:
                 pending = None
                 for out in _blocks(engine, buf, frame_n, cap_n, force=True):

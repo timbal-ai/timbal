@@ -558,6 +558,13 @@ class VoiceConfig(BaseModel):
     entity_patience_secs: float = Field(default=2.5, gt=0.0, le=10.0)
     """Silence budget while an entity is still open. Ignored when
     ``entity_patience`` is off."""
+    prompt_call_context_keys: list[str] | None = None
+    """``call_context`` fields every voice turn shows the model, as
+    ``key: value`` lines after the static prompt (for example
+    ``["from", "customer_name"]``). ``None`` shows none: telephony ids and custom
+    call parameters stay in session data, where a callable system prompt reads
+    what it needs. Each value is flattened to one line of at most 200
+    characters. Server-side only: a caller hello cannot widen it."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -631,6 +638,16 @@ class VoiceConfig(BaseModel):
     string / block → that opener on outbound only. Only a host that knows the
     call direction can apply it (:func:`greeting_for_direction`); the session
     itself never sees a direction."""
+
+    @field_validator("prompt_call_context_keys")
+    @classmethod
+    def _plain_context_keys(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        for key in v:
+            if not key or not key.isprintable() or key != key.strip():
+                raise ValueError(f"prompt_call_context_keys: {key!r} is not a plain key")
+        return v
 
     @field_validator("min_delay_secs", "stop_silence_secs", "first_flush_min_words", mode="before")
     @classmethod

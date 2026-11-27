@@ -53,6 +53,13 @@ async def _chunks(parts: list[bytes]):
         yield part
 
 
+async def _run_source(source, tempo: float = 2.0) -> bytes:
+    out: list[bytes] = []
+    async for chunk in change_tempo(source, sample_rate=SR, tempo=tempo):
+        out.append(chunk)
+    return b"".join(out)
+
+
 async def _run(parts: list[bytes], tempo: float, sr: int = SR) -> bytes:
     out: list[bytes] = []
     async for chunk in change_tempo(_chunks(parts), sample_rate=sr, tempo=tempo):
@@ -172,6 +179,71 @@ class TestIdleFlush:
         assert second_started.is_set()
         expect = (len(first) + len(second)) / 2 / 2.0
         assert len(got) // 2 == pytest.approx(expect, rel=0.08)
+
+    @pytest.mark.parametrize("tick", ["before_the_check", "with_the_timer"])
+    async def test_a_read_that_finishes_at_the_idle_deadline_is_kept(self, tick: str) -> None:
+        # The second read and the end of the stream complete on the tick the idle
+        # timer fires. Both chunks are played and the stream ends cleanly.
+        first = _sine(int(0.30 * SR))
+        second = _sine(int(0.30 * SR), freq=660)
+        loop = asyncio.get_running_loop()
+
+        class _Source:
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def __aiter__(self) -> _Source:
+                return self
+
+            def __anext__(self) -> asyncio.Future[bytes]:
+                self.reads += 1
+                fut: asyncio.Future[bytes] = loop.create_future()
+                if self.reads == 1:
+                    fut.set_result(first)
+                    return fut
+                result: bytes | BaseException = second if self.reads == 2 else StopAsyncIteration()
+
+                def finish() -> None:
+                    if isinstance(result, BaseException):
+                        fut.set_exception(result)
+                    else:
+                        fut.set_result(result)
+
+                if tick == "before_the_check":
+                    finish()
+                else:
+                    loop.call_soon(_behind_the_idle_timer, finish)
+                return fut
+
+        def _behind_the_idle_timer(finish) -> None:
+            # The idle wait has just armed its timer. Complete the read at the same instant, ordered after
+            # it: both run on one loop tick, the timer first, which is the race the idle check must survive.
+            now = loop.time()
+            timers = [
+                handle
+                for handle in loop._scheduled  # type: ignore[attr-defined]
+                if not handle.cancelled() and abs(handle.when() - (now + IDLE_FLUSH_SECS)) < 0.05
+            ]
+            assert timers, "the idle wait armed no timer"
+            loop.call_at(max(handle.when() for handle in timers), finish)
+
+        out = bytearray()
+
+        async def consume() -> None:
+            async for chunk in change_tempo(_Source(), sample_rate=SR, tempo=2.0):
+                out.extend(chunk)
+
+        await asyncio.wait_for(consume(), timeout=10)
+        expect = (len(first) + len(second)) / 2 / 2.0
+        assert len(out) // 2 == pytest.approx(expect, rel=0.08)
+
+    async def test_a_provider_timeout_is_raised_not_taken_for_idle(self) -> None:
+        async def source():
+            yield _sine(int(0.10 * SR))
+            raise TimeoutError("provider read timed out")
+
+        with pytest.raises(TimeoutError, match="provider read"):
+            await asyncio.wait_for(_run_source(source()), timeout=10)
 
     async def test_flush_does_not_wait_when_the_stream_ends(self) -> None:
         raw = _sine(int(0.30 * SR))

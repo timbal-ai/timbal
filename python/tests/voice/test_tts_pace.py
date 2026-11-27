@@ -284,4 +284,4 @@ class TestByteAccounting:
             recorder.close()
             if not task.done():
                 task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                await asyncio.wait({task}, timeout=30)

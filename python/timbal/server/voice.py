@@ -1291,6 +1291,9 @@ def build_voice_session(
         session_kwargs["playback_tracker"] = playback_tracker
     if call_context:
         session_kwargs["call_context"] = call_context
+    # Server config only: which call fields reach the model is the operator's call, not the caller's.
+    if defaults.prompt_call_context_keys:
+        session_kwargs["prompt_call_context_keys"] = list(defaults.prompt_call_context_keys)
     if parent_run_id:
         session_kwargs["parent_run_id"] = parent_run_id
     # Server config only, like recording: ``events`` is not client-settable, so

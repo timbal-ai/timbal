@@ -35,8 +35,28 @@ def _session(**kwargs) -> VoiceSession:
 
 
 class TestPromptForTurn:
+    def test_call_context_is_not_in_the_prompt_by_default(self):
+        session = _session(call_context={"from": "+1555", "crm_token": "sk-live-1"})
+        session._turn_prompt_now = datetime(2026, 11, 4, 9, 40, tzinfo=UTC)
+        prompt = session.prompt_for_turn("Be brief.")
+        assert "+1555" not in prompt.dynamic and "sk-live-1" not in prompt.dynamic
+        assert prompt.dynamic.startswith("Current date and time (UTC)")
+
+    def test_only_the_named_call_context_fields_reach_the_prompt(self):
+        session = _session(call_context={"from": "+1555", "crm_token": "sk-live-1"}, prompt_call_context_keys=["from"])
+        session._turn_prompt_now = datetime(2026, 11, 4, 9, 40, tzinfo=UTC)
+        prompt = session.prompt_for_turn("Be brief.")
+        assert "from: +1555" in prompt.dynamic
+        assert "sk-live-1" not in prompt.dynamic
+
+    def test_prompt_call_context_keys_must_be_strings(self):
+        with pytest.raises(TypeError):
+            _session(prompt_call_context_keys="from")
+
     def test_greeting_note_is_not_part_of_the_static_prefix(self):
-        session = _session(call_context={"from": "+1555", "account": "42"})
+        session = _session(
+            call_context={"from": "+1555", "account": "42"}, prompt_call_context_keys=["from", "account"]
+        )
         session._turn_prompt_now = datetime(2026, 11, 4, 9, 40, tzinfo=UTC)
         session._greeting_entry = SimpleNamespace(text="Hello, this is the clinic.")
         session._last_run_context = None

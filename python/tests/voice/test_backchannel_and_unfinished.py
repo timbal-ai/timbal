@@ -348,6 +348,81 @@ class TestHoldUnfinished:
         assert decision.action is CommitAction.NEW_TURN, text
         assert decision.reason == "provider", text
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Turn it on.",
+            "Please turn the lights on.",
+            "Count me in.",
+            "Let me in.",
+            "Plug it in.",
+            "I need to log in.",
+            "Hold on.",
+            "Please hold on.",
+            "Let's move on.",
+            "Try it on.",
+            "It's over.",
+            "The game's over.",
+            "Let me think it over.",
+            "Start over.",
+            "I'll stop by.",
+            "Option A.",
+            "Vitamin E.",
+            "I'll take A.",
+            "Fila Y.",
+            "I think so.",
+            "I'm afraid so.",
+            "Okay then.",
+            "See you then.",
+            "I'd like that.",
+            "Thanks for that.",
+            "Something like that.",
+        ],
+    )
+    async def test_function_words_used_as_content_words_are_finished(self, text: str) -> None:
+        """A particle, a letter name, or "so" / "then" / "that" can end a finished sentence."""
+        decision = await self._detector().on_committed(text, _state())
+        assert decision.action is CommitAction.NEW_TURN, text
+        assert decision.reason == "provider", text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "It depends on",
+            "I'm interested in",
+            "Can you turn on",
+            "Let me check on",
+            "I'll see you on",
+            "My appointment is on",
+            "Can I come in",
+            "Can I do it over",
+            "I'll pay it by",
+            "Tell me about",
+            "I want to",
+            "I want a",
+            "Okay. A",
+            "Quiero pan y",
+            "Voy a",
+            "and so",
+            "and then",
+            "I think that",
+            "The problem is that",
+            "It's just that",
+            "The thing is just that",
+            "Let's talk about it over",
+            "I'll think about it over",
+            "I left my keys on",
+            "Leave a message on",
+            "Can you check the status in",
+            "Please check the box in",
+            "Turn left on",
+        ],
+    )
+    async def test_the_same_words_still_hold_where_they_open_a_phrase(self, text: str) -> None:
+        decision = await self._detector().on_committed(text, _state())
+        assert decision.action is CommitAction.HOLD, text
+        assert decision.reason == "unfinished", text
+
     async def test_unaccented_si_and_el_still_hold(self) -> None:
         for text in ("no sé si", "dame el"):
             decision = await self._detector().on_committed(text, _state())

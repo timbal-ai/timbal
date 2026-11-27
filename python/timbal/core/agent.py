@@ -380,6 +380,13 @@ def _unused_name(base: str, fallbacks: tuple[str, ...], taken: set[str]) -> str:
     return f"{base}_{number}"
 
 
+def is_dispatcher(tools: Any, name: Any) -> bool:
+    """Whether ``name`` is the ``call_tool`` dispatcher among ``tools`` (one model call's), not a tool of the
+    agent's own that took one of its names: the check :meth:`Agent._dispatched` makes, for code that sees the
+    call but not the step."""
+    return any(isinstance(tool, _CallTool) and tool.name == name for tool in tools or ())
+
+
 def is_call_tool_name(name: Any) -> bool:
     """Whether ``name`` can be the ``call_tool`` dispatcher's: its usual name, a fallback, or a numbered one.
 
@@ -1610,7 +1617,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if self._system_prompt_fn is not None:
             system_prompt = f"<{self._system_prompt_fn.__name__}>"
         elif isinstance(self.system_prompt, SystemPrompt):
-            system_prompt = self.system_prompt.model_dump()
+            # The text the model gets, static part first: readers of the config
+            # (``codegen flow``, the platform's editor) treat the prompt as text.
+            system_prompt = self.system_prompt.as_text()
         else:
             system_prompt = self.system_prompt
 
