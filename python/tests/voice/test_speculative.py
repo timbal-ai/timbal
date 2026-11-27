@@ -703,7 +703,7 @@ class TestSpeculativeSession:
             await stt.inject(TranscriptEvent(type="resumed", text=""))
             await _until(lambda: session.speculative_generations_discarded == 1)
             await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
-            assert session._audio_hold is None
+            await _until(lambda: session._audio_hold is None)  # the discard finishes after the task
             session._spawn_session_task = original
             await stt.inject(TranscriptEvent(type="committed", text="something else entirely"))
             await _until(lambda: drive.audio())
@@ -1051,6 +1051,9 @@ class TestSpeculativeSession:
                 lambda: session._current_turn_task is None or session._current_turn_task.done(),
                 timeout=5.0,
             )
+            # No speculation while the reply's audio still plays (its 2 ms here): wait it out, or a fast
+            # runner sends the eager words inside it and no attempt starts.
+            await _until(lambda: not session._assistant_audio_playing, timeout=5.0)
             await stt.inject(TranscriptEvent(type="eager", text="book a table"))
             # Windows CI is slow to start the speculative retry and to append
             # the confirmed user line. 2s is not enough there.

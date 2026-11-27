@@ -3792,6 +3792,9 @@ class VoiceSession:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+            # The task's done callback drops the hold too, a loop step later: here it is gone before the
+            # next turn can start, whatever order the loop runs them in.
+            self._drop_discarded_hold(attempt.hold)
         self._cancel_turn.clear()
         self._active_turn_user_text = ""
         # note_run can land after the rewind above, including inside the
