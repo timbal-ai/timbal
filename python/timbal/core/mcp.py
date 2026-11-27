@@ -2065,7 +2065,9 @@ class MCPServer(ToolSet):
         running (an ``asyncio.Runner`` between two ``run()`` calls: call close() on that loop), or because a close
         was cancelled or failed (call close() again). One whose loop has closed went with it."""
         loop = asyncio.get_running_loop()
-        session = self._session_task
+        # The server's session's owner task, at whichever stage it is: a handshake under way publishes the same task
+        # as _session_task once it is done, maybe while this close() runs.
+        session = self._session_task or self._opening_task
         failed: list[BaseException] = []
         # The closes this close() waits for: those going when it began, and those it starts (here or handed over).
         # One still going after its waits is owed; one a call starts later is that call's.
@@ -2146,17 +2148,17 @@ class MCPServer(ToolSet):
                 owners.add(owner)
             else:
                 left.sessions += 1  # still shutting down after the wait for it (that wait was cut)
-        if session is not None and session is self._session_task and not session.done():
-            if paused(session.get_loop()):
-                owners.add(session)
+        # The session close() began with (its handshake maybe published since) and one opening now, each once, while
+        # it is still the server's session: one forgotten was closed, or is an owner counted above.
+        for owner in {task for task in (session, self._opening_task) if task is not None}:
+            if owner.done() or owner.get_loop().is_closed():
+                continue
+            if owner is not self._session_task and owner is not self._opening_task:
+                continue
+            if paused(owner.get_loop()):
+                owners.add(owner)  # its close (or handshake) waits for that loop: close() has to happen there
             else:
                 left.sessions += 1  # its close was handed over and did not happen
-        opening = self._opening_task
-        if opening is not None and not opening.done() and not opening.get_loop().is_closed():
-            if paused(opening.get_loop()):
-                owners.add(opening)  # its handshake waits for that loop: its close() has to happen there
-            else:
-                left.sessions += 1
         left.owners = len(owners)
         return left
 

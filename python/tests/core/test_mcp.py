@@ -1639,6 +1639,55 @@ class TestCrossLoopClose:
             runner.run(asyncio.wait_for(finish(), 10))
         assert server._session is None and server._opening_task is None
 
+    def test_a_handshake_that_publishes_while_close_runs_and_then_pauses_is_reported(self, monkeypatch):
+        """close() begins during a first handshake on another loop; the handshake publishes its session and that loop
+        pauses before close()'s handed close runs: still the server's session, it is reported, not missed."""
+        import threading
+
+        owner_loop = asyncio.new_event_loop()
+        shaking, gates = threading.Event(), {}
+
+        async def run_session(_self, ready, closed):  # the transport: its handshake waits for the test
+            gates["release"] = asyncio.Event()
+            shaking.set()
+            await gates["release"].wait()
+            ready.set_result(object())
+            await closed.wait()
+
+        open_session = MCPServer._open_session
+
+        async def open_then_pause(self):
+            session = await open_session(self)
+            asyncio.get_running_loop().stop()  # its loop pauses right after the publish
+            return session
+
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        monkeypatch.setattr(MCPServer, "_open_session", open_then_pause)
+        server = MCPServer(transport="stdio", command="unused")
+        first = threading.Thread(target=owner_loop.run_forever)
+        first.start()
+        try:
+            connecting = asyncio.run_coroutine_threadsafe(server._connect(), owner_loop)
+            assert shaking.wait(10)
+
+            async def close_elsewhere():
+                closing = asyncio.ensure_future(server.close())
+                await until(lambda: server._lock is not None and server._lock._waiters)  # its close, behind the lock
+                owner_loop.call_soon_threadsafe(gates["release"].set)
+                with pytest.raises(RuntimeError, match="not running"):
+                    await asyncio.wait_for(closing, 10)
+
+            asyncio.run(close_elsewhere())
+            first.join(10)
+        finally:
+            again = threading.Thread(target=owner_loop.run_forever)  # the loop runs again: the close happens there
+            again.start()
+            connecting.result(10)
+            asyncio.run_coroutine_threadsafe(asyncio.sleep(0), owner_loop).result(10)
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+            again.join(10)
+            owner_loop.close()
+
     def test_a_close_pending_when_close_began_whose_waits_are_cut_is_reported(self):
         """A teardown already going on another running loop when close() began, every wait close() sends for it
         cancelled there: still going after them, it is owed."""
