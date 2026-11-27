@@ -563,6 +563,16 @@ class TestTraceClaims:
         other = {PROVENANCE_CALL_KEY: pseudonym("https://tools.example.com:8443")}
         assert other[PROVENANCE_CALL_KEY] not in seen
 
+    def test_stdio_servers_reaching_different_upstreams_get_different_pseudonyms(self):
+        def pseudonym(**stdio):
+            server = MCPServer(transport="stdio", command="proxy", provenance=True, **stdio)
+            return meta_of(platform_context(), server=server)[PROVENANCE_CALL_KEY]
+
+        by_env = {pseudonym(args=["--serve"], env={"UPSTREAM": url}) for url in ("https://a.test", "https://b.test")}
+        assert len(by_env) == 2  # one command, two upstreams through env
+        assert pseudonym(args=["a b"]) != pseudonym(args=["a", "b"])  # argv is not its join
+        assert pseudonym(args=["x"], env={"K": "v"}) == pseudonym(args=["x"], env={"K": "v"})
+
     def test_a_third_party_gets_pseudonyms_only_of_ids_the_claims_carry(self):
         context = platform_context()
         context.parent_id = "not an id"

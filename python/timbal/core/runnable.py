@@ -2915,6 +2915,7 @@ class Runnable(ABC, BaseModel):
                 )
             output_event._input_dump = span._input_dump
             output_event._output_dump = await dump(handoff_result) if handed_off else span._output_dump
+            end_cut = False
             try:
                 if handoff_start is None:
                     # The end of the root run is stored before the caller goes on, even with background work
@@ -2945,6 +2946,7 @@ class Runnable(ABC, BaseModel):
                             else:
                                 handoff_control.complete(span.call_id, handoff_result)
             except BaseException:
+                end_cut = True
                 if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
                     # The save was cut (a turn interrupted as it ended). Once more before the session
                     # lets the next turn in, which reads this run. Shielded: a second cut ends the
@@ -2959,9 +2961,23 @@ class Runnable(ABC, BaseModel):
                 if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
                     scheduler, run_context._foreign_turn_of = run_context._foreign_turn_of, None
                     scheduler.foreign_finished(run_context.id, span.status)
-                # Last: whatever the save did, the run is over (a per-run MCP connection closes here).
-                if _new_parent_call_id is None and run_context._end_hooks:
-                    await run_context._run_end_hooks()
+                if end_cut:
+                    # Cut as it ended. The run is over all the same: its end hooks run (each is called before
+                    # any is waited for, so a second cut ends only the wait), and the caller gets its context
+                    # back before the cut goes on, as below, or it would go on as the finished run.
+                    if _new_parent_call_id is None:
+                        if run_context._end_hooks:
+                            with contextlib.suppress(BaseException):
+                                await run_context._run_end_hooks()
+                        else:
+                            run_context.__dict__["_end_hooks"] = ()
+                    set_parent_call_id(_parent_call_id)
+                    set_call_id(_call_id)
+                    if _entry_call_id is not None:
+                        set_run_context(_entry_run_context)
+                        if _call_id is None and run_context.__dict__.get("_invoker") is not None:
+                            set_parent_call_id(_entry_parent_call_id)
+                            set_call_id(_entry_call_id)
             # Warn about resume values that didn't match any gate or suspend()
             # so callers find typos / stale IDs instead of silently dropping
             # them. Only check the IDs introduced by THIS call; nested children
@@ -3006,6 +3022,14 @@ class Runnable(ABC, BaseModel):
                     # (``RunContext.update_usage`` records on that context's root then).
                     set_parent_call_id(_entry_parent_call_id)
                     set_call_id(_entry_call_id)
+            if _new_parent_call_id is None:
+                # Last: the run is over (a per-run MCP connection closes here), after the caller has its context
+                # back: a cut while the hooks are waited for leaves it right. Every finished root closes
+                # registration, hooks or not: one added later would never run.
+                if run_context._end_hooks:
+                    await run_context._run_end_hooks()
+                else:
+                    run_context.__dict__["_end_hooks"] = ()
             # Flush any still-buffered RunContext.emit() events (post_hook,
             # error paths, plain handlers) so every emission is ordered
             # before this call's OUTPUT. Close first: a racing off-loop emit

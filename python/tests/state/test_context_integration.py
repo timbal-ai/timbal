@@ -9,7 +9,7 @@ from datetime import datetime
 import pytest
 from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
-from timbal.state import get_run_context
+from timbal.state import get_call_id, get_run_context
 from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.file import File
 from timbal.types.message import Message
@@ -1821,6 +1821,76 @@ class TestRunEndHooks:
         assert called == ["slow", "next"]
         release.set()
         await until(lambda: sorted(finished) == ["next", "slow"])
+
+    async def test_a_root_that_ended_with_no_hooks_keeps_none_added_later(self):
+        contexts = []
+
+        def tool() -> str:
+            contexts.append(get_run_context())
+            return "ok"
+
+        model = TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="t1", name="tool", input={})], stop_reason="tool_use"),
+                "done",
+            ]
+        )
+        out = await Agent(name="agent", model=model, tools=[tool])(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        assert contexts[0].on_end(lambda: None) is False  # a background child's late hook would never run
+        assert not contexts[0]._end_hooks
+
+    async def test_a_cut_while_the_hooks_wait_gives_the_caller_its_context_back(self):
+        """A run started inside a call, iterated in the caller's task, cut while its end hooks are waited for: the
+        caller that catches the cut goes on with its own run context and call id, not the finished run's."""
+        release = asyncio.Event()
+        seen = {}
+
+        async def outer() -> str:
+            me = asyncio.current_task()
+
+            async def wait():
+                me.cancel()  # the cut lands while _run_end_hooks waits for this
+                await release.wait()
+
+            def register() -> str:
+                get_run_context().on_end(wait)
+                return "ok"
+
+            inner = Agent(
+                name="inner",
+                model=TestModel(
+                    responses=[
+                        Message(
+                            role="assistant",
+                            content=[ToolUseContent(id="r1", name="register", input={})],
+                            stop_reason="tool_use",
+                        ),
+                        "done",
+                    ]
+                ),
+                tools=[register],
+            )
+            before = (get_run_context(), get_call_id())
+            try:
+                await inner(prompt="x").collect()
+            except asyncio.CancelledError:
+                me.uncancel()
+            seen["same"] = (get_run_context(), get_call_id()) == before
+            return "ok"
+
+        model = TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="o1", name="outer", input={})], stop_reason="tool_use"),
+                "done",
+            ]
+        )
+        try:
+            out = await Agent(name="agent", model=model, tools=[outer])(prompt="go").collect()
+        finally:
+            release.set()
+        assert out.status.code == "success", out.error
+        assert seen == {"same": True}
 
     async def test_they_run_once_when_the_root_ends_and_none_is_kept_after(self):
         from timbal import Agent

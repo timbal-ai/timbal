@@ -481,7 +481,7 @@ class TestPlatformConnectionPerRun:
         from timbal.state.context import RunContext
 
         opened, _ = platform
-        monkeypatch.setattr("timbal.core.mcp._live_run", lambda context: context, raising=False)  # a run going on
+        monkeypatch.setattr("timbal.core.mcp._run_connection_key", lambda _context: "run", raising=False)  # one goes on
         set_run_context(RunContext())
         service = MCPServer(transport="http", service="api")
         try:
@@ -536,6 +536,96 @@ class TestPlatformConnectionPerRun:
             await asyncio.wait_for(closing, 30)
         release.set()
         await until(lambda: closed == [True])
+
+    @pytest.mark.asyncio
+    async def test_a_call_on_another_loop_opens_its_own(self, platform):
+        """An offloaded handler running ``asyncio.run`` carries the run's context; the run's session belongs to
+        the run's loop, so that call gets a connection of its own, closed with its loop's work."""
+        from timbal import Tool
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        opened, _ = platform
+        service = MCPServer(transport="http", service="api")
+        listed = []
+
+        def offloaded() -> str:
+            async def list_there():
+                tools = await asyncio.wait_for(service.resolve(), 20)
+                listed.append([t.name for t in tools])
+
+            asyncio.run(list_there())
+            return "listed"
+
+        responses = iter(
+            [
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="a", name="echo_meta", input={})],
+                    stop_reason="tool_use",
+                ),
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="b", name="offloaded", input={})],
+                    stop_reason="tool_use",
+                ),
+            ]
+        )
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        tools = [service, Tool(name="offloaded", handler=offloaded, offload_blocking=True)]
+        model = TestModel(handler=lambda _messages: next(responses, "done"))
+        out = await Agent(name="agent", model=model, tools=tools)(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        assert listed == [["echo_meta"]]
+        assert len(opened) == 2 and all(server._session is None for server, _ in opened)
+        assert not service._run_connections
+        await service.close()
+
+    @pytest.mark.asyncio
+    async def test_two_runs_with_one_context_id_do_not_share_a_connection(self, platform):
+        """``context.id`` is the caller's: two concurrent runs may carry the same one."""
+        from timbal import Tool
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+        from timbal.state.context import RunContext
+
+        opened, _ = platform
+        service = MCPServer(transport="http", service="api")
+        first_waiting, go_on = asyncio.Event(), asyncio.Event()
+
+        async def gate() -> str:
+            first_waiting.set()
+            await asyncio.wait_for(go_on.wait(), 30)
+            return "on"
+
+        async def release() -> str:
+            go_on.set()
+            return "released"
+
+        def script(*names):
+            steps = iter(
+                Message(role="assistant", content=[ToolUseContent(id=n, name=n, input={})], stop_reason="tool_use")
+                for n in names
+            )
+            return TestModel(handler=lambda _messages: next(steps, "done"))
+
+        async def run(model):
+            set_run_context(RunContext(id="the-same-id"))
+            set_call_id(None)
+            set_parent_call_id(None)
+            tools = [service, Tool(name="gate", handler=gate), Tool(name="release", handler=release)]
+            return await Agent(name="agent", model=model, tools=tools)(prompt="go").collect()
+
+        first = asyncio.ensure_future(run(script("echo_meta", "gate")))
+        await asyncio.wait_for(first_waiting.wait(), 30)  # the first run holds its connection
+        second = await asyncio.wait_for(run(script("echo_meta", "release")), 30)
+        outs = [await asyncio.wait_for(first, 30), second]
+        assert all(out.status.code == "success" for out in outs), [out.error for out in outs]
+        assert len(opened) == 2  # one each
+        assert all(server._session is None for server, _ in opened) and not service._run_connections
+        await service.close()
 
     @pytest.mark.asyncio
     async def test_outside_a_run_each_call_closes_its_own(self, platform):

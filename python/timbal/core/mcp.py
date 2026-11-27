@@ -499,10 +499,14 @@ async def _wait_closed(task: asyncio.Task) -> None:
         await asyncio.shield(task)
 
 
-def _live_run(run_context: Any) -> Any:
-    """``run_context`` while a run goes on in it: its root has not ended, or the caller is one of its background
-    children. None for a context no run started (the platform resolver creates one when there is none) and for a
-    run that has ended: a call there opens and closes its own connection, as outside a run."""
+def _run_connection_key(run_context: Any) -> str | None:
+    """The run a platform connection is kept for, while one goes on in ``run_context`` and the caller is on its
+    loop: its root call id, unique to the run (a caller may give two concurrent runs one ``context.id``).
+
+    None (a call opens and closes its own connection, as outside a run) for no context, a context no run started
+    (the platform resolver creates one when there is none), a run that has ended (unless the caller is one of its
+    background children), and a call on another event loop than the run's: a handler offloaded to a thread that
+    runs ``asyncio.run`` carries the run's context, and a session the run's loop owns cannot serve it."""
     if run_context is None:
         return None
     root = run_context.root_span()
@@ -510,7 +514,9 @@ def _live_run(run_context: Any) -> Any:
         return None
     if root.t1 is not None and current_background_task_id() is None:
         return None
-    return run_context
+    if run_context._loop is not asyncio.get_running_loop():
+        return None
+    return root.call_id
 
 
 class MCPTool(Tool):
@@ -849,7 +855,7 @@ class MCPServer(ToolSet):
     _tools_lock: asyncio.Lock | None = PrivateAttr(default=None)
     _inflight: dict[int, _InflightCall] = PrivateAttr(default_factory=dict)
     _inflight_seq: int = PrivateAttr(default=0)
-    # service="api": run id -> that run's platform connection (see _project_connection).
+    # service="api": a run's root call id -> that run's platform connection (see _project_connection).
     _run_connections: dict[str, "_RunConnection"] = PrivateAttr(default_factory=dict)
     # Closes of run connections still going (``close()`` waits for them).
     _close_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
@@ -928,15 +934,16 @@ class MCPServer(ToolSet):
         or for background children that outlive it). Never shared across runs: the platform takes each call's
         principal and party from this connection's credential (monolith#565), so another run on it would act as
         the wrong caller. A run whose credential changes (a refreshed token) gets a new connection. A call outside
-        a run that goes on (``_live_run``) opens and closes its own."""
+        a run that goes on, or on another loop than the run's (``_run_connection_key``), opens and closes its own."""
         # Read before resolving: the resolver creates and sets a run context when there is none.
-        run_context = _live_run(get_run_context())
+        run_context = get_run_context()
+        key = _run_connection_key(run_context)
         # Resolve BEFORE opening the transport's fresh-context owner task. It
         # must inherit the caller's identity, never a process service secret.
         from ..platform.utils import _resolve_url_and_headers
 
         url, headers = _resolve_url_and_headers("api", "mcp", {})
-        if run_context is None:
+        if key is None:
             server = self._new_project_server(url, headers)
             try:
                 yield server
@@ -944,7 +951,6 @@ class MCPServer(ToolSet):
                 await server.close()
             return
         fingerprint = hashlib.sha256(json.dumps([url, sorted(headers.items())]).encode()).hexdigest()
-        key = run_context.id
         entry = self._run_connections.get(key)
         if entry is not None and entry.fingerprint != fingerprint:
             self._retire_run_connection(key)
@@ -1577,7 +1583,8 @@ class MCPServer(ToolSet):
 
     def _origin(self) -> str:
         """What a pseudonym is keyed to: ``scheme://host:port`` (default port filled in, credentials in the URL
-        left out, so one server gets one set of pseudonyms however its URL is written), or ``stdio:{command}``."""
+        left out, so one server gets one set of pseudonyms however its URL is written), or for stdio the command,
+        its arguments and its environment, encoded exactly."""
         if self.transport == "http" and self.url:
             parts = urlsplit(self.url)
             scheme = parts.scheme.lower()
@@ -1589,7 +1596,9 @@ class MCPServer(ToolSet):
             host = parts.hostname or ""
             host = f"[{host}]" if ":" in host else host
             return f"{scheme}://{host}:{port}" if port else f"{scheme}://{host}"
-        return "stdio:" + " ".join([self.command or "", *self.args])
+        # Exact (an argument with a space is not two), and with the environment: one command reaching two
+        # upstreams through env is two servers. Never sent: only ever hashed with the key (_pseudonym).
+        return "stdio:" + json.dumps([self.command or "", list(self.args), sorted((self.env or {}).items())])
 
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
         # Bare name for the wire call; qualified name for the agent registry.

@@ -1052,6 +1052,22 @@ def _native_tool_search(model: Any) -> bool:
     return True
 
 
+def _arguments_invalid(tool: Any, arguments: Any) -> bool:
+    """Whether ``arguments`` (the call's input as resolved, ``OutputEvent.input``) fail ``tool``'s parameters.
+
+    Validation runs before the handler and gives the same answer for the same input: True means the call failed
+    there and its handler never ran, so asking for a retry cannot repeat anything. A ``ValidationError`` the
+    handler raised itself (parsing a receipt after a write) leaves the arguments valid: no retry is suggested.
+    """
+    try:
+        tool.params_model.model_validate(arguments)
+    except ValidationError:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 def _schemas_found(memory: list[Message]) -> set[str]:
     """Tools whose schema a ``search_tools`` result in ``memory`` showed the model (``tool_search="dispatch"``)."""
     search_ids = {
@@ -4957,7 +4973,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             elif event.error is not None:
                 content = event.error
                 unseen = schemaless_calls.get(event.path.rsplit(".", 1)[-1])
-                if unseen is not None and isinstance(content, dict) and content.get("type") == "ValidationError":
+                if (
+                    unseen is not None
+                    and isinstance(content, dict)
+                    and content.get("type") == "ValidationError"
+                    and _arguments_invalid(unseen, event.input)
+                ):
                     content = {
                         **content,
                         "hint": "You called this tool without its schema: call it again with these parameters.",

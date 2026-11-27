@@ -915,15 +915,16 @@ class RunContext(BaseModel):
         """
         hooks = self._end_hooks
         if hooks is None:
-            hooks = self._end_hooks = []
-        elif isinstance(hooks, tuple):  # () once they ran: see _run_end_hooks
+            hooks = self.__dict__["_end_hooks"] = []
+        elif isinstance(hooks, tuple):  # () once the root ended: see Runnable._stream
             return False
         hooks.append(hook)
         return True
 
     async def _run_end_hooks(self) -> None:
         # () from here on: falsy for the check in Runnable._stream, and on_end refuses new hooks.
-        hooks, self._end_hooks = self._end_hooks, ()
+        hooks = self._end_hooks
+        self.__dict__["_end_hooks"] = ()
         waits = []
         for hook in hooks or ():
             try:

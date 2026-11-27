@@ -216,6 +216,36 @@ class TestDispatch:
         assert out.status.code == "success", out.error
         assert ran == [3]
 
+    async def test_a_validation_error_of_the_handler_suggests_no_retry(self):
+        """The arguments were valid and the handler ran (it wrote, then failed parsing a receipt): calling it again
+        would write twice, so the error comes back as it is."""
+        from pydantic import BaseModel
+
+        class Receipt(BaseModel):
+            order_id: int
+
+        writes = []
+
+        def create_order(item: str) -> str:
+            writes.append(item)
+            Receipt.model_validate({"order_id": "not a number"})
+            return "ok"
+
+        tools = [Tool(name="create_order", description="Create an order.", handler=create_order, defer_loading=True)]
+        seen = []
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                seen.append(messages[-1].content[0].content[0].text)
+                return "Sorry."
+            return call("create_order", item="book")
+
+        out = await agent(TestModel(handler=handler), tools, tool_search="client")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        result = ast.literal_eval(seen[0])
+        assert result["type"] == "ValidationError" and "parameters" not in result and "hint" not in result
+        assert writes == ["book"]
+
     async def test_bad_arguments_after_a_search_get_no_schema_back(self):
         seen = []
         responses = iter(
