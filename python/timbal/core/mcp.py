@@ -539,6 +539,14 @@ class _Left:
             )
         cause = next((getattr(f, "cause", f) for f in failed), None)
         why = f" ({cause!r})" if cause is not None else ""
+        # A connection handoff that failed is judged by the state close() ends in (its closes settled, or counted
+        # above); a failure closing the server's own session, or any other, no count covers: said as it is.
+        uncounted = [f for f in failed if not isinstance(f, _HandoffFailed) or isinstance(f, _SessionCloseFailed)]
+        if uncounted and not (self.owners or self.sessions):
+            cause = getattr(uncounted[0], "cause", uncounted[0])
+            problems.append(
+                f"Closing the server's session on the event loop that owns it failed ({cause!r}). Call close() again."
+            )
         if self.cut:
             problems.append(
                 f"{self.cut} platform connection(s) are still open: their close was cancelled or failed{why}. "
@@ -546,7 +554,8 @@ class _Left:
             )
         if self.sessions:
             problems.append(
-                f"The server's session is still open: its close was cancelled or failed{why}. Call close() again."
+                f"{self.sessions} session(s) of this server are still open or shutting down: their close was "
+                f"cancelled or failed{why}. Call close() again."
             )
         if problems:
             raise RuntimeError(f"MCP server {label!r}: " + " ".join(problems)) from next(
@@ -560,6 +569,10 @@ def _reachable(owner: asyncio.AbstractEventLoop | None, loop: asyncio.AbstractEv
     return owner is loop or (not owner.is_closed() and owner.is_running())
 
 
+# How many times close() comes back to wait for closes still running before it counts what is owed.
+_SETTLE_ROUNDS = 3
+
+
 async def _wait_for_task(task: asyncio.Task) -> None:
     await asyncio.wait({task})
 
@@ -571,6 +584,10 @@ class _HandoffFailed(Exception):
         super().__init__(f"{count} connection(s): {cause!r}")
         self.count = count
         self.cause = cause
+
+
+class _SessionCloseFailed(_HandoffFailed):
+    """The server's own session's close, handed to the loop that owns it, ended there cancelled or failed."""
 
 
 async def _wait_all_closed(tasks: set[asyncio.Task]) -> None:
@@ -933,6 +950,9 @@ class MCPServer(ToolSet):
     # The per-run connection a ``service="api"`` server opens to the platform: it sends the platform's claims.
     _first_party: bool = PrivateAttr(default=False)
     _session_task: asyncio.Task | None = PrivateAttr(default=None)
+    # The loop the server's session was last opened on, recorded before its handshake (its owner task is set only
+    # after): a close() from another loop closes it there, behind its locks, even while the handshake runs.
+    _session_loop: asyncio.AbstractEventLoop | None = PrivateAttr(default=None)
     # Owner tasks a close() signalled to shut down and has not seen end (it was cut while waiting): the next close()
     # waits for them, its session refs being gone by then.
     _owners_closing: set[asyncio.Task] = PrivateAttr(default_factory=set)
@@ -1440,6 +1460,7 @@ class MCPServer(ToolSet):
     async def _open_session(self) -> ClientSession:
         """Open the transport in its own owner task. Caller must hold ``_get_lock()`` and check ``_session`` first."""
         loop = asyncio.get_running_loop()
+        self._session_loop = loop
         ready: asyncio.Future = loop.create_future()
         closed = asyncio.Event()
         # A fresh context: the owner task (and the SDK receive loop inside it) must not
@@ -2044,14 +2065,18 @@ class MCPServer(ToolSet):
     async def _settle_closes(self, loop: asyncio.AbstractEventLoop) -> None:
         """Wait for every close still going on a loop this close() can reach: this one's directly, another running
         loop's handed to it (and waited for while it runs). Shielded where they are waited for."""
-        if any(task.get_loop() is loop and not task.done() for task in list(self._close_tasks)):
-            await self._wait_loop_closes()
-        for owner in {task.get_loop() for task in list(self._close_tasks) if not task.done()} - {loop}:
-            if owner.is_closed() or not owner.is_running():
-                continue
-            handed = _hand_to(owner, self._wait_loop_closes())
-            if handed is not None:
-                await _wait_on_owner(handed, owner)
+        for _ in range(_SETTLE_ROUNDS):  # again while closes are running: one may have started during a wait
+            live = {task.get_loop() for task in list(self._close_tasks) if not task.done()}
+            live = {owner for owner in live if _reachable(owner, loop)}
+            if not live:
+                return
+            for owner in live:
+                if owner is loop:
+                    await self._wait_loop_closes()
+                    continue
+                handed = _hand_to(owner, self._wait_loop_closes())
+                if handed is not None:
+                    await _wait_on_owner(handed, owner)
 
     def _owed(self, loop: asyncio.AbstractEventLoop, taken: set[int], session: asyncio.Task | None) -> "_Left":
         """What is still owed once close() has done what it could, from the state it ends in: each connection,
@@ -2074,13 +2099,18 @@ class MCPServer(ToolSet):
             elif not (entry.loop or loop).is_closed():
                 left.cut += 1
         for task in list(self._close_tasks):
-            if task.done() or task.get_loop().is_closed():
-                continue
-            if paused(task.get_loop()):
+            if not task.done() and paused(task.get_loop()):
                 left.paused += 1
+        # A close still running on a reachable loop is not owed: the settle waited for those there were, and one
+        # that started since is a call's own (a connection in use is left to its call) or another close()'s.
+        owners = set()
+        for owner in list(self._owners_closing):
+            if owner.done() or owner.get_loop().is_closed():
+                continue
+            if paused(owner.get_loop()):
+                owners.add(owner)
             else:
-                left.cut += 1  # still closing after the wait for it (handed over and cut again): its session is open
-        owners = {owner for owner in list(self._owners_closing) if not owner.done() and paused(owner.get_loop())}
+                left.sessions += 1  # still shutting down after the wait for it (that wait was cut)
         if session is not None and session is self._session_task and not session.done():
             if paused(session.get_loop()):
                 owners.add(session)
@@ -2099,7 +2129,12 @@ class MCPServer(ToolSet):
             # loop of the owner it signalled.
             closing = [owner for owner in list(self._owners_closing) if not owner.done()]
             task = closing[0] if closing else None
-        owner = task.get_loop() if task is not None else loop
+        if task is not None:
+            owner = task.get_loop()
+        elif self._session_loop is not None and not self._session_loop.is_closed():
+            owner = self._session_loop  # a session may be opening there (its handshake holds the locks)
+        else:
+            owner = loop
         if owner is loop:
             await self._close_session_here()
             return _Left()
@@ -2110,7 +2145,7 @@ class MCPServer(ToolSet):
         if handed is not None and await _wait_on_owner(handed, owner):
             if _succeeded(handed):
                 return _Left()
-            raise _HandoffFailed(1, asyncio.CancelledError() if handed.cancelled() else handed.exception())
+            raise _SessionCloseFailed(1, asyncio.CancelledError() if handed.cancelled() else handed.exception())
         if owner.is_closed():
             self._forget_session()
         return _Left()  # what is left is counted by _owed, once
@@ -2137,8 +2172,7 @@ class MCPServer(ToolSet):
         """Every run connection, pooled or cut, by the loop that owns it; ``left`` counts those that cannot be
         closed from here (their loop is not running), which stay. Those of a closed loop went with it."""
         by_loop: dict[asyncio.AbstractEventLoop, list[tuple[str, _RunConnection]]] = {}
-        unclosed = [pair for ident in list(self._unclosed) if (pair := self._unclosed.pop(ident, None)) is not None]
-        for key, entry in [*self._run_connections.items(), *unclosed]:
+        for key, entry in list(self._run_connections.items()):
             owner = entry.loop or loop
             if owner.is_closed():
                 if self._run_connections.get(key) is entry:
@@ -2146,9 +2180,21 @@ class MCPServer(ToolSet):
                 continue
             if owner is not loop and not owner.is_running():
                 left.paused += 1
-                self._keep_unclosed([(key, entry)])
                 continue
             by_loop.setdefault(owner, []).append((key, entry))
+        # Cut ones: this loop's taken now (let go of at once by close()); another loop's left in _unclosed until
+        # that loop takes them (_retire_all there), so its run's end hook can still find and wait for them.
+        for ident, (key, entry) in list(self._unclosed.items()):
+            owner = entry.loop or loop
+            if owner.is_closed():
+                self._unclosed.pop(ident, None)
+            elif owner is loop:
+                if self._unclosed.pop(ident, None) is not None:
+                    by_loop.setdefault(loop, []).append((key, entry))
+            elif owner.is_running():
+                by_loop.setdefault(owner, []).append((key, entry))
+            else:
+                left.paused += 1
         for task in list(self._close_tasks):
             owner = task.get_loop()
             if owner.is_closed():
@@ -2161,6 +2207,10 @@ class MCPServer(ToolSet):
 
     def _retire_all(self, entries: list[tuple[str, "_RunConnection"]]) -> None:
         for key, entry in entries:
+            if self._run_connections.get(key) is not entry and entry.close_task is None:
+                # A cut one left in _unclosed for this loop: taken here, unless another taker (the run's end) did.
+                if id(entry) in self._unclosed and self._unclosed.pop(id(entry), None) is None:
+                    continue
             self._retire_run_connection(key, entry)
 
     async def _wait_owners_closing(self, loop: asyncio.AbstractEventLoop) -> "_Left":
@@ -2174,8 +2224,8 @@ class MCPServer(ToolSet):
                 continue
             if not owner_loop.is_closed() and owner_loop.is_running():
                 handed = _hand_to(owner_loop, _wait_for_task(owner))
-                if handed is not None and await _wait_on_owner(handed, owner_loop):
-                    continue
+                if handed is not None and await _wait_on_owner(handed, owner_loop) and owner.done():
+                    continue  # (a wait cut there finishes the handoff with the owner still running: owed)
             if owner_loop.is_closed():
                 self._owners_closing.discard(owner)
             else:

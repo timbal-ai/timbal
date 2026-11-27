@@ -1433,6 +1433,133 @@ class TestCrossLoopClose:
         finally:
             stop()
 
+    def test_a_close_from_another_loop_during_the_first_handshake_closes_the_session_there(self, monkeypatch):
+        """The first session is still in its handshake on its loop (no owner task recorded yet, its lock held) when a
+        close() comes from another loop: the close runs on the session's loop, after the handshake, and closes it."""
+        import threading
+
+        owner_loop, stop = self.owner_thread()
+        shaking, gates = threading.Event(), {}
+
+        async def run_session(_self, ready, closed):  # the transport: its handshake waits for the test
+            gates["release"] = asyncio.Event()
+            shaking.set()
+            await gates["release"].wait()
+            ready.set_result(object())
+            await closed.wait()
+
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        server = MCPServer(transport="stdio", command="unused")
+        try:
+            connecting = asyncio.run_coroutine_threadsafe(server._connect(), owner_loop)
+            assert shaking.wait(10)
+
+            async def close_elsewhere():
+                attempt = asyncio.ensure_future(server.close())
+                done, _ = await asyncio.wait({attempt}, timeout=0.3)
+                assert not done  # on the session's loop, behind its handshake
+                owner_loop.call_soon_threadsafe(gates["release"].set)
+                await asyncio.wait_for(attempt, 10)
+
+            asyncio.run(close_elsewhere())
+            connecting.result(10)
+            assert server._session is None and server._session_task is None  # closed, not left open
+        finally:
+            stop()
+
+    def test_a_cut_wait_for_a_signalled_owner_is_reported(self):
+        """The wait for an owner an earlier close() signalled is cancelled on the owner's loop while the owner still
+        runs: close() says that session is still shutting down instead of returning."""
+        owner_loop, stop = self.owner_thread()
+
+        def cancel_the_waits(loop, coro, **kwargs):
+            task = asyncio.Task(coro, loop=loop, **kwargs)
+            if getattr(coro, "__qualname__", "").endswith("_wait_for_task"):
+                task.cancel()
+            return task
+
+        async def start():
+            return asyncio.ensure_future(asyncio.Event().wait())
+
+        server = MCPServer(transport="stdio", command="unused")
+        owner = asyncio.run_coroutine_threadsafe(start(), owner_loop).result(10)
+        try:
+            owner_loop.set_task_factory(cancel_the_waits)
+            server._owners_closing.add(owner)  # signalled by an earlier close(), its refs forgotten
+            with pytest.raises(RuntimeError, match="still open or shutting down"):
+                asyncio.run(asyncio.wait_for(server.close(), 10))
+        finally:
+            owner_loop.call_soon_threadsafe(owner.cancel)
+            stop()
+
+    def test_the_runs_end_finds_a_cut_connection_a_close_elsewhere_is_about_to_retry(self):
+        """close() on another loop is about to retry a cut connection on its loop when the run ends there first: the
+        run's end still finds it and waits for its close, instead of returning with the transport open."""
+        import threading
+
+        from timbal.core.mcp import _RunConnection
+
+        owner_loop, stop = self.owner_thread()
+        closed = []
+
+        class Server:
+            async def close(self):
+                closed.append(True)
+
+        service = MCPServer(transport="http", service="api")
+        entry = _RunConnection(Server(), "fingerprint", owner_loop)
+        service._unclosed[id(entry)] = ("run", entry)
+        service._run_hooked["run"] = owner_loop
+
+        async def end_the_run():
+            waiting = service._run_ended("run")
+            if waiting is None:
+                return False  # nothing to wait for
+            await waiting
+            return bool(closed)
+
+        try:
+            gate = threading.Event()
+            owner_loop.call_soon_threadsafe(gate.wait, 10)  # its loop busy: what comes next waits in line
+            ended = asyncio.run_coroutine_threadsafe(end_the_run(), owner_loop)  # the run's end, first in line
+
+            async def close_elsewhere():
+                closing = asyncio.ensure_future(service.close())
+                await until(lambda: service._handoffs)  # its retry handed over, behind the run's end
+                gate.set()
+                await asyncio.wait_for(closing, 10)
+
+            asyncio.run(close_elsewhere())
+            assert ended.result(10) is True and closed == [True]
+        finally:
+            stop()
+
+    @pytest.mark.asyncio
+    async def test_a_close_that_starts_after_the_settle_is_not_reported(self, monkeypatch):
+        """A call's own close (its connection was in use, left to it) starting after close() waited for the closes
+        going: still closing as designed, not reported as cancelled."""
+        from timbal.core.mcp import _RunConnection
+
+        release = asyncio.Event()
+
+        class Slow:
+            async def close(self):
+                await release.wait()
+
+        settle = MCPServer._settle_closes
+
+        async def settle_then_a_call_closes_its_own(self, loop):
+            await settle(self, loop)
+            self._retire_run_connection("late", _RunConnection(Slow(), "fingerprint", loop))
+
+        monkeypatch.setattr(MCPServer, "_settle_closes", settle_then_a_call_closes_its_own)
+        service = MCPServer(transport="http", service="api")
+        try:
+            await asyncio.wait_for(service.close(), 10)
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*service._close_tasks), 10)
+
     def test_a_close_waiting_on_anothers_handoff_reports_what_it_left(self):
         """Two close() at once on one loop, the run connection on another: the second waits for the first's
         handoff, and when a session close was cut there it says the session is still open, as the first does."""
