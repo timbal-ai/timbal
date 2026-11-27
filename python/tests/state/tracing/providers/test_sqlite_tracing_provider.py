@@ -734,6 +734,79 @@ class TestPerSpanStorage:
         assert mine is not stored and mine.alive() and not stored.alive()
         assert sqlite_module.database(path) is mine  # and it is the one everybody gets from now on
 
+    def test_a_path_is_resolved_once_while_it_names_the_same_file(self, tmp_path, monkeypatch):
+        """Every store and trace call asks for its database, and the session store for its thread first.
+        Resolving the path reads the file system each time (on Windows it opens the file, ~250 us): it is
+        resolved once per spelling, and every call still checks that the spelling names the connection's file."""
+        from pathlib import Path
+
+        from timbal.state import chat_store
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        real, resolves = Path.resolve, []
+
+        def resolve(self, *args, **kwargs):
+            resolves.append(str(self))
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve)
+        path = tmp_path / "once.db"
+        first = sqlite_module.database(path)
+        thread = chat_store._store_thread(path)
+        for _ in range(20):
+            assert sqlite_module.database(path) is first
+            assert sqlite_module.database(str(path)) is first  # the same spelling as a str
+            assert chat_store._store_thread(path) is thread
+        assert resolves == [str(path)]
+
+    def test_a_relative_path_follows_the_working_directory(self, tmp_path, monkeypatch):
+        """A relative path names another file once the working directory changes: the connection, and the
+        session store's thread after the call that finds it, are that file's, as when it was resolved per call."""
+        from pathlib import Path
+
+        from timbal.state import chat_store
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        here, there = tmp_path / "here", tmp_path / "there"
+        here.mkdir()
+        there.mkdir()
+        monkeypatch.chdir(here)
+        mine = sqlite_module.database("follows-the-cwd.db")
+        assert mine.names(here / "follows-the-cwd.db")
+        assert chat_store._store_thread(Path("follows-the-cwd.db")) is chat_store._store_thread(
+            here / "follows-the-cwd.db"
+        )
+        monkeypatch.chdir(there)
+        theirs = sqlite_module.database("follows-the-cwd.db")
+        assert theirs is not mine and theirs.names(there / "follows-the-cwd.db")
+        assert sqlite_module.database(here / "follows-the-cwd.db") is mine  # still the other file's
+        assert chat_store._store_thread(Path("follows-the-cwd.db")) is chat_store._store_thread(
+            there / "follows-the-cwd.db"
+        )
+
+    def test_a_path_through_a_moved_link_reaches_the_file_it_names_now(self, tmp_path):
+        import os
+
+        from timbal.state import chat_store
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        first_dir, second_dir, link = tmp_path / "first", tmp_path / "second", tmp_path / "link"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        try:
+            os.symlink(first_dir, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("no symbolic links here (Windows without the privilege)")
+        first = sqlite_module.database(link / "t.db")
+        assert sqlite_module.database(first_dir / "t.db") is first  # one connection, whatever the spelling
+        link.unlink()
+        os.symlink(second_dir, link, target_is_directory=True)
+        second = sqlite_module.database(link / "t.db")
+        assert second is not first and second.names(second_dir / "t.db")
+        assert sqlite_module.database(second_dir / "t.db") is second
+        assert sqlite_module.database(first_dir / "t.db") is first
+        assert chat_store._store_thread(link / "t.db") is chat_store._store_thread(second_dir / "t.db")
+
     async def test_a_failed_save_leaves_its_spans_to_the_next_and_the_connection_clean(self, tmp_path):
         from timbal.state import get_run_context, set_run_context
 

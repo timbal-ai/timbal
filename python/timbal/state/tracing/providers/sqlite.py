@@ -86,11 +86,7 @@ class _Database:
         self.writing_lock = self.order.lock
 
     def _file_at_path(self) -> tuple[int, int] | None:
-        try:
-            found = os.stat(self.path)
-        except OSError:
-            return None
-        return (found.st_dev, found.st_ino)
+        return _file_at(self.path)
 
     def alive(self) -> bool:
         """Whether the path still names the file this connection opened.
@@ -98,7 +94,11 @@ class _Database:
         Not just whether a file is there: one deleted and written again (by another connection, by a
         restore) is a different file, and this connection would go on writing to the one that is gone.
         """
-        return self._file is not None and self._file_at_path() == self._file
+        return self.names(self.path)
+
+    def names(self, path: Path | str) -> bool:
+        """Whether ``path`` names the file this connection opened, as :meth:`alive` asks of its own path."""
+        return self._file is not None and _file_at(path) == self._file
 
     def run_state(self, run_id: str) -> dict[str, Any]:
         state = self.runs.get(run_id)
@@ -109,6 +109,45 @@ class _Database:
         else:
             self.runs.move_to_end(run_id)
         return state
+
+
+def _file_at(path: Path | str) -> tuple[int, int] | None:
+    """The file ``path`` names now (its device and inode), or None when there is none."""
+    try:
+        found = os.stat(path)
+    except OSError:
+        return None
+    return (found.st_dev, found.st_ino)
+
+
+# Per spelling of a path, as given (relative, through a link, in another case): Path.resolve()'s answer, which
+# database() keys its connection by and chat_store._store_thread() its thread. Resolving reads the file system,
+# a call per component and a stat, and on Windows it opens the file (~250 us); every store and trace call asks
+# for its database. Made once per spelling, and again whenever database() finds that the spelling no longer
+# names the file of the connection that answer keys (the working directory changed under a relative path, a
+# link was moved, the file was deleted): it stats the spelling on every call anyway, which is how it tells a
+# file deleted and written again. Plain data, so a forked child keeps it; thread safe as a dict.
+_RESOLVED: dict[str, str] = {}
+_RESOLVED_MAX = 4096  # spellings; past it they are all resolved again
+
+
+def resolved(path: Path | str) -> str:
+    """``str(Path(path).resolve())``: the path :func:`database` keys the connection for ``path`` by.
+
+    Remembered per spelling, without looking at the file system again: a caller that must not get a stale
+    answer (the path came to name another file since) gets it through :func:`database`, which checks it.
+    """
+    spelling = os.fspath(path)
+    known = _RESOLVED.get(spelling)
+    return _resolve(spelling) if known is None else known
+
+
+def _resolve(spelling: str) -> str:
+    found = str(Path(spelling).resolve())
+    if len(_RESOLVED) >= _RESOLVED_MAX:
+        _RESOLVED.clear()
+    _RESOLVED[spelling] = found
+    return found
 
 
 _DATABASES: dict[tuple[str, str], _Database] = {}
@@ -205,10 +244,19 @@ def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
     mode = synchronous.upper()
     if mode not in ("NORMAL", "FULL"):
         raise ValueError(f"synchronous must be 'NORMAL' or 'FULL', got {synchronous!r}")
-    key = (str(Path(path).resolve()), mode)
+    spelling = os.fspath(path)
+    known = _RESOLVED.get(spelling)
+    if known is not None:
+        with _DATABASES_LOCK:
+            db = _DATABASES.get((known, mode))
+        # The connection the spelling's remembered resolution keys, while the spelling names its file: the one
+        # stat every call makes (a file deleted and written again is another file). Otherwise resolved again.
+        if db is not None and db.names(spelling):
+            return db
+    key = (_resolve(spelling), mode)
     with _DATABASES_LOCK:
         db = _DATABASES.get(key)
-    if db is not None and db.alive():  # not alive: the file was deleted under us, don't write to the old inode
+    if db is not None and db.names(spelling):  # not: the file was deleted under us, don't write to the old inode
         return db
     # Opened outside the registry's lock, which every database of the process goes through: a file that
     # cannot be opened now (a stalled mount) holds up its own callers, not those of every other file.
@@ -220,7 +268,7 @@ def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
             order = _ORDERS[ident] = _FileOrder()
         opened.order, opened.writing, opened.writing_lock = order, order.writing, order.lock
         current = _DATABASES.get(key)
-        if current is not None and current is not db and current.alive():
+        if current is not None and current is not db and current.names(spelling):
             # Another thread opened it meanwhile: one connection per file, theirs. Only while theirs is
             # still to the file at the path: one that went stale since (the file deleted under it) is
             # replaced by this one, as a stale one always is.

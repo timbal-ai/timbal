@@ -364,7 +364,13 @@ _STORE_THREADS_LOCK = threading.Lock()
 
 
 def _store_thread(path: Path) -> _StoreThread:
-    key = str(path.resolve())
+    from .tracing.providers.sqlite import resolved
+
+    # The key database() opens the file's connection under, remembered per spelling of the path: asked on the
+    # event loop for every call, where resolving again would read the file system each time (it opens the file
+    # on Windows). The call itself goes through database(), which resolves the spelling again once it names
+    # another file than that key's connection, and the calls after it then come here under the new key.
+    key = resolved(path)
     with _STORE_THREADS_LOCK:
         thread = _STORE_THREADS.get(key)
         if thread is None:
