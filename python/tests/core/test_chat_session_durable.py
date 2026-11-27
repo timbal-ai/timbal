@@ -2305,17 +2305,16 @@ async def lease_from_here(session, store, ttl):
     # below and stamp the long lease again.
     assert time.monotonic() < session._lease_from + store.lease_ttl_s / 3
     store.lease_ttl_s = ttl
-    deadline = time.monotonic() + 30  # (a hang guard)
-    while True:
-        sent = time.monotonic()  # (a lease counts from when the request that confirmed it was sent)
-        await store.acquire_lease(session.id, process_owner())
-        # Back before its first renewal is due: the session then plans as after a renewal of its own. A runner
-        # that stalled while this was out (after the store wrote it, say) has used up part of the short lease,
-        # and the session would renew at once, or past nine tenths of it give it up: ask again. Until the swap
-        # below the session still plans by the long lease, so the asking costs it nothing.
-        if time.monotonic() < sent + ttl / 3:
-            break
-        assert time.monotonic() < deadline, f"no renewal came back within a third of a {ttl:g} s lease"
+    async with asyncio.timeout(30):  # a hang guard: for a renewal that never comes back, and for asking again
+        while True:
+            sent = time.monotonic()  # (a lease counts from when the request that confirmed it was sent)
+            await store.acquire_lease(session.id, process_owner())
+            # Back before its first renewal is due: the session then plans as after a renewal of its own. A
+            # runner that stalled while this was out (after the store wrote it, say) has used up part of the
+            # short lease, and the session would renew at once, or past nine tenths of it give it up: ask again.
+            # Until the swap below the session still plans by the long lease, so the asking costs it nothing.
+            if time.monotonic() < sent + ttl / 3:
+                break
     # Swapped with no await in between: a save that found no renewal loop would start a second one, counted
     # from the old lease, and the assignment below would hide it from close().
     session._stop_lease()
@@ -2348,7 +2347,8 @@ class TestLeaseRunsOut:
         session = ChatSession(make_agent(provider, till), session_store=store)
         session.send("start")
         await asyncio.wait_for(till.entered.wait(), 30)
-        await session.flush()
+        async with asyncio.timeout(30):  # (a hang guard: a save that never comes back)
+            await session.flush()
         await lease_from_here(session, store, ttl)
         return session, store, till
 
@@ -4129,7 +4129,8 @@ class TestAStoreThatHangs:
         session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
         session.send("hello")
         await records(session, "turn_finished", 1)
-        await session.flush()
+        async with asyncio.timeout(30):  # (a hang guard: a save that never comes back)
+            await session.flush()
         await lease_from_here(session, store, TestLeaseRunsOut.KEPT_TTL)
         hang(store)
         await asyncio.wait_for(session.wait_closed(), 30)
