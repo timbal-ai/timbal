@@ -70,6 +70,10 @@ class TurnMetrics(BaseModel):
     ``eou_to_first_audio_ms`` stamp then reflects the filler, not the reply."""
     filler_count: int = 0
     """How many filler phrases were spoken (>1 with ``repeat_secs`` on)."""
+    hesitations: int = 0
+    """How many hesitation sounds the session added to this turn's speech
+    (``VoiceConfig.hesitation``): at most one at the start of the turn and one
+    after each tool call. One the model wrote itself is not counted."""
     event: bool = False
     """True for a turn the session started on its own (``VoiceSession.notify``, a
     background result) rather than the caller: ``user_text_chars`` is 0 and the

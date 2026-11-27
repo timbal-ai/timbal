@@ -34,6 +34,7 @@ from ..voice.config import (
     AmbientAudioConfig,
     FillerConfig,
     GreetingConfig,
+    HesitationConfig,
     RecordingConfig,
     UserIdleConfig,
     VoiceConfig,
@@ -165,6 +166,7 @@ def _normalize_declared_voice_config(runnable: Any) -> dict[str, Any] | None:
 #: default the agent never touched is not reported (or merged) as a choice.
 _SPARSE_NESTED: tuple[tuple[str, type], ...] = (
     ("filler", FillerConfig),
+    ("hesitation", HesitationConfig),
     ("greeting", GreetingConfig),
     ("outbound_greeting", GreetingConfig),
     ("user_idle", UserIdleConfig),
@@ -1310,11 +1312,15 @@ def build_voice_session(
         greeting=(None if greeting is None else ((greeting.text or "")[:80] or "<generated>")),
         user_idle=merged.user_idle is not None,
         hangup_grace_secs=merged.hangup_grace_secs,
+        hesitation_rate=merged.hesitation.rate if merged.hesitation is not None else None,
     )
 
     session_kwargs: dict[str, Any] = {}
     if merged.filler is not None and merged.filler.enabled:
         session_kwargs["filler"] = merged.filler
+    # Server-side only: not in the hello allowlist, so this is the agent's.
+    if merged.hesitation is not None and merged.hesitation.enabled:
+        session_kwargs["hesitation"] = merged.hesitation
     if greeting is not None:
         session_kwargs["greeting"] = greeting
     if merged.user_idle is not None:
