@@ -2,6 +2,8 @@
 
 import asyncio
 import copy
+import inspect
+import time
 from typing import Any
 
 import pytest
@@ -2283,27 +2285,62 @@ def renewals(store, renew):
     store.acquire_lease = acquire
 
 
+# A lease for setting a session up on: a third of it, when its first renewal is due, is far past the setup's
+# 30 s hang guards and a CI runner that stops the whole process (70-260 s seen), so none is out when
+# `lease_from_here` takes over, and a stalled runner does not use it up.
+SETUP_TTL = 3600.0
+
+
+async def lease_from_here(session, store, ttl):
+    """Shorten ``session``'s lease to ``ttl``, counted from a renewal sent here, in the store and in the session.
+
+    A test sets its session up on `SETUP_TTL` and shortens the lease once the session is where it wants it: a
+    stalled runner then costs the setup nothing. Setting ``lease_ttl_s`` alone does not do it: the store keeps
+    the long lease it gave, and the session's renewal loop has planned by it, so its first renewal comes a third
+    of the long lease later and the next is planned by the long one too, past the end of the short lease: the
+    session gives that up without trying. From here it renews by ``ttl``, as after a renewal of its own.
+    """
+    assert not session.lost and session._lease_task is not None
+    # Its next renewal is not due yet, so none is out: one sent by the long lease could land after the one
+    # below and stamp the long lease again.
+    assert time.monotonic() < session._lease_from + store.lease_ttl_s / 3
+    store.lease_ttl_s = ttl
+    sent = time.monotonic()  # (a lease counts from when the request that confirmed it was sent)
+    await store.acquire_lease(session.id, process_owner())
+    # Swapped with no await in between: a save that found no renewal loop would start a second one, counted
+    # from the old lease, and the assignment below would hide it from close().
+    session._stop_lease()
+    session._lease_from = sent
+    session._lease_task = task = asyncio.get_running_loop().create_task(session._renew_lease())
+    # Once the loop has planned by ``ttl``: a lease set after this one (another worker's) must not be the one
+    # it plans by.
+    await until(lambda: inspect.getcoroutinestate(task.get_coro()) != inspect.CORO_CREATED)
+    assert not session.lost
+
+
 class TestLeaseRunsOut:
     """A lease this process could not renew runs out at a time the store and the session both know. The
     session has stopped by then, its turn with it: the worker the store gives the session to next must not
     find the old one still acting."""
 
     # Every test here first gets its session mid-tool, still the owner. A stalled event loop (a busy CI
-    # runner) uses up the lease as surely as a store that does not answer, and the session then rightly gives
-    # it up: a 0.9 s lease leaves about 0.4 s between a failed renewal and the end of the lease, and a
-    # runner took more than that during the setup alone; this one leaves 1.4 s. It is the lease for the
-    # whole test: the store stamps it when it gives it, and the session has planned its next renewal by the
-    # one it holds, so a shorter one set under a live session is given up without a renewal being tried.
+    # runner) uses up a lease as surely as a store that does not answer, and the session then rightly gives
+    # it up: during the setup of a session on a 3 s lease, a windows-latest runner kept the event loop from
+    # running through the whole window that lease gives its first renewal (from 1 s to 2.7 s), on the first
+    # attempt and on the retry ("the 3 s lease ran out, 3.78 s after its last renewal: no renewal was tried").
+    # So the setup runs on `SETUP_TTL`, and the session is given the lease a test is about once it is
+    # mid-tool (`lease_from_here`). This one leaves 1.4 s between a failed renewal and its end.
     KEPT_TTL = 3.0
 
     async def _mid_tool(self, db, ttl=KEPT_TTL):
         provider, store = db
-        store.lease_ttl_s = ttl
+        store.lease_ttl_s = SETUP_TTL
         till = Till()
         session = ChatSession(make_agent(provider, till), session_store=store)
         session.send("start")
         await asyncio.wait_for(till.entered.wait(), 30)
         await session.flush()
+        await lease_from_here(session, store, ttl)
         return session, store, till
 
     @pytest.mark.parametrize("store_is", ["hung", "down", "deaf"])
@@ -4078,12 +4115,13 @@ class TestAStoreThatHangs:
         """A renewal that gets no answer is one that did not happen. After a whole lease without one, another
         process may hold the session: this copy stops, as it does when renewals fail."""
         provider, store = db
-        # Long enough to still be held when the turn below is over, on a stalled runner too (see KEPT_TTL).
-        store.lease_ttl_s = TestLeaseRunsOut.KEPT_TTL
+        # Still held when the turn below is over, on a stalled runner too (see `lease_from_here`).
+        store.lease_ttl_s = SETUP_TTL
         session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
         session.send("hello")
         await records(session, "turn_finished", 1)
         await session.flush()
+        await lease_from_here(session, store, TestLeaseRunsOut.KEPT_TTL)
         hang(store)
         await asyncio.wait_for(session.wait_closed(), 30)
         assert session.lost and session.handed_off
