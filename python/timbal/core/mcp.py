@@ -960,9 +960,6 @@ class MCPServer(ToolSet):
     # The per-run connection a ``service="api"`` server opens to the platform: it sends the platform's claims.
     _first_party: bool = PrivateAttr(default=False)
     _session_task: asyncio.Task | None = PrivateAttr(default=None)
-    # The loop the server's session was last opened on, recorded before its handshake (its owner task is set only
-    # after): a close() from another loop closes it there, behind its locks, even while the handshake runs.
-    _session_loop: asyncio.AbstractEventLoop | None = PrivateAttr(default=None)
     # The owner task of a session whose handshake is under way (published as _session_task once it is done): a
     # close() meanwhile closes it on its loop, or says so when that loop is not running.
     _opening_task: asyncio.Task | None = PrivateAttr(default=None)
@@ -1482,7 +1479,6 @@ class MCPServer(ToolSet):
     async def _open_session(self) -> ClientSession:
         """Open the transport in its own owner task. Caller must hold ``_get_lock()`` and check ``_session`` first."""
         loop = asyncio.get_running_loop()
-        self._session_loop = loop
         ready: asyncio.Future = loop.create_future()
         closed = asyncio.Event()
         # A fresh context: the owner task (and the SDK receive loop inside it) must not
@@ -1509,13 +1505,15 @@ class MCPServer(ToolSet):
         except BaseException:
             closed.set()
             await asyncio.wait({task})
-            raise
-        finally:
             if self._opening_task is task:
                 self._opening_task = None
+            raise
         self._session = session
         self._session_task = task
         self._session_closed = closed
+        # Only now: a close() on another thread finds the owner in one field or the other, never in neither.
+        if self._opening_task is task:
+            self._opening_task = None
         task.add_done_callback(self._on_session_task_done)
         return session
 
@@ -2148,15 +2146,17 @@ class MCPServer(ToolSet):
                 owners.add(owner)
             else:
                 left.sessions += 1  # still shutting down after the wait for it (that wait was cut)
-        # The session close() began with (its handshake maybe published since) and one opening now, each once, while
-        # it is still the server's session: one forgotten was closed, or is an owner counted above.
-        for owner in {task for task in (session, self._opening_task) if task is not None}:
-            if owner.done() or owner.get_loop().is_closed():
-                continue
-            if owner is not self._session_task and owner is not self._opening_task:
-                continue
-            if paused(owner.get_loop()):
-                owners.add(owner)  # its close (or handshake) waits for that loop: close() has to happen there
+        # The session close() began with (its handshake maybe published since), while it is still the server's: one
+        # forgotten was closed, or is an owner counted above. A handshake started since is a new connection (a call
+        # reconnecting after this close() let go of the old one), not this close()'s to report.
+        if (
+            session is not None
+            and not session.done()
+            and not session.get_loop().is_closed()
+            and session in (self._session_task, self._opening_task)
+        ):
+            if paused(session.get_loop()):
+                owners.add(session)  # its close (or handshake) waits for that loop: close() has to happen there
             else:
                 left.sessions += 1  # its close was handed over and did not happen
         left.owners = len(owners)
@@ -2172,12 +2172,8 @@ class MCPServer(ToolSet):
             # loop of the owner it signalled.
             closing = [owner for owner in list(self._owners_closing) if not owner.done()]
             task = closing[0] if closing else None
-        if task is not None:
-            owner = task.get_loop()
-        elif self._session_loop is not None and not self._session_loop.is_closed():
-            owner = self._session_loop  # a session may be opening there (its handshake holds the locks)
-        else:
-            owner = loop
+        # Nothing open nor opening: closed where close() runs, which clears the caches, as before this was per loop.
+        owner = task.get_loop() if task is not None else loop
         if owner is loop:
             await self._close_session_here()
             return _Left()

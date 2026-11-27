@@ -1698,6 +1698,78 @@ class TestCrossLoopClose:
             running.join(10)
             owner_loop.close()
 
+    @pytest.mark.asyncio
+    async def test_the_opening_owner_is_cleared_only_once_the_session_is_published(self, monkeypatch):
+        """One owner reference across startup and publication: _opening_task goes only after _session_task is set,
+        so a close() on another thread never finds both empty."""
+        seen = []
+
+        class Watched(MCPServer):
+            def __setattr__(self, name, value):
+                if name == "_opening_task" and value is None:
+                    seen.append(self._session_task is not None)
+                super().__setattr__(name, value)
+
+        async def run_session(_self, ready, closed):
+            ready.set_result(object())
+            await closed.wait()
+
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        server = Watched(transport="stdio", command="unused")
+        await asyncio.wait_for(server._connect(), 10)
+        await asyncio.wait_for(server.close(), 10)
+        assert seen == [True]
+
+    @pytest.mark.asyncio
+    async def test_a_reconnect_after_close_let_go_of_the_session_is_not_its_failure(self, monkeypatch):
+        """A call reconnects once close() has closed the old session: the new handshake is not close()'s to report,
+        and close() succeeds, as it did before close() worked across loops."""
+        gates = {}
+
+        async def run_session(_self, ready, closed):
+            if "release" in gates:  # the reconnect: its handshake waits
+                await gates["release"].wait()
+            ready.set_result(object())
+            await closed.wait()
+
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        server = MCPServer(transport="stdio", command="unused")
+        await asyncio.wait_for(server._connect(), 10)  # the session close() is for
+        wait_owners, reconnect = MCPServer._wait_owners_closing, {}
+
+        async def then_a_call_reconnects(self, loop):
+            await wait_owners(self, loop)
+            gates["release"] = asyncio.Event()
+            reconnect["task"] = asyncio.ensure_future(self._connect())
+            await until(lambda: self._opening_task is not None)  # its handshake under way as close() counts
+
+        monkeypatch.setattr(MCPServer, "_wait_owners_closing", then_a_call_reconnects)
+        await asyncio.wait_for(server.close(), 10)
+        gates["release"].set()
+        await asyncio.wait_for(reconnect["task"], 10)
+        monkeypatch.setattr(MCPServer, "_wait_owners_closing", wait_owners)
+        await asyncio.wait_for(server.close(), 10)
+
+    def test_close_from_another_loop_clears_the_tool_cache_after_the_transport_dropped(self, monkeypatch):
+        """The session's transport dropped (its owner ended, the session forgotten) on a loop now paused: close() from
+        another loop has nothing to close there, and clears the tool cache where it runs, as close() always did."""
+
+        async def run_session(_self, ready, _closed):
+            ready.set_result(object())  # and the transport drops at once
+
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        server = MCPServer(transport="stdio", command="unused")
+        with asyncio.Runner() as runner:
+
+            async def connect_and_drop():
+                await server._connect()
+                await until(lambda: server._session is None)
+
+            runner.run(asyncio.wait_for(connect_and_drop(), 10))
+            server._tools_cache = ["the old list"]
+            asyncio.run(asyncio.wait_for(server.close(), 10))
+            assert server._tools_cache is None
+
     def test_a_close_pending_when_close_began_whose_waits_are_cut_is_reported(self):
         """A teardown already going on another running loop when close() began, every wait close() sends for it
         cancelled there: still going after them, it is owed."""
