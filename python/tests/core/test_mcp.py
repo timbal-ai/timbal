@@ -2490,7 +2490,7 @@ class TestPlatformConnectionOutsideARun:
             assert isinstance(await tools[0].handler(), str)  # the call went through
             assert len(platform) == 2 and all(server._session is None for server in platform)
             assert not service._run_connections
-            assert not get_run_context()._end_hooks  # nothing left waiting for an end that never comes
+            assert not get_run_context().__dict__.get("_end_hooks")  # nothing left waiting for an end that never comes
         finally:
             set_run_context(None)
             await service.close()

@@ -1789,7 +1789,78 @@ async def until(condition, timeout=30.0):
     await asyncio.wait_for(poll(), timeout)
 
 
+def race_at_the_hook_list(monkeypatch, other):
+    """A run context where this thread's first look at its end-hook list runs ``other(context)`` on a thread of its
+    own, going on once that has finished or waits on the end-hook lock this thread holds: where another thread of the
+    run would land. Returns the context and a list that holds that thread once it started."""
+    import threading
+
+    from timbal.state import context as context_module
+    from timbal.state.context import RunContext
+
+    class ObservedLock:
+        """The end-hook lock, saying when a second taker waits on it."""
+
+        def __init__(self):
+            self.lock, self.waited = threading.Lock(), threading.Event()
+
+        def __enter__(self):
+            if not self.lock.acquire(blocking=False):
+                self.waited.set()
+                self.lock.acquire()
+            return self
+
+        def __exit__(self, *_):
+            self.lock.release()
+
+    lock, armed, started = ObservedLock(), [], []
+
+    class Raced(RunContext):
+        def __getattribute__(self, name):
+            value = super().__getattribute__(name)
+            # Its first look at the hook list, through the attribute or the dict that holds it.
+            if name in ("_end_hooks", "__dict__") and armed and threading.current_thread() is threading.main_thread():
+                armed.clear()  # this thread has looked; the other one goes now
+                started.append(threading.Thread(target=other, args=(self,)))
+                started[0].start()
+                for _ in range(1000):  # until it is done, or waits on the lock this thread holds
+                    if not started[0].is_alive() or lock.waited.wait(0.01):
+                        break
+            return value
+
+    monkeypatch.setattr(context_module, "_END_HOOKS_LOCK", lock, raising=False)
+    context = Raced()
+    armed.append(True)  # from here on: the context is built
+    return context, started
+
+
 class TestRunEndHooks:
+    def test_two_threads_registering_at_once_both_have_their_hook_run(self, monkeypatch):
+        """Two threads of one run (a handler's workers) register end hooks at the same moment, before the run has a
+        list: each hook accepted runs at the end. Each thread used to install a list of its own, and one was lost."""
+        ran, accepted = [], []
+        context, other = race_at_the_hook_list(
+            monkeypatch, lambda ctx: accepted.append(ctx.on_end(lambda: ran.append("other")))
+        )
+        assert context.on_end(lambda: ran.append("this"))
+        other[0].join(10)
+        assert accepted == [True]
+        asyncio.run(asyncio.wait_for(context._run_end_hooks(), 10))
+        assert sorted(ran) == ["other", "this"]
+
+    def test_a_hook_registered_as_the_run_ends_runs_or_is_refused(self, monkeypatch):
+        """A thread registers an end hook just as the run's end takes the list: the hook runs, or on_end says it will
+        not (False). It used to be accepted into a list the end had already taken, so it never ran, and that list
+        reopened registration for good."""
+        ran = []
+        context, other = race_at_the_hook_list(
+            monkeypatch, lambda ctx: asyncio.run(asyncio.wait_for(ctx._run_end_hooks(), 10))
+        )
+        accepted = context.on_end(lambda: ran.append("hook"))
+        other[0].join(10)
+        assert accepted == (ran == ["hook"])
+        assert context._end_hooks == () and not context.on_end(lambda: None)  # registration stays closed
+
     async def test_a_cut_while_one_waits_calls_every_hook_and_lets_each_finish(self):
         """A run cancelled as it ends: the hooks after the one being waited for still run (a per-run MCP
         connection left after a credential change is one), and the cut ends the wait, not the hooks' work."""

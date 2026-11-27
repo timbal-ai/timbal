@@ -49,6 +49,7 @@ from ..state import (
 )
 from ..state.context import (  # noqa: F401  (_own_copy: chat_session imports it from here)
     _DETACHED_CALLS,
+    _HOOKS_CLOSED,
     _LIVE_CALLS,
     RunContext,
     _EmitSink,
@@ -2983,12 +2984,13 @@ class Runnable(ABC, BaseModel):
                     # Cut as it ended. The run is over all the same: its end hooks run (each is called before
                     # any is waited for, so a second cut ends only the wait), and the caller gets its context
                     # back before the cut goes on, as below, or it would go on as the finished run.
-                    if _new_parent_call_id is None:
-                        if run_context._end_hooks:
-                            with contextlib.suppress(BaseException):
-                                await run_context._run_end_hooks(_new_call_id, _left_of(deadline, deadline_loop))
-                        else:
-                            run_context.__dict__["_end_hooks"] = ()
+                    if (
+                        _new_parent_call_id is None
+                        and run_context.__dict__.setdefault("_end_hooks", _HOOKS_CLOSED) is not _HOOKS_CLOSED
+                        and (hooks := run_context._take_end_hooks())
+                    ):
+                        with contextlib.suppress(BaseException):
+                            await run_context._run_end_hooks(_new_call_id, _left_of(deadline, deadline_loop), hooks)
                     set_parent_call_id(_parent_call_id)
                     set_call_id(_call_id)
                     if _entry_call_id is not None:
@@ -3021,16 +3023,18 @@ class Runnable(ABC, BaseModel):
                 else:
                     run_context._background_handoff_control = previous_handoff_control
             try:
-                if _new_parent_call_id is None:
-                    # Last: the run is over (a per-run MCP connection closes here). In the run's own context: a
-                    # hook may read its credentials or record on its trace. The caller gets its context back in the
-                    # finally, also when a cut ends the wait. Every finished root closes registration, hooks or
-                    # not: one added later would never run.
-                    if run_context._end_hooks:
-                        # Within what is left of the runnable's timeout (none left: not waited for at all).
-                        await run_context._run_end_hooks(_new_call_id, _left_of(deadline, deadline_loop))
-                    else:
-                        run_context.__dict__["_end_hooks"] = ()
+                # Last: the run is over (a per-run MCP connection closes here). In the run's own context: a hook
+                # may read its credentials or record on its trace. The caller gets its context back in the finally,
+                # also when a cut ends the wait. Every finished root closes registration, hooks or not: one added
+                # later would never run. With none added, one atomic setdefault does it (on_end adds the list the
+                # same way, see _HOOKS_CLOSED); with some, _take_end_hooks takes them under the lock on_end takes.
+                if (
+                    _new_parent_call_id is None
+                    and run_context.__dict__.setdefault("_end_hooks", _HOOKS_CLOSED) is not _HOOKS_CLOSED
+                    and (hooks := run_context._take_end_hooks())
+                ):
+                    # Within what is left of the runnable's timeout (none left: not waited for at all).
+                    await run_context._run_end_hooks(_new_call_id, _left_of(deadline, deadline_loop), hooks)
             finally:
                 set_parent_call_id(_parent_call_id)
                 set_call_id(_call_id)

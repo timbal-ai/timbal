@@ -2,6 +2,7 @@ import asyncio
 import copy
 import inspect
 import os
+import threading
 import time
 import weakref
 from collections import deque
@@ -233,6 +234,26 @@ def _own_copy(value: Any) -> Any:
         if type(value) is tuple:
             return tuple(_own_copy(item) for item in value)
         return value
+
+
+# Taken by ``RunContext.on_end`` and by the step that takes a run's hooks at its end (``_take_end_hooks``): threads
+# of one run (a handler's workers) may register at once, and each hook accepted must be in the list that is run. One
+# for the module, not one per context: a lock in a context's state would not copy or pickle. A forked child gets its
+# own (one held by another thread of the parent at the fork would never be released there).
+_END_HOOKS_LOCK = threading.Lock()
+# A run's end-hook list once its root has ended (``_end_hooks``: absent until a hook is added, then a list): on_end
+# refuses new hooks. A root that ended with none closes registration with one atomic ``setdefault`` (Runnable._stream),
+# no lock: on_end creates the list with ``setdefault`` too, so whichever comes first wins and the other sees it.
+_HOOKS_CLOSED: tuple = ()
+
+
+def _fresh_end_hooks_lock() -> None:
+    global _END_HOOKS_LOCK
+    _END_HOOKS_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_fresh_end_hooks_lock)
 
 
 async def _awaited(awaitable: Any) -> Any:
@@ -503,8 +524,6 @@ class RunContext(BaseModel):
             # membership (offers send_to_agent), and the deepest reply chain of the agent messages it received.
             _peer=None,
             _peer_hops=None,
-            # Called once the run's root has ended and its end is stored (``on_end``); None until one is added.
-            _end_hooks=None,
             _tool_policy=None,
             _tool_policy_origin=None,
             _silence_token=None,
@@ -936,34 +955,45 @@ class RunContext(BaseModel):
         """Call ``hook()`` (sync, or returning an awaitable, which is awaited) once the run's root has ended, after
         its end was saved or the save failed. Background children may still be running then.
 
-        False, and the hook is not kept, once the root has ended: it would never run.
+        False, and the hook is not kept, once the root has ended: it would never run. Safe from any thread of the
+        run: a hook it accepts is one the run's end takes (``_take_end_hooks``, under the same lock).
         """
-        hooks = self._end_hooks
-        if hooks is None:
-            hooks = self.__dict__["_end_hooks"] = []
-        elif isinstance(hooks, tuple):  # () once the root ended: see Runnable._stream
-            return False
-        hooks.append(hook)
-        return True
+        with _END_HOOKS_LOCK:
+            # Absent until a hook is added (see _HOOKS_CLOSED): created in one step, as the run's end closes it.
+            hooks = self.__dict__.setdefault("_end_hooks", [])
+            if hooks is _HOOKS_CLOSED:
+                return False
+            hooks.append(hook)
+            return True
 
-    async def _run_end_hooks(self, call_id: str | None = None, timeout: float | None = None) -> None:
+    def _take_end_hooks(self) -> list[Callable[[], Any]] | None:
+        """The hooks to run at the root's end, registration closed in the same step (``()`` from then on: on_end
+        refuses new hooks). Every finished root calls it, hooks or not: one added later would never run."""
+        with _END_HOOKS_LOCK:
+            hooks = self.__dict__.get("_end_hooks")
+            self.__dict__["_end_hooks"] = _HOOKS_CLOSED
+        return hooks or None
+
+    async def _run_end_hooks(
+        self, call_id: str | None = None, timeout: float | None = None, hooks: list[Callable[[], Any]] | None = None
+    ) -> None:
         """Run the end hooks (``on_end``) in this run's own context, ``call_id`` being its root call's, whichever
         task ends it: a stream another task closes runs this in that task. That task's context is put back after.
-        ``timeout``: how long the run waits for them (what is left of its root's timeout), None for no bound."""
+        ``timeout``: how long the run waits for them (what is left of its root's timeout), None for no bound.
+        ``hooks``: those ``_take_end_hooks`` took (taken here when not given)."""
         from . import _call_id, _parent_call_id, _run_context_var
 
         tokens = (_run_context_var.set(self), _call_id.set(call_id), _parent_call_id.set(None))
         try:
-            await self._call_end_hooks(timeout)
+            await self._call_end_hooks(timeout, hooks)
         finally:
             _parent_call_id.reset(tokens[2])
             _call_id.reset(tokens[1])
             _run_context_var.reset(tokens[0])
 
-    async def _call_end_hooks(self, timeout: float | None = None) -> None:
-        # () from here on: falsy for the check in Runnable._stream, and on_end refuses new hooks.
-        hooks = self._end_hooks
-        self.__dict__["_end_hooks"] = ()
+    async def _call_end_hooks(self, timeout: float | None = None, hooks: list[Callable[[], Any]] | None = None) -> None:
+        if hooks is None:
+            hooks = self._take_end_hooks()
         waits = []
         for hook in hooks or ():
             try:
