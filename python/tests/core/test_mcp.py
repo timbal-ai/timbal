@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -1667,7 +1668,7 @@ class TestCrossLoopClose:
         first = threading.Thread(target=owner_loop.run_forever)
         first.start()
         try:
-            connecting = asyncio.run_coroutine_threadsafe(server._connect(), owner_loop)
+            asyncio.run_coroutine_threadsafe(server._connect(), owner_loop)
             assert shaking.wait(10)
 
             async def close_elsewhere():
@@ -1678,14 +1679,23 @@ class TestCrossLoopClose:
                     await asyncio.wait_for(closing, 10)
 
             asyncio.run(close_elsewhere())
-            first.join(10)
         finally:
-            again = threading.Thread(target=owner_loop.run_forever)  # the loop runs again: the close happens there
-            again.start()
-            connecting.result(10)
-            asyncio.run_coroutine_threadsafe(asyncio.sleep(0), owner_loop).result(10)
+            first.join(10)  # it stopped after the publish (or the test failed before: then it still runs)
+            running = first if first.is_alive() else threading.Thread(target=owner_loop.run_forever)
+            if running is not first:
+                running.start()  # the loop runs again: the close it was handed happens there
+
+            async def settle():  # on its own loop: the close finished, then whatever is left cancelled and awaited
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(server.close(), 10)
+                others = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+                for task in others:
+                    task.cancel()
+                await asyncio.gather(*others, return_exceptions=True)
+
+            asyncio.run_coroutine_threadsafe(settle(), owner_loop).result(20)
             owner_loop.call_soon_threadsafe(owner_loop.stop)
-            again.join(10)
+            running.join(10)
             owner_loop.close()
 
     def test_a_close_pending_when_close_began_whose_waits_are_cut_is_reported(self):
