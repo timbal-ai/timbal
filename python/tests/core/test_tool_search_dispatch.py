@@ -232,6 +232,29 @@ class TestDispatch:
         result = ast.literal_eval(seen[1])  # a tool error reaches the model as its repr
         assert result["type"] == "ValidationError" and "parameters" not in result  # it was in the search result
 
+    async def test_a_numbered_search_counts_as_the_search(self):
+        """The agent's own tools hold every usual search name: the search is ``search_tools_2`` (``_unused_name``),
+        and what it showed is shown all the same."""
+        seen = []
+        own = [
+            Tool(name=name, handler=lambda q="": "mine")  # noqa: ARG005 (a parameter for the schema)
+            for name in (SEARCH_TOOLS_NAME, "find_tools", "load_tools", "search_deferred_tools")
+        ]
+        responses = iter(
+            [call(f"{SEARCH_TOOLS_NAME}_2", query="weather"), dispatch("get_weather", "c2", arguments={"town": "Rome"})]
+        )
+
+        def handler(messages):
+            if messages[-1].role == "tool" and len(seen) < 2:
+                seen.append(messages[-1].content[0].content[0].text)
+            return next(responses, "Oops.")
+
+        out = await agent(TestModel(handler=handler), [*catalog(), *own], tool_search="dispatch")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        assert "get_weather" in seen[0]  # the numbered search ran and found it
+        result = ast.literal_eval(seen[1])
+        assert result["type"] == "ValidationError" and "parameters" not in result
+
     async def test_a_found_tool_called_by_its_own_name_runs_too(self):
         calls = []
         model = TestModel(responses=[call("get_weather", city="Oslo"), "ok"])

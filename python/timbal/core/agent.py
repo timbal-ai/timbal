@@ -397,6 +397,21 @@ def is_call_tool_name(name: Any) -> bool:
     return number.isascii() and number.isdigit() and number[0] != "0" and int(number) >= _FIRST_NUMBERED
 
 
+_SEARCH_TOOLS_NUMBERED = f"{SEARCH_TOOLS_NAME}_"
+
+
+def _is_search_tools_name(name: Any) -> bool:
+    """Whether ``name`` can be the ``search_tools`` search's: as :func:`is_call_tool_name` for the dispatcher."""
+    if not isinstance(name, str):
+        return False
+    if name == SEARCH_TOOLS_NAME or name in _SEARCH_TOOLS_FALLBACKS:
+        return True
+    if not name.startswith(_SEARCH_TOOLS_NUMBERED):
+        return False
+    number = name[len(_SEARCH_TOOLS_NUMBERED) :]
+    return number.isascii() and number.isdigit() and number[0] != "0" and int(number) >= _FIRST_NUMBERED
+
+
 # Session key: tools search_tools loaded, per agent path, in load order.
 _LOADED_TOOLS_KEY = "__loaded_tools"
 # Models with provider-side tool search: Claude 4.5 and later; OpenAI gpt-5.4 and later (Responses API).
@@ -1039,13 +1054,12 @@ def _native_tool_search(model: Any) -> bool:
 
 def _schemas_found(memory: list[Message]) -> set[str]:
     """Tools whose schema a ``search_tools`` result in ``memory`` showed the model (``tool_search="dispatch"``)."""
-    search_names = {SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS}
     search_ids = {
         c.id
         for m in memory
         if m.role == "assistant"
         for c in m.content
-        if isinstance(c, ToolUseContent) and c.name in search_names
+        if isinstance(c, ToolUseContent) and _is_search_tools_name(c.name)  # numbered ones too (_unused_name)
     }
     found: set[str] = set()
     for m in memory:

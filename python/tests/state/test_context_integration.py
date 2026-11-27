@@ -1779,7 +1779,49 @@ class TestTraceDumpedVersions:
                     assert "[OUTER-PRE]" not in dump_content
                     assert "[INNER-PRE]" not in dump_content
 
+async def until(condition, timeout=30.0):
+    """Wait for ``condition()``. The budget is for a slow machine: one where it never holds fails here."""
+
+    async def poll():
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
 class TestRunEndHooks:
+    async def test_a_cut_while_one_waits_calls_every_hook_and_lets_each_finish(self):
+        """A run cancelled as it ends: the hooks after the one being waited for still run (a per-run MCP
+        connection left after a credential change is one), and the cut ends the wait, not the hooks' work."""
+        from timbal.state.context import RunContext
+
+        release = asyncio.Event()
+        called, finished = [], []
+
+        def hook(name, wait):
+            async def work():
+                if wait:
+                    await release.wait()
+                finished.append(name)
+
+            def start():
+                called.append(name)
+                return work()
+
+            return start
+
+        context = RunContext()
+        context.on_end(hook("slow", wait=True))
+        context.on_end(hook("next", wait=False))
+        task = asyncio.ensure_future(context._run_end_hooks())
+        await until(lambda: called)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 30)
+        assert called == ["slow", "next"]
+        release.set()
+        await until(lambda: sorted(finished) == ["next", "slow"])
+
     async def test_they_run_once_when_the_root_ends_and_none_is_kept_after(self):
         from timbal import Agent
         from timbal.core.test_model import TestModel

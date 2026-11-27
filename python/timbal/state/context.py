@@ -924,13 +924,29 @@ class RunContext(BaseModel):
     async def _run_end_hooks(self) -> None:
         # () from here on: falsy for the check in Runnable._stream, and on_end refuses new hooks.
         hooks, self._end_hooks = self._end_hooks, ()
+        waits = []
         for hook in hooks or ():
             try:
                 result = hook()
-                if inspect.isawaitable(result):
-                    await result
             except Exception:
                 _get_logger().exception("run_end_hook_failed", run_id=self.id)
+                continue
+            if inspect.isawaitable(result):
+                waits.append(result)
+        if not waits:
+            return
+        # Every hook is called before any is waited for, and the waits are shielded: a cut while waiting (the
+        # run cancelled as it ends) ends the wait, never a hook's work, and no hook is left uncalled.
+        waiting = asyncio.gather(*waits, return_exceptions=True)
+        waiting.add_done_callback(self._log_end_hook_failures)
+        await asyncio.shield(waiting)
+
+    def _log_end_hook_failures(self, waiting: "asyncio.Future[list[Any]]") -> None:
+        if waiting.cancelled():
+            return
+        for result in waiting.result():
+            if isinstance(result, Exception):
+                _get_logger().error("run_end_hook_failed", run_id=self.id, error=repr(result))
 
     def update_usage(self, key: str, value: int) -> None:
         """Update usage statistics for the current call and all parent calls.

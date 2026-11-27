@@ -517,6 +517,27 @@ class TestPlatformConnectionPerRun:
         assert not service._close_tasks
 
     @pytest.mark.asyncio
+    async def test_a_cancelled_close_lets_the_closes_finish(self):
+        from timbal.core.mcp import _RunConnection
+
+        release, closed = asyncio.Event(), []
+
+        class SlowClose:
+            async def close(self):
+                await release.wait()
+                closed.append(True)
+
+        service = MCPServer(transport="http", service="api")
+        service._run_connections["run"] = _RunConnection(SlowClose(), "fingerprint")
+        closing = asyncio.ensure_future(service.close())
+        await until(lambda: service._close_tasks)
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(closing, 30)
+        release.set()
+        await until(lambda: closed == [True])
+
+    @pytest.mark.asyncio
     async def test_outside_a_run_each_call_closes_its_own(self, platform):
         opened, _ = platform
         service = MCPServer(transport="http", service="api")

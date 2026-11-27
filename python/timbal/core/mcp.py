@@ -1739,7 +1739,8 @@ class MCPServer(ToolSet):
         loop = asyncio.get_running_loop()
         closing = [task for task in self._close_tasks if task.get_loop() is loop]
         if closing:
-            await asyncio.gather(*closing, return_exceptions=True)
+            # Shielded: a close() that is cancelled stops waiting, the closes go on (gather would cancel them).
+            await asyncio.shield(asyncio.gather(*closing, return_exceptions=True))
         async with self._get_tools_lock(), self._get_lock():
             task, closed = self._session_task, self._session_closed
             self._forget_session()
