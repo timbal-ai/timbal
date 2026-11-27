@@ -72,7 +72,7 @@ def texts(session, name):
     return [e.output.collect_text() for e in outputs(session, name) if e.output is not None]
 
 
-async def until(condition, timeout=5.0):
+async def until(condition, timeout=30.0):  # a hang guard (slow runners stretch timers)
     async def wait():
         while not condition():
             await asyncio.sleep(0.01)
@@ -187,7 +187,7 @@ class TestExchange:
         async with ChatSession(make_agent("bob", bob, tools=[Tool(name="work", handler=work)])) as b:
             directory.join(b, "bob")
             b.send("start")
-            await asyncio.wait_for(working.wait(), 5)
+            await asyncio.wait_for(working.wait(), 30)
             receipt = await directory.send("alice", "bob", "stop after this", priority="urgent")
             gate.set()
             await settle(b)
@@ -276,7 +276,7 @@ class TestDirectory:
         async with ChatSession(make_agent("bob", bob, tools=[Tool(name="work", handler=work)])) as b:
             directory.join(b, "bob")
             b.send("start")
-            await asyncio.wait_for(working.wait(), 5)
+            await asyncio.wait_for(working.wait(), 30)
             first = await directory.send("alice", "bob", "hello", message_id="am_1")
             again = await directory.send("alice", "bob", "hello", message_id="am_1")
             same_text = await directory.send("alice", "bob", "hello", message_id="am_2")
@@ -640,9 +640,9 @@ class TestTheInbox:
         ) as b:
             directory.join(b, "bob")
             sends = [asyncio.create_task(directory.send("alice", "bob", "hi", message_id="am_1")) for _ in range(2)]
-            await asyncio.wait_for(both.wait(), 5)
+            await asyncio.wait_for(both.wait(), 30)
             gate.set()
-            receipts = await asyncio.wait_for(asyncio.gather(*sends), 5)
+            receipts = await asyncio.wait_for(asyncio.gather(*sends), 30)
             await settle(b)
         assert sorted(r["duplicate"] for r in receipts) == [False, True]
         assert received(b) == [("alice", "hi")]
@@ -697,7 +697,7 @@ class TestTheInbox:
         b = ChatSession(make_agent("bob", lambda _: "NO_REPLY", guardrails=[guardrail(slow, stages=["input"])]))
         directory.join(b, "bob")
         send = asyncio.create_task(directory.send("alice", "bob", "hi"))
-        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.wait_for(entered.wait(), 30)
         await b.close()
         gate.set()
         with pytest.raises(PeerRejected) as refused:
@@ -1326,7 +1326,7 @@ class TestOwnerRoundOne:
             assert ready.wait(5)
             directory = AgentDirectory()
             await asyncio.to_thread(directory.join, served["session"], "bob")  # from a thread with no loop
-            receipt = await asyncio.wait_for(directory.send("alice", "bob", "hello"), 5)
+            receipt = await asyncio.wait_for(directory.send("alice", "bob", "hello"), 30)
             assert receipt["status"] == "sent"
             assert loops == [served["loop"]]
         finally:
@@ -1471,7 +1471,7 @@ class TestOwnerRoundOneReview:
                 directory = AgentDirectory()
                 directory.join(session, "bob")
                 session._hold_worker = True
-                return await asyncio.wait_for(directory.send("alice", "bob", "hello"), 5)
+                return await asyncio.wait_for(directory.send("alice", "bob", "hello"), 30)
 
         assert asyncio.run(main())["status"] == "sent"
 
@@ -1652,10 +1652,10 @@ class TestOwnerRoundOneReview:
 
             async def elsewhere():
                 session = served["session"]
-                await asyncio.wait_for(session.restore(), 5)  # done already: nothing to do here
+                await asyncio.wait_for(session.restore(), 30)  # done already: nothing to do here
                 directory = AgentDirectory()
                 directory.join(session, "bob")
-                return await asyncio.wait_for(directory.send("alice", "bob", "hello"), 5)
+                return await asyncio.wait_for(directory.send("alice", "bob", "hello"), 30)
 
             assert asyncio.run(elsewhere())["status"] == "sent"
             assert loops == [served["loop"]]
@@ -2046,7 +2046,7 @@ class TestOwnerRoundTwoReview:
 
         async def sender():
             assert await asyncio.to_thread(ready.wait, 5)
-            return await asyncio.wait_for(served["session"].receive_agent_message("hello", sender="alice"), 5)
+            return await asyncio.wait_for(served["session"].receive_agent_message("hello", sender="alice"), 30)
 
         try:
             with caplog.at_level("ERROR"):

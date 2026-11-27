@@ -272,7 +272,7 @@ class TestQuietLine:
             await asyncio.sleep(0.3)
             assert event.state == "pending" and len(model.calls) == 1
             tracker.playing = False
-            assert await asyncio.wait_for(event.settled(), 2) == "delivered"
+            assert await asyncio.wait_for(event.settled(), 30) == "delivered"
             await _until(lambda: REPLY in _texts(events))
 
         events = await _run(session, stt, drive)
@@ -400,7 +400,7 @@ class TestCoalescing:
             second = await session.notify("Task 1: finished.", key="task:1")
             assert first.state == "superseded"
             tracker.playing = False
-            assert await asyncio.wait_for(second.settled(), 2) == "delivered"
+            assert await asyncio.wait_for(second.settled(), 30) == "delivered"
             await _until(lambda: REPLY in _texts(events))
 
         await _run(session, stt, drive)
@@ -525,7 +525,7 @@ class TestLifecycle:
         assert early.state == "pending"
 
         async def drive(events: list[VoiceSessionEvent]) -> None:
-            assert await asyncio.wait_for(early.settled(), 2) == "delivered"
+            assert await asyncio.wait_for(early.settled(), 30) == "delivered"
             await _until(lambda: REPLY in _texts(events))
 
         await _run(session, stt, drive)
@@ -835,9 +835,9 @@ class TestOtherChannel:
             await _until(lambda: REPLY in _texts(events))
             await _until(lambda: session._current_turn_task.done())
             await stt.inject(TranscriptEvent(type="committed", text="Hola"))
-            await asyncio.wait_for(model.entered.wait(), 2)
+            await asyncio.wait_for(model.entered.wait(), 30)
             text_turn = session.agent(prompt="from chat", parent_id=session._last_run_context.id)
-            outcomes.append(await asyncio.wait_for(text_turn.collect(), 2))
+            outcomes.append(await asyncio.wait_for(text_turn.collect(), 30))
             model.opened.set()
             await _until(lambda: "Vale." in _texts(events))
 
@@ -855,14 +855,14 @@ class TestOtherChannel:
             await _until(lambda: REPLY in _texts(events))
             await _until(lambda: session._current_turn_task.done())
             await stt.inject(TranscriptEvent(type="committed", text="Hola"))
-            await asyncio.wait_for(model.entered.wait(), 2)
+            await asyncio.wait_for(model.entered.wait(), 30)
             # The chat only knows the last finished run, not the "Hola" turn in flight.
             requested.append(session._last_run_context.id)
             text_turn = asyncio.create_task(session.agent(prompt="from chat", parent_id=requested[0]).collect())
             await asyncio.sleep(0.1)
             assert not text_turn.done() and len(model.calls) == 1  # queued behind the call's turn
             model.opened.set()
-            text_results.append(await asyncio.wait_for(text_turn, 3))
+            text_results.append(await asyncio.wait_for(text_turn, 30))
             await _until(lambda: session._current_turn_task.done())
             await stt.inject(TranscriptEvent(type="committed", text="¿Lo has visto?"))
             await _until(lambda: "Visto." in _texts(events))
@@ -913,14 +913,14 @@ class TestOtherChannel:
             await _until(lambda: REPLY in _texts(events))
             await _until(lambda: session._current_turn_task.done())
             await stt.inject(TranscriptEvent(type="committed", text="Hola"))
-            await asyncio.wait_for(held.wait(), 2)
+            await asyncio.wait_for(held.wait(), 30)
             text_turn = asyncio.create_task(
                 session.agent(prompt="from chat", parent_id=session._last_run_context.id).collect()
             )
             await asyncio.sleep(0.1)
             assert not text_turn.done()  # queued behind the "Hola" turn
             await session.notify("The fire alarm test starts now.", announce="interrupt")
-            text_results.append(await asyncio.wait_for(text_turn, 3))
+            text_results.append(await asyncio.wait_for(text_turn, 30))
 
         events = await _run(session, stt, drive)
 
@@ -966,12 +966,12 @@ class TestOtherChannel:
             await _until(lambda: session._current_turn_task.done())
             assert store_for_run(earlier.run_id) is None
             await stt.inject(TranscriptEvent(type="committed", text="Hola"))
-            await asyncio.wait_for(model.entered.wait(), 2)
+            await asyncio.wait_for(model.entered.wait(), 30)
             text_turn = asyncio.create_task(session.agent(prompt="from chat", parent_id=earlier.run_id).collect())
             await asyncio.sleep(0.1)
             assert not text_turn.done() and len(model.calls) == 2  # queued behind the call's turn
             model.opened.set()
-            results.append(await asyncio.wait_for(text_turn, 3))
+            results.append(await asyncio.wait_for(text_turn, 30))
             call_turns.append(session._last_run_context.id)
             assert store_for_run(results[0].run_id) is session._scheduler.store  # it joined the session
 
@@ -1031,12 +1031,12 @@ class TestOtherChannel:
             text_turn = asyncio.create_task(
                 session.agent(prompt="from chat", parent_id=session._last_run_context.id).collect()
             )
-            await asyncio.wait_for(model.entered.wait(), 2)
+            await asyncio.wait_for(model.entered.wait(), 30)
             await stt.inject(TranscriptEvent(type="committed", text="Hola"))
             await asyncio.sleep(0.2)
             assert len(model.calls) == 1  # the call's turn waits for the chat's
             model.opened.set()
-            text_results.append(await asyncio.wait_for(text_turn, 3))
+            text_results.append(await asyncio.wait_for(text_turn, 30))
             await _until(lambda: "Hola." in _texts(events))
 
         await _run(session, stt, drive)
@@ -1055,14 +1055,14 @@ class TestOtherChannel:
             await _until(lambda: session._current_turn_task.done())
             parent = session._last_run_context.id
             first = asyncio.create_task(session.agent(prompt="chat 1", parent_id=parent).collect())
-            await asyncio.wait_for(model.entered.wait(), 2)
+            await asyncio.wait_for(model.entered.wait(), 30)
             second = asyncio.create_task(session.agent(prompt="chat 2", parent_id=parent).collect())
             await asyncio.sleep(0.05)
             assert not second.done()  # queued behind the first chat turn
             await stt.inject(TranscriptEvent(type="committed", text="Hola"))
             await asyncio.sleep(0.1)
             model.opened.set()
-            chats.extend(await asyncio.wait_for(asyncio.gather(first, second), 3))
+            chats.extend(await asyncio.wait_for(asyncio.gather(first, second), 30))
             await _until(lambda: "Te escucho." in _texts(events))
 
         await _run(session, stt, drive)
@@ -1189,14 +1189,14 @@ class TestOtherChannel:
             await _until(lambda: REPLY in _texts(events))
             await _until(lambda: session._current_turn_task.done())
             await stt.inject(TranscriptEvent(type="committed", text="Hola"))
-            await asyncio.wait_for(held.wait(), 2)
+            await asyncio.wait_for(held.wait(), 30)
             text_turn = asyncio.create_task(
                 session.agent(prompt="from chat", parent_id=session._last_run_context.id).collect()
             )
             await asyncio.sleep(0.05)
             assert not text_turn.done()
             await stt.inject(TranscriptEvent(type="committed", text="Espera"))
-            text_results.append(await asyncio.wait_for(text_turn, 3))
+            text_results.append(await asyncio.wait_for(text_turn, 30))
             await _until(lambda: len(_done(events)) == 2)
 
         await _run(session, stt, drive)
@@ -1255,7 +1255,7 @@ class TestOtherChannel:
 
         await _run(session, stt, drive)
         driver.stop()
-        await asyncio.wait_for(consumer, 2)
+        await asyncio.wait_for(consumer, 30)
         release.set()
         # One conversation, one store: the call's event went to the driver's session, not a second store.
         assert seen == [store]
@@ -1303,7 +1303,7 @@ class TestOtherChannel:
             await _until(lambda: REPLY in _texts(events))
             await _until(lambda: session._current_turn_task.done())
             notify_task.append(asyncio.create_task(session.notify("Client note", source="client")))
-            await asyncio.wait_for(screening_started.wait(), 2)
+            await asyncio.wait_for(screening_started.wait(), 30)
 
         await _run(session, stt, drive)
         release_screening.set()
@@ -1371,15 +1371,15 @@ class TestOtherChannel:
         chat_task = asyncio.create_task(
             session.agent(prompt="from chat", parent_id=outputs[0].run_id).collect()
         )
-        await asyncio.wait_for(chat_entered.wait(), 2)
-        await asyncio.wait_for(consumer, 2)
+        await asyncio.wait_for(chat_entered.wait(), 30)
+        await asyncio.wait_for(consumer, 30)
         assert driver.stop_reason == "preempted"
         set_run_context(None)
         session.parent_run_id = outputs[0].run_id
 
         async def drive(events: list[VoiceSessionEvent]) -> None:
             chat_opened.set()
-            await asyncio.wait_for(chat_task, 2)
+            await asyncio.wait_for(chat_task, 30)
             release.set()
             await asyncio.sleep(0.25)
 
@@ -1427,8 +1427,8 @@ class TestOtherChannel:
         consumer = asyncio.create_task(consume())
         await _until(lambda: outputs and driver._waiter is not None)
         chat_task = asyncio.create_task(session.agent(prompt="from chat", parent_id=outputs[0].run_id).collect())
-        await asyncio.wait_for(chat_entered.wait(), 2)
-        await asyncio.wait_for(consumer, 2)
+        await asyncio.wait_for(chat_entered.wait(), 30)
+        await asyncio.wait_for(consumer, 30)
         set_run_context(None)
         session.parent_run_id = outputs[0].run_id
         refused: list[RuntimeError] = []
@@ -1448,8 +1448,8 @@ class TestOtherChannel:
             attempt = asyncio.create_task(other_driver())
             await asyncio.sleep(0.05)
             chat_opened.set()
-            await asyncio.wait_for(chat_task, 2)
-            await asyncio.wait_for(attempt, 2)
+            await asyncio.wait_for(chat_task, 30)
+            await asyncio.wait_for(attempt, 30)
             release.set()
             await asyncio.sleep(0.3)
 

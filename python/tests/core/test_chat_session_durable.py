@@ -812,7 +812,7 @@ class TestEdges:
         monkeypatch.setattr(store, "save", flaky)
         async with ChatSession(make_agent(provider, Gate(released=True)), session_store=store) as session:
             session.send("hi")
-            await asyncio.wait_for(session.flush(), 1)
+            await asyncio.wait_for(session.flush(), 30)
             await records(session, "turn_finished", 1)
             await session.flush()
             snapshot = await store.load(session.id)
@@ -1240,7 +1240,7 @@ class TestRestore:
         )
         session = ChatSession(agent, session_store=store)
         sent = session.send("hello")
-        await asyncio.wait_for(thinking.wait(), 3)
+        await asyncio.wait_for(thinking.wait(), 30)
         await crash(session)
         provider.crashed = False
         assert "dispatched" not in (await store.load(session.id)).in_flight
@@ -1320,7 +1320,7 @@ class TestRestore:
         )
         session = ChatSession(agent, session_store=store)
         session.send("start")
-        await asyncio.wait_for(entered.wait(), 3)
+        await asyncio.wait_for(entered.wait(), 30)
         worker = session._worker
         closing = asyncio.get_running_loop().create_task(session.close(keep=True))
         await asyncio.sleep(0.05)
@@ -2979,7 +2979,7 @@ class TestFoundByTheCrashSweeps:
         )
         session = ChatSession(slow, session_store=store)
         sent = session.send("hello")
-        await asyncio.wait_for(thinking.wait(), 3)
+        await asyncio.wait_for(thinking.wait(), 30)
         await session.flush()
         await session.close(keep=True)
 
@@ -3299,7 +3299,7 @@ class TestAStopThatReachesATurnAtItsEdges:
 
         store.save = save
         session.resume({approval.approval_id: True})
-        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.wait_for(entered.wait(), 30)
         assert session.interrupt() is True
         held.set()
         finished = await records(session, "turn_finished", 2)
@@ -3331,7 +3331,7 @@ class TestAStopThatReachesATurnAtItsEdges:
 
         monkeypatch.setattr(RunContext, "get_session", held_session)
         session.send("two")
-        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.wait_for(entered.wait(), 30)
         assert session.interrupt() is True
         finished = await records(session, "turn_finished", 2)
         assert finished[1]["status"] == {"code": "cancelled", "reason": "interrupted", "message": ""}
