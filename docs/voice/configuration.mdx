@@ -20,6 +20,8 @@ Set `stt_provider` and optionally `stt_model`. These are adapter IDs and speech 
 Set `language` to the conversation language. It hints transcription and, when set, tells the model to reply in that language. Omit it to follow the user's latest substantive message. See [Reply language](#reply-language). `keyterms` and `stt_languages` are transcription only. They do not change `reply_language`.
 
 ```python
+from timbal import Agent
+
 agent = Agent(
     name="norte_market",
     model="openai/gpt-5.4-mini",
@@ -170,7 +172,7 @@ Each stream of audio that had a silence between words logs one `tts_rhythm_shape
 ```python
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-5.4-mini",
     system_prompt="Reply in one or two short spoken sentences.",
     voice_config={"language": "es", "tts_rhythm": True, "max_tts_pause_secs": 0.55},
 )
@@ -304,7 +306,7 @@ from timbal import Agent
 
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-5-mini",
+    model="openai/gpt-5.4-mini",
     system_prompt="Reply in one or two short spoken sentences.",
     voice_config={"language": "es", "hesitation": True},
 )
