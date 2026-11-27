@@ -61,8 +61,8 @@ class TestContentlessSingleToken:
             assert _is_contentless_single_token(text), text
 
     def test_spanish_one_word_turns_survive(self) -> None:
-        # "¿Y?" asks for more, "o"/"u" can be a spelled letter, and the rest are plain answers.
-        for text in ("Sí.", "No.", "Vale.", "Hola.", "¿Y?", "O.", "U.", "Gracias.", "Dígame.", "¿Qué?"):
+        # "¿Y?" asks for more, "o"/"u" can be a spelled letter, "una" answers a count, the rest are plain answers.
+        for text in ("Sí.", "No.", "Vale.", "Hola.", "¿Y?", "O.", "U.", "Una.", "Gracias.", "Dígame.", "¿Qué?"):
             assert not _is_contentless_single_token(text), text
 
     def test_a_spanish_function_word_inside_an_utterance_survives(self) -> None:
