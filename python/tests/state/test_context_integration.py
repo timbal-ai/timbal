@@ -2048,6 +2048,21 @@ class TestRunEndHooks:
             thread.join(10)
             owner.close()
 
+    async def test_a_hook_future_already_done_is_read_whatever_its_loop(self):
+        """A future that completed on a loop since closed: its outcome is read, not reported as a failure; a pending
+        one of such a loop fails without the future's repr (it can carry what it holds) in the message."""
+        from timbal.state.context import _awaited
+
+        gone = asyncio.new_event_loop()
+        done = gone.create_future()
+        done.set_result("secret value")
+        pending = gone.create_future()
+        gone.close()
+        assert await _awaited(done) == "secret value"
+        with pytest.raises(RuntimeError) as failure:
+            await _awaited(pending)
+        assert "pending" in str(failure.value) and "<" not in str(failure.value)
+
     async def test_they_run_once_when_the_root_ends_and_none_is_kept_after(self):
         from timbal import Agent
         from timbal.core.test_model import TestModel

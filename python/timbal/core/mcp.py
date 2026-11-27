@@ -1045,7 +1045,9 @@ class MCPServer(ToolSet):
         loop = asyncio.get_running_loop()
         closing = [task for task in self._close_tasks if task.get_loop() is loop]
         if closing:
-            await asyncio.gather(*closing, return_exceptions=True)
+            # Shielded: a cut of this wait (the owner cancelling the handed work) must not cancel the closes, which
+            # would leave sessions open with nothing left to close them.
+            await asyncio.shield(asyncio.gather(*closing, return_exceptions=True))
 
     def _run_ended(self, key: str) -> Awaitable[None] | None:
         """The run's end hook (one per run): its connection is let go of, and the run waits for every close of its
@@ -1122,7 +1124,7 @@ class MCPServer(ToolSet):
             entry.close_task = task = asyncio.get_running_loop().create_task(entry.server.close())
             self._close_tasks.add(task)
             self._run_closes.setdefault(key, set()).add(task)
-            task.add_done_callback(functools.partial(self._close_done, key))
+            task.add_done_callback(functools.partial(self._close_done, key, entry))
             task.add_done_callback(_log_close_failure)
         return entry.close_task
 
@@ -1135,13 +1137,19 @@ class MCPServer(ToolSet):
             if not closes:
                 del self._run_closes[key]
 
-    def _close_done(self, key: str, task: asyncio.Task) -> None:
+    def _close_done(self, key: str, entry: "_RunConnection", task: asyncio.Task) -> None:
         self._close_tasks.discard(task)
         closes = self._run_closes.get(key)
         if closes is not None:
             closes.discard(task)
             if not closes:
                 del self._run_closes[key]
+        if task.cancelled() and not task.get_loop().is_closed():
+            # Cut before the session had closed: it may still be open. Kept (ended, nothing using it) for the next
+            # close() or end of the run to close again, under its own key unless a newer connection holds that.
+            entry.close_task = None
+            entry.ended = True
+            self._run_connections.setdefault(key if key not in self._run_connections else f"{key}#{id(entry)}", entry)
 
     # ------------------------------------------------------------------ session
 

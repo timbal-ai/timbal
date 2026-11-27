@@ -240,13 +240,18 @@ async def _awaited(awaitable: Any) -> Any:
     by a stream closed from elsewhere) is awaited on that loop while it runs; one whose loop is not running cannot
     finish from here, which is raised (and logged as the hook's failure)."""
     if asyncio.isfuture(awaitable):
+        if awaitable.done():  # its outcome is there already, whatever its loop does now
+            return awaitable.result()
         owner = awaitable.get_loop()
         if owner is not asyncio.get_running_loop():
             from .loops import hand_to, wait_on_owner
 
             handed = None if owner.is_closed() or not owner.is_running() else hand_to(owner, _settle(awaitable))
             if handed is None or not await wait_on_owner(handed, owner):
-                raise RuntimeError(f"an end hook returned {awaitable!r}, of an event loop that is not running")
+                # Not the future itself: its repr can carry what it holds.
+                raise RuntimeError(
+                    f"an end hook returned a pending {type(awaitable).__name__} of an event loop that is not running"
+                )
             return handed.result()
     return await awaitable
 

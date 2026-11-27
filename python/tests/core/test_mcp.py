@@ -869,6 +869,61 @@ class TestPlatformConnectionLifetime:
             thread.join(10)
             owner.close()
 
+    @pytest.mark.asyncio
+    async def test_a_cut_teardown_does_not_cut_the_session_close(self):
+        """The owner's cleanup is cancelled after it let go of the connection and started its close: the close goes
+        on, and a later close() waits for it instead of returning with the session still open."""
+        from timbal.core.mcp import _RunConnection
+
+        release, closed = asyncio.Event(), []
+
+        class SlowClose:
+            async def close(self):
+                await release.wait()
+                closed.append(True)
+
+        service = MCPServer(transport="http", service="api")
+        entry = _RunConnection(SlowClose(), "fingerprint", asyncio.get_running_loop())
+        service._run_connections["run"] = entry
+        teardown = asyncio.ensure_future(service._close_run_connections([("run", entry)]))
+        await until(lambda: service._close_tasks)  # let go of, its close started
+        teardown.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await teardown
+        assert service._close_tasks and not closed  # still closing
+        release.set()
+        await asyncio.wait_for(service.close(), 10)
+        assert closed == [True]
+
+    @pytest.mark.asyncio
+    async def test_a_session_close_that_is_cut_is_kept_for_the_next_close(self):
+        """The close task itself cancelled (a loop cancelling its tasks) before the session closed: the connection is
+        kept, ended, and the next close() closes it."""
+        from timbal.core.mcp import _RunConnection
+
+        started, closed = asyncio.Event(), []
+
+        class CutOnce:
+            calls = 0
+
+            async def close(self):
+                CutOnce.calls += 1
+                if CutOnce.calls == 1:
+                    started.set()
+                    await asyncio.Event().wait()  # cut here
+                closed.append(True)
+
+        service = MCPServer(transport="http", service="api")
+        service._run_connections["run"] = _RunConnection(CutOnce(), "fingerprint", asyncio.get_running_loop())
+        task = service._retire_run_connection("run")
+        await asyncio.wait_for(started.wait(), 10)
+        task.cancel()
+        await asyncio.wait({task})
+        await until(lambda: service._run_connections)  # kept
+        assert service._run_connections["run"].ended
+        await asyncio.wait_for(service.close(), 10)
+        assert closed == [True] and not service._run_connections
+
     def test_closes_of_a_closed_loop_leave_both_collections(self):
         """A close that finished on a loop that stopped before its done callback ran: dropped from the per-run sets
         too, so the run keeps neither the task nor its loop."""
