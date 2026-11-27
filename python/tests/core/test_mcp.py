@@ -444,7 +444,9 @@ class TestPlatformConnectionPerRun:
         set_run_context(None)
         set_call_id(None)
         set_parent_call_id(None)
-        agent = Agent(name="agent", model=TestModel(handler=self.calls(1)), tools=[service], tracing_provider=HoldsTheEnd)
+        agent = Agent(
+            name="agent", model=TestModel(handler=self.calls(1)), tools=[service], tracing_provider=HoldsTheEnd
+        )
         task = asyncio.ensure_future(agent(prompt="go").collect())
         await asyncio.wait_for(holding.wait(), 30)
         assert len(opened) == 1 and service._run_connections  # used, and not idle-closed yet

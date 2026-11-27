@@ -503,7 +503,8 @@ class TestTraceClaims:
 
     def test_an_acceptable_tracestate_rides_along(self, monkeypatch):
         monkeypatch.setattr(
-            "timbal.core.mcp._ambient_trace_context", lambda: {"traceparent": TRACEPARENT, "tracestate": "rojo=00f0\tx=1"}
+            "timbal.core.mcp._ambient_trace_context",
+            lambda: {"traceparent": TRACEPARENT, "tracestate": "rojo=00f0\tx=1"},
         )
         meta = meta_of(platform_context())
         platform_read(meta)
@@ -530,7 +531,9 @@ class TestTraceClaims:
         platform_read(meta)
         assert meta["traceparent"] != traceparent and "tracestate" not in meta
         assert platform_keeps(meta)["traceparent"] == meta["traceparent"]
-        third = meta_of(platform_context(), server=MCPServer(transport="http", url="https://x.test/mcp", provenance=True))
+        third = meta_of(
+            platform_context(), server=MCPServer(transport="http", url="https://x.test/mcp", provenance=True)
+        )
         assert "traceparent" not in third and "tracestate" not in third
 
     def test_a_third_party_gets_pseudonyms_only_of_ids_the_claims_carry(self):
