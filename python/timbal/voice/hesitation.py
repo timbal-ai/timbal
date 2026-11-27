@@ -7,15 +7,23 @@ unevenly. This adds the sound at a set rate, to the text sent to the voice and
 nowhere else: the reply the client receives, the transcript and the model's
 memory keep the model's own words.
 
+Many replies open with a word or two of acknowledgement ("Perfecto.", "Vale,
+Marta."). The sound then goes after it, where the thought starts: "Perfecto.
+Eh... tu factura es de cuarenta euros." Without that, an agent whose replies
+open that way never hesitated: measured on two demo agents, every reply of
+their test calls did.
+
 Pure text. :class:`Hesitator` holds one call's state. The session shows it the
 first segment it speaks in each model step: the start of a turn, and the first
-speech after a tool call.
+speech after a tool call. When that segment is only an acknowledgement, it
+shows it the next one too.
 """
 
 from __future__ import annotations
 
 import random
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
@@ -39,9 +47,31 @@ syntheses. The session uses it to tell how much of a segment's audio was the
 sound when a reply is cut short."""
 
 MIN_OPENING_WORDS = 3
-"""A reply whose first clause is shorter than this is not hesitated. One or
-two words before the first comma or full stop are an acknowledgement, a
-greeting, a name or a goodbye ("Vale,", "De acuerdo.", "Hasta luego,")."""
+"""The sound goes before a clause of at least this many words. One or two
+words before a comma or a full stop are an acknowledgement, a greeting, a name
+or a goodbye ("Vale,", "De acuerdo.", "Hasta luego,"), not a thought."""
+
+MAX_ACKNOWLEDGEMENT_CLAUSES = 2
+"""How many such short clauses the sound may go after ("Perfecto, Marta. Eh...
+tu factura..."). A reply that opens with more of them is said clean."""
+
+GREETING_WORDS = frozenset(
+    {
+        # es
+        "hola", "buenas", "buenos", "adios", "hasta", "chao", "bienvenido", "bienvenida", "encantado", "encantada",
+        # ca
+        "adeu", "fins", "bon", "bona", "benvingut", "benvinguda", "encantat",
+        # en
+        "hello", "hi", "hey", "bye", "goodbye", "welcome", "morning", "afternoon", "evening", "night",
+    }
+)  # fmt: skip
+"""Words that make a short opening clause a greeting or a goodbye, without
+accents. Nothing is added after one: "Hola, eh... soy Laura" and "Hasta luego,
+eh... que vaya bien" are not how a person hesitates."""
+
+# Punctuation that closes a sentence. After any other clause end (a comma, a
+# colon, a dash) the sound is in the middle of one and keeps its lower case.
+_SENTENCE_END = ".!?…\n"
 
 # Punctuation that closes the first clause. It needs a space or the end after
 # it, so the comma in "10,60" and the dot in "10.60" do not count.
@@ -76,16 +106,31 @@ def _opens_with(body: str, core: str) -> bool:
     return len(body) == len(core) or not body[len(core)].isalpha()
 
 
+def _fold(word: str) -> str:
+    """``word`` in lower case, without accents or the punctuation around it."""
+    plain = "".join(ch for ch in unicodedata.normalize("NFD", word.lower()) if not unicodedata.combining(ch))
+    return plain.strip("¡!¿?\"'()[]«»")
+
+
+def _is_greeting(clause: str) -> bool:
+    return any(_fold(word) in GREETING_WORDS for word in clause.split())
+
+
 class Hesitator:
     """Decides, one reply opening at a time, whether it gets a hesitation sound.
 
-    An opening gets one when all of these hold:
+    The sound goes before the first clause of :data:`MIN_OPENING_WORDS` words
+    or more: at the very start, or after one or two short clauses of
+    acknowledgement ("Vale,", "Perfecto, Marta."). An opening gets one when
+    all of these hold:
 
     * the language has openers (``openers``, else :data:`DEFAULT_OPENERS`);
-    * it does not already open with one, or with a bare sound and punctuation
-      ("Mm,", "Ehh..."). Such an opening counts as hesitated;
+    * that clause does not already open with one, or with a bare sound and
+      punctuation ("Mm,", "Ehh..."). Such an opening counts as hesitated;
     * it starts with a letter, so not with a figure, ``¿``, ``¡`` or a bracket;
-    * its first clause has at least :data:`MIN_OPENING_WORDS` words;
+    * the short clauses before it are at most
+      :data:`MAX_ACKNOWLEDGEMENT_CLAUSES` and none is a greeting or a goodbye
+      (:data:`GREETING_WORDS`);
     * the opening before it was not hesitated;
     * a random draw falls under ``rate``.
 
@@ -125,12 +170,17 @@ class Hesitator:
         """Forget the openings considered since :meth:`state`: nobody heard them."""
         self._previous, self._last_opener = state
 
-    def consider(self, text: str, language: str | None) -> tuple[Hesitated | None, str]:
+    def consider(self, text: str, language: str | None, *, mid_sentence: bool = False) -> tuple[Hesitated | None, str]:
         """Return ``text`` with a sound added, or ``None``, and the reason either way.
 
         Reasons: ``added``, ``no_openers``, ``already``, ``not_a_word``,
-        ``short_opening``, ``after_hesitation``, ``draw``. Blank text is
-        ``not_a_word`` and leaves the state alone.
+        ``short_opening``, ``acknowledgement``, ``after_hesitation``, ``draw``.
+        Blank text is ``not_a_word``. ``acknowledgement`` is a segment that is
+        only short clauses ("Perfecto."): the opening is still to come, so the
+        caller shows the next segment. Both leave the state alone.
+
+        ``mid_sentence`` says ``text`` continues a sentence (the segment before
+        it ended on a comma): a sound at its start keeps its lower case.
         """
         openers = self.openers(language)
         if not openers:
@@ -138,15 +188,15 @@ class Hesitator:
         body = text.lstrip()
         if not body:
             return None, "not_a_word"
-        offset = len(text) - len(body)
-        if _BARE_SOUND.match(body) or any(_opens_with(body, _core(opener)) for opener in openers):
+        start, sentence_start, found = self._opening(body, openers, sentence_start=not mid_sentence)
+        if found == "already":
             self._previous = True
             return None, "already"
+        if found == "acknowledgement":
+            return None, "acknowledgement"
         after_hesitation, self._previous = self._previous, False
-        if not body[0].isalpha():
-            return None, "not_a_word"
-        if len(_CLAUSE_END.split(body, maxsplit=1)[0].split()) < MIN_OPENING_WORDS:
-            return None, "short_opening"
+        if found:
+            return None, found
         if after_hesitation:
             return None, "after_hesitation"
         if self._rng.random() >= self.rate:
@@ -154,10 +204,41 @@ class Hesitator:
         choices = [opener for opener in openers if opener != self._last_opener] or list(openers)
         opener = self._rng.choice(choices)
         self._previous, self._last_opener = True, opener
-        # The sound opens the sentence now, so it takes the capital and the
-        # reply's first word gives it up. An acronym ("DNI") keeps its own.
-        sound = opener[0].upper() + opener[1:] + " "
-        first = body[0].lower()
-        if len(body) > 1 and body[1].islower() and len(first) == 1:
-            body = first + body[1:]
-        return Hesitated(offset, sound, text[:offset] + sound + body), "added"
+        offset = len(text) - len(body) + start
+        rest = body[start:]
+        sound = opener + " "
+        if sentence_start:
+            # The sound opens the sentence now, so it takes the capital and the
+            # next word gives it up. An acronym ("DNI") keeps its own.
+            sound = sound[0].upper() + sound[1:]
+            first = rest[0].lower()
+            if len(rest) > 1 and rest[1].islower() and len(first) == 1:
+                rest = first + rest[1:]
+        return Hesitated(offset, sound, text[:offset] + sound + rest), "added"
+
+    @staticmethod
+    def _opening(body: str, openers: Sequence[str], *, sentence_start: bool) -> tuple[int, bool, str]:
+        """Where in ``body`` the sound would go, whether a sentence starts there, and why not ("" when it can)."""
+        start = 0
+        skipped = 0
+        while True:
+            rest = body[start:]
+            if _BARE_SOUND.match(rest) or any(_opens_with(rest, _core(opener)) for opener in openers):
+                return start, sentence_start, "already"
+            if not rest[0].isalpha():
+                return start, sentence_start, "not_a_word"
+            end = _CLAUSE_END.search(rest)
+            clause = rest[: end.start()] if end else rest
+            if len(clause.split()) >= MIN_OPENING_WORDS:
+                return start, sentence_start, ""
+            if end is None or _is_greeting(clause):
+                return start, sentence_start, "short_opening"
+            after = rest[end.end() :]
+            if not after.strip():
+                # Nothing but short clauses: the thought is in a later segment.
+                return start, sentence_start, "acknowledgement"
+            if skipped == MAX_ACKNOWLEDGEMENT_CLAUSES:
+                return start, sentence_start, "short_opening"
+            skipped += 1
+            sentence_start = end.group() in _SENTENCE_END
+            start += end.end() + len(after) - len(after.lstrip())

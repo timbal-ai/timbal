@@ -565,6 +565,13 @@ class ElevenLabsStreamTTS(TextToSpeech):
         # closing dialogue context can make the server close the whole socket.
         self._context_send_lock = asyncio.Lock()
 
+    def performs_audio_tags(self, config: AudioOutputConfig) -> bool:
+        """The dialogue models perform ``[laughs]``; Flash and Multilingual read it aloud.
+
+        Measured: ``benchmarks/voice/tts_audio_tags.py``.
+        """
+        return effective_tts_model(config).startswith(_DIALOGUE_MODEL_PREFIXES)
+
     async def connect(self, config: AudioOutputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
         if not config.voice:

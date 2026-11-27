@@ -57,21 +57,69 @@ def test_an_opening_of_three_words_or_more_gets_the_sound(text):
 
 
 @pytest.mark.parametrize(
-    "text",
+    "text,spoken",
     [
-        "Vale, te paso con un compañero.",
-        "De acuerdo. Te lo miro ahora mismo.",
-        "Hasta luego, que vaya bien.",
-        "Venga, adiós, que tengas buen día.",
-        "Pedro, ya te he encontrado.",
-        "Dime, ¿de qué se trata?",
-        "Of course, let me check that for you.",
-        "Pedido confirmado.",
-        "Claro.",
+        ("Vale, te paso con un compañero.", "Vale, eh... te paso con un compañero."),
+        ("De acuerdo. Te lo miro ahora mismo.", "De acuerdo. Eh... te lo miro ahora mismo."),
+        ("Pedro, ya te he encontrado.", "Pedro, eh... ya te he encontrado."),
+        ("Of course, let me check that for you.", "Of course, eh... let me check that for you."),
+        ("Perfecto, Marta. Tu factura es de 40 euros.", "Perfecto, Marta. Eh... tu factura es de 40 euros."),
+        ("Vale: te lo miro ahora mismo.", "Vale: eh... te lo miro ahora mismo."),
+        ("Sí.\nTe lo miro ahora mismo.", "Sí.\nEh... te lo miro ahora mismo."),
+        # An acronym keeps its capital after the sound.
+        ("Perfecto. DNI y nombre del titular.", "Perfecto. Eh... DNI y nombre del titular."),
     ],
 )
-def test_a_one_or_two_word_opening_is_said_clean(text):
-    assert consider(text) == (None, "short_opening")
+def test_the_sound_goes_after_a_short_acknowledgement(text, spoken):
+    made, reason = consider(text)
+    assert reason == "added"
+    assert made.spoken == spoken
+    # After a comma the sound is inside the sentence: lower case, and the next word keeps its own.
+    assert made.opener == ("Eh... " if spoken[made.offset] == "E" else "eh... ")
+    assert text[: made.offset] == spoken[: made.offset]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A greeting or a goodbye is not an acknowledgement.
+        "Hasta luego, que vaya bien.",
+        "Venga, adiós, que tengas buen día.",
+        "Hola, soy Laura de Luzia Energía.",
+        "¡Hola! Soy Laura de Luzia Energía.",
+        "Good morning, this is Laura from the desk.",
+        "Bon dia, sóc la Laura del taller.",
+        # More than two short clauses before the thought.
+        "Vale, sí, claro, ahora te lo miro yo.",
+        # No clause of three words anywhere.
+        "Pedido confirmado, gracias",
+    ],
+)
+def test_a_greeting_a_goodbye_or_a_run_of_short_clauses_is_said_clean(text):
+    assert consider(text)[0] is None
+    assert consider(text)[1] in ("short_opening", "not_a_word")
+
+
+@pytest.mark.parametrize("text", ["Pedido confirmado.", "Claro.", "Vale, perfecto.", "De acuerdo, Marta. "])
+def test_a_segment_that_is_only_an_acknowledgement_leaves_the_opening_to_the_next(text):
+    hesitator = Hesitator(1.0, ["eh..."])
+    before = hesitator.state()
+    assert hesitator.consider(text, "es") == (None, "acknowledgement")
+    assert hesitator.state() == before
+
+
+def test_the_clause_after_an_acknowledgement_follows_the_same_rules():
+    assert consider("Dime, ¿de qué se trata?") == (None, "not_a_word")
+    assert consider("Vale, 10 euros con sesenta.") == (None, "not_a_word")
+    assert consider("Vale, eh... te lo miro ahora mismo.") == (None, "already")
+    assert consider("Vale. Mm, déjame ver un momento.") == (None, "already")
+
+
+def test_a_segment_that_continues_a_sentence_keeps_the_sound_in_lower_case():
+    made, _ = Hesitator(1.0, ["eh..."]).consider(" te paso con un compañero.", "es", mid_sentence=True)
+    assert made.spoken == " eh... te paso con un compañero."
+    made, _ = Hesitator(1.0, ["eh..."]).consider(" Te paso con un compañero.", "es")
+    assert made.spoken == " Eh... te paso con un compañero."
 
 
 @pytest.mark.parametrize(
@@ -109,8 +157,8 @@ def test_a_sound_the_model_wrote_is_not_doubled(text):
 
 
 def test_a_bare_sound_needs_a_comma_a_full_stop_an_ellipsis_or_a_dash():
-    # "Um?" asks the caller to repeat. It is a one-word opening, said clean, and not a hesitation.
-    assert consider("Um? I did not catch that.") == (None, "short_opening")
+    # "Um?" asks the caller to repeat. It is a one-word clause like any other, and not a hesitation.
+    assert consider("Um? I did not catch that.")[0].spoken == "Um? Eh... I did not catch that."
     # A configured opener is matched by its letters, whatever follows them.
     assert consider("Um? I did not catch that.", openers=("um,",)) == (None, "already")
 
@@ -185,8 +233,17 @@ def test_a_sound_the_model_wrote_counts_as_a_hesitation():
 
 def test_only_the_opening_right_after_is_held_back():
     hesitator = Hesitator(1.0, ["eh..."])
-    reasons = [hesitator.consider(text, "es")[1] for text in (PLAIN, "Vale, ahora lo miro.", PLAIN)]
+    reasons = [hesitator.consider(text, "es")[1] for text in (PLAIN, "Hasta luego, que vaya bien.", PLAIN)]
     assert reasons == ["added", "short_opening", "added"]
+    # An opening after an acknowledgement is an opening: it waits its turn too.
+    reasons = [hesitator.consider(text, "es")[1] for text in ("Vale, ahora lo miro yo.", PLAIN)]
+    assert reasons == ["after_hesitation", "added"]
+
+
+def test_a_reply_that_is_only_an_acknowledgement_is_not_an_opening():
+    hesitator = Hesitator(1.0, ["eh..."])
+    reasons = [hesitator.consider(text, "es")[1] for text in (PLAIN, "Claro.", PLAIN, PLAIN)]
+    assert reasons == ["added", "acknowledgement", "after_hesitation", "added"]
 
 
 @pytest.mark.parametrize("rate", [0.15, 0.5, 1.0])
@@ -449,7 +506,7 @@ async def test_a_reply_language_with_no_sounds_is_spoken_clean(language, reply_l
 
 
 async def test_each_sound_is_logged_and_a_skipped_opening_says_why():
-    session = make_session([PLAIN, "Vale, pasa a la ventanilla."], hesitation=ALWAYS)
+    session = make_session([PLAIN, "Hasta luego, que vaya bien."], hesitation=ALWAYS)
     with capture_logs() as logs:
         await session._run_turn("¿cuánto es?")
         await session._run_turn("vale")
@@ -520,6 +577,56 @@ async def test_the_next_turn_opens_clean_after_a_hesitated_one():
         ["Eh... son diez con sesenta."],
     ]
     assert [m.hesitations for m in session.metrics] == [1, 0, 1]
+
+
+async def test_a_reply_that_opens_with_an_acknowledgement_hesitates_after_it():
+    reply = "Perfecto. Tu factura es de cuarenta euros. ¿Te la envío por correo?"
+    tts = StreamingMockTTS()
+    session = make_session([reply], tts=tts, hesitation=ALWAYS)
+    await session._run_turn("¿cuánto es?")
+    assert fed(tts) == "Perfecto. Eh... tu factura es de cuarenta euros. ¿Te la envío por correo?"
+    assert session.transcript[-1].text == reply
+    assert "".join(str(record[0]) for record in session._turn_tts_segment_records) == reply
+    assert session.metrics[-1].hesitations == 1
+
+
+async def test_an_acknowledgement_spoken_on_its_own_leaves_the_sound_to_the_next_segment():
+    segments = ["Perfecto.", " Tu factura es de cuarenta euros.", " Luego te la envío por correo."]
+    tts = StreamingMockTTS()
+    session = make_session(["hi"], tts=tts, hesitation=ALWAYS)
+    session._turn_hesitation_due = True
+    for segment in segments:
+        session._schedule_tts(segment)
+    await session._tts_tail
+    try:
+        assert tts.streams[0].fed == ["Perfecto.", " Eh... tu factura es de cuarenta euros.", segments[2]]
+        assert session._turn_hesitations == 1
+        assert session._turn_hesitation_due is False
+    finally:
+        await session._abort_tts_stream()
+
+
+async def test_a_segment_after_a_comma_gets_the_sound_in_lower_case():
+    tts = StreamingMockTTS()
+    session = make_session(["hi"], tts=tts, hesitation=ALWAYS)
+    session._turn_hesitation_due = True
+    session._schedule_tts("Vale,")
+    session._schedule_tts(" te paso con un compañero.")
+    await session._tts_tail
+    try:
+        assert tts.streams[0].fed == ["Vale,", " eh... te paso con un compañero."]
+    finally:
+        await session._abort_tts_stream()
+
+
+async def test_the_reply_to_a_goodbye_is_said_clean():
+    tts = StreamingMockTTS()
+    session = make_session(["Gracias a ti por llamar. Que tengas muy buen día."] * 2, tts=tts, hesitation=ALWAYS)
+    await session._run_turn("Eso era todo, gracias. Hasta luego.")
+    assert fed(tts) == "Gracias a ti por llamar. Que tengas muy buen día."
+    assert session.metrics[-1].hesitations == 0
+    await session._run_turn("Una cosa más antes de colgar.")
+    assert tts.streams[-1].fed[0].startswith("Eh... gracias a ti")
 
 
 async def test_only_the_first_segment_of_a_step_is_considered():

@@ -17,6 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .ambience import validate_ambient_source
+from .audio_tags import DEFAULT_AUDIO_TAGS
 
 # Override with ELEVENLABS_VOICE_ID / TIMBAL_VOICE_ID (cloned/custom voices
 # are account-specific).
@@ -358,18 +359,21 @@ class HesitationConfig(BaseModel):
     Off unless set. The sound goes into the text sent to the voice and nowhere
     else: reply deltas, the transcript and the model's memory keep the model's
     words, and an interrupted reply is cut to the words the caller heard,
-    without the sound. Only the first segment spoken at the start of a turn or
-    after a tool call can get one. Greetings, fillers, idle prompts and fixed
-    fallback lines never do. See :mod:`timbal.voice.hesitation` for the rules.
+    without the sound. Only the opening of a turn, or of what is said after a
+    tool call, can get one: at its very start, or after a word or two of
+    acknowledgement ("Perfecto. Eh... tu factura..."). Greetings, goodbyes,
+    fillers, idle prompts and fixed fallback lines never do. See
+    :mod:`timbal.voice.hesitation` for the rules.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     rate: float = Field(default=DEFAULT_HESITATION_RATE, ge=0.0, le=1.0, allow_inf_nan=False)
     """Chance that a reply opening gets a sound, from 0 (off) to 1. It applies
-    to openings that can take one: they start with a letter, their first
-    clause has three words or more, and the model has not hesitated on its
-    own. The opening after a hesitated one is always left clean, so the share
+    to openings that can take one: a clause of three words or more that starts
+    with a letter, at the start of the reply or after one or two short clauses
+    of acknowledgement, where the model has not hesitated on its own.
+    The opening after a hesitated one is always left clean, so the share
     that gets a sound is at most ``rate``, and ``rate / (1 + rate)`` when
     every opening of the call can take one: 0.13 for 0.15, every other one
     for 1."""
@@ -420,6 +424,309 @@ def coerce_hesitation(value: Any) -> Any:
     if value is False:
         return None
     return value
+
+
+AUDIO_TAGS_MAX = 12
+AUDIO_TAG_MAX_CHARS = 30
+
+
+class AudioTagsConfig(BaseModel):
+    """Laughs and sighs written into the reply as ``[laughs]``, for voices that perform them.
+
+    Off unless set. With a voice that performs the marks (the ElevenLabs
+    dialogue models: Eleven v3, v3 conversational, v4), the model is told
+    which ones exist and to use them rarely, and what it writes is limited
+    before it is spoken. With any other voice the model is told nothing and
+    a mark it writes is taken out of the text sent to the voice, where it
+    would be read aloud ("Chuckles. Claro que sí..."). Reply deltas, the
+    transcript and the model's memory keep what the model wrote. See
+    :mod:`timbal.voice.audio_tags`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tags: list[str] = Field(default_factory=lambda: list(DEFAULT_AUDIO_TAGS))
+    """The marks, without brackets, as the voice's provider documents them
+    (English). Any other bracketed word in a reply is not spoken."""
+    max_per_reply: int = Field(default=1, ge=1, le=5)
+    """Marks spoken in one reply. The ones past it are taken out."""
+    rest_replies: int = Field(default=1, ge=0, le=20)
+    """Replies after one with a mark that go without. 0 lets every reply have one."""
+
+    @field_validator("tags")
+    @classmethod
+    def _clean_tags(cls, v: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for tag in v:
+            name = " ".join(tag.strip().strip("[]").lower().split())
+            if not name:
+                continue
+            if len(name) > AUDIO_TAG_MAX_CHARS or not all(ch.isalpha() or ch in " '-" for ch in name):
+                raise ValueError(
+                    f"an audio tag is a word or two of letters, at most {AUDIO_TAG_MAX_CHARS} characters: {tag!r}"
+                )
+            if name not in cleaned:
+                cleaned.append(name)
+        if len(cleaned) > AUDIO_TAGS_MAX:
+            raise ValueError(f"at most {AUDIO_TAGS_MAX} audio tags")
+        return cleaned
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.tags)
+
+
+def coerce_audio_tags(value: Any) -> Any:
+    """``True`` is the default marks, a list is those marks, ``False`` is off. Anything else passes through."""
+    if value is True:
+        return {"tags": list(DEFAULT_AUDIO_TAGS)}
+    if value is False:
+        return None
+    if isinstance(value, list | tuple):
+        return {"tags": list(value)}
+    return value
+
+
+UPSET_WORDS_MAX = 200
+
+
+def _clean_upset_words(words: Any) -> list[str]:
+    if not isinstance(words, list | tuple):
+        raise ValueError("upset_words is a list of words or phrases")
+    cleaned: list[str] = []
+    for word in words:
+        if not isinstance(word, str):
+            raise ValueError("upset_words is a list of words or phrases")
+        word = " ".join(word.split())
+        if word and word not in cleaned:
+            cleaned.append(word[:80])
+    if len(cleaned) > UPSET_WORDS_MAX:
+        raise ValueError(f"at most {UPSET_WORDS_MAX} upset words per language")
+    return cleaned
+
+
+class AdaptiveTempoConfig(BaseModel):
+    """Speak slower to a caller who talks slowly, or who is upset.
+
+    Off unless set. Each reply is spoken at ``tts_tempo`` times a factor
+    between ``slowest`` and 1, decided when its turn starts: ``tts_tempo`` is
+    the fastest the agent talks, and this only slows it. See
+    :mod:`timbal.voice.adaptive_tempo`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    slowest: float = Field(default=0.9, ge=0.6, le=1.0, allow_inf_nan=False)
+    """The factor for the slowest caller: 0.9 is a tenth slower. 1 leaves the
+    caller's pace out and keeps only ``upset_tempo``."""
+    slow_rate: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    """Syllables per second of speech at or below which the factor is
+    ``slowest``. ``None`` uses the reply language's entry in
+    ``timbal.voice.adaptive_tempo.DEFAULT_RATES`` (4.4 for Spanish, 3.6 for
+    English)."""
+    normal_rate: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    """Syllables per second at or above which the factor is 1 (6.0 for
+    Spanish, 5.0 for English). Between the two rates the factor is a straight
+    line."""
+    upset_tempo: float | None = Field(default=0.93, ge=0.6, le=1.0, allow_inf_nan=False)
+    """The factor while the caller is upset. ``None`` leaves mood out."""
+    upset_turns: int = Field(default=3, ge=1, le=20)
+    """Replies spoken at ``upset_tempo`` after an utterance with an upset word in it."""
+    upset_words: list[str] | dict[str, list[str]] | None = None
+    """Words and phrases that mark an upset caller, matched whole and without
+    accents or case. A list serves every language; a dict is keyed by language
+    (``"*"`` for any other) and replaces that language's list. ``None`` uses
+    ``timbal.voice.adaptive_tempo.DEFAULT_UPSET_WORDS`` (``es``, ``en``, ``ca``)."""
+
+    @field_validator("slowest", "upset_tempo", "slow_rate", "normal_rate", mode="before")
+    @classmethod
+    def _not_bool(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("must be a number, not a boolean")
+        return v
+
+    @field_validator("upset_words", mode="before")
+    @classmethod
+    def _clean_words(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, dict):
+            merged: dict[str, list[str]] = {}
+            for language, words in v.items():
+                key = "*" if isinstance(language, str) and language.strip() == "*" else language_key(language)
+                if not key:
+                    raise ValueError('upset_words by language needs a language code or "*" as each key')
+                merged.setdefault(key, []).extend(_clean_upset_words(words))
+            return merged
+        return _clean_upset_words(v)
+
+    @model_validator(mode="after")
+    def _rates_in_order(self) -> AdaptiveTempoConfig:
+        if self.slow_rate is not None and self.normal_rate is not None and self.normal_rate <= self.slow_rate:
+            raise ValueError("normal_rate must be greater than slow_rate")
+        return self
+
+    @property
+    def enabled(self) -> bool:
+        return self.slowest < 1.0 or (self.upset_tempo is not None and self.upset_tempo < 1.0)
+
+
+def coerce_adaptive_tempo(value: Any) -> Any:
+    """``True`` is the defaults and ``False`` is off. Anything else passes through."""
+    if value is True:
+        return {"slowest": 0.9}
+    if value is False:
+        return None
+    return value
+
+
+BACKCHANNEL_PHRASES_MAX = 12
+BACKCHANNEL_PHRASE_MAX_CHARS = 24
+
+
+def _clean_backchannel_phrases(phrases: Any) -> list[str]:
+    if not isinstance(phrases, list | tuple):
+        raise ValueError("phrases is a list of short sounds")
+    cleaned: list[str] = []
+    for phrase in phrases:
+        if not isinstance(phrase, str):
+            raise ValueError("phrases is a list of short sounds")
+        phrase = " ".join(phrase.split())
+        if not phrase:
+            continue
+        if len(phrase) > BACKCHANNEL_PHRASE_MAX_CHARS:
+            raise ValueError(f"a listening sound is at most {BACKCHANNEL_PHRASE_MAX_CHARS} characters")
+        if phrase not in cleaned:
+            cleaned.append(phrase)
+    if len(cleaned) > BACKCHANNEL_PHRASES_MAX:
+        raise ValueError(f"at most {BACKCHANNEL_PHRASES_MAX} listening sounds per language")
+    return cleaned
+
+
+class BackchannelConfig(BaseModel):
+    """Listening sounds ("ajá", "mm-hm") while the caller is still talking.
+
+    Off unless set. When the caller pauses in the middle of a number they are
+    dictating, of a phrase they have not finished or of a long explanation,
+    the agent says a short sound in its own voice and the caller goes on. It
+    is not a turn: no model call, nothing in the transcript or the model's
+    memory, and talking over it interrupts nothing. Needs PCM16 mic audio.
+    See :mod:`timbal.voice.backchannel` for the rules.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rate: float = Field(default=0.7, ge=0.0, le=1.0, allow_inf_nan=False)
+    """Share of the pauses that qualify which get a sound. 0 is off."""
+    phrases: list[str] | dict[str, list[str]] | None = None
+    """The sounds, written the way the voice should read them. A list serves
+    every language. A dict is keyed like ``FillerConfig.phrases`` (``"es"``,
+    ``"en"``, region dropped, ``"*"`` for any other). A language without an
+    entry uses ``timbal.voice.backchannel.DEFAULT_BACKCHANNELS`` (``es``,
+    ``en``, ``ca``), and any other "Mm-hm.". Each is synthesized once per
+    call, and a take longer than 1.2 s is not used."""
+    pause_secs: float = Field(default=0.45, ge=0.25, le=2.0, allow_inf_nan=False)
+    """Silence on the mic before a sound. Shorter talks over the caller's own
+    gaps between words; longer and the caller has started again."""
+    min_speech_secs: float = Field(default=1.5, ge=0.3, le=30.0, allow_inf_nan=False)
+    """Seconds the caller must have talked since the last sound, or since
+    they started. A group of a dictated number needs 0.8 s at most."""
+    min_gap_secs: float = Field(default=3.0, ge=0.5, le=60.0, allow_inf_nan=False)
+    """Least time between two sounds."""
+    max_per_turn: int = Field(default=3, ge=1, le=20)
+    """Most sounds before the agent's next reply."""
+    long_speech_secs: float | None = Field(default=6.0, ge=2.0, le=120.0, allow_inf_nan=False)
+    """After this long talking, a pause gets a sound without any other sign
+    that the caller has more to say (unless they asked a question). ``None``
+    leaves length out."""
+    volume: float = Field(default=0.6, ge=0.05, le=1.5, allow_inf_nan=False)
+    """Level of the sound against the voice as synthesized. A listener's
+    "ajá" is quieter than their answer."""
+    seed: int | None = None
+    """Fix the random draws. Unset draws differently on every call."""
+
+    @field_validator(
+        "rate", "pause_secs", "min_speech_secs", "min_gap_secs", "long_speech_secs", "volume", mode="before"
+    )
+    @classmethod
+    def _not_bool(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("must be a number, not a boolean")
+        return v
+
+    @field_validator("phrases", mode="before")
+    @classmethod
+    def _clean_phrases(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, dict):
+            merged: dict[str, list[str]] = {}
+            for language, phrases in v.items():
+                key = "*" if isinstance(language, str) and language.strip() == "*" else language_key(language)
+                if not key:
+                    raise ValueError('phrases by language needs a language code or "*" as each key')
+                merged.setdefault(key, []).extend(_clean_backchannel_phrases(phrases))
+            return {key: phrases for key, phrases in merged.items() if phrases} or None
+        return _clean_backchannel_phrases(v) or None
+
+    @property
+    def enabled(self) -> bool:
+        return self.rate > 0
+
+
+def coerce_backchannel(value: Any) -> Any:
+    """``True`` is the defaults and ``False`` is off. Anything else passes through."""
+    if value is True:
+        return {"rate": 0.7}
+    if value is False:
+        return None
+    return value
+
+
+PRONUNCIATIONS_MAX = 200
+PRONUNCIATION_TERM_MAX_CHARS = 64
+PRONUNCIATION_SPOKEN_MAX_CHARS = 200
+
+
+def _clean_pronunciation_terms(terms: Any) -> dict[str, str]:
+    if not isinstance(terms, dict):
+        raise ValueError("pronunciations maps each term to the way it is said")
+    cleaned: dict[str, str] = {}
+    for term, spoken in terms.items():
+        if not isinstance(term, str) or not isinstance(spoken, str):
+            raise ValueError("a pronunciation is a term and its spoken form, both text")
+        term, spoken = term.strip(), " ".join(spoken.split())
+        if not term or not spoken:
+            raise ValueError("a pronunciation needs a term and a spoken form")
+        if len(term) > PRONUNCIATION_TERM_MAX_CHARS or len(spoken) > PRONUNCIATION_SPOKEN_MAX_CHARS:
+            raise ValueError(
+                f"a pronunciation term is at most {PRONUNCIATION_TERM_MAX_CHARS} characters "
+                f"and its spoken form at most {PRONUNCIATION_SPOKEN_MAX_CHARS}"
+            )
+        cleaned[term] = spoken
+    if len(cleaned) > PRONUNCIATIONS_MAX:
+        raise ValueError(f"at most {PRONUNCIATIONS_MAX} pronunciations per language")
+    return cleaned
+
+
+def validate_pronunciations(value: Any) -> dict[str, str] | dict[str, dict[str, str]] | None:
+    """``{term: spoken}``, or ``{language: {term: spoken}}`` with ``"*"`` for every language. Empty is unset."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("pronunciations maps each term to the way it is said")
+    by_language = [isinstance(v, dict) for v in value.values()]
+    if any(by_language) and not all(by_language):
+        raise ValueError("pronunciations is either {term: spoken} or {language: {term: spoken}}, not a mix")
+    if not any(by_language):
+        return _clean_pronunciation_terms(value) or None
+    merged: dict[str, dict[str, str]] = {}
+    for language, terms in value.items():
+        key = "*" if isinstance(language, str) and language.strip() == "*" else language_key(language)
+        if not key:
+            raise ValueError('pronunciations by language needs a language code or "*" as each key')
+        merged.setdefault(key, {}).update(_clean_pronunciation_terms(terms))
+    return {key: terms for key, terms in merged.items() if terms} or None
 
 
 DEFAULT_GREETING_SYSTEM_PROMPT = (
@@ -756,6 +1063,9 @@ _OPTIONAL_VOICE_BLOCKS = {
     "ambient": AmbientAudioConfig,
     "filler": FillerConfig,
     "hesitation": HesitationConfig,
+    "audio_tags": AudioTagsConfig,
+    "adaptive_tempo": AdaptiveTempoConfig,
+    "backchannel": BackchannelConfig,
     "recording": RecordingConfig,
     "events": VoiceEventsConfig,
     "speculative_generation": SpeculativeGeneration,
@@ -993,6 +1303,35 @@ class VoiceConfig(BaseModel):
     ``False`` and ``{}`` add none. ``True`` is ``{"rate": 0.15}``
     (:data:`DEFAULT_HESITATION_RATE`). Server-side: a caller hello cannot set
     it. See :class:`HesitationConfig`."""
+    adaptive_tempo: AdaptiveTempoConfig | None = None
+    """Speak slower to a caller who talks slowly or is upset: each reply at
+    ``tts_tempo`` times a factor between ``slowest`` (0.9) and 1. ``None``
+    (default) keeps one speed for the call. ``True`` uses the defaults,
+    ``False`` and ``{}`` are off. Needs PCM16 mic audio to time the caller;
+    without it only the upset words count. Server-side: a caller hello cannot
+    set it. See :class:`AdaptiveTempoConfig`."""
+    backchannel: BackchannelConfig | None = None
+    """Listening sounds ("ajá", "mm-hm") in the agent's voice when the caller
+    pauses while dictating a number, in the middle of a phrase or of a long
+    explanation. ``None`` (default) keeps the agent silent until the turn is
+    over. ``True`` uses the defaults, ``False`` and ``{}`` are off. Needs
+    PCM16 mic audio. Server-side: a caller hello cannot set it. See
+    :class:`BackchannelConfig`."""
+    audio_tags: AudioTagsConfig | None = None
+    """Laughs and sighs in the reply (``[laughs]``), for voices that perform
+    them; taken out of the spoken text for voices that would read them aloud.
+    ``None`` (default) leaves replies as they are. ``True`` uses
+    ``timbal.voice.audio_tags.DEFAULT_AUDIO_TAGS``, a list names the marks,
+    ``False`` and ``{}`` are off. Server-side: a caller hello cannot set it.
+    See :class:`AudioTagsConfig`."""
+    pronunciations: dict[str, str] | dict[str, dict[str, str]] | None = None
+    """How to say terms the voice reads badly, in the text sent to the voice
+    and nowhere else: ``{"DNI": "deneí", "NIE": "níe"}``, or by reply language
+    with ``"*"`` for all of them (``{"es": {"DNI": "deneí"}, "*": {...}}``).
+    A term is matched whole and in the case it is written. Reply deltas, the
+    transcript and the model's memory keep the model's spelling. ``None``
+    (default) and ``{}`` change nothing. Server-side: a caller hello cannot set
+    it. See :mod:`timbal.voice.pronunciation`."""
     user_idle: UserIdleConfig | None = None
     """None → wait for the user forever. ``{}`` is unset. See :class:`UserIdleConfig`."""
     greeting: GreetingConfig | None = None
@@ -1102,6 +1441,26 @@ class VoiceConfig(BaseModel):
     @classmethod
     def _coerce_hesitation(cls, v: Any) -> Any:
         return coerce_hesitation(v)
+
+    @field_validator("adaptive_tempo", mode="before")
+    @classmethod
+    def _coerce_adaptive_tempo(cls, v: Any) -> Any:
+        return coerce_adaptive_tempo(v)
+
+    @field_validator("backchannel", mode="before")
+    @classmethod
+    def _coerce_backchannel(cls, v: Any) -> Any:
+        return coerce_backchannel(v)
+
+    @field_validator("audio_tags", mode="before")
+    @classmethod
+    def _coerce_audio_tags(cls, v: Any) -> Any:
+        return coerce_audio_tags(v)
+
+    @field_validator("pronunciations", mode="before")
+    @classmethod
+    def _clean_pronunciations(cls, v: Any) -> Any:
+        return validate_pronunciations(v)
 
     @field_validator("speculative_generation", mode="before")
     @classmethod

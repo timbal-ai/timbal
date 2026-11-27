@@ -31,7 +31,10 @@ from ..voice.ambience import PRESETS as AMBIENT_PRESETS
 from ..voice.ambience import ensure_ambient_source
 from ..voice.config import (
     DEFAULT_VOICE_ID,
+    AdaptiveTempoConfig,
     AmbientAudioConfig,
+    AudioTagsConfig,
+    BackchannelConfig,
     FillerConfig,
     GreetingConfig,
     HesitationConfig,
@@ -167,6 +170,9 @@ def _normalize_declared_voice_config(runnable: Any) -> dict[str, Any] | None:
 _SPARSE_NESTED: tuple[tuple[str, type], ...] = (
     ("filler", FillerConfig),
     ("hesitation", HesitationConfig),
+    ("audio_tags", AudioTagsConfig),
+    ("adaptive_tempo", AdaptiveTempoConfig),
+    ("backchannel", BackchannelConfig),
     ("greeting", GreetingConfig),
     ("outbound_greeting", GreetingConfig),
     ("user_idle", UserIdleConfig),
@@ -1343,6 +1349,15 @@ def build_voice_session(
     # Server-side only: not in the hello allowlist, so this is the agent's.
     if merged.hesitation is not None and merged.hesitation.enabled:
         session_kwargs["hesitation"] = merged.hesitation
+    # Server-side only, like hesitation: how the agent's own words are said.
+    if merged.audio_tags is not None and merged.audio_tags.enabled:
+        session_kwargs["audio_tags"] = merged.audio_tags
+    if merged.adaptive_tempo is not None and merged.adaptive_tempo.enabled:
+        session_kwargs["adaptive_tempo"] = merged.adaptive_tempo
+    if merged.backchannel is not None and merged.backchannel.enabled:
+        session_kwargs["backchannel"] = merged.backchannel
+    if merged.pronunciations:
+        session_kwargs["pronunciations"] = merged.pronunciations
     if greeting is not None:
         session_kwargs["greeting"] = greeting
     if merged.user_idle is not None:
@@ -1496,6 +1511,7 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         AgentTextDelta,
         AgentTextDone,
         AudioOutput,
+        BackchannelSpoken,
         EventTurnStarted,
         FillerSpoken,
         SessionEnded,
@@ -1537,6 +1553,8 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         return [dump_value(event.model_dump(), mode="json")]
     if isinstance(event, FillerSpoken):
         return [{"type": "filler", "text": event.text}]
+    if isinstance(event, BackchannelSpoken):
+        return [{"type": "backchannel", "text": event.text, "reason": event.reason}]
     if isinstance(event, EventTurnStarted):
         return [
             {

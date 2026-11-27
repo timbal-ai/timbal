@@ -1,7 +1,10 @@
 """timbal.voice — voice pipeline: VoiceSession, STT/TTS ABCs, turn detection, metrics, and provider implementations."""
 
 from .config import (
+    AdaptiveTempoConfig,
     AmbientAudioConfig,
+    AudioTagsConfig,
+    BackchannelConfig,
     FillerConfig,
     GreetingConfig,
     HesitationConfig,
@@ -29,6 +32,7 @@ from .events import (
     AgentTextDelta,
     AgentTextDone,
     AudioOutput,
+    BackchannelSpoken,
     EventTurnStarted,
     FillerSpoken,
     SessionEnded,
@@ -153,6 +157,10 @@ __all__ = [
     "FillerSpoken",
     "FishAudioStreamTTS",
     "GreetingConfig",
+    "AdaptiveTempoConfig",
+    "AudioTagsConfig",
+    "BackchannelConfig",
+    "BackchannelSpoken",
     "HesitationConfig",
     "HeuristicTurnDetector",
     "LexicalTurnDetector",

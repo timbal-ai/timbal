@@ -495,7 +495,7 @@ async def serve_media_ws(
     tenant) and leave ``TIMBAL_VOICE_RECORDING_UPLOAD`` unset.
     """
     try:
-        from ..voice import AgentTextDone, AudioOutput, FillerSpoken, SessionEnded, TurnMetricsEvent
+        from ..voice import AgentTextDone, AudioOutput, BackchannelSpoken, FillerSpoken, SessionEnded, TurnMetricsEvent
         from ..voice.telephony import (
             TELEPHONY_SAMPLE_RATE,
             ULAW_SILENCE,
@@ -709,12 +709,12 @@ async def serve_media_ws(
                 break
             yield chunk
 
-    # Events that follow *completed* speech (turn reply spoken, filler spoken,
+    # Events that follow *completed* speech (turn reply spoken, filler or listening sound spoken,
     # turn wrapped up, session over) — the only safe points to flush the
     # sub-minimum downlink tail. Flushing on every non-audio event would pad
     # mid-utterance (AgentTextDelta interleaves with AudioOutput while TTS
     # streams), stitching audible silence gaps into continuous speech.
-    flush_events = (AgentTextDone, FillerSpoken, TurnMetricsEvent, SessionEnded)
+    flush_events = (AgentTextDone, FillerSpoken, BackchannelSpoken, TurnMetricsEvent, SessionEnded)
 
     recv_task = asyncio.create_task(_recv_loop())
     try:

@@ -171,6 +171,19 @@ class FillerSpoken(VoiceSessionEvent):
     text: str
 
 
+class BackchannelSpoken(VoiceSessionEvent):
+    """A listening sound ("ajá") was said while the caller was still talking.
+
+    Not a turn and not part of any reply: nothing follows it, and the
+    transcript does not hold it. ``reason`` is what said the caller was not
+    done: ``entity``, ``held``, ``unfinished`` or ``long``
+    (:mod:`timbal.voice.backchannel`)."""
+
+    type: Literal["backchannel"] = "backchannel"
+    text: str
+    reason: str = ""
+
+
 class EventTurnStarted(VoiceSessionEvent):
     """The agent started a turn on its own (finished tasks, posted events), not for the caller.
 

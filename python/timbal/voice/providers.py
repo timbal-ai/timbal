@@ -235,6 +235,15 @@ class TextToSpeech(VoiceUsageEmitter, ABC):
         """
         return None
 
+    def performs_audio_tags(self, config: AudioOutputConfig) -> bool:  # noqa: ARG002
+        """Optional capability: ``[laughs]`` in the text comes out as a laugh.
+
+        ``False`` (default) means the voice would read the mark aloud, so a
+        session with ``audio_tags`` set takes it out of the text. Answered for
+        the ``config`` of the call: it depends on the model.
+        """
+        return False
+
     @abstractmethod
     async def close(self) -> None: ...
 

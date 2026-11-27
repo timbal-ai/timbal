@@ -72,8 +72,21 @@ class TurnMetrics(BaseModel):
     """How many filler phrases were spoken (>1 with ``repeat_secs`` on)."""
     hesitations: int = 0
     """How many hesitation sounds the session added to this turn's speech
-    (``VoiceConfig.hesitation``): at most one at the start of the turn and one
-    after each tool call. One the model wrote itself is not counted."""
+    (``VoiceConfig.hesitation``): at most one at the opening of the turn and
+    one after each tool call. One the model wrote itself is not counted."""
+    audio_tags: int = 0
+    """Marks the voice performed in this turn's reply (``VoiceConfig.audio_tags``:
+    ``[laughs]``, ``[sighs]``). Marks taken out before the voice are not counted."""
+    backchannels: int = 0
+    """Listening sounds ("ajá") the agent made while the caller said what this
+    turn answers (``VoiceConfig.backchannel``)."""
+    tts_tempo: float | None = None
+    """The tempo this turn's reply was spoken at, when ``VoiceConfig.adaptive_tempo``
+    is on: ``tts_tempo`` times the factor for this caller. ``None`` otherwise."""
+    caller_syllables_per_sec: float | None = None
+    """How fast the caller said what this turn answers (``adaptive_tempo``):
+    syllables over seconds of speech. ``None`` when the utterance said nothing
+    about pace (a few words, digits) or the option is off."""
     event: bool = False
     """True for a turn the session started on its own (``VoiceSession.notify``, a
     background result) rather than the caller: ``user_text_chars`` is 0 and the
