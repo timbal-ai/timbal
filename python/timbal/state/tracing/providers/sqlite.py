@@ -45,12 +45,14 @@ class _FileOrder:
     for a few statements; re-entrant, since a save left suspended when its loop was closed is closed by the
     garbage collector, whose cleanup asks for it on whatever thread is allocating, one that holds it included.
     ``commit``: held from the comparison with what is stored to the end of the commit, on any connection to the
-    file.
+    file. ``key``: the registry key of the first connection this process opened to the file, which every call
+    for the file is queued under (:func:`file_key`), by whatever path it names the file.
     """
 
-    __slots__ = ("commit", "lock", "writing")
+    __slots__ = ("commit", "key", "lock", "writing")
 
-    def __init__(self) -> None:
+    def __init__(self, key: str | None = None) -> None:
+        self.key = key
         self.writing: dict[str, _Writes] = {}
         self.lock = threading.RLock()
         self.commit = threading.Lock()
@@ -122,12 +124,14 @@ def _file_at(path: Path | str) -> tuple[int, int] | None:
 
 # Per spelling of a path, as given (relative, through a link, in another case, with a trailing slash): the name
 # SQLite opens it by (``str(Path(spelling))``, which drops that slash) and Path.resolve()'s answer, which
-# database() keys its connection by and chat_store._store_thread() its thread. Resolving reads the file system,
-# a call per component and a stat, and on Windows it opens the file (~250 us); every store and trace call asks
-# for its database. Made once per spelling, and again whenever the name no longer names the file of the
-# connection the remembered key has (the working directory changed under a relative path, a link was moved, the
-# file was deleted): one stat per call, which database() made anyway to tell a file deleted and written again.
-# Plain data, so a forked child keeps it; thread safe as a dict.
+# database() keys its connection by. Resolving reads the file system, a call per component and a stat, and on
+# Windows it opens the file (~250 us); every store and trace call asks for its database. Made once per spelling,
+# and again whenever the name no longer names the file of the connection the remembered key has (the working
+# directory changed under a relative path, a link was moved, the file was deleted): one stat per call, which
+# database() made anyway to tell a file deleted and written again. A remembered key can outlive the path it was
+# (a directory renamed with the file in it): the connection under it is still to the file the name names, which
+# is all database() needs. Queues need more, and go by the file (file_key). Plain data, so a forked child keeps
+# it; thread safe as a dict.
 _RESOLVED: dict[str, tuple[str, str]] = {}
 _RESOLVED_MAX = 4096  # spellings; past it they are all resolved again
 
@@ -148,25 +152,39 @@ def _registered(spelling: str, mode: str) -> tuple[str, str, "_Database | None",
 
     A remembered key is used only while it does. Otherwise the spelling is resolved again, as it was on every call
     before: whatever it names now is what the caller gets, and a path that came to name another file is never
-    answered with the old file's connection, or the old file's key.
+    answered with the old file's connection. The registry is read without its lock (one dict lookup), so a thread
+    that holds it while it opens another file holds up nothing here.
     """
     known = _RESOLVED.get(spelling)
     if known is not None:
         name, key = known
-        with _DATABASES_LOCK:
-            db = _DATABASES.get((key, mode))
+        db = _DATABASES.get((key, mode))
         if db is not None and db.names(name):
             return name, key, db, True
     name, key = _resolve(spelling)
-    with _DATABASES_LOCK:
-        db = _DATABASES.get((key, mode))
+    db = _DATABASES.get((key, mode))
     return name, key, db, db is not None and db.names(name)
 
 
-def resolved(path: Path | str, synchronous: str = "NORMAL") -> str:
-    """``str(Path(path).resolve())``: the path :func:`database` keys the connection for ``path`` by, checked as
-    :func:`database` checks it (a stat, while its ``synchronous`` connection is open; resolved again otherwise)."""
-    return _registered(os.fspath(path), synchronous.upper())[1]
+def file_key(path: Path | str) -> str:
+    """The key the calls for the file ``path`` names are queued under (``chat_store._store_thread``: one thread
+    per key, its calls in the order they were made): the registry key of the first connection this process opened
+    to that file, whatever path it was opened by.
+
+    So every spelling of an open file queues with the others, also once the path changed under one of them
+    (a link moved to the file, a directory renamed with it, another case): a remembered resolution cannot tell
+    that a path came to resolve to another key while the file stayed the same. With no connection to that file
+    yet, ``path`` resolved, as on every call before.
+
+    Asked on the event loop for every store call: one stat, and the file registry read without its lock.
+    """
+    spelling = os.fspath(path)
+    known = _RESOLVED.get(spelling)
+    found = _file_at(known[0] if known is not None else Path(spelling))
+    order = _ORDERS.get(found) if found is not None else None
+    if order is not None and order.key is not None:
+        return order.key
+    return _resolve(spelling)[1]
 
 
 _DATABASES: dict[tuple[str, str], _Database] = {}
@@ -272,21 +290,27 @@ def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
     # Opened outside the registry's lock, which every database of the process goes through: a file that
     # cannot be opened now (a stalled mount) holds up its own callers, not those of every other file.
     opened = _Database(Path(name), mode)
+    ident = opened._file if opened._file is not None else key[0]
     with _DATABASES_LOCK:
-        ident = opened._file if opened._file is not None else key[0]
         order = _ORDERS.get(ident)
         if order is None:
-            order = _ORDERS[ident] = _FileOrder()
-        opened.order, opened.writing, opened.writing_lock = order, order.writing, order.lock
-        current = _DATABASES.get(key)
-        if current is not None and current is not db and current.names(name):
-            # Another thread opened it meanwhile: one connection per file, theirs. Only while theirs is
-            # still to the file at the path: one that went stale since (the file deleted under it) is
-            # replaced by this one, as a stale one always is.
+            order = _ORDERS[ident] = _FileOrder(key[0])
+    opened.order, opened.writing, opened.writing_lock = order, order.writing, order.lock
+    stale = db  # what this call found under the key, not to the file at the path
+    while True:
+        with _DATABASES_LOCK:
+            current = _DATABASES.get(key)
+            if current is None or current is stale:
+                _DATABASES[key] = opened
+                return opened
+        # Another thread opened it meanwhile: one connection per file, theirs. Only while theirs is still to
+        # the file at the path: one that went stale since (the file deleted under it) is replaced by this
+        # one, as a stale one always is. Checked, and this one closed, outside the registry's lock, which
+        # every file's callers take: a stat or a close that is slow holds up only this file's.
+        if current.names(name):
             opened.conn.close()
             return current
-        _DATABASES[key] = opened
-        return opened
+        stale = current
 
 
 class SqliteTracingProvider(TracingProvider):

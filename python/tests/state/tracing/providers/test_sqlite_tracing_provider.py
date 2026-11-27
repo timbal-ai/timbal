@@ -734,6 +734,59 @@ class TestPerSpanStorage:
         assert mine is not stored and mine.alive() and not stored.alive()
         assert sqlite_module.database(path) is mine  # and it is the one everybody gets from now on
 
+    def test_two_threads_opening_one_file_look_at_it_outside_the_registrys_lock(self, tmp_path, monkeypatch):
+        """Every file's callers take the registry's lock, the event loop's too. The thread that finds another
+        one's connection stored meanwhile checks it (a stat) and closes its own without holding that lock: a
+        slow file system holds up only that file's callers."""
+        import threading
+
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        class Lock:
+            """The registry's lock, saying which thread holds it."""
+
+            def __init__(self):
+                self.lock, self.owner = threading.Lock(), None
+
+            def __enter__(self):
+                self.lock.acquire()
+                self.owner = threading.get_ident()
+
+            def __exit__(self, *exc):
+                self.owner = None
+                self.lock.release()
+
+        registry = Lock()
+        monkeypatch.setattr(sqlite_module, "_DATABASES_LOCK", registry)
+        real_file_at, under_lock = sqlite_module._file_at, []
+
+        def file_at(path):
+            under_lock.append(registry.owner == threading.get_ident())
+            return real_file_at(path)
+
+        monkeypatch.setattr(sqlite_module, "_file_at", file_at)
+        path = tmp_path / "opened-twice.db"
+        entered, go = threading.Event(), threading.Event()
+        real, calls = sqlite3.connect, []
+
+        def connect(target, *args, **kwargs):
+            calls.append(target)
+            if len(calls) == 1:  # the first thread's open: held until the other one stored its connection
+                entered.set()
+                go.wait(30)
+            return real(target, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite_module.sqlite3, "connect", connect)
+        got = []
+        slow = threading.Thread(target=lambda: got.append(sqlite_module.database(path)), daemon=True)
+        slow.start()
+        assert entered.wait(30)
+        stored = sqlite_module.database(path)
+        go.set()
+        slow.join(30)
+        assert got == [stored]  # one connection per file: the one stored first
+        assert under_lock and not any(under_lock)
+
     def test_a_path_is_resolved_once_while_it_names_the_same_file(self, tmp_path, monkeypatch):
         """Every store and trace call asks for its database, and the session store for its thread first.
         Resolving the path reads the file system each time (on Windows it opens the file, ~250 us): it is
