@@ -2035,8 +2035,23 @@ class MCPServer(ToolSet):
         for result in await asyncio.shield(asyncio.gather(*waits, return_exceptions=True)):
             if isinstance(result, BaseException):
                 failed.append(result)  # its cause is said; what it left is counted below, once
+        # Closes a cut handoff started there (it let go of the connections, then was cancelled) go on: waited for
+        # here too, as the ones this close() started, so it never returns while they are open.
+        await self._settle_closes(loop)
         await self._wait_owners_closing(loop)
         self._owed(loop, taken, session).raise_if_owed(self._label, failed)
+
+    async def _settle_closes(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Wait for every close still going on a loop this close() can reach: this one's directly, another running
+        loop's handed to it (and waited for while it runs). Shielded where they are waited for."""
+        if any(task.get_loop() is loop and not task.done() for task in list(self._close_tasks)):
+            await self._wait_loop_closes()
+        for owner in {task.get_loop() for task in list(self._close_tasks) if not task.done()} - {loop}:
+            if owner.is_closed() or not owner.is_running():
+                continue
+            handed = _hand_to(owner, self._wait_loop_closes())
+            if handed is not None:
+                await _wait_on_owner(handed, owner)
 
     def _owed(self, loop: asyncio.AbstractEventLoop, taken: set[int], session: asyncio.Task | None) -> "_Left":
         """What is still owed once close() has done what it could, from the state it ends in: each connection,
@@ -2059,8 +2074,12 @@ class MCPServer(ToolSet):
             elif not (entry.loop or loop).is_closed():
                 left.cut += 1
         for task in list(self._close_tasks):
-            if not task.done() and paused(task.get_loop()):
+            if task.done() or task.get_loop().is_closed():
+                continue
+            if paused(task.get_loop()):
                 left.paused += 1
+            else:
+                left.cut += 1  # still closing after the wait for it (handed over and cut again): its session is open
         owners = {owner for owner in list(self._owners_closing) if not owner.done() and paused(owner.get_loop())}
         if session is not None and session is self._session_task and not session.done():
             if paused(session.get_loop()):

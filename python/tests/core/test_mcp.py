@@ -1393,6 +1393,46 @@ class TestCrossLoopClose:
                 asyncio.run(asyncio.wait_for(server.close(), 10))
             assert "1 session(s) of this server are still shutting down" in str(failure.value)
 
+    def test_a_cancelled_handoff_does_not_end_close_before_the_closes_it_started(self):
+        """The owner cancelled close()'s handoff after it had let go of the connection and started its close: that
+        close goes on there, and close() waits for it instead of returning while the session is open."""
+        import threading
+
+        from timbal.core.mcp import _RunConnection
+
+        owner_loop, stop = self.owner_thread()
+        started, closed = threading.Event(), []
+
+        async def make_event():
+            return asyncio.Event()
+
+        release = asyncio.run_coroutine_threadsafe(make_event(), owner_loop).result(10)
+
+        class Slow:
+            async def close(self):
+                started.set()
+                await release.wait()
+                closed.append(True)
+
+        service = MCPServer(transport="http", service="api")
+        try:
+            service._run_connections["run"] = _RunConnection(Slow(), "fingerprint", owner_loop)
+
+            async def main():
+                closing = asyncio.ensure_future(service.close())
+                assert await asyncio.to_thread(started.wait, 10)  # let go of there, its close going
+                handed, _ = next(iter(service._handoffs.values()))
+                handed.cancel()  # the owner cancels the handed work
+                done, _ = await asyncio.wait({closing}, timeout=0.3)
+                assert not done and not closed  # waiting for the close it started
+                owner_loop.call_soon_threadsafe(release.set)
+                await asyncio.wait_for(closing, 10)
+                assert closed == [True]
+
+            asyncio.run(main())
+        finally:
+            stop()
+
     def test_a_close_waiting_on_anothers_handoff_reports_what_it_left(self):
         """Two close() at once on one loop, the run connection on another: the second waits for the first's
         handoff, and when a session close was cut there it says the session is still open, as the first does."""
