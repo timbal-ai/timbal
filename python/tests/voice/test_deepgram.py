@@ -123,11 +123,122 @@ class TestFluxEventMapping:
         events = _drain(stt)
         assert [(e.type, e.text) for e in events] == [("committed", "tell me a story.")]
 
-    async def test_eager_events_emit_nothing(self) -> None:
+    async def test_eager_events_are_predictions_not_commits(self) -> None:
         stt = DeepgramFluxSTT()
-        await stt._handle_message(_flux_turn_info("EagerEndOfTurn"))
-        await stt._handle_message(_flux_turn_info("TurnResumed"))
+        await stt._handle_message(_flux_turn_info("EagerEndOfTurn", "tell me a story"))
+        await stt._handle_message(_flux_turn_info("TurnResumed", "tell me a story about"))
+        events = _drain(stt)
+        assert [(e.type, e.text, e.confidence) for e in events] == [
+            ("eager", "tell me a story", 0.9),
+            ("resumed", "tell me a story about", 0.9),
+        ]
+
+    async def test_turn_resumed_without_text_is_still_an_event(self) -> None:
+        stt = DeepgramFluxSTT()
+        await stt._handle_message(_flux_turn_info("TurnResumed", ""))
+        events = _drain(stt)
+        assert [(e.type, e.text) for e in events] == [("resumed", "")]
+
+    async def test_eager_suppressed_does_not_call_listener(self) -> None:
+        stt = DeepgramFluxSTT()
+        seen: list[str] = []
+        stt.on_eager_end_of_turn = seen.append
+        stt.eager_suppressed = True
+        await stt._handle_message(_flux_turn_info("EagerEndOfTurn", "415 555"))
+        assert seen == []
+        assert stt.eager_suppressed_count == 1
         assert _drain(stt) == []
+        stt.eager_suppressed = False
+        await stt._handle_message(_flux_turn_info("EagerEndOfTurn", "415 555 1212"))
+        assert seen == ["415 555 1212"]
+        # The session still sees the prediction. The listener is an extra hook,
+        # not a replacement for the eager event.
+        events = _drain(stt)
+        assert [(e.type, e.text) for e in events] == [("eager", "415 555 1212")]
+
+    async def test_configure_turn_clamps_and_nests_thresholds(self) -> None:
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=2.0, eot_timeout_ms=10, eager_eot_threshold=0.95, patient=True)
+        payload = json.loads(stt._ws.sent[-1])
+        assert payload["type"] == "Configure"
+        assert payload["thresholds"]["eot_threshold"] == 1.0
+        assert payload["thresholds"]["eot_timeout_ms"] == 500
+        # Eager cannot exceed eot_threshold, and 0.95 is above the 0.9 cap
+        # before the eot clamp. 1.0 eot still leaves eager at its own max.
+        assert payload["thresholds"]["eager_eot_threshold"] == 0.9
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is True
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is False
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt._handle_message({"type": "ConfigureFailure", "description": "nope"})
+        assert stt.patient_thresholds_live is False
+
+    async def test_each_configure_answer_settles_its_own_message(self) -> None:
+        """Off then on, back to back: the first answer is for "off", so patience is not live until the second."""
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is False
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is True
+
+    async def test_an_answer_read_while_the_send_drains_is_matched(self) -> None:
+        stt = DeepgramFluxSTT()
+        stt._ws = _SlowFakeWs()
+        send = asyncio.create_task(stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True))
+
+        async def _sending() -> None:
+            while stt._ws.in_flight == 0:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(_sending(), timeout=30)
+        await stt._handle_message({"type": "ConfigureSuccess"})  # answered before send() returned
+        await asyncio.wait_for(send, timeout=30)
+        assert stt.patient_thresholds_live is True
+        assert not stt._configure_acks
+
+    async def test_a_send_that_fails_after_its_answer_was_read_is_harmless(self) -> None:
+        class _AnsweredThenFails(_SlowFakeWs):
+            async def send(self, payload) -> None:
+                await super().send(payload)
+                raise ConnectionError("socket closed while draining")
+
+        stt = DeepgramFluxSTT()
+        stt._ws = _AnsweredThenFails()
+        send = asyncio.create_task(stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True))
+
+        async def _sending() -> None:
+            while stt._ws.in_flight == 0:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(_sending(), timeout=30)
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        await asyncio.wait_for(send, timeout=30)  # no IndexError
+        assert not stt._configure_acks
+        # A later Configure is still matched to its own answer.
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is False
+
+    async def test_a_failed_language_update_leaves_patience_live(self) -> None:
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        stt._input_config = AudioInputConfig(model="flux-general-multi")
+        assert await stt.update_language("es") is True
+        await stt._handle_message({"type": "ConfigureFailure", "description": "bad hint"})
+        assert stt.patient_thresholds_live is True
+        # A failed restore leaves Flux as it was: still patient.
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt._handle_message({"type": "ConfigureFailure", "description": "nope"})
+        assert stt.patient_thresholds_live is True
 
     async def test_empty_transcripts_skipped(self) -> None:
         stt = DeepgramFluxSTT()

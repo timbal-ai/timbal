@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from timbal import Agent
+from timbal.core.llm.prompt_cache import system_prompt_text
 from timbal.core.test_model import TestModel
 from timbal.state import get_run_context
 from timbal.voice import (
@@ -956,8 +957,11 @@ class TestDeliveryAndPromptSections:
 
         assert "Hello, caller." in " ".join(tts.synthesized_texts)
         (llm_input,) = self._llm_inputs(session)
-        # Nothing tells the model its text is private, and it has no tool to answer with instead.
-        assert not llm_input.get("system_prompt")
+        # Nothing tells the model its text is private, and it has no tool to answer with instead. (A call's
+        # prompt still carries its per-turn facts: the clock, the reply language.)
+        prompt = system_prompt_text(llm_input.get("system_prompt")) or ""
+        assert "send_message" not in prompt
+        assert "Current date and time" in prompt
         assert [tool.name for tool in llm_input.get("tools") or []] == []
         assert "delivery" not in session._last_run_context.root_span().metadata
 

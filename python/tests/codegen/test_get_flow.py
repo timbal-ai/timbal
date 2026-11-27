@@ -136,6 +136,21 @@ class TestAgentNode:
         assert "callable" in any_of_types
         assert "string" in any_of_types
 
+    def test_system_prompt_split_into_static_and_dynamic_is_text(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.core.llm.prompt_cache import voice_prompt
+
+        agent = Agent(
+            name="a",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            system_prompt=voice_prompt("You are a receptionist.", "plan: gold"),
+        )
+        """)
+        config = _single_node(_flow(ws))["data"]["config"]
+        assert config["system_prompt"]["value"] == "You are a receptionist.\n\nplan: gold"
+
     def test_system_prompt_none(self, workspace):
         ws = workspace("""\
         from timbal.core import Agent
@@ -878,6 +893,30 @@ class TestFormatCompact:
         """)
         out = _compact(ws)
         assert 'system_prompt: "Be helpful."' in out
+
+    def test_standalone_agent_split_system_prompt(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.core.llm.prompt_cache import voice_prompt
+
+        agent = Agent(
+            name="a", model="openai/gpt-4o-mini", max_tokens=128, system_prompt=voice_prompt("You are...", "plan: gold")
+        )
+        """)
+        out = _compact(ws)
+        assert 'system_prompt: "You are...  plan: gold"' in out
+
+    def test_workflow_step_agent_split_system_prompt(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent, Workflow
+        from timbal.core.llm.prompt_cache import voice_prompt
+
+        inner = Agent(name="inner", model="openai/gpt-4o-mini", max_tokens=128, system_prompt=voice_prompt("Be brief."))
+        agent = Workflow(name="wf")
+        agent.step(inner)
+        """)
+        out = _compact(ws)
+        assert 'system_prompt: "Be brief."' in out
 
     def test_standalone_agent_system_prompt_truncated(self, workspace):
         long_prompt = "x" * 200

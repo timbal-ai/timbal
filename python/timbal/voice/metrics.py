@@ -61,6 +61,10 @@ class TurnMetrics(BaseModel):
     """True when this turn's committed transcript was forced by the local VAD
     endpointing fast path (Silero + audio EOU) rather than the STT provider's
     own silence debounce — the ``eou_to_*`` numbers then start earlier."""
+    predictive_endpoint: bool = False
+    """True when that fast path confirmed the turn from a during-speech
+    prediction instead of waiting out the silence floor. Implies
+    ``vad_endpointed``."""
     filler_spoken: bool = False
     """True when a tool-call filler phrase was spoken this turn — the
     ``eou_to_first_audio_ms`` stamp then reflects the filler, not the reply."""
@@ -70,6 +74,15 @@ class TurnMetrics(BaseModel):
     """True for a turn the session started on its own (``VoiceSession.notify``, a
     background result) rather than the caller: ``user_text_chars`` is 0 and the
     ``eou_to_*`` clocks start at the turn's start."""
+    speculative: bool = False
+    """True when this turn was started before the transcript was confirmed.
+    ``eou_to_first_audio_ms`` is still measured from the confirming commit, so
+    0 means the first audio was already waiting when the turn confirmed."""
+    speculative_generations_started: int = 0
+    """How many speculative replies this call has started, including this one."""
+    speculative_generations_discarded: int = 0
+    """How many of those were dropped (the caller resumed, or the confirmed
+    transcript did not match) before this metrics event."""
 
 
 class TurnMetricsEvent(VoiceSessionEvent):

@@ -32,7 +32,7 @@ flowchart LR
 
 The built-in server serves the same agent through text and voice endpoints. Open `/voice` for the browser playground, or connect your own client using WebSocket, WebRTC, LiveKit, or a Twilio/Telnyx media stream.
 
-Keep replies concise and ask one question at a time. Tables, URLs, and long lists are difficult to follow aloud. Start with a conversation you can understand and measure before adding optional behavior.
+Keep replies concise and ask one question at a time. Tables, URLs, and long lists are difficult to follow aloud. Write the system prompt the same way: short spoken behavior first, and anything that changes each turn after it. See [Voice prompts](/voice/prompts). Start with a conversation you can understand and measure before adding optional behavior.
 
 The same process serves text at `POST /run` and `POST /stream` and voice at `/voice`. Deploy it like any other workforce member ([self-hosted](/deployment/self-hosted) or the [platform](/deployment/platform)); the voice routes are part of `python -m timbal.server`, not a separate binary. Failures you will actually see are listed on [Transports](/voice/transports#websocket-clients).
 
