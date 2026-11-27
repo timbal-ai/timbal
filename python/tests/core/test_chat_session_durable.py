@@ -4256,8 +4256,8 @@ class TestAStoreThatHangs:
 
     async def test_a_call_through_a_link_that_followed_a_renamed_directory_queues_with_the_file(self, tmp_path):
         """The directory is renamed with the database in it (the same file, the same inode) and the link moved
-        to follow it: the link and the new path still name one file, so their calls share its queue, in the order
-        they were made, also behind a call made by the old path before the rename."""
+        to follow it, while a call made by the old path before the rename is still running: the link and the new
+        path resolve to one key, so their calls share its queue, in the order they were made."""
         import os
         import threading
 
@@ -4294,6 +4294,30 @@ class TestAStoreThatHangs:
         assert await asyncio.wait_for(saved, 30) == 1
         snapshot = await asyncio.wait_for(loaded, 30)
         assert snapshot is not None and snapshot.session_id == "s2"  # the save went first, in the same queue
+
+    async def test_a_new_file_at_a_renamed_files_old_path_gets_a_queue_of_its_own(self, tmp_path):
+        """A directory renamed with its database, and a new database made at the old path: two files, so two
+        queues. A hang or a burst of work on one holds up nothing of the other."""
+        import os
+
+        from timbal.state import chat_store
+
+        old_dir, new_dir = tmp_path / "old", tmp_path / "new"
+        old_dir.mkdir()
+        await SqliteChatSessionStore(old_dir / "s.db").save(
+            SessionSnapshot(session_id="s1", agent="agent"), expect_version=None
+        )
+        try:
+            os.rename(old_dir, new_dir)
+        except OSError:
+            pytest.skip("an open database's directory cannot be renamed here")
+        old_dir.mkdir()
+        await SqliteChatSessionStore(old_dir / "s.db").save(
+            SessionSnapshot(session_id="s9", agent="agent"), expect_version=None
+        )
+        assert chat_store._store_thread(new_dir / "s.db") is not chat_store._store_thread(old_dir / "s.db")
+        assert await SqliteChatSessionStore(new_dir / "s.db").load("s9") is None  # and two files, as they were
+        assert (await SqliteChatSessionStore(new_dir / "s.db").load("s1")).session_id == "s1"
 
     async def test_a_store_call_does_not_wait_for_another_files_open(self, tmp_path):
         """The registry of open databases has one lock for every file. A thread opening another one may hold

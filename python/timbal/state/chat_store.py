@@ -364,13 +364,7 @@ _STORE_THREADS_LOCK = threading.Lock()
 
 
 def _store_thread(path: Path) -> _StoreThread:
-    from .tracing.providers.sqlite import file_key
-
-    # One thread per file the path names when the call is made, not when it runs (file_key: the key of the first
-    # connection this process opened to it), so the call queues with that file's other calls, by any path, in the
-    # order they were made. One stat on the event loop instead of a resolve (which opens the file on Windows),
-    # and no lock that another file's open could be holding.
-    key = file_key(path)
+    key = str(path.resolve())
     with _STORE_THREADS_LOCK:
         thread = _STORE_THREADS.get(key)
         if thread is None:

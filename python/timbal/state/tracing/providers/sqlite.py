@@ -45,14 +45,12 @@ class _FileOrder:
     for a few statements; re-entrant, since a save left suspended when its loop was closed is closed by the
     garbage collector, whose cleanup asks for it on whatever thread is allocating, one that holds it included.
     ``commit``: held from the comparison with what is stored to the end of the commit, on any connection to the
-    file. ``key``: the registry key of the first connection this process opened to the file, which every call
-    for the file is queued under (:func:`file_key`), by whatever path it names the file.
+    file.
     """
 
-    __slots__ = ("commit", "key", "lock", "writing")
+    __slots__ = ("commit", "lock", "writing")
 
-    def __init__(self, key: str | None = None) -> None:
-        self.key = key
+    def __init__(self) -> None:
         self.writing: dict[str, _Writes] = {}
         self.lock = threading.RLock()
         self.commit = threading.Lock()
@@ -130,8 +128,11 @@ def _file_at(path: Path | str) -> tuple[int, int] | None:
 # directory changed under a relative path, a link was moved, the file was deleted): one stat per call, which
 # database() made anyway to tell a file deleted and written again. A remembered key can outlive the path it was
 # (a directory renamed with the file in it): the connection under it is still to the file the name names, which
-# is all database() needs. Queues need more, and go by the file (file_key). Plain data, so a forked child keeps
-# it; thread safe as a dict.
+# is all a connection needs; the path's own key then gets a second connection to that file, sharing its
+# _FileOrder, as two synchronous modes or two cases of one path do. Not for chat_store._store_thread(), which
+# resolves on every call: a store's calls are ordered by the path's key when the call is made, and no stat tells
+# that a path came to resolve elsewhere while the file stayed the same. Plain data, so a forked child keeps it;
+# thread safe as a dict.
 _RESOLVED: dict[str, tuple[str, str]] = {}
 _RESOLVED_MAX = 4096  # spellings; past it they are all resolved again
 
@@ -164,27 +165,6 @@ def _registered(spelling: str, mode: str) -> tuple[str, str, "_Database | None",
     name, key = _resolve(spelling)
     db = _DATABASES.get((key, mode))
     return name, key, db, db is not None and db.names(name)
-
-
-def file_key(path: Path | str) -> str:
-    """The key the calls for the file ``path`` names are queued under (``chat_store._store_thread``: one thread
-    per key, its calls in the order they were made): the registry key of the first connection this process opened
-    to that file, whatever path it was opened by.
-
-    So every spelling of an open file queues with the others, also once the path changed under one of them
-    (a link moved to the file, a directory renamed with it, another case): a remembered resolution cannot tell
-    that a path came to resolve to another key while the file stayed the same. With no connection to that file
-    yet, ``path`` resolved, as on every call before.
-
-    Asked on the event loop for every store call: one stat, and the file registry read without its lock.
-    """
-    spelling = os.fspath(path)
-    known = _RESOLVED.get(spelling)
-    found = _file_at(known[0] if known is not None else Path(spelling))
-    order = _ORDERS.get(found) if found is not None else None
-    if order is not None and order.key is not None:
-        return order.key
-    return _resolve(spelling)[1]
 
 
 _DATABASES: dict[tuple[str, str], _Database] = {}
@@ -294,7 +274,7 @@ def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
     with _DATABASES_LOCK:
         order = _ORDERS.get(ident)
         if order is None:
-            order = _ORDERS[ident] = _FileOrder(key[0])
+            order = _ORDERS[ident] = _FileOrder()
     opened.order, opened.writing, opened.writing_lock = order, order.writing, order.lock
     stale = db  # what this call found under the key, not to the file at the path
     while True:

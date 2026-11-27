@@ -788,12 +788,11 @@ class TestPerSpanStorage:
         assert under_lock and not any(under_lock)
 
     def test_a_path_is_resolved_once_while_it_names_the_same_file(self, tmp_path, monkeypatch):
-        """Every store and trace call asks for its database, and the session store for its thread first.
-        Resolving the path reads the file system each time (on Windows it opens the file, ~250 us): it is
-        resolved once per spelling, and every call still checks that the spelling names the connection's file."""
+        """Every store and trace call asks for its database. Resolving the path reads the file system each time
+        (on Windows it opens the file, ~250 us): it is resolved once per spelling, and every call still checks
+        that the spelling names the connection's file."""
         from pathlib import Path
 
-        from timbal.state import chat_store
         from timbal.state.tracing.providers import sqlite as sqlite_module
 
         real, resolves = Path.resolve, []
@@ -805,11 +804,9 @@ class TestPerSpanStorage:
         monkeypatch.setattr(Path, "resolve", resolve)
         path = tmp_path / "once.db"
         first = sqlite_module.database(path)
-        thread = chat_store._store_thread(path)
         for _ in range(20):
             assert sqlite_module.database(path) is first
             assert sqlite_module.database(str(path)) is first  # the same spelling as a str
-            assert chat_store._store_thread(path) is thread
         assert resolves == [str(path)]
 
     def test_a_relative_path_follows_the_working_directory(self, tmp_path, monkeypatch):
@@ -830,7 +827,7 @@ class TestPerSpanStorage:
             here / "follows-the-cwd.db"
         )
         monkeypatch.chdir(there)
-        # The thread first, before any database() call: it is chosen when a store call is made.
+        # The thread first, before any database() call: it is chosen when a store call is made, by the path's key.
         assert chat_store._store_thread(Path("follows-the-cwd.db")) is chat_store._store_thread(
             there / "follows-the-cwd.db"
         )
