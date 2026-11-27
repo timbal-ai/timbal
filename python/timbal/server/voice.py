@@ -1347,6 +1347,9 @@ def build_voice_session(
     session_kwargs["max_tts_pause_secs"] = merged.max_tts_pause_secs
     session_kwargs["tts_quiet_dbfs"] = merged.tts_quiet_dbfs
     session_kwargs["tts_tempo"] = merged.tts_tempo
+    # Server-side only: not in the hello allowlist, so this is the agent's.
+    if merged.tts_rhythm is not None and merged.tts_rhythm.enabled:
+        session_kwargs["tts_rhythm"] = merged.tts_rhythm
     if merged.hangup_grace_secs is not None:
         session_kwargs["hangup_grace_secs"] = merged.hangup_grace_secs
     if merged.turn_timeout_secs is not None:
