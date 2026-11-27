@@ -283,9 +283,10 @@ class _EagerAddition:
     ``before`` / ``after``: the buffer around the event. While the buffer still reads ``after`` (or starts
     with it, more requests queued behind), a retraction puts ``before`` back as it was written, whatever
     the refinement rewrote ("booking" → "bookings", "two" → "2", a comma). Only when the STT has rewritten
-    the buffer since does it fall back to its words: ``words`` (spoken-token keys) followed ``anchor``, the
+    the buffer since does it fall back to its words: ``words`` (value keys) followed ``anchor``, the
     buffer's last words before the event (empty when they did not simply follow it), and ``tail`` is the
-    punctuation the buffer ended with before ("Check the booking." → ``"."``).
+    punctuation the buffer ended with before ("Check the booking." → ``"."``). A newer answer that
+    replaced the buffer, or said the eager words itself, drops the record: what is there is the caller's.
     """
 
     before: str
@@ -306,14 +307,14 @@ def _eager_addition(before: str, after: str, eager: str) -> _EagerAddition | Non
     Decided on values (strict keys): "Record 5 - 3" changed "Record 5 + 3", and "1.250" changed "1250",
     though they are said with the same words.
     """
-    if _keys(after, strict=True) == _keys(before, strict=True):
+    b, a = _keys(before, strict=True), _keys(after, strict=True)
+    if a == b:
         return None
-    b, a = _keys(before), _keys(after)
-    if b and a[: len(b)] == b and _keys(after, strict=True)[: len(b)] == _keys(before, strict=True):
-        last_end = _spoken_tokens(before, strict=False)[-1][2]
+    if b and a[: len(b)] == b:
+        last_end = _spoken_tokens(before, strict=True)[-1][2]
         return _EagerAddition(before, after, tuple(b[-_ANCHOR_WORDS:]), tuple(a[len(b) :]), before[last_end:].strip())
     # Not an extension: the eager words rewrote the buffer (or it was empty). Their words are the fallback.
-    words = tuple(a) if not b else tuple(_keys(eager))
+    words = tuple(a) if not b else tuple(_keys(eager, strict=True))
     return _EagerAddition(before, after, (), words, "") if words else None
 
 
@@ -356,9 +357,11 @@ def _without_addition(text: str, addition: _EagerAddition) -> str:
         return addition.before
     if addition.after and text.startswith(addition.after):
         return _rejoin(addition.before, text[len(addition.after) :], addition.after)
-    tokens = _spoken_tokens(text, strict=False)
+    # By value: a newer answer that says other numbers ("Record 5 * 3" over the eager "Record 5 - 3") is not
+    # the eager text, and is left alone.
+    tokens = _spoken_tokens(text, strict=True)
     keys = [key for key, _, _ in tokens]
-    after_keys = tuple(_keys(addition.after))
+    after_keys = tuple(_keys(addition.after, strict=True))
     n = len(after_keys)
     if n and len(keys) >= n:
         # The buffer still says what the event left, written differently: put the earlier text in its place.
@@ -3458,8 +3461,25 @@ class VoiceSession:
         self._schedule_deferred_turn()
 
     def _merge_deferred_user_text(self, text: str) -> None:
-        """Add ``text`` to the deferred buffer: a refinement replaces, a new fragment is appended."""
-        self._deferred_user_text = _merged_deferred(self._deferred_user_text, text)
+        """Add ``text`` to the deferred buffer: a refinement replaces, a new fragment is appended.
+
+        Text other than the eager event's own (a typed answer, a confirmed commit) that replaces the buffer
+        as a refinement of it ("Record 5 * 3" over the eager "Record 5 - 3", or "Record 5 - 3 please"
+        restating it) supersedes the eager words: ``TurnResumed`` has nothing left to take back there. A
+        fragment appended after them leaves them the eager event's.
+        """
+        prev = self._deferred_user_text
+        merged = _merged_deferred(prev, text)
+        if (
+            "deferred" in self._eager_appended
+            and not self._eager_commit
+            and prev
+            and merged != prev
+            and merged == text.strip()
+        ):
+            self._eager_appended.pop("deferred", None)
+            logger.info("flux_eager_superseded", buffer="deferred", text_preview=text[:80])
+        self._deferred_user_text = merged
 
     def _defer_held_user_speech(self, held: str) -> None:
         """A hold expired while barge-in is off: its words wait in the deferred buffer, and so does what an

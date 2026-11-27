@@ -73,6 +73,30 @@ class TestACorrectionOfAConfirmedValue:
         await _until(lambda: got)
         assert got == [value]
 
+    @pytest.mark.parametrize(
+        ("typed", "value"),
+        [
+            ("Record 5 * 3", "5 * 3"),  # another value: the eager text is gone
+            ("Record 5 - 3 please", "5 - 3 please"),  # the eager value, restated: now the caller's
+        ],
+    )
+    async def test_a_newer_typed_answer_survives_the_retraction(
+        self, monkeypatch: pytest.MonkeyPatch, typed: str, value: str
+    ) -> None:
+        got: list[str] = []
+        session = _recording_session(monkeypatch, got)
+        _protect(session)
+        await session._handle_provider_commit("Record 5 + 3")
+        await session._handle_provider_prediction(_eager("Record 5 - 3"))
+        session.started_at = 1.0  # a typed message is taken once the call has started
+        assert await session.submit_user_text(typed)
+        assert session._deferred_user_text == typed
+        await session._handle_provider_prediction(_resumed())
+        assert session._deferred_user_text == typed
+        session._turn_tool_batch_inflight = 0
+        await _until(lambda: got)
+        assert got == [value]
+
 
 class TestARefinementThatRewritesAConfirmedWord:
     @pytest.mark.parametrize(
