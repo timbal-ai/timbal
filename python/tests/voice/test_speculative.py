@@ -731,7 +731,7 @@ class TestSpeculativeSession:
             await stt.inject(TranscriptEvent(type="resumed", text=""))
             await _until(lambda: session.speculative_generations_discarded == 1)
             await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
-            assert session._audio_hold is None
+            await _until(lambda: session._audio_hold is None)  # the discard finishes after the task
             session._spawn_session_task = original
             await stt.inject(TranscriptEvent(type="committed", text="something else entirely"))
             await _until(lambda: drive.audio())
@@ -786,31 +786,204 @@ class TestSpeculativeSession:
             await _until(lambda: drive.audio())
         assert model.call_count == 2
 
-    async def test_an_ignored_commit_discards_the_attempt_it_closes(self) -> None:
-        session, stt, _tts, model = _session(["A reply nobody asked for."])
-        async with _Drive(session, stt) as drive:
-            await stt.inject(TranscriptEvent(type="eager", text="um"))
-            await _until(lambda: session._speculative_attempt is not None)
-            await _until(lambda: model.call_count >= 1)
-            await stt.inject(TranscriptEvent(type="committed", text="um"))  # IGNOREd: hesitation
-            await _until(lambda: session.speculative_generations_discarded == 1)
+    @pytest.mark.parametrize("text", ["...", "uh", "Um, hmm.", "the"])
+    async def test_no_attempt_starts_on_text_no_detector_would_answer(self, text: str) -> None:
+        session, stt, _tts, model = _session(["Reply."])
+        async with _Drive(session, stt):
+            await session._maybe_start_speculative(text, source="smart_turn")
             assert session._speculative_attempt is None
+        assert model.call_count == 0
+
+    @pytest.mark.parametrize(
+        ("commit", "attempt", "source", "closes"),
+        [
+            ("Yeah.", "yeah", "eager_eot", True),
+            ("um", "uh", "smart_turn", True),  # the recognizer revised a hesitation
+            ("...", "...", "eager_eot", True),
+            ("yes", "yes", "eager_eot", True),
+            # Flux repeats the eager transcript in EndOfTurn: other words are another utterance.
+            ("Okay", "Okay book Friday", "eager_eot", False),
+            ("Say cancel to stop the booking", "cancel", "eager_eot", False),
+            ("Yeah okay.", "yeah", "eager_eot", False),
+            # A Smart Turn attempt is a partial: its final may extend, trim or revise it.
+            ("Yeah okay.", "yeah", "smart_turn", True),
+            ("book a table for two", "book a table", "smart_turn", True),
+            ("Um.", "um okay", "smart_turn", True),
+            ("The.", "The booking", "smart_turn", True),
+            ("Hello, hello.", "book a table", "smart_turn", False),
+        ],
+    )
+    def test_which_dropped_commit_is_the_attempts_own_final(
+        self, commit: str, attempt: str, source: str, closes: bool
+    ) -> None:
+        from timbal.voice.session import _closes_utterance
+
+        assert _closes_utterance(commit, attempt, source) is closes
+
+    async def test_a_late_echo_that_contains_the_attempts_words_leaves_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import types
+
+        import timbal.voice.session as session_module
+
+        clock = [time.monotonic()]
+        monkeypatch.setattr(
+            session_module,
+            "time",
+            types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time, perf_counter=time.perf_counter),
+        )
+        session, stt, _tts, model = _session(["Say cancel to stop the booking.", "Stopped."])
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="committed", text="hi"))
+            await _until(lambda: drive.audio())
             await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
-            assert not session._is_speaking  # the line is free for idle prompts and event turns
-            assert session._audio_hold is None
+            await _until(lambda: not session._assistant_audio_playing)
+            heard = len(drive.audio())
+            clock[0] += 0.5
+            await stt.inject(TranscriptEvent(type="eager", text="cancel"))
+            await _until(lambda: model.call_count >= 2)
+            decisions: list[tuple[str, str | None]] = []
+            decide = session.turn_detector.on_committed
+
+            async def recorded(text, state):
+                decision = await decide(text, state)
+                decisions.append((text, decision.reason))
+                return decision
+
+            session.turn_detector.on_committed = recorded  # type: ignore[method-assign]
+            clock[0] += 0.5  # the reply's echo lands inside the grace: dropped, and the attempt stays
+            await stt.inject(TranscriptEvent(type="committed", text="Say cancel to stop the booking"))
+            await _until(lambda: decisions)
+            assert decisions == [("Say cancel to stop the booking", "echo")]
+            assert session._speculative_attempt is not None
+            # The caller's own final, after the grace (a verbatim word of the reply inside it is dropped as
+            # echo by the detector, speculation or not).
+            clock[0] += 1.5
+            await stt.inject(TranscriptEvent(type="committed", text="cancel"))
+            await _until(lambda: len(drive.audio()) > heard)
+        assert model.call_count == 2
+        assert [e.text for e in session.transcript if e.role == "user"] == ["hi", "cancel"]
+
+    async def test_a_late_echo_of_the_greeting_leaves_the_first_attempt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import types
+
+        import timbal.voice.session as session_module
+
+        clock = [time.monotonic()]
+        monkeypatch.setattr(
+            session_module,
+            "time",
+            types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time, perf_counter=time.perf_counter),
+        )
+        model = TestModel(responses=["Stopped."])
+        stt = ScriptedSTT()
+        session = VoiceSession(
+            agent=Agent(name="speculative_voice", model=model, tools=[]),
+            stt=stt,
+            tts=ScriptedTTS(),
+            turn_detector="heuristic",
+            speculative_generation=True,
+            greeting="Say cancel to stop the booking.",
+        )
+        decisions: list[tuple[str, str | None]] = []
+        decide = session.turn_detector.on_committed
+
+        async def recorded(text, state):
+            decision = await decide(text, state)
+            decisions.append((text, decision.reason))
+            return decision
+
+        session.turn_detector.on_committed = recorded  # type: ignore[method-assign]
+        async with _Drive(session, stt) as drive:
+            await _until(lambda: drive.audio())  # the greeting
+            await _until(lambda: not session._assistant_audio_playing)
+            heard = len(drive.audio())
+            clock[0] += 0.5
+            await stt.inject(TranscriptEvent(type="eager", text="cancel"))
+            await _until(lambda: model.call_count >= 1)
+            clock[0] += 0.5
+            await stt.inject(TranscriptEvent(type="committed", text="Say cancel to stop the booking"))
+            await _until(lambda: decisions)
+            assert decisions == [("Say cancel to stop the booking", "echo")]
+            assert session._speculative_attempt is not None
+            clock[0] += 1.5
+            await stt.inject(TranscriptEvent(type="committed", text="cancel"))
+            await _until(lambda: len(drive.audio()) > heard)
+        assert model.call_count == 1
+        assert [e.text for e in session.transcript if e.role == "user"] == ["cancel"]
+
+    async def test_the_heard_reply_is_the_echo_reference_from_the_attempts_start(self) -> None:
+        session, stt, _tts, _model = _session(["Your booking is confirmed.", "It is on Friday."])
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="committed", text="book it"))
+            await _until(lambda: drive.audio())
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            await _until(lambda: not session._assistant_audio_playing)
+            async with session._user_turn_lock:
+                await session._start_speculative_held("when is my booking", source="smart_turn")
+                # No yield since: the attempt's task has not run, and an echo check now already sees the reply.
+                assert "Your booking is confirmed." in session._spoken_assistant_text()
+
+    async def test_the_echo_grace_runs_from_when_the_reply_finished_playing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import types
+
+        import timbal.voice.session as session_module
+
+        clock = [time.monotonic()]
+        monkeypatch.setattr(
+            session_module,
+            "time",
+            types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time, perf_counter=time.perf_counter),
+        )
+        session, stt, _tts, model = _session(["Monday morning or Friday at noon.", "Friday at noon it is."])
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="committed", text="when can I come"))
+            await _until(lambda: drive.audio())
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            await _until(lambda: not session._assistant_audio_playing)
+            heard = len(drive.audio())
+            clock[0] += 2.25  # the caller answers 2.25 s after the options finished playing
+            await stt.inject(TranscriptEvent(type="eager", text="Friday at noon"))
+            await _until(lambda: model.call_count >= 2)
+            await stt.inject(TranscriptEvent(type="committed", text="Friday at noon"))
+            await _until(lambda: len(drive.audio()) > heard)
+        assert model.call_count == 2
+        assert [e.text for e in session.transcript if e.role == "user"] == ["when can I come", "Friday at noon"]
+
+    @pytest.mark.parametrize(("attempt", "final"), [("...", "..."), ("uh", "um"), ("um", "um")])
+    async def test_a_dropped_final_releases_an_attempt_on_contentless_text(self, attempt: str, final: str) -> None:
+        session, stt, _tts, model = _session(["Reply."])
+        async with _Drive(session, stt) as drive:
+            async with session._user_turn_lock:
+                await session._start_speculative_held(attempt, source="smart_turn")  # past the start guard
+            await _until(lambda: model.call_count >= 1)
+            await stt.inject(TranscriptEvent(type="committed", text=final))  # IGNOREd: garbage / hesitation
+            await _until(lambda: session.speculative_generations_discarded == 1)
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            assert session._speculative_attempt is None
+            assert not session._is_speaking
             assert drive.audio() == []
 
-    async def test_words_the_held_reply_contains_are_not_its_echo(self) -> None:
-        """The attempt's reply is held, so a confirming "hello" is the caller, not an echo of "Hello! …"."""
-        session, stt, _tts, model = _session(["Hello! How can I help?"])
+    async def test_the_last_heard_reply_still_echoes_while_the_next_is_held(self) -> None:
+        session, stt, _tts, model = _session(["Your booking is confirmed.", "It is on Friday."])
         async with _Drive(session, stt) as drive:
-            await stt.inject(TranscriptEvent(type="eager", text="hello"))
-            await _until(lambda: model.call_count >= 1)
-            await _until(lambda: "Hello! How can I help?" in session._turn_assistant_text)
-            await stt.inject(TranscriptEvent(type="committed", text="hello"))
+            await stt.inject(TranscriptEvent(type="committed", text="book it"))
             await _until(lambda: drive.audio())
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            await _until(lambda: not session._assistant_audio_playing)
+            heard = len(drive.audio())
+            await stt.inject(TranscriptEvent(type="eager", text="when is my booking"))
+            await _until(lambda: model.call_count >= 2)
+            # The first reply's echo lands late, while the new reply is held.
+            await stt.inject(TranscriptEvent(type="committed", text="booking is confirmed"))
+            await stt.inject(TranscriptEvent(type="committed", text="when is my booking"))
+            await _until(lambda: len(drive.audio()) > heard)
+        assert model.call_count == 2  # the held reply was used, not regenerated with the echo
         assert session.speculative_generations_discarded == 0
-        assert [e.text for e in session.transcript if e.role == "user"] == ["hello"]
+        assert [e.text for e in session.transcript if e.role == "user"] == ["book it", "when is my booking"]
 
     async def test_an_ignored_commit_of_other_words_leaves_the_attempt(self) -> None:
         session, stt, _tts, model = _session(["Booked."])
@@ -906,6 +1079,9 @@ class TestSpeculativeSession:
                 lambda: session._current_turn_task is None or session._current_turn_task.done(),
                 timeout=5.0,
             )
+            # No speculation while the reply's audio still plays (its 2 ms here): wait it out, or a fast
+            # runner sends the eager words inside it and no attempt starts.
+            await _until(lambda: not session._assistant_audio_playing, timeout=5.0)
             await stt.inject(TranscriptEvent(type="eager", text="book a table"))
             # Windows CI is slow to start the speculative retry and to append
             # the confirmed user line. 2s is not enough there.

@@ -359,6 +359,14 @@ _CONTENTLESS_SINGLE_TOKENS = frozenset(
 )
 
 
+def is_contentless_utterance(text: str) -> bool:
+    """Text every detector drops whatever the call's state: a noise label, punctuation or a broken
+    caption, only hesitations, or a lone function word ("the", "I")."""
+    return (
+        _is_noise(text) or _is_garbage_commit(text) or _is_hesitation_only(text) or _is_contentless_single_token(text)
+    )
+
+
 def _is_contentless_single_token(text: str) -> bool:
     """One function word, alone: a fragment or a mis-transcribed breath, never a turn."""
     words = _WORD_RE.findall(text)

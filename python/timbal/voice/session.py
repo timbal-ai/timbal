@@ -38,6 +38,7 @@ import unicodedata
 from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator, Collection, Coroutine
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -160,6 +161,7 @@ from .turn_detection import (
     _BACKCHANNEL_GRACE_SECS,
     _BACKCHANNEL_PHRASES,
     _BACKCHANNEL_WORDS,
+    _ECHO_GRACE_SECS,
     _INTERRUPT_COMMANDS,
     CommitAction,
     CommitDecision,
@@ -173,6 +175,7 @@ from .turn_detection import (
     _likely_stt_echo,
     _normalize_spoken,
     ends_with_question,
+    is_contentless_utterance,
     resolve_turn_detector,
 )
 
@@ -264,9 +267,27 @@ def _without_spoken_words(text: str, words: str) -> str:
     return f"{text[:begin].rstrip()} {text[end:].lstrip()}".strip()
 
 
-def _closes_utterance(commit: str, attempt: str) -> bool:
-    """Whether ``commit`` is the final transcript of the utterance ``attempt`` was started on: the same
-    words, or one of them a run of the other's ("yeah" / "Yeah okay.")."""
+def _closes_utterance(commit: str, attempt: str, source: str) -> bool:
+    """Whether a commit the detector dropped is the final transcript of the utterance ``attempt`` was
+    started on, so nothing else will settle the attempt.
+
+    The same text or words, or two contentless utterances (a revision of the same non-turn: "uh" → "um").
+    Beyond that it depends on what the attempt was started on. A Flux ``EagerEndOfTurn``
+    (``source="eager_eot"``) carries the turn's transcript, which its ``EndOfTurn`` repeats unless a
+    ``TurnResumed`` came between: any other commit is another utterance ("Okay" during "Okay book
+    Friday", an echo of the greeting that contains "cancel"), and the attempt's own final is still to
+    come. A Smart Turn attempt was started on a partial, which its final may extend, trim or revise: one
+    containing the other is that final ("book a table" → "book a table for two"; "um okay" → "Um.").
+    """
+    commit, attempt = (commit or "").strip(), (attempt or "").strip()
+    if not commit or not attempt:
+        return False
+    if commit == attempt or _same_spoken_words(commit, attempt):
+        return True
+    if is_contentless_utterance(commit) and is_contentless_utterance(attempt):
+        return True
+    if source == "eager_eot":
+        return False
     return _contains_spoken_words(commit, attempt) or _contains_spoken_words(attempt, commit)
 
 
@@ -282,20 +303,133 @@ def _merged_deferred(prev: str, text: str) -> str:
     return f"{prev.rstrip()} {text.lstrip()}"
 
 
-def _taken_back(current: str, words: str, before: str, after: str) -> str:
-    """``current`` without what ``words`` added to it, when they turned the buffer from ``before`` into ``after``.
+_CLOSING_PUNCTUATION = ".,;:!?…¿¡\"'»”"
+_ANCHOR_WORDS = 4
 
-    Unchanged since: ``before``. Grown or rewritten since: ``words`` leave the part after ``before`` (an STT
-    may have reformatted them), never ``before`` itself, which held them already as another request.
+
+@dataclass(frozen=True)
+class _EagerAddition:
+    """What an eager event did to a buffer, so a retraction takes back that and nothing else.
+
+    ``before`` / ``after``: the buffer around the event. While the buffer still reads ``after`` (or starts
+    with it, more requests queued behind), a retraction puts ``before`` back as it was written, whatever
+    the refinement rewrote ("booking" → "bookings", "two" → "2", a comma). Only when the STT has rewritten
+    the buffer since does it fall back to its words: ``words`` (value keys) followed ``anchor``, the
+    buffer's last words before the event (empty when they did not simply follow it), and ``tail`` is the
+    punctuation the buffer ended with before ("Check the booking." → ``"."``). A newer answer that
+    replaced the buffer, or said the eager words itself, drops the record: what is there is the caller's.
     """
-    if current == after:
+
+    before: str
+    after: str
+    anchor: tuple[str, ...]
+    words: tuple[str, ...]
+    tail: str
+
+
+def _keys(text: str, *, strict: bool = False) -> list[str]:
+    return [key for key, _, _ in _spoken_tokens(text, strict=strict)]
+
+
+def _eager_addition(before: str, after: str, eager: str) -> _EagerAddition | None:
+    """How ``eager`` changed a buffer from ``before`` to ``after``; None when it added nothing (a repeat of
+    a request the buffer held already, deduplicated).
+
+    Decided on values (strict keys): "Record 5 - 3" changed "Record 5 + 3", and "1.250" changed "1250",
+    though they are said with the same words.
+    """
+    b, a = _keys(before, strict=True), _keys(after, strict=True)
+    if a == b:
+        return None
+    if b and a[: len(b)] == b:
+        last_end = _spoken_tokens(before, strict=True)[-1][2]
+        return _EagerAddition(before, after, tuple(b[-_ANCHOR_WORDS:]), tuple(a[len(b) :]), before[last_end:].strip())
+    # Not an extension: the eager words rewrote the buffer (or it was empty). Their words are the fallback.
+    words = tuple(a) if not b else tuple(_keys(eager, strict=True))
+    return _EagerAddition(before, after, (), words, "") if words else None
+
+
+def _rejoin(before: str, rest: str, after: str) -> str:
+    """``before`` with ``rest`` (what followed ``after`` in the buffer) put back behind it."""
+    if not rest.strip():
         return before
-    if before and current.startswith(before):
-        tail = current[len(before) :]
-        if not _contains_spoken_words(tail, words):
-            return current
-        return f"{before.rstrip()} {_without_spoken_words(tail, words)}".strip()
-    return _without_spoken_words(current, words)
+    if not before:
+        return rest.strip()
+    if not rest[:1].isspace():
+        return before + rest  # ", please" stays attached
+    # "Check the booking" + " Send a receipt.": the sentence the refinement closed ("today.") still ends here.
+    closer = after.rstrip()[-1:]
+    sep = closer if closer in ".!?…" and before[-1] not in _CLOSING_PUNCTUATION else ""
+    return f"{before}{sep} {rest.lstrip()}"
+
+
+def _replace_span(text: str, start: int, end: int, replacement: str) -> str:
+    """``text`` with ``text[start:end]`` replaced by ``replacement``, punctuation and spacing kept sane."""
+    left, right, rep = text[:start].rstrip(), text[end:], replacement.strip()
+    if not rep or rep[-1] in _CLOSING_PUNCTUATION:
+        # Removed outright, the words take their closing punctuation with them; replaced by text with its own,
+        # that stands for what followed them.
+        right = right.lstrip(_CLOSING_PUNCTUATION)
+    joined = f"{left} {rep}".strip() if rep else left
+    if not right.strip():
+        return joined.strip()
+    if not joined:
+        return right.strip()
+    return f"{joined} {right.lstrip()}" if right[:1].isspace() else joined + right
+
+
+def _without_addition(text: str, addition: _EagerAddition) -> str:
+    """``text`` as it would read without the eager event: ``before`` put back where the buffer still says
+    ``after`` (as written, at its start with more requests behind: "Check the booking today. Send a
+    receipt." → "Check the booking. Send a receipt."; or the same words recased or repunctuated since),
+    else ``text`` without the event's words (found after their anchor, at the start for a buffer that was
+    empty, else as their last run)."""
+    if text == addition.after:
+        return addition.before
+    if addition.after and text.startswith(addition.after):
+        return _rejoin(addition.before, text[len(addition.after) :], addition.after)
+    # By value: a newer answer that says other numbers ("Record 5 * 3" over the eager "Record 5 - 3") is not
+    # the eager text, and is left alone.
+    tokens = _spoken_tokens(text, strict=True)
+    keys = [key for key, _, _ in tokens]
+    after_keys = tuple(_keys(addition.after, strict=True))
+    n = len(after_keys)
+    if n and len(keys) >= n:
+        # The buffer still says what the event left, written differently: put the earlier text in its place.
+        # At the start first (requests queue behind), else its last run.
+        starts = [0] if tuple(keys[:n]) == after_keys else []
+        starts += [i for i in range(len(keys) - n, 0, -1) if tuple(keys[i : i + n]) == after_keys]
+        if starts:
+            i = starts[0]
+            return _replace_span(text, tokens[i][1], tokens[i + n - 1][2], addition.before)
+    words, m = addition.words, len(addition.words)
+    span: tuple[int, int] | None = None
+    anchored = False
+    if not addition.before and tuple(keys[:m]) == words and m:
+        span = (tokens[0][1], tokens[m - 1][2])  # the buffer was empty: the words opened it
+    for anchor in ((addition.anchor, ()) if addition.anchor else ((),)) if span is None else ():
+        n = len(anchor)
+        for i in range(len(keys) - n - m, -1, -1):
+            if tuple(keys[i : i + n]) == anchor and tuple(keys[i + n : i + n + m]) == words:
+                span = (tokens[i + n][1], tokens[i + n + m - 1][2])
+                break
+        if span is not None:
+            anchored = bool(anchor)
+            break
+    if not m or span is None:
+        return text
+    start, end = span
+    left, right = text[:start].rstrip(), text[end:]
+    stripped = right.lstrip(_CLOSING_PUNCTUATION)
+    lead, rest = right[: len(right) - len(stripped)], stripped
+    if not anchored or (left and left[-1] in _CLOSING_PUNCTUATION):
+        lead = ""  # the punctuation after the words was theirs, or the buffer's own is already left of them
+    elif lead:
+        lead = addition.tail  # a refinement wrote the buffer's own punctuation after its words
+    joined = left + lead
+    if rest.strip():
+        joined = f"{joined} {rest.lstrip()}" if joined else rest.lstrip()
+    return joined.strip()
 
 
 def _text_before_spoken_words(text: str, words: str) -> str:
@@ -1091,8 +1225,9 @@ class VoiceSession:
         self.audio_input = audio_input or AudioInputConfig()
         self.audio_output = audio_output or AudioOutputConfig()
         # PCM16 mono: 2 bytes per sample.
+        self._output_bytes_per_second = max(1, self.audio_output.sample_rate * 2)
         self.playback = playback_tracker or BufferedPlaybackTracker(
-            bytes_per_second=self.audio_output.sample_rate * 2,
+            bytes_per_second=self._output_bytes_per_second,
         )
         # Default HOLD timeout when a detector returns CommitAction.HOLD without
         # a per-decision override. Heuristic never HOLDs. Provider HOLDs only
@@ -1239,9 +1374,9 @@ class VoiceSession:
         self._eager_turn_task: asyncio.Task | None = None
         self._eager_row: TranscriptEntry | None = None
         self._eager_prefix = ""
-        # What the eager words added to the held / deferred buffer: ``{name: (before, after)}``. A buffer
-        # that already said them (an earlier, confirmed request they repeat) is not theirs to take back.
-        self._eager_appended: dict[str, tuple[str, str]] = {}
+        # What the eager words added to the held / deferred buffer (``_EagerAddition``). A buffer that
+        # already said them (an earlier, confirmed request they repeat) is not theirs to take back.
+        self._eager_appended: dict[str, _EagerAddition] = {}
         self._eager_commit = False
         # Mic PCM for a Smart Turn vote when the turn detector does not buffer
         # (provider mode on Flux). Unused when the detector already has audio.
@@ -1282,6 +1417,14 @@ class VoiceSession:
         self._turn_filler_spoken: list[str] = []
         self._turn_filler_spoke_at = 0.0
         self._turn_filler_text = ""
+        # The last reply whose audio played, for echo checks while a speculative reply is held, and when the
+        # audio sent so far finishes playing (gapless real time from each chunk, cut at an interrupt): its
+        # echo can land for ``_ECHO_GRACE_SECS`` after that.
+        self._last_heard_text = ""
+        self._audio_plays_until = 0.0
+        # The latest turn is a speculative attempt none of whose audio has played (unconfirmed, or
+        # discarded): echo checks use ``_last_heard_text`` instead of its text.
+        self._latest_turn_unheard = False
         # Segments/bytes as of the last filler — "spoken since then" checks.
         self._turn_filler_segments_baseline = 0
         self._turn_filler_audio_baseline = 0
@@ -2695,6 +2838,7 @@ class VoiceSession:
             self.playback.on_interrupted()
             # The queued audio is dropped, so it does not play until its estimate.
             self._last_assistant_active_at = min(self._last_assistant_active_at, time.monotonic())
+            self._audio_plays_until = min(self._audio_plays_until, time.monotonic())
         self._cancel_turn.set()
         for t in list(self._tts_tasks):
             if not t.done():
@@ -3433,9 +3577,9 @@ class VoiceSession:
         appended, self._eager_appended = self._eager_appended, {}
         logger.info("flux_eager_cancelled")
         if "deferred" in appended:
-            self._deferred_user_text = _taken_back(self._deferred_user_text, text, *appended["deferred"])
+            self._deferred_user_text = _without_addition(self._deferred_user_text, appended["deferred"])
         if "held" in appended and self._held_user_text:
-            rest = _taken_back(self._held_user_text, text, *appended["held"])
+            rest = _without_addition(self._held_user_text, appended["held"])
             if rest:
                 self._held_user_text = rest  # the timer reads it when it fires
             else:
@@ -3507,8 +3651,8 @@ class VoiceSession:
         if self._eager_unconfirmed:
             # An earlier eager event is still unconfirmed: its words are no more the caller's than these, so what
             # a retraction gives back is the buffer from before that one.
-            for name, (before, _after) in self._eager_appended.items():
-                buffers_before[name] = before
+            for name, addition in self._eager_appended.items():
+                buffers_before[name] = addition.before
         active_before = self._active_turn_user_text or ""
         try:
             logger.info(
@@ -3525,11 +3669,22 @@ class VoiceSession:
         # words changed: a buffer or turn that already said them (a repeat of a
         # confirmed request, deduplicated) gained nothing that TurnResumed may take.
         buffers_after = {"held": self._held_user_text or "", "deferred": self._deferred_user_text or ""}
-        appended = {
-            name: (buffers_before[name], after)
-            for name, after in buffers_after.items()
-            if after != buffers_before[name] and _contains_spoken_words(after, text)
-        }
+        held_moved = buffers_before["held"]
+        if (
+            held_moved
+            and not buffers_after["held"]
+            and _contains_spoken_words(buffers_after["deferred"], held_moved)
+            and _contains_spoken_words(buffers_after["deferred"], text)
+        ):
+            # The eager words took a held fragment with them into the deferred buffer (a protected tool runs):
+            # it was the caller's before them, so it counts as the deferred buffer's "before".
+            buffers_before["deferred"] = _merged_deferred(buffers_before["deferred"], held_moved)
+        appended: dict[str, _EagerAddition] = {}
+        for name, after in buffers_after.items():
+            if after != buffers_before[name] and _contains_spoken_words(after, text):
+                addition = _eager_addition(buffers_before[name], after, text)
+                if addition is not None:
+                    appended[name] = addition
         active_after = self._active_turn_user_text or ""
         if (
             self._eager_gate_taken
@@ -3545,14 +3700,21 @@ class VoiceSession:
             self._eager_gate = None  # not accepted: no turn waits on it
 
     def _eager_turn_prefix(self, final_text: str) -> str:
-        """What a turn starting on the eager words keeps if they are retracted: the buffer it came from as it
-        was before the eager event ("Check the booking." under a refinement "Check the booking today."), else
-        the text in front of the eager words."""
-        words = self._eager_gate_text
-        for before, after in self._eager_appended.values():
-            if before and (final_text == after or final_text.startswith(before)):
-                return _taken_back(final_text, words, before, after)
-        return _text_before_spoken_words(final_text, words)
+        """What a turn starting on the eager words keeps if they are retracted: its text without what the
+        eager event added to the buffer it came from ("Check the booking today. Send a receipt." → "Check
+        the booking. Send a receipt."), else the text in front of the eager words."""
+        if self._eager_commit:
+            # Started by the eager event being handled now: what precedes its words, less what an earlier
+            # eager event still unconfirmed added to the buffer it came from (its record is the only one yet).
+            prefix = _text_before_spoken_words(final_text, self._eager_gate_text)
+            for addition in self._eager_appended.values():
+                prefix = _without_addition(prefix, addition)
+            return prefix
+        for addition in self._eager_appended.values():
+            kept = _without_addition(final_text, addition)
+            if kept != final_text:
+                return kept
+        return _text_before_spoken_words(final_text, self._eager_gate_text)
 
     def _settle_eager_gate(self, *, confirm: bool) -> None:
         """Release (EndOfTurn) or cancel (TurnResumed, a different final) the tools of an eager-started turn."""
@@ -3716,9 +3878,15 @@ class VoiceSession:
         # so the next commit can refine/merge against it — but do NOT fold HOLD
         # into assistant_active (that breaks hallucination filters + refinements).
         active = self._held_user_text if holding else self._active_turn_user_text
-        assistant_active = self._assistant_active
+        # As the caller hears it: an unconfirmed speculative reply is silence (its audio is held), so the
+        # caller's "Okay." to the question they heard is an answer, not a backchannel over the agent, and an
+        # unfinished phrase is held as it would be without speculation.
+        assistant_active = self._assistant_audio_playing or (self._is_speaking and not self._speculative_unconfirmed())
         if assistant_active:
             self._last_assistant_active_at = max(self._last_assistant_active_at, now)
+        # The last moment the caller could hear the assistant: a snapshot taken while it was active, or when
+        # the audio sent so far finished playing (gapless real time), whichever is later.
+        last_audible = max(self._last_assistant_active_at, min(now, self._audio_plays_until))
         return TurnState(
             assistant_active=assistant_active,
             audio_playing=self._assistant_audio_playing,
@@ -3727,9 +3895,7 @@ class VoiceSession:
             seconds_since_turn_start=now - self._turn_started_at,
             seconds_since_last_commit=now - self._last_commit_at,
             seconds_since_assistant_active=(
-                None
-                if assistant_active or not self._last_assistant_active_at
-                else max(0.0, now - self._last_assistant_active_at)
+                None if assistant_active or not last_audible else max(0.0, now - last_audible)
             ),
             mic_speech_since_last_commit=self._mic_speech_since_last_commit(),
             partials_since_last_commit=self._partials_since_last_commit,
@@ -4328,20 +4494,40 @@ class VoiceSession:
         self._schedule_deferred_turn()
 
     def _merge_deferred_user_text(self, text: str) -> None:
-        """Add ``text`` to the deferred buffer: a refinement replaces, a new fragment is appended."""
-        self._deferred_user_text = _merged_deferred(self._deferred_user_text, text)
+        """Add ``text`` to the deferred buffer: a refinement replaces, a new fragment is appended.
+
+        Text other than the eager event's own (a typed answer, a confirmed commit) that the buffer becomes
+        (it replaced it: "Record 5 * 3" over the eager "Record 5 - 3", "Record 5 - 3 please"; or it says the
+        same: "Record 150" over the eager "Record 150") is the caller's answer, and the eager words in it are
+        theirs: ``TurnResumed`` has nothing left to take back there, and a turn started on it does not wait
+        on the eager gate. A fragment appended after them leaves them the eager event's.
+        """
+        prev = self._deferred_user_text
+        merged = _merged_deferred(prev, text)
+        if "deferred" in self._eager_appended and not self._eager_commit and prev and merged == text.strip():
+            self._eager_appended.pop("deferred", None)
+            logger.info("flux_eager_superseded", buffer="deferred", text_preview=text[:80])
+            if not self._eager_appended and self._eager_turn_task is None:
+                # Nothing of the eager event is left anywhere: no turn may wait on its gate (EndOfTurn with the
+                # same words still settles it as confirmed, TurnResumed finds nothing to retract).
+                self._settle_eager_gate(confirm=False)
+        self._deferred_user_text = merged
 
     def _defer_held_user_speech(self, held: str) -> None:
         """A hold expired while barge-in is off: its words wait in the deferred buffer, and so does what an
         unconfirmed eager event added to them, so a ``TurnResumed`` still takes exactly those words back."""
-        record = self._eager_appended.pop("held", None) if self._eager_unconfirmed else None
+        addition = self._eager_appended.pop("held", None) if self._eager_unconfirmed else None
         deferred_before = self._deferred_user_text
         self._defer_user_speech(held)
-        if record is not None:
-            held_before, held_after = record
-            self._eager_appended["deferred"] = (
-                _merged_deferred(deferred_before, held_before) if held_before else deferred_before,
-                _merged_deferred(deferred_before, held_after),
+        if addition is not None:
+            # The same words, now in the deferred buffer after what it held.
+            before = _merged_deferred(deferred_before, addition.before) if addition.before else deferred_before
+            self._eager_appended["deferred"] = _EagerAddition(
+                before,
+                _merged_deferred(deferred_before, addition.after),
+                addition.anchor,
+                addition.words,
+                addition.tail,
             )
 
     def _take_deferred_prefix(self, text: str) -> str:
@@ -4487,6 +4673,11 @@ class VoiceSession:
     async def _maybe_start_speculative_held(self, text: str, *, source: str) -> None:
         if self._closed or self._assistant_audio_playing:
             return
+        if not _spoken_tokens(text, strict=True) or is_contentless_utterance(text):
+            # Nothing a detector would make a turn of ("...", "uh", "the"): nothing to answer, and its final
+            # is dropped too, so nothing would confirm it.
+            logger.info("speculative_skipped", reason="contentless", text_preview=text[:80])
+            return
         # A real reply is in flight. A new eager event here is a barge-in the
         # commit path handles, not another speculative start.
         if self._is_speaking and self._speculative_attempt is None:
@@ -4526,9 +4717,16 @@ class VoiceSession:
             prior_context=self._last_run_context,
             prior_head=self._scheduler.head,
         )
+        if (self._turn_first_audio_at is not None or self._turn_index == 0) and not self._latest_turn_unheard:
+            # The latest turn was heard (before the first one, the greeting was): its echo may still land
+            # while this attempt's audio is held. Taken now, before the hold is in place and before the
+            # attempt's task (which may first wait for another channel's turn) resets the turn's text and
+            # index. A discarded, unheard attempt keeps the older one.
+            self._last_heard_text = self._audible_turn_text()
         self._speculative_attempt = attempt
         self._speculative_gate = gate
         self._audio_hold = hold
+        self._latest_turn_unheard = True
         self._speculative_tts_stash = []
         self._speculative_text_deltas = []
         self._speculative_final_text = None
@@ -4642,6 +4840,9 @@ class VoiceSession:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+            # The task's done callback drops the hold too, a loop step later: here it is gone before the
+            # next turn can start, whatever order the loop runs them in.
+            self._drop_discarded_hold(attempt.hold)
         self._cancel_turn.clear()
         self._active_turn_user_text = ""
         # note_run can land after the rewind above, including inside the
@@ -4774,6 +4975,7 @@ class VoiceSession:
     async def _emit_pcm(self, chunk: bytes, record: list, *, turnless: bool) -> None:
         self._backchannel_only = False
         if not turnless:
+            self._latest_turn_unheard = False
             if self._turn_first_audio_at is None:
                 self._turn_first_audio_at = time.monotonic()
             self._note_turn_audio(len(chunk))
@@ -4782,6 +4984,8 @@ class VoiceSession:
         if self._recorder is not None:
             self._recorder.add_agent(chunk)
         record[1] += len(chunk)
+        now = time.monotonic()
+        self._audio_plays_until = max(now, self._audio_plays_until) + len(chunk) / self._output_bytes_per_second
         await self._emit(AudioOutput(data=chunk))
         self.playback.on_audio_emitted(len(chunk))
 
@@ -5014,14 +5218,14 @@ class VoiceSession:
                 and self._speculative_attempt is pending_attempt
                 and not pending_attempt.settled
                 and decision.reason not in ("refinement", "early_duplicate", "speculative_confirm_superseded")
-                and _closes_utterance(decision.text or text, pending_attempt.text)
+                and _closes_utterance(decision.text or text, pending_attempt.text, pending_attempt.source)
                 and not (self._held_user_text is not None and self._speculative_matches(self._held_user_text))
             ):
-                # The commit that closes the attempt's utterance (its words, or more or fewer of them) was
-                # dropped (backchannel, echo, noise, hesitation): it is not a turn, and nothing else would
-                # confirm or discard the attempt, which keeps the line busy. Another commit (an echo of the
-                # last reply arriving late) leaves the attempt to its own. A hold on the same words still
-                # settles it when it expires.
+                # The attempt's own final (``_closes_utterance``) was dropped (backchannel, echo, noise,
+                # hesitation): it is not a turn, and nothing else would confirm or discard the attempt, which
+                # keeps the line busy. Any other commit (an echo of the last reply arriving late, a separate
+                # "okay") leaves the attempt to its own. A hold on the same words still settles it when it
+                # expires.
                 await self._discard_speculative(reason=decision.reason or "ignored")
             # Timer was cancelled at the top of this method; re-arm so a noise/
             # hesitation commit mid-hold does not freeze the fragment forever.
@@ -5299,7 +5503,12 @@ class VoiceSession:
         runner = getattr(self.agent, "_guardrail_runner", None)
         if runner is None or not runner.has_stage(GuardrailStage.INPUT):
             return text, []
-        ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=getattr(self.agent, "_path", None))
+        # The event as ``ctx.payload``, as a prompt's check gets its message: a rail may read it. A user message
+        # with ``source="client"``, never a runtime one: rails that let the runtime's own text through screen this.
+        payload = Message(role="user", content=[TextContent(text=text)], metadata={"source": "client"})
+        ctx = GuardrailContext(
+            stage=GuardrailStage.INPUT, agent_path=getattr(self.agent, "_path", None), payload=payload
+        )
         outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
         if outcome.verdict is not None:
             # No run exists yet to carry a guardrail report, so the log is the record.
@@ -5542,6 +5751,8 @@ class VoiceSession:
         voice_token = None
         self._turn_speculative = speculative
         self._turn_memory_reconciled = False
+        if not speculative:
+            self._latest_turn_unheard = False
         if self._scheduler.other_turn_active:
             # Another channel's turn on this conversation runs: the call's goes after it.
             await self._scheduler.until_no_other_turn(include_queued=False)
@@ -6421,15 +6632,29 @@ class VoiceSession:
 
         An unconfirmed speculative reply is not in it: its audio is held, so
         nothing of it can echo, and a caller whose words it happens to contain
-        ("hello" against "Hello! How can I help?") is not their own echo.
+        ("hello" against "Hello! How can I help?") is not their own echo. The
+        reply heard before it is, until the echo grace after that reply's audio
+        finished playing: its echo can still be landing ("booking is confirmed").
         """
-        spoken = "" if self._speculative_unconfirmed() else self._turn_assistant_text
+        if self._latest_turn_unheard:
+            # A speculative attempt none of whose audio played (held, or discarded): nothing of it can echo,
+            # its filler included. The reply heard before it still can.
+            heard = self._last_heard_text if time.monotonic() <= self._audio_plays_until + _ECHO_GRACE_SECS else ""
+            return heard or self._with_echoing_greeting("")
+        return self._audible_turn_text()
+
+    def _audible_turn_text(self) -> str:
+        """This turn's filler and reply, and the greeting while it can still echo."""
+        spoken = self._with_echoing_greeting(self._turn_assistant_text)
+        if self._turn_filler_text:
+            return f"{self._turn_filler_text} {spoken}".strip()
+        return spoken
+
+    def _with_echoing_greeting(self, spoken: str) -> str:
         if self._greeting_text and (
             self._turn_index == 0 or self._greeting_speaking or self._greeting_pending_bytes() > 0
         ):
-            spoken = f"{self._greeting_text} {spoken}".strip()
-        if self._turn_filler_text:
-            return f"{self._turn_filler_text} {spoken}".strip()
+            return f"{self._greeting_text} {spoken}".strip()
         return spoken
 
     def _own_llm_path(self) -> str | None:

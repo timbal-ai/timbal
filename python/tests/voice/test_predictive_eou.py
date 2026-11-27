@@ -398,6 +398,70 @@ class TestEndpointerTiming:
         await ep.close()
         await predictor.close()
 
+    async def test_a_repeat_of_the_committed_words_never_votes_while_the_final_is_late(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # However late the STT's final is, a replayed partial of the committed utterance is not new speech.
+        import types
+
+        import timbal.voice.predictive_eou as predictive_eou
+
+        clock = [1000.0]
+        monkeypatch.setattr(predictive_eou, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+        scores = _Scores(0.95)
+        predictor = _predictor(scores)
+        predictor.note_partial("What is my balance?")
+        await predictor.signals()
+        predictor.on_commit_sent()
+        clock[0] += 2.05  # the provider's final is late
+        for late in ("What is my balance?", "what is my", "What is my balance today"):
+            predictor.note_partial(late)
+            predictor.kick_audio()
+            stale = await predictor.signals()
+            assert stale.p_text is None and not prediction_is_complete(stale), late
+        # Other words wait for the final too: until it arrives they cannot be told from a rewrite.
+        predictor.note_partial("Can I pay my bill?")
+        predictor.kick_audio()
+        assert not prediction_is_complete(await predictor.signals())
+        predictor.on_committed()  # the final arrives
+        predictor.note_partial("Can I pay my bill?")
+        predictor.kick_audio()
+        assert prediction_is_complete(await predictor.signals())
+        await predictor.close()
+
+    @pytest.mark.parametrize(
+        ("at_commit", "late"),
+        [
+            ("", "What is my balance?"),  # no partial yet when the endpointer committed
+            ("What is my balance?", "What's my balance?"),  # the STT rewrote it: not a word prefix
+        ],
+    )
+    async def test_no_partial_votes_while_a_sent_commit_is_unanswered(self, at_commit: str, late: str) -> None:
+        scores = _Scores(0.95)
+        predictor = _predictor(scores)
+        if at_commit:
+            predictor.note_partial(at_commit)
+            await predictor.signals()
+        predictor.on_commit_sent()
+        predictor.note_partial(late)
+        predictor.kick_audio()
+        stale = await predictor.signals()
+        assert stale.p_text is None and not prediction_is_complete(stale)
+        await predictor.close()
+
+    async def test_the_audio_vote_of_the_committed_pause_does_not_carry_over(self) -> None:
+        scores = _Scores(0.95)
+        predictor = _predictor(scores)
+        predictor.note_partial("What is my balance?")
+        predictor.kick_audio()
+        assert (await predictor.signals()).audio_fresh
+        predictor.on_commit_sent()
+        predictor.on_committed()  # the final arrives; no new pause has been scored yet
+        predictor.note_partial("Can I pay my bill?")
+        after = await predictor.signals()
+        assert not after.audio_fresh and not prediction_is_complete(after)
+        await predictor.close()
+
     async def test_a_dip_inside_the_sentence_keeps_its_text_vote(self) -> None:
         # One silent frame between words is not a pause: the partial still describes the sentence.
         scores = _Scores(0.95)
