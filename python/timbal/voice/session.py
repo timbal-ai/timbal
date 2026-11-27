@@ -3443,7 +3443,7 @@ class VoiceSession:
         attempt.hold.release()
         # Out now, not when the turn loop next gets an event: a tool released by this confirmation (a hangup
         # awaiting ``commit_hangup``) runs before that, and its goodbye must play while it waits.
-        self._spawn_session_task(self._flush_speculative_outputs(), name="speculative-flush")
+        self._spawn_session_task(self._flush_speculative_outputs(attempt.hold), name="speculative-flush")
         logger.info(
             "speculative_confirmed",
             source=attempt.source,
@@ -3461,7 +3461,13 @@ class VoiceSession:
                 raise asyncio.CancelledError
         await self._flush_speculative_outputs()
 
-    async def _flush_speculative_outputs(self) -> None:
+    async def _flush_speculative_outputs(self, hold: AudioHold | None = None) -> None:
+        """Out with what a confirmed attempt held back. ``hold``: that attempt's audio (default: the current
+        hold). When a newer attempt has replaced it since, only its audio goes: the text and stash are the
+        newer attempt's, which is not confirmed."""
+        if hold is not None and hold is not self._audio_hold:
+            await self._flush_audio_hold(hold)
+            return
         if self._speculative_unconfirmed():
             return
         self._reconcile_speculative_user_text()
@@ -3473,7 +3479,7 @@ class VoiceSession:
         self._speculative_tts_stash = []
         for text, previous_text in stash:
             self._schedule_tts_now(text, advance_cursor=False, previous_text=previous_text)
-        await self._flush_audio_hold()
+        await self._flush_audio_hold(hold)
 
     def _reconcile_speculative_user_text(self) -> None:
         """Write the confirmed transcript onto the message the attempt sent.
@@ -3542,12 +3548,15 @@ class VoiceSession:
             else:
                 while hold.flushing:
                     await asyncio.sleep(0.01)
-                await self._flush_audio_hold()
+                await self._flush_audio_hold(hold)  # this turn's hold, even if a newer attempt replaced it meanwhile
         if self._audio_hold is hold and (hold.discarded or hold.drained):
             self._audio_hold = None
 
-    async def _flush_audio_hold(self) -> None:
-        hold = self._audio_hold
+    async def _flush_audio_hold(self, hold: AudioHold | None = None) -> None:
+        """Emit ``hold``'s queued audio, in order, and mark it drained. Always the hold a caller means (its
+        attempt's, or its turn's): the current one may already belong to a newer, unconfirmed attempt."""
+        if hold is None:
+            hold = self._audio_hold
         if hold is None or hold.discarded:
             return
         hold.released = True

@@ -444,3 +444,38 @@ class TestRetractionAndHoldEnd:
         await asyncio.wait_for(asyncio.gather(flush, end), 3.0)
         assert played == [b"AA", b"BB"]
         assert session._audio_hold is None
+
+    async def test_settling_never_flushes_a_newer_attempts_hold(self) -> None:
+        from timbal.voice import VoiceSession
+
+        from .test_session import MockSTT, MockTTS
+
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector="heuristic")
+        old = AudioHold()
+        session._audio_hold = old
+        await session._deliver_pcm(b"OLD", ["", 0], turnless=False)
+        gate = asyncio.Event()
+        played: list[bytes] = []
+        original = session._emit_pcm
+
+        async def slow_emit(chunk: bytes, rec: list, *, turnless: bool) -> None:
+            played.append(chunk)
+            await gate.wait()
+            await original(chunk, rec, turnless=turnless)
+
+        session._emit_pcm = slow_emit  # type: ignore[method-assign]
+        old.release()
+        flush = asyncio.create_task(session._flush_audio_hold())  # the confirmation's flush, of ``old``
+        await _until(lambda: old.flushing)
+        end = asyncio.create_task(session._settle_audio_hold_at_turn_end())
+        await asyncio.sleep(0)
+        # A new speculative attempt starts meanwhile, with audio of its own held until it is confirmed.
+        new = AudioHold()
+        session._audio_hold = new
+        await session._deliver_pcm(b"NEW", ["", 0], turnless=False)
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(flush, end), 3.0)
+        assert played == [b"OLD"]
+        assert not new.released and new.chunks
+        assert session._audio_hold is new
