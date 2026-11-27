@@ -1,0 +1,730 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demos de voz · Timbal</title>
+<style>
+  :root {
+    color-scheme: light;
+    --fondo: #f5f4f0; --panel: #ffffff; --borde: #dcd9d1; --texto: #1d1c1a; --suave: #6b6860;
+    --acento: #1f6f5c; --acento-fondo: #e6f2ee; --rojo: #b23b2a; --tu: #1f6f5c; --agente: #eeece6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--fondo); color: var(--texto);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  main { max-width: 1040px; margin: 0 auto; padding: 20px 20px 48px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+  h1 { font-size: 22px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  h2 { font-size: 13px; margin: 0 0 10px; font-weight: 600; color: var(--suave); text-transform: uppercase; letter-spacing: 0.06em; }
+  a { color: var(--acento); }
+  header a, footer a { font-size: 14px; }
+  section { margin-bottom: 22px; }
+
+  .demos { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+  .demo {
+    text-align: left; font: inherit; color: inherit; cursor: pointer;
+    background: var(--panel); border: 2px solid var(--borde); border-radius: 14px; padding: 14px 16px; min-height: 92px;
+  }
+  .demo strong { display: block; font-size: 17px; margin-bottom: 4px; }
+  .demo span { display: block; font-size: 14px; color: var(--suave); }
+  .demo[aria-pressed="true"] { border-color: var(--acento); background: var(--acento-fondo); }
+  .demo:focus-visible, .chip input:focus-visible + span, #llamar:focus-visible { outline: 3px solid #8fc4b6; outline-offset: 2px; }
+
+  .grupo { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .grupo > b { width: 96px; font-size: 14px; font-weight: 600; }
+  .chip { position: relative; }
+  .chip input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+  .chip span {
+    display: inline-block; padding: 8px 14px; border-radius: 999px; font-size: 14px;
+    background: var(--panel); border: 1.5px solid var(--borde); user-select: none;
+  }
+  .chip input:checked + span { border-color: var(--acento); background: var(--acento-fondo); color: var(--acento); font-weight: 600; }
+  .ayuda { font-size: 13px; color: var(--suave); margin: 4px 0 0; }
+
+  .llamada { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; }
+  #llamar {
+    font: inherit; font-size: 20px; font-weight: 650; color: #fff; background: var(--acento); border: 0;
+    border-radius: 16px; padding: 16px 44px; min-width: 190px; cursor: pointer;
+  }
+  #llamar[data-modo="colgar"] { background: var(--rojo); }
+  #llamar:disabled { opacity: 0.6; cursor: default; }
+  #estado { font-size: 17px; display: flex; align-items: center; gap: 10px; min-height: 28px; }
+  #estado::before { content: ""; width: 11px; height: 11px; border-radius: 50%; background: #b9b5aa; flex: none; }
+  #estado[data-tipo="espera"]::before { background: #d39a2c; animation: pulso 1s ease-in-out infinite; }
+  #estado[data-tipo="escucha"]::before { background: var(--acento); }
+  #estado[data-tipo="habla"]::before { background: #3767c9; animation: pulso 0.8s ease-in-out infinite; }
+  #estado[data-tipo="error"] { color: var(--rojo); }
+  #estado[data-tipo="error"]::before { background: var(--rojo); }
+  @keyframes pulso { 50% { opacity: 0.35; } }
+
+  .dos { display: grid; grid-template-columns: 1fr; gap: 16px; }
+  @media (min-width: 880px) { .dos { grid-template-columns: 3fr 2fr; } }
+  .caja { background: var(--panel); border: 1px solid var(--borde); border-radius: 14px; padding: 14px 16px; }
+  #chat { height: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+  #chat:empty::before { content: "Aquí verás la conversación."; color: var(--suave); font-size: 14px; margin: auto; }
+  .msg { max-width: 82%; display: flex; flex-direction: column; }
+  .msg small { font-size: 12px; color: var(--suave); margin: 2px 6px 0; }
+  .msg .quien { margin: 0 6px 2px; }
+  .burbuja { padding: 9px 13px; border-radius: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.tu { align-self: flex-end; align-items: flex-end; }
+  .msg.tu .burbuja { background: var(--tu); color: #fff; border-bottom-right-radius: 5px; }
+  .msg.tu.parcial .burbuja { opacity: 0.55; }
+  .msg.agente { align-self: flex-start; align-items: flex-start; }
+  .msg.agente .burbuja { background: var(--agente); border-bottom-left-radius: 5px; }
+  #probar ol { margin: 0; padding-left: 22px; }
+  #probar li { margin-bottom: 8px; }
+  #probar p { font-size: 13px; color: var(--suave); margin: 10px 0 0; }
+
+  footer { margin-top: 26px; font-size: 14px; color: var(--suave); }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; }
+  #registro {
+    margin: 8px 0 0; padding: 12px; background: #1d1c1a; color: #e9e6dd; border-radius: 10px; max-height: 260px;
+    overflow: auto; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Demos de voz</h1>
+    <a id="enlace-estado" href="/estado" hidden>Estado de la rama</a>
+  </header>
+
+  <section>
+    <h2>1 · Elige demo</h2>
+    <div class="demos" id="demos"></div>
+  </section>
+
+  <section>
+    <h2>2 · Variante (opcional)</h2>
+    <div id="variantes"></div>
+    <p class="ayuda">Voz y Escucha se aplican en la siguiente llamada. Modelo y Naturalidad reinician la demo: tarda unos segundos.</p>
+  </section>
+
+  <section>
+    <div class="llamada">
+      <button id="llamar" type="button" data-modo="llamar" disabled>Llamar</button>
+      <div id="estado" role="status" aria-live="polite">Cargando…</div>
+    </div>
+    <p class="ayuda">Habla con normalidad y puedes interrumpir al agente. Con auriculares el agente no se oye a sí mismo por el micrófono.</p>
+  </section>
+
+  <section class="dos">
+    <div class="caja" id="chat" aria-label="Conversación"></div>
+    <div class="caja" id="probar">
+      <h2>Qué probar</h2>
+      <ol id="guion"></ol>
+      <p id="nota"></p>
+    </div>
+  </section>
+
+  <footer>
+    <a id="enlace-playground" href="/voice" hidden>Playground avanzado</a>
+    <details id="detalle-registro">
+      <summary>Ver registro</summary>
+      <pre id="registro">Todavía no se ha arrancado ninguna demo.</pre>
+    </details>
+  </footer>
+</main>
+
+<script>
+'use strict';
+// Cliente de voz por WebSocket, el mismo protocolo que python/timbal/server/voice.html:
+// primer mensaje JSON con la configuración, después PCM de 16 bits del micrófono en binario;
+// el servidor manda JSON (audio en base64, transcripciones, métricas).
+const SAMPLE_RATE = 16000;
+const CHUNK_MS = 80;
+const ACUSE_MS = 250;
+const CLAVE_GUARDADA = 'timbal-voice-demos';
+const $ = (id) => document.getElementById(id);
+const btn = $('llamar'), estadoEl = $('estado'), chat = $('chat');
+
+let demos = [], variantes = [];
+let sel = { demo: '', voz: '', modelo: '', naturalidad: '', escucha: '' };
+
+// ---- Estado de la página ---------------------------------------------------------------------------------------
+function estado(tipo, texto) {
+  estadoEl.dataset.tipo = tipo;
+  estadoEl.textContent = texto;
+}
+function boton(modo) {
+  btn.dataset.modo = modo;
+  btn.textContent = modo === 'colgar' ? 'Colgar' : 'Llamar';
+}
+function demoActual() { return demos.find((d) => d.id === sel.demo) || demos[0]; }
+function opcion(grupo, id) {
+  const g = variantes.find((v) => v.id === grupo);
+  return (g && g.opciones.find((o) => o.id === id)) || { id: '' };
+}
+function oculta(grupo, id) {
+  const d = demoActual();
+  return Boolean(id) && Boolean(d && d.ocultar && d.ocultar.includes(`${grupo}:${id}`));
+}
+function guardar() { try { localStorage.setItem(CLAVE_GUARDADA, JSON.stringify(sel)); } catch (_) {} }
+
+async function pedir(ruta, cuerpo) {
+  let r;
+  try {
+    r = await fetch(ruta, cuerpo === undefined ? {} : {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cuerpo),
+    });
+  } catch (_) {
+    throw new Error('no se puede hablar con el lanzador. ¿Sigue abierto hub.py en la terminal?');
+  }
+  const datos = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(datos.error || `el lanzador respondió ${r.status}.`);
+  return datos;
+}
+
+// ---- Selección de demo y variante ------------------------------------------------------------------------------
+function pintarDemos() {
+  const caja = $('demos');
+  caja.innerHTML = '';
+  for (const d of demos) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'demo';
+    b.setAttribute('aria-pressed', String(d.id === sel.demo));
+    const nombre = document.createElement('strong');
+    nombre.textContent = d.name;
+    const desc = document.createElement('span');
+    desc.textContent = d.description || '';
+    b.append(nombre, desc);
+    b.onclick = () => { if (sel.demo !== d.id) { sel.demo = d.id; cambio(); } };
+    caja.appendChild(b);
+  }
+}
+
+function pintarVariantes() {
+  const caja = $('variantes');
+  caja.innerHTML = '';
+  for (const g of variantes) {
+    if (oculta(g.id, sel[g.id])) sel[g.id] = '';
+    const fila = document.createElement('div');
+    fila.className = 'grupo';
+    fila.setAttribute('role', 'radiogroup');
+    fila.setAttribute('aria-label', g.titulo);
+    const titulo = document.createElement('b');
+    titulo.textContent = g.titulo;
+    fila.appendChild(titulo);
+    for (const o of g.opciones) {
+      if (oculta(g.id, o.id)) continue;
+      const chip = document.createElement('label');
+      chip.className = 'chip';
+      const radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = `v-${g.id}`;
+      radio.checked = (sel[g.id] || '') === o.id;
+      radio.onchange = () => { sel[g.id] = o.id; cambio(); };
+      const texto = document.createElement('span');
+      texto.textContent = o.nombre;
+      chip.append(radio, texto);
+      fila.appendChild(chip);
+    }
+    caja.appendChild(fila);
+  }
+}
+
+function pintarGuion() {
+  const d = demoActual();
+  const lista = $('guion');
+  lista.innerHTML = '';
+  for (const frase of (d && d.probar) || []) {
+    const li = document.createElement('li');
+    li.textContent = `«${frase}»`;
+    lista.appendChild(li);
+  }
+  $('nota').textContent = (d && d.nota) || '';
+}
+
+/** Cualquier cambio cuelga la llamada en curso: lo elegido vale para la siguiente. */
+function cambio() {
+  const enLlamada = btn.dataset.modo === 'colgar';
+  guardar();
+  pintarDemos();
+  pintarVariantes();
+  pintarGuion();
+  if (enLlamada) {
+    void colgar();
+    estado('', 'Cambio guardado. Pulsa Llamar para probarlo.');
+  } else if (estadoEl.dataset.tipo !== 'espera') {
+    estado('', 'Listo. Pulsa Llamar y habla.');
+  }
+  precalentar();
+}
+
+// ---- Demo arrancada por el lanzador ----------------------------------------------------------------------------
+function claveActual() { return `${sel.demo}|${sel.modelo}|${sel.naturalidad}`; }
+
+let temporizadorPrevio = null;
+/** Arranca la demo elegida mientras el usuario lee, para que Llamar conecte enseguida. Sin avisos si falla. */
+function precalentar() {
+  clearTimeout(temporizadorPrevio);
+  temporizadorPrevio = setTimeout(() => {
+    if (btn.dataset.modo === 'colgar' || ocupado || !sel.demo) return;
+    pedir('/api/spawn', { demo: sel.demo, modelo: sel.modelo, naturalidad: sel.naturalidad }).catch(() => {});
+  }, 700);
+}
+
+/** Pide la demo con su variante y espera a que responda. Devuelve {port, hello}. */
+async function arrancarDemo(gen) {
+  const clave = claveActual();
+  let r = await pedir('/api/spawn', { demo: sel.demo, modelo: sel.modelo, naturalidad: sel.naturalidad });
+  const limite = Date.now() + 180000;
+  for (;;) {
+    if (gen !== generacion) return null;
+    const hijo = r.child || {};
+    if (r.clave !== clave) throw new Error('otra ventana ha cambiado de demo. Vuelve a pulsar Llamar.');
+    if (hijo.state === 'running') return { port: hijo.port, hello: r.hello || {} };
+    if (hijo.state === 'exited' || hijo.state === 'stopped') {
+      throw new Error('la demo no ha arrancado. Abre «Ver registro», abajo, para ver el motivo.');
+    }
+    if (Date.now() > limite) throw new Error('la demo tarda demasiado en arrancar. Mira «Ver registro», abajo.');
+    await new Promise((ok) => setTimeout(ok, 400));
+    r = await pedir('/api/status');
+  }
+}
+
+// ---- Audio: micrófono y reproducción (igual que voice.html, sin RNNoise) ---------------------------------------
+let ws = null, audioCtx = null, micStream = null, worklet = null, fuente = null;
+let micAlSocket = false, frecuenciaSesion = SAMPLE_RATE;
+let siguienteInicio = 0, agenda = [], reproducidoMs = 0, ultimoAcuseMs = -1, relojAcuses = null;
+const fuentesSonando = new Set();
+/** Tras una interrupción se descartan los trozos de audio que aún venían de camino. */
+let descartarAudio = false;
+let generacion = 0, ocupado = false, sesionLista = false, errorVisibleHasta = 0;
+
+const MODULO_CAPTURA = `
+  class Capture extends AudioWorkletProcessor {
+    constructor() { super(); this._buf = []; }
+    process(inputs) {
+      const ch = inputs[0][0];
+      if (!ch) return true;
+      for (let i = 0; i < ch.length; i++) this._buf.push(ch[i]);
+      const needed = Math.floor(sampleRate * ${CHUNK_MS / 1000});
+      while (this._buf.length >= needed) {
+        const slice = this._buf.splice(0, needed);
+        const i16 = new Int16Array(slice.length);
+        for (let j = 0; j < slice.length; j++) {
+          const s = Math.max(-1, Math.min(1, slice[j]));
+          i16[j] = s < 0 ? s * 32768 : s * 32767;
+        }
+        this.port.postMessage(i16.buffer, [i16.buffer]);
+      }
+      return true;
+    }
+  }
+  registerProcessor('capture', Capture);
+`;
+
+/** Abre micrófono y grafo de audio. Si mientras tanto se colgó (gen cambió), lo suelta todo y no deja nada abierto. */
+async function abrirMicro(gen) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('este navegador no deja usar el micrófono aquí. Abre la página en http://localhost.');
+  }
+  let flujo;
+  try {
+    flujo = await navigator.mediaDevices.getUserMedia({
+      // La cancelación de eco del navegador es lo que permite usar altavoces e interrumpir al agente.
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: SAMPLE_RATE },
+    });
+  } catch (err) {
+    if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+      throw new Error('el navegador no tiene permiso para usar el micrófono. Dáselo en la barra de direcciones.');
+    }
+    if (err && (err.name === 'NotFoundError' || err.name === 'OverconstrainedError')) {
+      throw new Error('no se encuentra ningún micrófono.');
+    }
+    throw new Error('no se pudo abrir el micrófono.');
+  }
+  const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+  const soltar = () => {
+    flujo.getTracks().forEach((t) => t.stop());
+    void ctx.close().catch(() => {});
+  };
+  try {
+    await ctx.audioWorklet.addModule('data:text/javascript,' + encodeURIComponent(MODULO_CAPTURA));
+  } catch (_) {
+    soltar();
+    throw new Error('el navegador no pudo preparar el audio.');
+  }
+  if (gen !== generacion) { soltar(); return; }
+  micStream = flujo;
+  audioCtx = ctx;
+  fuente = ctx.createMediaStreamSource(flujo);
+  worklet = new AudioWorkletNode(ctx, 'capture');
+  worklet.port.onmessage = (e) => {
+    if (!micAlSocket || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(new Uint8Array(e.data));
+  };
+  fuente.connect(worklet);
+  const mudo = ctx.createGain();
+  mudo.gain.value = 0;
+  worklet.connect(mudo);
+  mudo.connect(ctx.destination);
+  try { if (ctx.state === 'suspended') await ctx.resume(); } catch (_) {}
+}
+
+function msReproducidos() {
+  if (!audioCtx) return reproducidoMs;
+  const ahora = audioCtx.currentTime;
+  let enCurso = 0;
+  const quedan = [];
+  for (const t of agenda) {
+    if (ahora >= t.fin) reproducidoMs += (t.fin - t.inicio) * 1000;
+    else { enCurso += Math.max(0, ahora - t.inicio) * 1000; quedan.push(t); }
+  }
+  agenda = quedan;
+  return reproducidoMs + enCurso;
+}
+
+/** El servidor recorta una respuesta interrumpida a lo que de verdad se oyó: necesita saber cuánto ha sonado. */
+function acusarReproduccion(forzar) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const ms = msReproducidos();
+  if (!forzar && ms === ultimoAcuseMs) return;
+  ultimoAcuseMs = ms;
+  ws.send(JSON.stringify({ type: 'playback', played_ms: ms }));
+}
+
+function callarAgente() {
+  if (audioCtx) {
+    const ahora = audioCtx.currentTime;
+    for (const t of agenda) t.fin = Math.min(t.fin, Math.max(t.inicio, ahora));
+  }
+  acusarReproduccion(true);
+  for (const s of fuentesSonando) { try { s.stop(0); } catch (_) {} }
+  fuentesSonando.clear();
+  siguienteInicio = 0;
+}
+
+function sonar(b64) {
+  if (!audioCtx || descartarAudio) return;
+  if (audioCtx.state === 'suspended') void audioCtx.resume();
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const i16 = new Int16Array(bytes.buffer, 0, bytes.length >> 1);
+  if (!i16.length) return;
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+  const buf = audioCtx.createBuffer(1, f32.length, frecuenciaSesion);
+  buf.getChannelData(0).set(f32);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(audioCtx.destination);
+  const inicio = Math.max(siguienteInicio, audioCtx.currentTime);
+  src.start(inicio);
+  siguienteInicio = inicio + buf.duration;
+  agenda.push({ inicio, fin: inicio + buf.duration });
+  fuentesSonando.add(src);
+  src.onended = () => fuentesSonando.delete(src);
+}
+
+/** «Hablando» mientras suena el agente; «Escuchando» el resto de la llamada. */
+function refrescarEstadoDeLlamada() {
+  if (!sesionLista || Date.now() < errorVisibleHasta) return;
+  const sonando = Boolean(audioCtx) && siguienteInicio > audioCtx.currentTime + 0.02;
+  if (sonando) estado('habla', 'Hablando');
+  else if (!micAlSocket) estado('espera', 'Haz clic en la página para activar el micrófono');
+  else estado('escucha', 'Escuchando');
+}
+
+// ---- Conversación ----------------------------------------------------------------------------------------------
+let burbujaAgente = null, ultimaAgente = null, burbujasTurno = [], respuestaHecha = false, parcial = null;
+
+const ACOTACIONES = new Set([
+  'relieved', 'laughs', 'laughing', 'chuckles', 'giggles', 'sighs', 'gasps', 'curious', 'excited', 'sad', 'angry',
+  'happy', 'nervous', 'calm', 'warm', 'whispers', 'whispering', 'shouts', 'shouting', 'crying', 'sobbing',
+  'sarcastic', 'thoughtful', 'hesitant', 'confident', 'serious', 'playful', 'short pause', 'long pause', 'pause',
+  'clears throat', 'inhales', 'exhales',
+]);
+/** Quita las acotaciones de interpretación ([laughs]) que algunas voces reciben pero no se leen. */
+function textoAgente(crudo, final) {
+  let t = crudo.replace(/\[([^\[\]\r\n]{1,60})\][ \t]*/g, (todo, etiqueta) =>
+    (ACOTACIONES.has(etiqueta.trim().toLowerCase()) ? '' : todo));
+  if (!final) {
+    const abierta = /\[([^\[\]\r\n]{0,60})$/.exec(t);
+    if (abierta && [...ACOTACIONES].some((e) => e.startsWith(abierta[1].trimStart().toLowerCase()))) {
+      t = t.slice(0, abierta.index);
+    }
+  }
+  return t;
+}
+
+function burbuja(clase, texto) {
+  const m = document.createElement('div');
+  m.className = 'msg ' + clase;
+  const quien = document.createElement('small');
+  quien.className = 'quien';
+  quien.textContent = clase.startsWith('tu') ? 'Tú' : 'Agente';
+  const b = document.createElement('div');
+  b.className = 'burbuja';
+  b.textContent = texto;
+  m.append(quien, b);
+  m._texto = b;
+  chat.appendChild(m);
+  chat.scrollTop = chat.scrollHeight;
+  return m;
+}
+function ponerParcial(texto) {
+  if (!texto) { if (parcial) { parcial.remove(); parcial = null; } return; }
+  if (!parcial) parcial = burbuja('tu parcial', '');
+  else chat.appendChild(parcial);
+  parcial._texto.textContent = texto + '…';
+  chat.scrollTop = chat.scrollHeight;
+}
+function limpiarConversacion() {
+  chat.innerHTML = '';
+  burbujaAgente = null; ultimaAgente = null; burbujasTurno = []; respuestaHecha = false; parcial = null;
+}
+
+/** Tiempo desde que dejaste de hablar hasta el primer audio: transcripción más respuesta. */
+function anotarTiempo(m) {
+  if (!m || m.event || m.eou_to_first_audio_ms == null || !ultimaAgente || !ultimaAgente.isConnected) return;
+  if (ultimaAgente.querySelector('.tiempo')) return;
+  const ms = m.eou_to_first_audio_ms + (m.speech_end_to_transcript_ms || 0);
+  const nota = document.createElement('small');
+  nota.className = 'tiempo';
+  nota.textContent = `Respondió en ${(ms / 1000).toFixed(1).replace('.', ',')} s`
+    + (m.filler_spoken ? ' (con frase de espera)' : '');
+  ultimaAgente.appendChild(nota);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function recibir(msg) {
+  switch (msg.type) {
+    case 'session_started':
+      sesionLista = true;
+      refrescarEstadoDeLlamada();
+      break;
+    case 'transcript_partial':
+      ponerParcial(msg.text);
+      break;
+    case 'transcript_committed': {
+      ponerParcial(null);
+      descartarAudio = false; // turno nuevo: vuelve a sonar el agente
+      // ultimaAgente a null: el tiempo de respuesta de este turno solo se anota en una burbuja de este turno.
+      burbujasTurno = []; respuestaHecha = true; burbujaAgente = null; ultimaAgente = null;
+      const mias = chat.querySelectorAll('.msg.tu:not(.parcial)');
+      if (msg.replace && mias.length) mias[mias.length - 1]._texto.textContent = msg.text;
+      else burbuja('tu', msg.text);
+      break;
+    }
+    case 'filler':
+      burbuja('agente', msg.text);
+      break;
+    case 'agent_text_delta':
+      ponerParcial(null);
+      descartarAudio = false;
+      if (respuestaHecha) { burbujasTurno = []; respuestaHecha = false; }
+      if (!burbujaAgente) {
+        burbujaAgente = burbuja('agente', '');
+        burbujaAgente._crudo = '';
+        burbujasTurno.push(burbujaAgente);
+      }
+      burbujaAgente._crudo += msg.text;
+      burbujaAgente._texto.textContent = textoAgente(burbujaAgente._crudo, false);
+      chat.scrollTop = chat.scrollHeight;
+      break;
+    case 'agent_text_done':
+      if (burbujaAgente) {
+        const crudo = typeof msg.text === 'string' ? msg.text : burbujaAgente._crudo;
+        burbujaAgente._texto.textContent = textoAgente(crudo, true);
+      }
+      ultimaAgente = burbujaAgente || ultimaAgente;
+      burbujaAgente = null;
+      respuestaHecha = true;
+      break;
+    case 'audio':
+      sonar(msg.data);
+      refrescarEstadoDeLlamada();
+      break;
+    case 'interrupted': {
+      // Deja en pantalla solo lo que se llegó a oír de la respuesta cortada.
+      const enCurso = Boolean(burbujaAgente) || (burbujasTurno.length && !respuestaHecha);
+      if (msg.heard_text !== undefined && msg.heard_text !== null && (enCurso || msg.heard_text)) {
+        const lista = burbujasTurno.length ? burbujasTurno : [burbujaAgente || ultimaAgente].filter(Boolean);
+        for (const el of lista.slice(1)) el.remove();
+        const primera = lista[0];
+        if (primera) {
+          const oido = msg.heard_text ? textoAgente(msg.heard_text, true) : '';
+          if (oido.trim()) { primera._texto.textContent = oido; ultimaAgente = primera; }
+          else { primera.remove(); if (ultimaAgente === primera) ultimaAgente = null; }
+        }
+      }
+      burbujasTurno = []; respuestaHecha = false; burbujaAgente = null;
+      descartarAudio = true;
+      callarAgente();
+      refrescarEstadoDeLlamada();
+      break;
+    }
+    case 'metrics':
+      anotarTiempo(msg.metrics);
+      break;
+    case 'error':
+      // Un fallo dentro de la llamada no siempre la corta: se enseña unos segundos y sigue.
+      errorVisibleHasta = Date.now() + 8000;
+      estado('error', `Error: ${msg.message || 'fallo en la llamada.'}`);
+      break;
+    case 'session_ended':
+      void colgar('La llamada ha terminado. Pulsa Llamar para otra.');
+      break;
+  }
+}
+
+// ---- Llamar y colgar -------------------------------------------------------------------------------------------
+async function colgar(mensaje) {
+  generacion += 1;
+  callarAgente();
+  if (relojAcuses) { clearInterval(relojAcuses); relojAcuses = null; }
+  micAlSocket = false;
+  sesionLista = false;
+  if (ws) {
+    const s = ws;
+    ws = null;
+    s.onclose = null; s.onerror = null; s.onmessage = null;
+    try { s.close(); } catch (_) {}
+  }
+  if (worklet) { try { worklet.disconnect(); } catch (_) {} worklet = null; }
+  if (fuente) { try { fuente.disconnect(); } catch (_) {} fuente = null; }
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  if (audioCtx) { const c = audioCtx; audioCtx = null; try { await c.close(); } catch (_) {} }
+  agenda = []; reproducidoMs = 0; ultimoAcuseMs = -1; descartarAudio = false;
+  ponerParcial(null);
+  boton('llamar');
+  if (mensaje !== undefined) estado(mensaje.startsWith('Error') ? 'error' : '', mensaje);
+}
+
+async function llamar() {
+  if (ocupado) return;
+  ocupado = true;
+  clearTimeout(temporizadorPrevio);
+  await colgar();
+  const gen = generacion;
+  boton('colgar');
+  limpiarConversacion();
+  try {
+    estado('espera', 'Arrancando la demo…');
+    // El permiso del micrófono se pide a la vez que arranca la demo.
+    const micro = abrirMicro(gen);
+    micro.catch(() => {});
+    const destino = await arrancarDemo(gen);
+    if (gen !== generacion || !destino) return;
+    estado('espera', 'Conectando…');
+    await micro;
+    if (gen !== generacion) return;
+    conectar(gen, destino);
+  } catch (err) {
+    if (gen !== generacion) return;
+    await colgar(`Error: ${err && err.message ? err.message : 'no se pudo iniciar la llamada.'}`);
+    void refrescarRegistro();
+  } finally {
+    ocupado = false;
+  }
+}
+
+function conectar(gen, destino) {
+  const anfitrion = ['localhost', '127.0.0.1', ''].includes(location.hostname) ? '127.0.0.1' : location.hostname;
+  const socket = new WebSocket(`ws://${anfitrion}:${destino.port}/voice/ws`);
+  socket.binaryType = 'arraybuffer';
+  ws = socket;
+
+  socket.onopen = () => {
+    if (gen !== generacion) return;
+    // La configuración TIENE que ser el primer mensaje del socket.
+    frecuenciaSesion = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
+    socket.send(JSON.stringify({
+      sample_rate: frecuenciaSesion,
+      ...destino.hello,
+      ...(opcion('voz', sel.voz).hello || {}),
+      ...(opcion('escucha', sel.escucha).hello || {}),
+    }));
+    relojAcuses = setInterval(() => { acusarReproduccion(false); refrescarEstadoDeLlamada(); }, ACUSE_MS);
+    const armar = async () => {
+      try { if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume(); } catch (_) {}
+      if (audioCtx && audioCtx.state === 'running') { micAlSocket = true; return true; }
+      return false;
+    };
+    void (async () => {
+      if (await armar()) return;
+      // El navegador ha dejado el audio en pausa hasta que haya un gesto del usuario.
+      const empujar = async () => {
+        if (await armar()) {
+          window.removeEventListener('pointerdown', empujar);
+          window.removeEventListener('keydown', empujar);
+          refrescarEstadoDeLlamada();
+        }
+      };
+      window.addEventListener('pointerdown', empujar, { passive: true });
+      window.addEventListener('keydown', empujar);
+    })();
+  };
+  socket.onmessage = (e) => {
+    if (gen !== generacion || typeof e.data !== 'string') return;
+    let msg;
+    try { msg = JSON.parse(e.data); } catch (_) { return; }
+    recibir(msg);
+  };
+  socket.onerror = () => {
+    if (gen !== generacion) return;
+    void colgar('Error: no se pudo conectar con la demo. Vuelve a pulsar Llamar.');
+    void refrescarRegistro();
+  };
+  socket.onclose = () => {
+    if (gen !== generacion) return;
+    void colgar(estadoEl.dataset.tipo === 'error' ? undefined : 'La llamada ha terminado. Pulsa Llamar para otra.');
+  };
+}
+
+btn.onclick = () => {
+  if (btn.dataset.modo === 'colgar') void colgar('Llamada terminada. Pulsa Llamar para otra.');
+  else void llamar();
+};
+
+// ---- Registro del servidor (plegado al final) ------------------------------------------------------------------
+let relojRegistro = null;
+async function refrescarRegistro() {
+  try {
+    const r = await pedir('/api/status');
+    const lineas = (r.child && r.child.logs) || [];
+    const caja = $('registro');
+    const alFinal = caja.scrollTop + caja.clientHeight >= caja.scrollHeight - 8;
+    caja.textContent = lineas.length ? lineas.join('\n') : 'Todavía no se ha arrancado ninguna demo.';
+    if (alFinal) caja.scrollTop = caja.scrollHeight;
+  } catch (_) {}
+}
+$('detalle-registro').addEventListener('toggle', (e) => {
+  clearInterval(relojRegistro);
+  if (e.target.open) {
+    void refrescarRegistro();
+    relojRegistro = setInterval(refrescarRegistro, 2000);
+  }
+});
+
+// ---- Inicio ----------------------------------------------------------------------------------------------------
+(async () => {
+  try {
+    const r = await pedir('/demos');
+    demos = r.demos || [];
+    variantes = r.variantes || [];
+    $('enlace-estado').hidden = !r.estado;
+    if (r.playground) { $('enlace-playground').href = r.playground; $('enlace-playground').hidden = false; }
+    try { sel = { ...sel, ...JSON.parse(localStorage.getItem(CLAVE_GUARDADA) || '{}') }; } catch (_) {}
+    if (!demos.some((d) => d.id === sel.demo)) sel.demo = demos.length ? demos[0].id : '';
+    for (const g of variantes) {
+      if (!g.opciones.some((o) => o.id === (sel[g.id] || ''))) sel[g.id] = '';
+    }
+    if (!demos.length) { estado('error', 'Error: no hay ninguna demo en demos.json.'); return; }
+    btn.disabled = false;
+    cambio();
+  } catch (err) {
+    estado('error', `Error: ${err.message}`);
+  }
+})();
+window.addEventListener('pagehide', () => { if (ws) { try { ws.close(); } catch (_) {} } });
+</script>
+</body>
+</html>

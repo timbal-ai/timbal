@@ -67,3 +67,6 @@ planning/
 
 # Raw voice benchmark rows (benchmarks/voice/bench_242.py writes and resumes them; summaries stay tracked)
 benchmarks/voice/242-results/*.jsonl
+
+# Voice demo hub: local-only demos and notes (client names stay out of the repository)
+/examples/voice_demos/*.local.*
