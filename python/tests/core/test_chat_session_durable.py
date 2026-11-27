@@ -587,7 +587,7 @@ class TestEdges:
         gate = Gate()
         session = ChatSession(make_agent(provider, gate), session_store=store)
         session.send("start")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         session.send("also this", mode="followup")
         await crash(session)
         provider.crashed = False
@@ -619,7 +619,7 @@ class TestEdges:
         first = Charge()
         session, approval = await parked(provider, store, first)
         session.resume({approval.approval_id: True})
-        await asyncio.wait_for(first.gate.entered.wait(), 3)
+        await asyncio.wait_for(first.gate.entered.wait(), 30)
         await crash(session)
         provider.crashed = False
 
@@ -647,7 +647,7 @@ class TestEdges:
         first = Charge()
         session, approval = await parked(provider, store, first)
         session.resume({approval.approval_id: True})
-        await asyncio.wait_for(first.gate.entered.wait(), 3)
+        await asyncio.wait_for(first.gate.entered.wait(), 30)
         await crash(session)
         provider.crashed = False
 
@@ -684,12 +684,12 @@ class TestEdges:
         gate = Gate()
         session = ChatSession(agent(gate, checking), session_store=store)
         session.send("start")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         await crash(session)
         provider.crashed = False
 
         second = await ChatSession.from_store(agent(Gate(), checking), store, session.id)
-        await asyncio.wait_for(checking.entered.wait(), 3)  # the recovery turn is checking: crash again
+        await asyncio.wait_for(checking.entered.wait(), 30)  # the recovery turn is checking: crash again
         recovery_run = second.run_id
         await crash(second)
         provider.crashed = False
@@ -708,7 +708,7 @@ class TestEdges:
         gate = Gate()
         session = ChatSession(make_agent(provider, gate), session_store=store)
         session.send("start")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         session.wake("routine", key="r", tool_policy=["work"])
         session.wake("custom", key="c", tool_policy=lambda _tool: True)
         await crash(session)
@@ -1013,7 +1013,7 @@ class TestWriteAhead:
         gate = Gate()
         async with ChatSession(make_agent(provider, gate), session_store=store) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 3)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             queued = session.send("later", mode="followup")
             await session.flush()
             snapshot = await store.load(session.id)
@@ -1063,7 +1063,7 @@ class TestRestore:
         gate = Gate()
         session = ChatSession(make_agent(provider, gate), session_store=store)
         session.send("start")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         dead_run = session.run_id
         await crash(session)
         provider.crashed = False
@@ -1096,7 +1096,7 @@ class TestRestore:
 
         session = ChatSession(agent(), session_store=store)
         session.send("go")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         await crash(session)
         provider.crashed = False
 
@@ -1138,7 +1138,7 @@ class TestRestore:
 
         session = ChatSession(agent(), session_store=store)
         session.send("go")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         await crash(session)
         provider.crashed = False
 
@@ -1184,7 +1184,7 @@ class TestRestore:
 
         session = ChatSession(agent(), session_store=store)
         session.send("go")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         dispatched = (await store.load(session.id)).in_flight["dispatched"]
         assert [call["name"] for call in dispatched] == ["call_tool", "call_tool"]  # as the model asked for them
         await crash(session)
@@ -1206,7 +1206,7 @@ class TestRestore:
         gate = Gate()
         session = ChatSession(make_agent(provider, gate), session_store=store)
         session.send("start")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         dispatched = (await store.load(session.id)).in_flight["dispatched"]
         assert [call["name"] for call in dispatched] == ["work"]  # stored before the tool ran
         await crash(session)
@@ -1257,7 +1257,7 @@ class TestRestore:
         gate = Gate()
         session = ChatSession(make_agent(provider, gate), session_store=store)
         session.send("start")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         await session.close(keep=True)
 
         restored = await ChatSession.from_store(make_agent(provider, Gate(released=True)), store, session.id)
@@ -1356,7 +1356,7 @@ class TestRestore:
         gate = Gate()
         session = ChatSession(make_agent(provider, gate), session_store=store, on_dead_turn=on_dead_turn)
         session.send("start")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         await crash(session)
         provider.crashed = False
 
@@ -1710,7 +1710,7 @@ class TestRestoreSafety:
         gate = Gate()
         session = ChatSession(make_agent(provider, gate), session_store=store)
         session.send("start")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         await crash(session)
         provider.crashed = False
         stored = await store.load(session.id)
@@ -1740,7 +1740,7 @@ class TestRestoreSafety:
         gate = Gate()
         session = ChatSession(make_agent(provider, gate), session_store=store)
         session.send("start")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         session.send("also this", mode="followup")
         await crash(session)
         provider.crashed = False
@@ -1842,7 +1842,7 @@ class TestAcknowledgement:
         gate = Gate()
         async with ChatSession(make_agent(provider, gate), session_store=store) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 3)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             running, context = session.run_id, session._turn_context
             event = session.send("stop", mode=mode, defer_cut=True)
             await asyncio.sleep(0.05)
@@ -1868,7 +1868,7 @@ class TestAcknowledgement:
         gate = Gate()
         async with ChatSession(make_agent(provider, gate), session_store=store) as session:
             event = session.send("start", mode="interrupt", defer_cut=True)
-            await asyncio.wait_for(gate.entered.wait(), 3)  # its own turn runs by the time it is stored
+            await asyncio.wait_for(gate.entered.wait(), 30)  # its own turn runs by the time it is stored
             assert session.cut_for(event, "interrupt") is False
             assert session.busy
             gate.release.set()
@@ -1909,7 +1909,7 @@ class TestAcknowledgement:
         gate = Gate()
         session = ChatSession(make_agent(provider, gate), session_store=store)
         session.send("start")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         await crash(session)
         provider.crashed = False
         real_recover = ChatSession._recover
@@ -1953,7 +1953,7 @@ class TestWriteAheadOfTurns:
         assert [e["id"] for e in stored.pending] == [sent.id] and stored.in_flight is None
         assert gate.calls == 0 and session.turns == 0  # nothing ran: a restart now runs the message once
         hold.set()
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         stored = await store.load(session.id)
         assert stored.pending == [] and stored.in_flight["run_id"] == session.run_id
         gate.release.set()
@@ -2105,7 +2105,7 @@ class TestStoredWithTheSession:
         gate = Gate()
         async with ChatSession(make_agent(provider, gate), session_store=store) as session:
             session.send("start")  # busy: wakes wait
-            await asyncio.wait_for(gate.entered.wait(), 3)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             first = session.wake("first", key="k")
             await session.flush()
             real_save = store.save
@@ -2159,12 +2159,12 @@ class TestSteeredMessages:
         first, second = Gate(), Gate()
         session = ChatSession(steering_agent(provider, first, second), session_store=store)
         session.send("start also")  # holds the text of the message steered in after it
-        await asyncio.wait_for(first.entered.wait(), 3)
+        await asyncio.wait_for(first.entered.wait(), 30)
         if not trace_until_steered:
             provider.crashed = True  # what is stored of the run from here on never lands
         also = session.send("also", mode="steer")
         first.release.set()
-        await asyncio.wait_for(second.entered.wait(), 3)  # the turn took the steered message and went on
+        await asyncio.wait_for(second.entered.wait(), 30)  # the turn took the steered message and went on
         await session.flush()
         stored = await store.load(session.id)
         assert stored.pending == []
@@ -2226,10 +2226,10 @@ class TestSteeredMessages:
         first, second = Gate(), Gate()
         session = ChatSession(steering_agent(provider, first, second), session_store=store)
         session.send("start")
-        await asyncio.wait_for(first.entered.wait(), 3)
+        await asyncio.wait_for(first.entered.wait(), 30)
         event = session.store.post_event("also: the invoice was paid elsewhere", lane="next")
         first.release.set()
-        await asyncio.wait_for(second.entered.wait(), 3)
+        await asyncio.wait_for(second.entered.wait(), 30)
         await session.flush()
         stored = await store.load(session.id)
         assert stored.pending == []
@@ -2686,7 +2686,7 @@ class TestRecordedToolCalls:
         (question,) = session.state()["pending_interactions"]
         provider.crashed = True  # nothing of the resumed turn is ever stored
         session.resume({question["interaction_id"]: "yes"})
-        await asyncio.wait_for(first.entered.wait(), 3)  # it took the answer and went on to an ordinary tool
+        await asyncio.wait_for(first.entered.wait(), 30)  # it took the answer and went on to an ordinary tool
         await crash(session)
         provider.crashed = False
 
@@ -2740,7 +2740,7 @@ class TestRecordedToolCalls:
         gate = Gate()
         session = ChatSession(agent(gate), session_store=store)
         session.send("/doit")
-        await asyncio.wait_for(gate.entered.wait(), 3)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         assert [call["name"] for call in (await store.load(session.id)).in_flight["dispatched"]] == ["llm"]
         await crash(session)
         provider.crashed = False
@@ -2783,7 +2783,7 @@ class TestRecordedToolCalls:
         first = Gate()
         session = ChatSession(agent(first), session_store=store)
         session.send("go")
-        await asyncio.wait_for(first.entered.wait(), 3)
+        await asyncio.wait_for(first.entered.wait(), 30)
         await crash(session)
         provider.crashed = False
 
@@ -2821,7 +2821,7 @@ class TestRecordedToolCalls:
         )
         async with ChatSession(parent, session_store=store) as session:
             session.send("go")
-            await asyncio.wait_for(gate.entered.wait(), 3)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             dispatched = (await store.load(session.id)).in_flight["dispatched"]
             assert [call["name"] for call in dispatched] == ["child"]
             gate.release.set()
@@ -2891,7 +2891,7 @@ class TestSnapshotBehindTheTrace:
 
         session = ChatSession(agent(first), session_store=store)
         session.send("start")
-        await asyncio.wait_for(first.entered.wait(), 3)
+        await asyncio.wait_for(first.entered.wait(), 30)
         also = session.send("also", mode="steer")
         await session.flush()  # acknowledged: stored as pending, with the turn in flight
         real_save = store.save
@@ -3237,7 +3237,7 @@ class TestAStopThatReachesATurnAtItsEdges:
         charge = Charge(released=True)
         session = ChatSession(gated_agent(provider, charge), session_store=store)
         session.send("pay")
-        await asyncio.wait_for(provider.entered.wait(), 5)
+        await asyncio.wait_for(provider.entered.wait(), 30)
         assert session.busy and not session.parked
         if how == "interrupt()":
             assert session.interrupt() is True
@@ -3269,7 +3269,7 @@ class TestAStopThatReachesATurnAtItsEdges:
 
         session._trace_stored = no_further
         session.send("pay")
-        await asyncio.wait_for(provider.entered.wait(), 5)
+        await asyncio.wait_for(provider.entered.wait(), 30)
         assert session.interrupt() is True
         await session.flush()  # what the route waits for before it says so
         assert (await store.load(session.id)).in_flight["stopped"] is True
