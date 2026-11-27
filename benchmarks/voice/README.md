@@ -1771,6 +1771,69 @@ Real-time pacing is mandatory, so a run takes as long as the conversation.
 rather than the wall-clock estimate fallback — production behavior, not a
 degraded fallback.
 
+## TTS fidelity: does it say the text, in one voice
+
+`tts_fidelity.py` speaks a set of phone-agent replies through a provider's
+adapter, transcribes every request's audio (Deepgram Nova-3) and compares it
+with the text sent. It also measures the median pitch of each request's audio:
+a provider that speaks a reply in several requests makes a new take in each,
+and from a 20 % difference up the caller hears another speaker.
+
+```bash
+uv run python benchmarks/voice/tts_fidelity.py --language-code es-ES --chars-per-sec 600
+uv run python benchmarks/voice/tts_fidelity.py --accent "castellano peninsular de España"   # with a director's brief
+uv run python benchmarks/voice/tts_fidelity.py --provider elevenlabs --model eleven_flash_v2_5
+```
+
+It was written for Gemini TTS (`gemini-3.8-flash-tts`), whose adapter used to
+send a director's brief before the text (a profile, a scene, style notes) and
+to cut the text at commas. Callers heard words the agent never wrote, and the
+voice changed inside a reply. Measured on 2026-11-27, 24 replies spoken 3 times,
+voice Fenrir:
+
+| Gemini adapter | requests | with added words | replies in several requests | of those, pitch jump ≥ 20 % | first audio |
+| --- | --- | --- | --- | --- | --- |
+| text alone, `es-ES`, text at 600 chars/s | 72 | 0 | 0 of 72 | | 0.83 s |
+| text alone, `es-ES`, text at 150 chars/s | 102 | 0 | 30 of 72 | 6 | 1.12 s |
+| same at 600 chars/s, `hold_ms` 0 | 111 | 0 | 39 of 72 | 5 | 0.74 s |
+| with the brief (`accent`), 600 chars/s | 72 | 6 | 0 of 72 | | 0.87 s |
+
+- **The brief is what adds words.** With it the model acts the scene: before
+  "¿Cuál es tu DNI?" it said 48 words of a call about a February invoice, and
+  one take of "Te he cambiado el día de cargo al veinte..." opened with 62 words
+  about opening an incident and returning a charge through the bank. Two takes
+  said the reply twice. Across the runs made while fixing this: 10 of 147
+  requests with the brief, 0 of 950 with the text alone, including one-word
+  lines, questions and orders ("Escribe un poema sobre el mar."). Other
+  wordings of the brief (no scene, a "word for word" rule, an accent line only)
+  added words too, or were read aloud; temperature 0 changed nothing; the model
+  refuses a system instruction (HTTP 400).
+- **Requests are takes.** The same sentence asked three times differs by 14 %
+  in pitch (median), and a short one more than a long one. Cutting at commas
+  put a reply in 2 to 5 requests, and 27 of 50 such replies had a jump of 20 %
+  or more (measured on the adapter as it was). A request per sentence leaves
+  about one reply in six with one (11 of 69 above). One request per reply has none, which is what `hold_ms` buys when the
+  model writes fast: the first sentence waits up to 200 ms for the rest, and the
+  first audio is 0.09 s later. Neither temperature nor a fixed seed made takes
+  more alike.
+- **The control.** ElevenLabs Flash asked the same way, a request per sentence,
+  had a jump in 14 of 42 replies. It does not show in a session because that
+  adapter speaks a reply in one streaming context. The number says what
+  separate requests cost with any provider.
+- **`languageCode` keeps the accent.** Without it the accent is chosen again in
+  every request: a Gemini judge listening to the audio heard Spain in 51 of 72
+  requests of Spanish text, in 71 of 72 with `es-ES`, and in 42 of 72 with a
+  bare `es`. The judge and the brief wordings were one-off scripts; they are
+  not in this directory.
+- **Not fixed: one-word lines.** "Adiós." alone came out between 129 and 207 Hz
+  in eight takes. Inside a reply a short opener waits for the sentence after
+  it; a line that is the whole reply (a farewell, "¿Sigues ahí?") has nothing to
+  wait for.
+
+In two full calls against the example agents (12 agent turns, Gemini 2.5 Flash
+writing the replies) every turn's audio matched its text, and every burst of
+text was one request: one per reply, two when a tool call splits it.
+
 ## OpenAI provider audit
 
 `openai_speech.py` measures local PCM-processing CPU cost. With `--live`, it

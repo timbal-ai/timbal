@@ -76,11 +76,20 @@ def test_unknown_variants_and_unsupported_tuning_are_refused(hub) -> None:
 
 
 def test_call_variants_only_use_keys_a_browser_may_set(hub) -> None:
-    from timbal.server.voice import CLIENT_SETTABLE_VOICE_FIELDS
+    from timbal.server.voice import CLIENT_SETTABLE_VOICE_FIELDS, CLIENT_TUNING_TTS_EXTRA
 
     for group in hub.VARIANTES:
         for option in group["opciones"]:
-            assert set(option.get("hello", {})) <= set(CLIENT_SETTABLE_VOICE_FIELDS), (group["id"], option["id"])
+            hello = option.get("hello", {})
+            assert set(hello) <= set(CLIENT_SETTABLE_VOICE_FIELDS), (group["id"], option["id"])
+            assert set(hello.get("tts_extra", {})) <= set(CLIENT_TUNING_TTS_EXTRA), (group["id"], option["id"])
+
+
+def test_the_gemini_voice_option_names_the_language_and_the_region(hub) -> None:
+    """Without the tag Gemini picks the accent again in every request, and it changes inside one reply."""
+    voices = next(group for group in hub.VARIANTES if group["id"] == "voz")
+    gemini = next(option for option in voices["opciones"] if option["id"] == "gemini")
+    assert gemini["hello"]["tts_extra"] == {"language_code": "es-ES"}
 
 
 def _voice(voice_id: str, name: str, category: str = "professional", **labels: str) -> dict:

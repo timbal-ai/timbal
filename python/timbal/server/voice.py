@@ -394,12 +394,13 @@ def client_call_direction(config: dict[str, Any]) -> str | None:
 # Munsit, on-prem Deepgram or a residency endpoint.
 _OPENAI_STT_EXTRA = frozenset({"prompt", "threshold", "prefix_padding_ms", "silence_duration_ms", "noise_reduction"})
 _OPENAI_TTS_EXTRA = frozenset({"instructions"})
-# Gemini TTS reads one free-text line for the accent of its director's brief. The only way to get an Andalusian or a
-# Rioplatense voice out of a Gemini voice, so the playground has to be able to set it.
-_GEMINI_TTS_EXTRA = frozenset({"accent"})
-# Everything the Gemini adapter reads off ``tts_extra``. Only ``accent`` is client-settable; the rest is server
+# Gemini TTS takes the language and accent of a call as a tag (``language_code``: ``es-ES``, ``ca-ES``), and one
+# free-text line for the accent of a director's brief (``accent``), the only way to an accent no tag names
+# (Andalusian). A playground has to be able to set both.
+_GEMINI_TTS_EXTRA = frozenset({"accent", "language_code"})
+# Everything the Gemini adapter reads off ``tts_extra``. Only those two are client-settable; the rest is server
 # config. None of it may reach another provider when a call switches away from Gemini.
-_GEMINI_TTS_KEYS = _GEMINI_TTS_EXTRA | frozenset({"director_notes", "prefetch"})
+_GEMINI_TTS_KEYS = _GEMINI_TTS_EXTRA | frozenset({"director_notes", "prefetch", "hold_ms"})
 CLIENT_TUNING_STT_EXTRA = _OPENAI_STT_EXTRA | frozenset(
     {
         # Deepgram Flux / Nova
@@ -1225,8 +1226,9 @@ def build_voice_session(
             if defaults.tts_provider != "openai" and isinstance(defaults.tts_extra, dict) and key in defaults.tts_extra:
                 tts_extra[key] = defaults.tts_extra[key]
     if tts_provider != "gemini":
-        # ElevenLabs and Deepgram forward unknown keys into their query string: the Gemini brief (``accent``,
-        # ``director_notes``) and ``prefetch`` must not reach them.
+        # ElevenLabs and Deepgram forward unknown keys into their query string: what a call set for Gemini
+        # (``language_code``, ``accent``) and a Gemini agent's ``director_notes``, ``prefetch`` and ``hold_ms``
+        # must not reach them. An agent of theirs keeps the ``language_code`` it set for its own provider.
         for key in _GEMINI_TTS_KEYS:
             tts_extra.pop(key, None)
             if defaults.tts_provider != "gemini" and isinstance(defaults.tts_extra, dict) and key in defaults.tts_extra:

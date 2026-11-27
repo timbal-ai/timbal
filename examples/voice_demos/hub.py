@@ -71,7 +71,13 @@ VARIANTES: list[dict[str, Any]] = [
             {
                 "id": "gemini",
                 "nombre": "Gemini TTS",
-                "hello": {"tts_provider": "gemini", "tts_model": "gemini-3.8-flash-tts", "voice": "Fenrir"},
+                # Con el idioma y la región, el acento no cambia de una frase a otra.
+                "hello": {
+                    "tts_provider": "gemini",
+                    "tts_model": "gemini-3.8-flash-tts",
+                    "voice": "Fenrir",
+                    "tts_extra": {"language_code": "es-ES"},
+                },
             },
         ],
     },

@@ -1,16 +1,24 @@
 """Gemini TTS over ``streamGenerateContent`` (SSE), no provider SDK required.
 
 Gemini speech models take a whole prompt, not a live text stream, and keep no
-context between requests. So each *clause* is its own request and its own
-intonation. A reply is cut at sentence ends and at commas (see
-:func:`split_clauses`), the next clauses are requested while the current one
-plays (``prefetch``), and audio is handed to the session in order.
+context between requests: each request is a new take, with its own pitch and
+energy. So a reply is spoken in as few requests as its text allows. Text is
+cut after a sentence, never at a comma (see :func:`split_sentences`). A
+sentence waits ``hold_ms`` for the ones right behind it, and the sentences that
+arrive while a request is generating wait for it and go together. With a model
+that writes a reply in one burst that is one request per reply; with a slow one
+it is the first sentence and then the rest. Audio is handed to the session in
+order.
 
-The prompt is a director's brief followed by the transcript. The brief says
-who speaks, the scene, the pace and the accent. Keep the layout: telling the
-model to "read only the transcript" makes it read the notes aloud in a large
-share of calls, while a brief with a ``TRANSCRIPCIÓN`` header leaked none in
-testing.
+The prompt is the text to speak and nothing else. These models perform what
+surrounds the text. Given a director's brief (a profile, a scene, style notes)
+they say words of their own before the line ("vale, a ver, déjame que lo
+mire...") or read the notes aloud. Measured on ``gemini-3.8-flash-tts`` with
+``benchmarks/voice/tts_fidelity.py``: with the brief this adapter used to
+send, 10 of 147 requests said words that were not in the text, up to 87 of
+them; with the text alone, 0 of 950, questions and orders ("write a poem")
+included. No wording of the brief tried got to zero. Language and accent are a
+request field instead (``language_code``), which cannot be read aloud.
 
 Voices are Gemini prebuilt names (``Fenrir``, ``Puck`` ...). A voice or model
 id from another provider is ignored, so a session that switches provider on a
@@ -18,12 +26,25 @@ server configured for ElevenLabs does not send an ElevenLabs id to Google.
 
 ``AudioOutputConfig.extra`` knobs (all optional):
 
-``accent``
-    Free text for the brief's accent line. Default: peninsular Spanish.
-``director_notes``
-    Replaces the whole brief, keeping the transcript header.
+``language_code``
+    BCP-47 tag sent as ``speechConfig.languageCode`` (``"es-ES"``, ``"ca-ES"``,
+    ``"en-US"``). Without it Gemini takes the language from the text, and the
+    accent then changes from one request to the next: Spanish came out
+    Latin American in about 3 requests of 10. Name the region: a bare ``"es"``
+    does not pin the accent either. Text in another language is still read in
+    its own. A tag Gemini refuses is dropped for the rest of the call.
+``accent`` / ``director_notes``
+    Send a director's brief before the text: ``accent`` is the accent line of
+    the built-in brief (the way to a regional accent no tag names, such as
+    Andalusian), ``director_notes`` replaces the whole brief. Either one brings
+    back the added words measured above.
+``hold_ms``
+    How long a sentence waits for the next before it is requested alone
+    (default 200; 0 = not at all). The end of the reply ends the wait, so a
+    reply that is already whole is not held. This is the most a reply's first
+    audio is delayed, in exchange for one voice from its start to its end.
 ``prefetch``
-    Clause requests in flight at once (default 2).
+    Requests in flight at once (default 2).
 """
 
 from __future__ import annotations
@@ -33,14 +54,16 @@ import base64
 import contextlib
 import json
 import os
-import re
+import time
 from collections.abc import AsyncIterator
 
 import httpx
 import structlog
 from pydantic import SecretStr
 
+from .language import normalize_language_tag
 from .providers import AudioOutputConfig, TextToSpeech, TTSStream
+from .segments import sentence_boundary_ends
 
 logger = structlog.get_logger("timbal.voice.gemini_tts")
 
@@ -60,13 +83,13 @@ GEMINI_RATE = 24_000
 """Gemini returns 24 kHz PCM16 mono."""
 
 _URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent"
-_MIN_CLAUSE_CHARS = 18
-_TERMINALS = ".!?…;:"
+_MIN_REQUEST_CHARS = 18
+"""A shorter opener ("Perfecto, Marta.") waits for the sentence after it: one take, not two."""
+_SENTENCE_ENDS = ".!?\u061f\uff1f\uff01"
+"""What closes a sentence here. A colon or a semicolon does not: what follows belongs to the same take."""
 _FRAME_SECS = 0.1
-"""Audio leaves in 100 ms frames so a barge-in cuts within 100 ms, not at the end of a clause."""
-_SPLIT = re.compile(r"(?<=[.!?…;:])\s+|(?<=,)\s+(?=\S{3,})")
+"""Audio leaves in 100 ms frames so a barge-in cuts within 100 ms, not at the end of a request."""
 
-DEFAULT_ACCENT = "castellano peninsular de España, natural, sin acento latinoamericano"
 _BRIEF = """# PERFIL DE AUDIO: agente de atención al cliente en España
 ## ESCENA: llamada telefónica real a un servicio de atención al cliente.
 ### NOTAS DEL DIRECTOR
@@ -74,6 +97,15 @@ Estilo: natural, cercano y profesional, como una persona real al teléfono. Sin 
 Ritmo: ágil y fluido, pausas breves. Las dudas escritas ('eh...', 'mm...', 'a ver,') se dicen tal cual, como alguien que piensa en voz alta, sin exagerar.
 Acento: {accent}"""
 _TRANSCRIPT_HEADER = "#### TRANSCRIPCIÓN"
+
+
+class GeminiTTSError(RuntimeError):
+    """Gemini answered a synthesis request with an HTTP error."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(f"Gemini TTS HTTP {status}: {detail}")
+        self.status = status
+        self.detail = detail
 
 
 def effective_tts_model(config: AudioOutputConfig) -> str:
@@ -89,25 +121,31 @@ def effective_voice(config: AudioOutputConfig) -> str:
 
 
 def build_prompt(text: str, *, accent: str | None = None, director_notes: str | None = None) -> str:
-    """The director's brief plus the transcript, in the layout that does not leak the notes."""
-    brief = (director_notes or "").strip() or _BRIEF.format(accent=(accent or "").strip() or DEFAULT_ACCENT)
-    return f"{brief}\n{_TRANSCRIPT_HEADER}\n{text}"
+    """What one request sends: the text alone, or a brief and then the text when the agent asked for a brief."""
+    notes = (director_notes or "").strip()
+    accent = (accent or "").strip()
+    if not notes and not accent:
+        return text
+    return f"{notes or _BRIEF.format(accent=accent)}\n{_TRANSCRIPT_HEADER}\n{text}"
 
 
-def split_clauses(text: str, *, min_chars: int = _MIN_CLAUSE_CHARS) -> tuple[list[str], str]:
-    """Split off what can be spoken now. Returns ``(complete clauses, unfinished rest)``."""
-    parts = _SPLIT.split(text)
-    if len(parts) == 1:
-        return [], text
-    out: list[str] = []
-    carry = ""
-    for p in parts[:-1]:
-        carry = f"{carry} {p}".strip() if carry else p
-        if len(carry) >= min_chars:
-            out.append(carry)
-            carry = ""
-    rest = f"{carry} {parts[-1]}".strip() if carry else parts[-1]
-    return out, rest
+def split_sentences(text: str, *, min_chars: int = _MIN_REQUEST_CHARS) -> tuple[str, str]:
+    """Split off what can be spoken now. Returns ``(the complete sentences, the unfinished rest)``.
+
+    The sentences come back as one text, for one request. Nothing is cut inside a sentence: not at a comma, not at
+    a colon, and not at the period of ``Sr.`` or ``3.14`` (the session's own boundary rules). Sentences that do not
+    add up to ``min_chars`` are not ready yet.
+    """
+    body = text.rstrip()
+    # A word after the text gives its last terminator the lookahead a sentence boundary needs.
+    ends = [end for end in sentence_boundary_ends(f"{body} x") if body[:end].rstrip()[-1:] in _SENTENCE_ENDS]
+    if not ends:
+        return "", text
+    cut = min(ends[-1], len(body))
+    ready = body[:cut].strip()
+    if len(ready) < min_chars:
+        return "", text
+    return ready, (text[cut:].lstrip() if cut < len(body) else "")
 
 
 def _resolve_api_key(explicit: str | SecretStr | None) -> str:
@@ -122,7 +160,7 @@ def _resolve_api_key(explicit: str | SecretStr | None) -> str:
 
 
 class GeminiStreamTTS(TextToSpeech):
-    """Gemini TTS: one SSE request per clause, ordered playback, bounded read-ahead."""
+    """Gemini TTS: one SSE request per group of sentences, ordered playback, bounded read-ahead."""
 
     provider_id = "gemini"
 
@@ -136,7 +174,9 @@ class GeminiStreamTTS(TextToSpeech):
         self._voice = DEFAULT_VOICE
         self._accent: str | None = None
         self._notes: str | None = None
+        self._language_code: str | None = None
         self._prefetch = 2
+        self._hold = 0.2
         self._rate = GEMINI_RATE
         self._streams: set[_GeminiTTSStream] = set()
 
@@ -150,7 +190,13 @@ class GeminiStreamTTS(TextToSpeech):
         self._voice = effective_voice(config)
         self._accent = str(extra["accent"]) if extra.get("accent") else None
         self._notes = str(extra["director_notes"]) if extra.get("director_notes") else None
+        self._language_code = (
+            normalize_language_tag(str(extra["language_code"])) if extra.get("language_code") else None
+        )
+        if extra.get("language_code") and self._language_code is None:
+            logger.warning("gemini_tts_language_code_ignored", reason="not a language tag")
         self._prefetch = max(1, int(extra.get("prefetch", 2)))
+        self._hold = max(0.0, float(extra.get("hold_ms", 200))) / 1000
         self._rate = int(config.sample_rate)
         # The key travels in a header: httpx logs URLs, and a key in the query string would land in the logs.
         self._client = httpx.AsyncClient(
@@ -175,19 +221,23 @@ class GeminiStreamTTS(TextToSpeech):
 
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         """One whole text in a single request (fixed lines such as greetings)."""
-        if not text.strip():
+        text = " ".join(text.split())
+        if not text:
             return
-        async for frame in self._clause_with_retry(text.strip()):
+        async for frame in self._request_with_retry(text):
             yield frame
 
     def _frames(self, pcm: bytes) -> list[bytes]:
         step = max(2, int(self._rate * _FRAME_SECS) * 2)
         return [pcm[i : i + step] for i in range(0, len(pcm), step)]
 
-    async def _clause_audio(self, text: str) -> AsyncIterator[bytes]:
+    async def _request_audio(self, text: str) -> AsyncIterator[bytes]:
         """Audio for one text at the session rate. Raises if Gemini fails or sends no audio."""
         if self._client is None:
             raise RuntimeError("Call connect() before synthesizing.")
+        speech: dict[str, object] = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self._voice}}}
+        if self._language_code:
+            speech["languageCode"] = self._language_code
         body = {
             "contents": [
                 {
@@ -195,10 +245,7 @@ class GeminiStreamTTS(TextToSpeech):
                     "parts": [{"text": build_prompt(text, accent=self._accent, director_notes=self._notes)}],
                 }
             ],
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self._voice}}},
-            },
+            "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": speech},
         }
         resampler = None
         if self._rate != GEMINI_RATE:
@@ -210,7 +257,7 @@ class GeminiStreamTTS(TextToSpeech):
         async with self._client.stream("POST", _URL.format(model=self._model), params={"alt": "sse"}, json=body) as r:
             if r.status_code >= 400:
                 detail = (await r.aread()).decode(errors="replace")[:300]
-                raise RuntimeError(f"Gemini TTS HTTP {r.status_code}: {detail}")
+                raise GeminiTTSError(r.status_code, detail)
             async for line in r.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -239,12 +286,16 @@ class GeminiStreamTTS(TextToSpeech):
             for frame in self._frames(resampler.flush()):
                 yield frame
 
-    async def _clause_with_retry(self, text: str) -> AsyncIterator[bytes]:
-        """One retry when a request fails before any audio (a 5xx, or a text-only answer Gemini gives now and then)."""
+    async def _request_with_retry(self, text: str) -> AsyncIterator[bytes]:
+        """One retry when a request fails before any audio (a 5xx, or a text-only answer Gemini gives now and then).
+
+        A language tag Gemini refuses is not a reason to lose the call's voice: the request goes again without the
+        tag, and so does every later one.
+        """
         for attempt in (1, 2):
             sent = False
             try:
-                async for frame in self._clause_audio(text):
+                async for frame in self._request_audio(text):
                     sent = True
                     yield frame
                 return
@@ -253,11 +304,15 @@ class GeminiStreamTTS(TextToSpeech):
             except Exception as exc:
                 if sent or attempt == 2:
                     raise
+                if isinstance(exc, GeminiTTSError) and exc.status == 400 and "language_code" in exc.detail:
+                    logger.warning("gemini_tts_language_code_refused", language_code=self._language_code)
+                    self._language_code = None
+                    continue
                 logger.warning("gemini_tts_retry", error=str(exc)[:200], text_preview=text[:60])
 
 
 class _GeminiTTSStream(TTSStream):
-    """One reply: every closed clause is requested as soon as it arrives and plays in order."""
+    """One reply: its complete sentences, in as few requests as the pace of the text allows, played in order."""
 
     def __init__(self, tts: GeminiStreamTTS) -> None:
         self._tts = tts
@@ -266,6 +321,9 @@ class _GeminiTTSStream(TTSStream):
         self._queues: list[asyncio.Queue[bytes | Exception | None]] = []
         self._tasks: list[asyncio.Task[None]] = []
         self._sem = asyncio.Semaphore(tts._prefetch)
+        self._generating = 0
+        self._hold_timer: asyncio.TimerHandle | None = None
+        self._first_text_at: float | None = None
         self._ended = False
         self._aborted = False
         self._audio_done = False
@@ -273,14 +331,23 @@ class _GeminiTTSStream(TTSStream):
         self._progress = asyncio.Event()
 
     def _launch(self, text: str) -> None:
+        text = " ".join(text.split())  # one line: a reply's line breaks are not part of what is said
+        if not text:
+            return
         out: asyncio.Queue[bytes | Exception | None] = asyncio.Queue()
         self._queues.append(out)
         self._jobs.put_nowait(out)
+        logger.debug(
+            "gemini_tts_request",
+            request=len(self._queues),
+            chars=len(text),
+            since_first_text_ms=round((time.monotonic() - (self._first_text_at or time.monotonic())) * 1000),
+        )
 
         async def run() -> None:
             try:
                 async with self._sem:
-                    async for frame in self._tts._clause_with_retry(text):
+                    async for frame in self._tts._request_with_retry(text):
                         if self._aborted:
                             return
                         out.put_nowait(frame)
@@ -290,27 +357,54 @@ class _GeminiTTSStream(TTSStream):
                 out.put_nowait(exc)
             finally:
                 out.put_nowait(None)
+                self._generating -= 1
+                self._launch_ready()
 
+        self._generating += 1
         self._tasks.append(asyncio.create_task(run()))
+
+    def _launch_ready(self) -> None:
+        """Request the sentences that are complete, unless a request is still generating.
+
+        Audio is generated about three times faster than it plays, so the sentences that arrive while one request
+        runs can wait for it and go together: what follows a reply's first request is one more take, however many
+        sentences it has, and no audio is later for it.
+        """
+        self._stop_hold()
+        if self._generating or self._ended or self._aborted:
+            return
+        ready, self._buf = split_sentences(self._buf)
+        if ready:
+            self._launch(ready)
 
     async def feed(self, text: str) -> None:
         if self._ended or self._aborted or not text:
             return
+        # The session feeds a reply in segments it has already cut where speech can break. What is complete
+        # goes in one request, as it came: cutting it again at each sentence, or at a comma, gave every piece a
+        # take of its own, and the voice changed from one to the next.
+        if self._first_text_at is None:
+            self._first_text_at = time.monotonic()
         self._buf += text
-        done, self._buf = split_clauses(self._buf)
-        # The session feeds whole sentences: they end in punctuation and the next space arrives with the
-        # next sentence. Waiting for that space would delay the first audio, so a long-enough tail that ends
-        # a clause is spoken now.
-        rest = self._buf.strip()
-        if len(rest) >= _MIN_CLAUSE_CHARS and rest[-1] in _TERMINALS:
-            done.append(rest)
-            self._buf = ""
-        for clause in done:
-            self._launch(clause)
+        if self._generating or self._hold_timer is not None or not split_sentences(self._buf)[0]:
+            return  # it goes with what is waiting, or it is not a sentence yet
+        if self._tts._hold <= 0:
+            self._launch_ready()
+        else:
+            # A model writes the sentences of a short reply within milliseconds of each other. Asked for one by
+            # one they are as many takes; held this long they are one, and ``flush()`` (the reply's end, a tool
+            # call) cuts the wait short.
+            self._hold_timer = asyncio.get_running_loop().call_later(self._tts._hold, self._launch_ready)
+
+    def _stop_hold(self) -> None:
+        if self._hold_timer is not None:
+            self._hold_timer.cancel()
+            self._hold_timer = None
 
     async def flush(self) -> bool:
-        if not self._ended and not self._aborted and self._buf.strip():
-            self._launch(self._buf.strip())
+        self._stop_hold()
+        if not self._ended and not self._aborted:
+            self._launch(self._buf)
         self._buf = ""
         return True
 
@@ -334,6 +428,7 @@ class _GeminiTTSStream(TTSStream):
         if self._aborted:
             return
         self._aborted = True
+        self._stop_hold()
         for t in self._tasks:
             t.cancel()
         for q in self._queues:
