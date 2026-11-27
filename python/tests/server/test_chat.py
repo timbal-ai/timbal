@@ -240,6 +240,58 @@ def test_steer_joins_the_running_turn(client):
     assert state["turns"] == 1 and state["busy"] is False and state["pending"] == []
 
 
+def test_an_agent_message_starts_a_turn_and_a_repeat_is_a_duplicate(client):
+    session_id = open_session(client)
+    client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi"})
+    read_log(client, session_id, until_kind="turn_finished", count=1)
+    url = f"/chat/sessions/{session_id}/agent_messages"
+    body = {"from": "planner", "text": "the build is green", "message_id": "am_1", "hops": 1}
+    sent = client.post(url, json=body)
+    assert sent.status_code == 202, sent.text
+    assert sent.json()["duplicate"] is False and sent.json()["message_id"] == "am_1"
+    assert client.post(url, json=body).json()["duplicate"] is True
+    items = read_log(client, session_id, until_kind="turn_finished", count=2)
+    (received,) = [item for _, item in items if item.get("kind") == "agent_message"]
+    assert received["sender"] == "planner" and received["hops"] == 1
+    started = [item for _, item in items if item.get("kind") == "turn_started"]
+    assert started[-1]["trigger"]["kind"] == "session_event"
+    assert client.post(url, json={"from": "planner"}).status_code == 400
+    assert client.post(url, json={"from": "planner", "text": "x", "priority": "asap"}).status_code == 422
+    assert client.post("/chat/sessions/nope/agent_messages", json=body).status_code == 404
+
+
+def test_an_agent_message_the_answers_could_not_carry_is_a_400_and_not_queued(client):
+    session_id = open_session(client)
+    url = f"/chat/sessions/{session_id}/agent_messages"
+    for body in (
+        {"from": "planner", "text": "hi \ud800"},
+        {"from": "planner", "text": "hi", "message_id": "am_\ud800"},
+        {"from": "planner \ud800", "text": "hi"},
+    ):
+        sent = client.post(url, content=json.dumps(body), headers={"content-type": "application/json"})
+        assert sent.status_code == 400, sent.text
+    log = client.get(f"/chat/sessions/{session_id}/log", params={"after": 0, "wait_ms": 0}).json()["events"]
+    assert not [entry for entry in log if entry["data"].get("kind") == "agent_message"]
+
+
+def test_an_agent_message_refused_by_the_session_says_why(client, monkeypatch):
+    from timbal.core.chat_session import ChatSession
+    from timbal.core.peers import PeerRejected
+
+    session_id = open_session(client)
+    url = f"/chat/sessions/{session_id}/agent_messages"
+    refused = client.post(url, json={"from": "the planner", "text": "hi"})
+    assert refused.status_code == 422 and refused.json()["reason"] == "invalid"
+
+    async def blocked(_self, _text, _sender, _peer):
+        raise PeerRejected("blocked", "Blocked by the recipient's 'pii' guardrail.")
+
+    monkeypatch.setattr(ChatSession, "_screen_agent_message", blocked)
+    refused = client.post(url, json={"from": "planner", "text": "my card is 4111"})
+    assert refused.status_code == 403
+    assert refused.json() == {"detail": "Blocked by the recipient's 'pii' guardrail.", "reason": "blocked"}
+
+
 def test_followup_gets_its_own_turn_and_the_log_resumes_from_a_cursor(client):
     session_id = open_session(client)
     client.post(f"/chat/sessions/{session_id}/messages", json={"text": "start"})

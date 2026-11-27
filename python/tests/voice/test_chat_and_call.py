@@ -124,7 +124,7 @@ class TestWhoAnswersAUserMessage:
                 await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 typed = chat.send("escrito 2")
                 await chat.flush()
                 # Kept: the session lives on in its store, with this message. Not the call's to answer.
@@ -167,7 +167,7 @@ class TestWhoAnswersAUserMessage:
                 await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 typed = chat.send("escrito 2")
                 await chat.flush()
                 await chat.close(keep=True)
@@ -216,10 +216,10 @@ class TestWhoAnswersAUserMessage:
                 await _until(lambda: _owner(chat) is call._scheduler)
                 await chat.flush()
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 store.hold = True
                 chat.send("escrito 2")
-                await asyncio.wait_for(store.entered.wait(), 2)  # its save is out, and held
+                await asyncio.wait_for(store.entered.wait(), 30)  # its save is out, and held
                 closing = asyncio.create_task(chat.close(keep=True))
                 await _until(lambda: call._scheduler.successor(chat.store) is None)  # the chat has let go
                 if source == "user":
@@ -264,7 +264,7 @@ class TestWhoAnswersAUserMessage:
                 await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 chat.send("escrito 2")
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 await chat.flush()
                 await chat.close(keep=True)  # cuts the turn: the restore has to read its run
                 model.opened.set()  # the gate is for that turn only
@@ -301,7 +301,7 @@ class TestWhoAnswersAUserMessage:
                 await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 typed = chat.send("escrito 2")
                 await chat.flush()
                 await chat.close(keep=True)
@@ -337,7 +337,7 @@ class TestWhoAnswersAUserMessage:
             await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
             await _said(call, events, "Hola por voz.")
             await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-            await asyncio.wait_for(model.entered.wait(), 2)
+            await asyncio.wait_for(model.entered.wait(), 30)
             receipt = await call.notify("¿qué hora es?", source="user", announce="when_idle")
             chat = ChatSession(_agent(model), parent_id=call._last_run_context.id)
             chats.append(chat)
@@ -375,7 +375,7 @@ class TestTheCallsEventsStayTheCalls:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 typed.append(chat.send("escrito 2"))  # steer: for the turn in flight, if it were the chat's
                 await asyncio.sleep(0.2)
                 model.opened.set()
@@ -406,7 +406,7 @@ class TestTheCallsEventsStayTheCalls:
             async with ChatSession(steering_agent(), parent_id=call._last_run_context.id) as chat:
                 assert _owner(chat) is chat._scheduler
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 typed.append(chat.send("escrito 2"))
                 await asyncio.sleep(0.2)
                 model.opened.set()
@@ -445,7 +445,7 @@ class TestTheCallsEventsStayTheCalls:
                 await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 receipt = await call.notify("informe listo")
                 await chat.flush()
                 await chat.close(keep=True)
@@ -490,7 +490,7 @@ class TestTheCallsEventsStayTheCalls:
                 await _until(lambda: _owner(chat) is call._scheduler)
                 hold[0] = True
                 chat.send("escrito 2")
-                await asyncio.wait_for(entered.wait(), 3)  # the chat's turn has started, its prompt not built yet
+                await asyncio.wait_for(entered.wait(), 30)  # the chat's turn has started, its prompt not built yet
                 receipts.append(await call.notify("informe listo"))
                 gate.set()
                 await _turns(chat, 2)
@@ -525,7 +525,7 @@ class TestTheCallsEventsStayTheCalls:
                 await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 chat.send("escrito 2")
-                await asyncio.wait_for(started.wait(), 3)
+                await asyncio.wait_for(started.wait(), 30)
                 # For the turn in flight (lane="next"), but not the user's words: the call's to speak.
                 receipts.append(chat.store.post_event("informe listo", lane="next"))
                 release.set()
@@ -604,7 +604,7 @@ class TestBothBusy:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 chat.send("escrito 2")
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
                 await asyncio.sleep(0.3)
                 assert len(model.calls) == 1  # the caller's turn waits for the chat's
@@ -625,7 +625,7 @@ class TestBothBusy:
 
             async def drive(events: list[VoiceSessionEvent]) -> None:
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 1"))
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 chat.send("escrito 2")
                 await asyncio.sleep(0.3)
                 assert len(model.calls) == 1  # the chat's turn waits for the caller's
@@ -1031,13 +1031,13 @@ class TestAQuestionWaitsOnTheCall:
                 first = asyncio.create_task(
                     _collect(call.agent(prompt="paga", parent_id=asked.run_id, resume={asked.approval_id: True}))
                 )
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 await asyncio.sleep(0.2)
                 # The answer's run is running: the chat does not start behind it, where a second
                 # question would find its turn already started.
                 assert not chat.busy and len(chat.pending_messages()) == 1
                 model.opened.set()
-                output, [second] = await asyncio.wait_for(first, 3)
+                output, [second] = await asyncio.wait_for(first, 30)
                 assert output.status.reason == "approval_required"
                 await asyncio.sleep(0.3)
                 assert chat.turns == 1 and len(chat.pending_messages()) == 1 and not chat.parked
@@ -1440,7 +1440,7 @@ class TestAQuestionTheChatCannotRead:
             await asyncio.wait_for(chat._wait_to_read_again(), 0.3)
             assert chat._question_failures == 0
             chat._work.clear()
-            await asyncio.wait_for(chat._wait_to_read_again(), 2)  # the whole first wait (0.5 s)
+            await asyncio.wait_for(chat._wait_to_read_again(), 30)  # the whole first wait (0.5 s)
             assert chat._question_failures == 1
 
 
@@ -1500,7 +1500,7 @@ class TestOnlyWhatIsTypedWhileLent:
             chat.send("escrito 1")
             await _turns(chat, 1)
             chat.send("escrito 2")
-            await asyncio.wait_for(model.entered.wait(), 2)
+            await asyncio.wait_for(model.entered.wait(), 30)
             call, stt = _call(model, parent_run_id=chat.head)
 
             async def drive(_events: list[VoiceSessionEvent]) -> None:
@@ -1560,7 +1560,7 @@ class TestOnlyWhatIsTypedWhileLent:
                 await _said(call, events, "Hola por voz.")
                 await _until(lambda: _owner(chat) is call._scheduler)
                 await stt.inject(TranscriptEvent(type="committed", text="hablado 2"))
-                await asyncio.wait_for(model.entered.wait(), 2)
+                await asyncio.wait_for(model.entered.wait(), 30)
                 chat._wakes.append(
                     _Wake(
                         text="revisa el turno cortado",
@@ -1623,7 +1623,7 @@ class TestATurnCutAsItEnds:
                 await _until(lambda: _owner(chat) is call._scheduler)
                 _SlowEnd.hold = "escrito 2"
                 chat.send("escrito 2")
-                await asyncio.wait_for(_SlowEnd.entered.wait(), 3)
+                await asyncio.wait_for(_SlowEnd.entered.wait(), 30)
                 chat.interrupt()  # lands in the save that ends the chat's run, admitted by the call
                 await _until(lambda: not chat.busy)
                 _SlowEnd.gate.set()

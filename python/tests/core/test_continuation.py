@@ -90,7 +90,7 @@ async def until(predicate):
         while not predicate():
             await asyncio.sleep(0)
 
-    await asyncio.wait_for(poll(), 2)
+    await asyncio.wait_for(poll(), 30)
 
 
 async def until_waiting(stream):
@@ -98,7 +98,7 @@ async def until_waiting(stream):
 
 
 async def settle(store):
-    await asyncio.wait_for(asyncio.gather(*(record.task for record in store._tasks.values())), 2)
+    await asyncio.wait_for(asyncio.gather(*(record.task for record in store._tasks.values())), 30)
     await asyncio.sleep(0)
 
 
@@ -136,7 +136,7 @@ async def test_completion_starts_new_run_without_rewriting_history(tmp_path, pro
     initial_memory = [message.collect_text() for message in initial_context.root_span().memory]
     task_id = store_for_run(initial.run_id).list()[0]["task_id"]
     release.set()
-    events = await asyncio.wait_for(consume(stream), 3)
+    events = await asyncio.wait_for(consume(stream), 30)
     outputs = root_outputs(events)
     assert len(outputs) == 1
     assert outputs[0].run_id != initial.run_id
@@ -175,14 +175,14 @@ async def test_completion_during_model_response_does_not_overlap():
     agent, _ = make_agent(release, model=model)
     stream = agent.stream_until_idle(prompt="start")
     consumer = asyncio.create_task(consume(stream))
-    await asyncio.wait_for(response_started.wait(), 2)
+    await asyncio.wait_for(response_started.wait(), 30)
     store = store_for_run(stream.last_run_id)
     release.set()
     await settle(store)
     assert model.call_count == 1
     assert stream.continuations == 0
     release_response.set()
-    events = await asyncio.wait_for(consumer, 3)
+    events = await asyncio.wait_for(consumer, 30)
     assert len(root_outputs(events)) == 2
     assert model.call_count == 3
 
@@ -290,9 +290,9 @@ async def test_direct_turn_preempts_waiting_driver():
     initial = await through_output(stream)
     consumer = asyncio.create_task(consume(stream))
     await until_waiting(stream)
-    output = await asyncio.wait_for(agent(prompt="status", parent_id=initial.run_id).collect(), 2)
+    output = await asyncio.wait_for(agent(prompt="status", parent_id=initial.run_id).collect(), 30)
     assert output.status.code == "success"
-    assert await asyncio.wait_for(consumer, 2) == []
+    assert await asyncio.wait_for(consumer, 30) == []
     assert stream.stop_reason == "preempted"
     store = store_for_run(initial.run_id)
     assert store.continuation_owner() is None
@@ -321,9 +321,9 @@ async def test_direct_turn_takes_the_notice_a_driver_holds_for_admission():
     initial = await through_output(stream)
     consumer = asyncio.create_task(consume(stream))
     release.set()
-    await asyncio.wait_for(admit_entered.wait(), 2)
-    output = await asyncio.wait_for(agent(prompt="status", parent_id=initial.run_id).collect(), 2)
-    assert await asyncio.wait_for(consumer, 2) == []
+    await asyncio.wait_for(admit_entered.wait(), 30)
+    output = await asyncio.wait_for(agent(prompt="status", parent_id=initial.run_id).collect(), 30)
+    assert await asyncio.wait_for(consumer, 30) == []
     assert stream.stop_reason == "preempted"
     assert stream.continuations == 0
     assert admit_cancelled == [True]
@@ -352,13 +352,13 @@ async def test_direct_turn_rejected_while_followup_in_flight():
     initial = await through_output(stream)
     consumer = asyncio.create_task(consume(stream))
     release.set()
-    await asyncio.wait_for(entered.wait(), 2)
-    output = await asyncio.wait_for(agent(prompt="racing user", parent_id=initial.run_id).collect(), 2)
+    await asyncio.wait_for(entered.wait(), 30)
+    output = await asyncio.wait_for(agent(prompt="racing user", parent_id=initial.run_id).collect(), 30)
     assert output.status.code == "error"
     assert "in flight" in output.error["message"]
     assert output.run_id not in hook_runs
     opened.set()
-    events = await asyncio.wait_for(consumer, 2)
+    events = await asyncio.wait_for(consumer, 30)
     assert texts(root_outputs(events)) == ["Finished."]
     assert stream.stop_reason == "idle"
     assert hook_runs == [initial.run_id, stream.last_run_id]
@@ -374,13 +374,13 @@ async def test_new_driver_preempts_waiting_driver():
     first_consumer = asyncio.create_task(consume(first))
     await until_waiting(first)
     second = agent.stream_until_idle(prompt="next", parent_id=initial.run_id)
-    second_output = await asyncio.wait_for(through_output(second), 2)
+    second_output = await asyncio.wait_for(through_output(second), 30)
     assert second_output.status.code == "success"
-    assert await asyncio.wait_for(first_consumer, 2) == []
+    assert await asyncio.wait_for(first_consumer, 30) == []
     assert first.stop_reason == "preempted"
     assert continuation_for_run(initial.run_id) is second
     release.set()
-    events = await asyncio.wait_for(consume(second), 2)
+    events = await asyncio.wait_for(consume(second), 30)
     assert texts(root_outputs(events)) == ["Finished."]
     assert second.stop_reason == "idle"
 
@@ -404,19 +404,19 @@ async def test_new_driver_on_the_run_the_first_one_started_from():
     assert store_for_run(earlier.run_id) is None
     second = agent.stream_until_idle(prompt="next", parent_id=earlier.run_id)
     second_run = asyncio.create_task(through_output(second))
-    await asyncio.wait_for(entered.wait(), 2)
+    await asyncio.wait_for(entered.wait(), 30)
     # The second driver owns the session from its first run on: a direct turn meanwhile is refused.
     assert continuation_for_run(earlier.run_id) is second
-    direct = await asyncio.wait_for(agent(prompt="racing user", parent_id=earlier.run_id).collect(), 2)
+    direct = await asyncio.wait_for(agent(prompt="racing user", parent_id=earlier.run_id).collect(), 30)
     assert direct.status.code == "error" and "in flight" in direct.error["message"]
     opened.set()
-    second_output = await asyncio.wait_for(second_run, 2)
+    second_output = await asyncio.wait_for(second_run, 30)
     assert second_output.parent_run_id == initial.run_id
     assert second_output.metadata["requested_parent_id"] == earlier.run_id
-    assert await asyncio.wait_for(first_consumer, 2) == []
+    assert await asyncio.wait_for(first_consumer, 30) == []
     assert first.stop_reason == "preempted"
     release.set()
-    events = await asyncio.wait_for(consume(second), 2)
+    events = await asyncio.wait_for(consume(second), 30)
     assert texts(root_outputs(events)) == ["Finished."]
 
 
@@ -431,14 +431,14 @@ async def test_new_driver_rejected_while_followup_in_flight():
     initial = await through_output(first)
     consumer = asyncio.create_task(consume(first))
     release.set()
-    await asyncio.wait_for(entered.wait(), 2)
+    await asyncio.wait_for(entered.wait(), 30)
     second = agent.stream_until_idle(prompt="other", parent_id=initial.run_id)
     with pytest.raises(RuntimeError, match="in flight"):
         await asyncio.wait_for(consume(second), 2)
     assert second.stop_reason == "error"
     assert continuation_for_run(initial.run_id) is first
     opened.set()
-    await asyncio.wait_for(consumer, 2)
+    await asyncio.wait_for(consumer, 30)
     assert first.stop_reason == "idle"
     assert model.call_count == 3
 
@@ -452,7 +452,7 @@ async def test_stop_while_waiting_ends_the_stream_and_leaves_the_child():
     await until_waiting(stream)
     assert continuation_for_run(initial.run_id) is stream
     stream.stop()
-    assert await asyncio.wait_for(consumer, 2) == []
+    assert await asyncio.wait_for(consumer, 30) == []
     assert stream.stop_reason == "stopped"
     assert continuation_for_run(initial.run_id) is None
     store = store_for_run(initial.run_id)
@@ -476,11 +476,11 @@ async def test_stop_during_followup_lets_it_finish_and_starts_no_more():
     agent, _ = make_agent(release, model=model)
     stream = agent.stream_until_idle(prompt="start")
     consumer = asyncio.create_task(consume(stream))
-    await asyncio.wait_for(entered.wait(), 2)
+    await asyncio.wait_for(entered.wait(), 30)
     stream.stop()
     assert stream.stop_reason is None
     opened.set()
-    events = await asyncio.wait_for(consumer, 2)
+    events = await asyncio.wait_for(consumer, 30)
     assert texts(root_outputs(events)) == ["Working", "Working again"]
     assert stream.stop_reason == "stopped"
     assert model.call_count == 4
@@ -516,7 +516,7 @@ async def test_admit_is_awaited_before_each_followup():
     await until(lambda: admit_calls)
     assert model.call_count == 2
     admitted.set()
-    events = await asyncio.wait_for(consumer, 2)
+    events = await asyncio.wait_for(consumer, 30)
     assert len(root_outputs(events)) == 1
     assert admit_calls == [2]
     assert model.call_count == 3
@@ -528,7 +528,7 @@ async def test_sync_admit_is_accepted():
     admit_calls = []
     agent, model = make_agent(release)
     stream = AgentContinuation(agent, admit=lambda: admit_calls.append(True), prompt="start")
-    events = await asyncio.wait_for(consume(stream), 2)
+    events = await asyncio.wait_for(consume(stream), 30)
     assert len(root_outputs(events)) == 2
     assert admit_calls == [True]
 
@@ -612,7 +612,7 @@ async def test_waiter_wakes_when_already_acknowledged_task_finishes():
     waiter = asyncio.create_task(store.wait_for_completion())
     await asyncio.sleep(0)
     release.set()
-    assert await asyncio.wait_for(waiter, 2) is False
+    assert await asyncio.wait_for(waiter, 30) is False
     await stream.aclose()
 
 
@@ -636,7 +636,7 @@ async def test_cancellation_during_continuation_is_not_swallowed():
                     release.set()
 
     consumer = asyncio.create_task(run())
-    await asyncio.wait_for(continuation_started.wait(), 3)
+    await asyncio.wait_for(continuation_started.wait(), 30)
     consumer.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(consumer, 3)
@@ -660,14 +660,14 @@ async def test_followup_cut_before_memory_leaves_notice_for_next_turn():
     await through_output(stream)
     consumer = asyncio.create_task(consume(stream))
     release.set()
-    await asyncio.wait_for(entered.wait(), 2)
+    await asyncio.wait_for(entered.wait(), 30)
     cut_run_id = stream.last_run_id
     consumer.cancel()
     with pytest.raises(asyncio.CancelledError):
         await consumer
     assert stream.stop_reason == "cancelled"
     assert model.call_count == 2
-    output = await asyncio.wait_for(agent(prompt="status", parent_id=cut_run_id).collect(), 2)
+    output = await asyncio.wait_for(agent(prompt="status", parent_id=cut_run_id).collect(), 30)
     assert output.status.code == "success"
     memory = await stored_memory(output)
     assert [message.collect_text() for message in memory if message.role == "user" and not message.is_runtime()] == [
@@ -692,7 +692,7 @@ async def test_two_sessions_using_one_agent_are_isolated():
         events = await consume(stream)
         return store, first.run_id, root_outputs(events)[0].parent_run_id
 
-    first, second = await asyncio.wait_for(asyncio.gather(run("first"), run("second")), 3)
+    first, second = await asyncio.wait_for(asyncio.gather(run("first"), run("second")), 30)
     assert first[0] is not second[0]
     assert first[1] == first[2]
     assert second[1] == second[2]

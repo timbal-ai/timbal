@@ -419,6 +419,24 @@ class Client:
                 self.session.withdraw(event.id)  # as the route does before its 503
         return False
 
+    async def agent(self, text, *, message_id, priority="normal") -> bool:
+        """A message from another agent, as ``POST .../agent_messages`` takes it. True: it was acknowledged."""
+        from timbal.core.peers import PeerRejected
+
+        if not self._alive():
+            return False
+        with contextlib.suppress(PeerRejected):  # closed under us
+            receipt = await self.session.receive_agent_message(
+                text, sender="planner", message_id=message_id, priority=priority
+            )
+            mark = self.session.mark()
+            if await self.stored() or (self._alive() and self.session.stored_since(mark)):
+                self.acked[receipt["event_id"]] = text
+                return True
+            if self._alive() and not receipt["duplicate"]:
+                self.session.withdraw(receipt["event_id"])  # as the route does before its 503
+        return False
+
     def stop(self) -> None:
         """Stop the session as ``POST .../interrupt`` does. Once a turn has started (a message no turn has
         taken yet is still queued, and a stop leaves the queue alone), a stop that is taken rules out the
@@ -462,6 +480,8 @@ class Client:
             and session._resume is None
             and not session.pending_messages()
             and session._in_flight is None
+            # An event that starts a turn (another agent's message) is still to be answered, as a message is.
+            and not session.due
         )
 
     async def answer(self) -> bool:
@@ -616,6 +636,20 @@ async def rooted(c):
     await c.settle()
 
 
+async def from_an_agent(c):
+    """Another agent's message starts a turn of its own (core/peers.py), which runs a tool."""
+    await c.agent("work on the release", message_id="am_1")
+    await c.settle()
+
+
+async def from_an_agent_urgently(c):
+    """An urgent message from another agent joins the running turn after its tool batch."""
+    await c.send("work")
+    if await c.until(lambda: c.calls["work"] or c.at_rest()):
+        await c.agent("the release is cancelled", message_id="am_2", priority="urgent")
+    await c.settle()
+
+
 # Scenarios whose snapshots load as ones written before ``root_run_id`` existed.
 LEGACY_SNAPSHOTS = {"rooted_legacy"}
 
@@ -640,6 +674,8 @@ SCENARIOS = {
     "wake_replaced": wake_replaced,
     "rooted": rooted,
     "rooted_legacy": rooted,
+    "from_an_agent": from_an_agent,
+    "from_an_agent_urgently": from_an_agent_urgently,
 }
 
 

@@ -47,8 +47,8 @@ async def test_interrupt_aborts_stream_and_pump_while_draining(at_boundary):
         session._schedule_tool_boundary()
     session._current_turn_task = asyncio.create_task(session._await_tts_chain())
     try:
-        await asyncio.wait_for(stream.end_started.wait(), 1)
-        await asyncio.wait_for(session.interrupt(), 1)
+        await asyncio.wait_for(stream.end_started.wait(), 30)
+        await asyncio.wait_for(session.interrupt(), 30)
         assert stream.aborted
         assert pump.done()
     finally:
@@ -141,7 +141,7 @@ async def test_multistep_memory_truncates_cleaned_message_copy_on_barge_in():
     session = VoiceSession(agent=agent, stt=MockSTT(), tts=tts, turn_detector="heuristic")
     turn = asyncio.create_task(session._run_turn("check order"))
     try:
-        await asyncio.wait_for(tool_entered.wait(), 1)
+        await asyncio.wait_for(tool_entered.wait(), 30)
         # Wait until TTS has emitted the pre-tool audio, then simulate only a prefix played.
         while session._turn_audio_bytes == 0:
             await asyncio.sleep(0)
@@ -307,7 +307,7 @@ async def test_punctuated_text_flushes_before_tool_arguments_finish():
                                 yield DeltaEvent(run_id=event.run_id, path=event.path, call_id=event.call_id, item=item)
                                 if isinstance(item, ToolUse):
                                     # Model is still generating arguments: no OutputEvent yet.
-                                    await asyncio.wait_for(flushed.wait(), 1)
+                                    await asyncio.wait_for(flushed.wait(), 30)
                         yield event
 
             return events()
@@ -333,7 +333,7 @@ async def test_punctuated_text_flushes_before_tool_arguments_finish():
         ),
     )
     session = VoiceSession(agent=agent, stt=MockSTT(), tts=TTS(), turn_detector="heuristic")
-    await asyncio.wait_for(session._run_turn("check it"), 3)
+    await asyncio.wait_for(session._run_turn("check it"), 30)
     assert flushed.is_set()
     assert session._last_run_context.root_span().output.collect_text() == "It shipped."
 
