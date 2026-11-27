@@ -76,6 +76,12 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
+          # The key names the runner's own Python (setup-python runs after this step), so without the matrix's
+          # every job of one OS in a full run shares a key and they race to save it ("Unable to reserve cache").
+          cache-suffix: py${{ matrix.python }}
+          # A cache is read back only from its own ref or main's, and main runs no CI: a merge queue run's ref is
+          # new each time and gone after it, so what it saved was never read (~10 MB and ~2 s per job).
+          save-cache: ${{ github.event_name != 'merge_group' }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
