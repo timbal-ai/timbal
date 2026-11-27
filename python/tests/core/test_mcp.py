@@ -2234,17 +2234,12 @@ class TestCrossLoopClose:
             free.set()
             stop()
 
-    def test_two_closes_on_two_threads_take_a_closed_loops_connection_once(self):
-        """close() on two threads both find a connection whose loop has closed: one takes it out of the pool and the
-        other finds it gone, instead of passing the check too and failing on the delete (``KeyError``, which ended
-        its cleanup)."""
+    @staticmethod
+    def race_at_the_pool_check(service, connections, other):
+        """Install ``connections`` as ``service``'s pool and run ``other`` on a thread of its own right after this
+        thread's first look at it, going on once ``other`` has finished or waits on the pool lock this thread holds
+        (where another thread's removal would land). Returns a list that holds that thread once it started."""
         import threading
-
-        from timbal.core.mcp import _RunConnection
-
-        class Server:
-            async def close(self):
-                pass
 
         class ObservedLock:
             """The pool lock, saying when a second taker waits on it."""
@@ -2261,10 +2256,38 @@ class TestCrossLoopClose:
             def __exit__(self, *_):
                 self.lock.release()
 
+        lock, armed, started = ObservedLock(), [True], []
+
+        class Pool(dict):
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                if armed and threading.current_thread() is threading.main_thread():
+                    armed.clear()  # this thread has looked; the other one goes now
+                    started.append(threading.Thread(target=other))
+                    started[0].start()
+                    for _ in range(1000):  # until it is done, or waits on the lock this thread holds
+                        if not started[0].is_alive() or lock.waited.wait(0.01):
+                            break
+                return value
+
+        service.__pydantic_private__["_run_connections"] = Pool(connections)
+        service.__pydantic_private__["_pool_lock"] = lock
+        return started
+
+    def test_two_closes_on_two_threads_take_a_closed_loops_connection_once(self):
+        """close() on two threads both find a connection whose loop has closed: one takes it out of the pool and the
+        other finds it gone, instead of passing the check too and failing on the delete (``KeyError``, which ended
+        its cleanup)."""
+        from timbal.core.mcp import _RunConnection
+
+        class Server:
+            async def close(self):
+                pass
+
         gone = asyncio.new_event_loop()
         gone.close()
         service = MCPServer(transport="http", service="api")
-        lock, results, armed, others = ObservedLock(), [], [True], []
+        results = []
 
         def close_here():
             try:
@@ -2273,23 +2296,36 @@ class TestCrossLoopClose:
             except BaseException as error:
                 results.append(error)
 
-        class Pool(dict):
-            def get(self, key, default=None):
-                value = super().get(key, default)
-                if armed and threading.current_thread() is threading.main_thread():
-                    armed.clear()  # this close() has looked; the other one, on its own thread, goes now
-                    others.append(threading.Thread(target=close_here))
-                    others[0].start()
-                    for _ in range(1000):  # until it is done, or waits on the lock this close() holds
-                        if not others[0].is_alive() or lock.waited.wait(0.01):
-                            break
-                return value
-
-        service.__pydantic_private__["_run_connections"] = Pool(run=_RunConnection(Server(), "fingerprint", gone))
-        service.__pydantic_private__["_pool_lock"] = lock
+        other = self.race_at_the_pool_check(service, {"run": _RunConnection(Server(), "fingerprint", gone)}, close_here)
         close_here()
-        others[0].join(10)
+        other[0].join(10)
         assert results == [None, None] and not service._run_connections
+
+    def test_a_run_dropped_while_close_takes_its_connection_is_taken_once(self):
+        """The run's loop closed: its end hook drops the run (``_drop_run``) on one thread while close() on another
+        takes the run's connection out of the pool. Both take the pool lock, so whichever comes second finds it gone
+        instead of failing on the delete (``KeyError``, which ended close()'s cleanup)."""
+        from timbal.core.mcp import _RunConnection
+
+        class Server:
+            async def close(self):
+                pass
+
+        gone = asyncio.new_event_loop()
+        gone.close()
+        service = MCPServer(transport="http", service="api")
+        errors = []
+
+        def drop():
+            try:
+                service._drop_run("run")
+            except BaseException as error:
+                errors.append(error)
+
+        other = self.race_at_the_pool_check(service, {"run": _RunConnection(Server(), "fingerprint", gone)}, drop)
+        asyncio.run(asyncio.wait_for(service.close(), 10))
+        other[0].join(10)
+        assert not errors and not service._run_connections
 
 
 class TestPlatformConnectionOutsideARun:

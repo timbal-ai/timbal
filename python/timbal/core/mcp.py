@@ -986,8 +986,9 @@ class MCPServer(ToolSet):
     _inflight_seq: int = PrivateAttr(default=0)
     # service="api": a run's root call id -> that run's platform connection (see _project_connection).
     _run_connections: dict[str, "_RunConnection"] = PrivateAttr(default_factory=dict)
-    # Taken around a pool insert and a remove-if-still-this-one (_unpool): close() on two threads may both find one
-    # connection to remove, and neither may remove a replacement put in meanwhile.
+    # Taken around every write to the pool (an insert, a remove-if-still-this-one in _unpool, a run's drop): close()
+    # on two threads, or a run's end beside a close(), may both find one connection to remove, and neither may remove
+    # a replacement put in meanwhile.
     _pool_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # Closes of run connections still going (``close()`` waits for them), and those of each run's (its end waits).
     _close_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
@@ -1295,7 +1296,8 @@ class MCPServer(ToolSet):
     def _drop_run(self, key: str) -> None:
         """Forget everything of the run ``key`` (its loop closed, taking its sessions): its connection, its closes,
         and its cut connections, which hold their credential headers."""
-        self._run_connections.pop(key, None)
+        with self._pool_lock:  # as every write to the pool: an _unpool on another thread checks, then deletes
+            self._run_connections.pop(key, None)
         self._run_closes.pop(key, None)
         for ident, (kept_key, _) in list(self._unclosed.items()):
             if kept_key == key:
