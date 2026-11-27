@@ -1805,6 +1805,8 @@ class MCPServer(ToolSet):
                 self._close_tasks.discard(task)
             elif owner is loop or owner.is_running():
                 by_loop.setdefault(owner, [])
+            elif not task.done():
+                paused += 1  # a close already started there (an idle close, a credential change) waits for it too
         waits = []
         for owner, entries in by_loop.items():
             if owner is loop:
@@ -1827,9 +1829,9 @@ class MCPServer(ToolSet):
             self._inflight.clear()
         if paused:
             raise RuntimeError(
-                f"MCP server {self._label!r}: {paused} platform connection(s) belong to an event loop that is not "
-                "running, so they cannot be closed from this one. Call close() on that loop (for example "
-                "runner.run(server.close()) for an asyncio.Runner) to close them."
+                f"MCP server {self._label!r}: {paused} platform connection(s), open or closing, belong to an event "
+                "loop that is not running, so they cannot be closed from this one. Call close() on that loop (for "
+                "example runner.run(server.close()) for an asyncio.Runner) to close them."
             )
 
     def __del__(self):

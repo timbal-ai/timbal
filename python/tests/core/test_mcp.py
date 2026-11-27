@@ -705,6 +705,41 @@ class TestPlatformConnectionLifetime:
             runner.run(service.close())
         assert closed == [True] and not service._run_connections
 
+    def test_close_says_so_when_a_close_already_started_waits_on_a_paused_loop(self):
+        """Let go of before close() (an idle close, a credential change): its close was started on the owner loop,
+        which paused before it finished. close() from another loop cannot finish it, and says so."""
+        from timbal.core.mcp import _RunConnection
+
+        closed = []
+
+        class SlowClose:
+            def __init__(self):
+                self.release = asyncio.Event()
+
+            async def close(self):
+                await self.release.wait()
+                closed.append(True)
+
+        fake = SlowClose()
+        service = MCPServer(transport="http", service="api")
+        with asyncio.Runner() as runner:
+
+            async def let_go():
+                service._run_connections["run"] = _RunConnection(fake, "fingerprint", asyncio.get_running_loop())
+                service._retire_run_connection("run")  # started; the runner pauses before it finishes
+
+            runner.run(let_go())
+            assert not service._run_connections and service._close_tasks
+            with pytest.raises(RuntimeError, match="open or closing"):
+                asyncio.run(asyncio.wait_for(service.close(), 10))
+
+            async def finish():
+                fake.release.set()
+                await service.close()
+
+            runner.run(finish())
+        assert closed == [True] and not service._close_tasks
+
     @pytest.mark.asyncio
     async def test_connections_let_go_of_are_not_kept_alive_by_the_run(self, monkeypatch):
         """One end hook per run, which finds the connection at the run's end: the hooks keep no server (with its
