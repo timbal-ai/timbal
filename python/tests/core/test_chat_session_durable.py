@@ -2305,8 +2305,17 @@ async def lease_from_here(session, store, ttl):
     # below and stamp the long lease again.
     assert time.monotonic() < session._lease_from + store.lease_ttl_s / 3
     store.lease_ttl_s = ttl
-    sent = time.monotonic()  # (a lease counts from when the request that confirmed it was sent)
-    await store.acquire_lease(session.id, process_owner())
+    deadline = time.monotonic() + 30  # (a hang guard)
+    while True:
+        sent = time.monotonic()  # (a lease counts from when the request that confirmed it was sent)
+        await store.acquire_lease(session.id, process_owner())
+        # Back before its first renewal is due: the session then plans as after a renewal of its own. A runner
+        # that stalled while this was out (after the store wrote it, say) has used up part of the short lease,
+        # and the session would renew at once, or past nine tenths of it give it up: ask again. Until the swap
+        # below the session still plans by the long lease, so the asking costs it nothing.
+        if time.monotonic() < sent + ttl / 3:
+            break
+        assert time.monotonic() < deadline, f"no renewal came back within a third of a {ttl:g} s lease"
     # Swapped with no await in between: a save that found no renewal loop would start a second one, counted
     # from the old lease, and the assignment below would hide it from close().
     session._stop_lease()
