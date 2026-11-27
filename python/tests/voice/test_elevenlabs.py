@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from timbal.voice import elevenlabs as el
-from timbal.voice.providers import AudioInputConfig, AudioOutputConfig
+from timbal.voice.providers import AudioInputConfig, AudioOutputConfig, TranscriptEvent
 
 
 class _IdleWs:
@@ -77,6 +77,293 @@ class TestScribeRealtimeQuery:
         assert q["no_verbatim"] == ["false"]
         assert "_private" not in q
         assert "stt_host" not in q
+
+    async def test_scribe_v3_live_is_the_default_and_v2_stays_selectable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert (await _connect_uri(monkeypatch, AudioInputConfig()))["model_id"] == ["scribe_v3_live"]
+        q = await _connect_uri(monkeypatch, AudioInputConfig(model="scribe_v2_realtime"))
+        assert q["model_id"] == ["scribe_v2_realtime"]
+
+    async def test_v3_live_options_reach_the_wire(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        q = await _connect_uri(
+            monkeypatch,
+            AudioInputConfig(extra={"commit_strategy": "turn_prediction", "diarize": True}),
+        )
+        assert q["commit_strategy"] == ["turn_prediction"]
+        assert q["diarize"] == ["true"]
+
+    async def test_keyterms_over_the_realtime_limits_are_dropped_not_sent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Realtime Scribe refuses the whole connection for a 51st term or a
+        21-character one (v2 and v3 Live, checked against the API). A Flux
+        agent with 100 phrases falls back here when Deepgram has no key."""
+        terms = ["a phrase of twenty-five ch"] + [f"t{i}" for i in range(60)]
+        q = await _connect_uri(monkeypatch, AudioInputConfig(keyterms=terms))
+        assert q["keyterms"] == [f"t{i}" for i in range(50)]
+        q = await _connect_uri(monkeypatch, AudioInputConfig(extra={"keyterms": terms}))
+        assert q["keyterms"] == [f"t{i}" for i in range(50)]
+        q = await _connect_uri(monkeypatch, AudioInputConfig(keyterms=["Norte Market", "exactly twenty chars"]))
+        assert q["keyterms"] == ["Norte Market", "exactly twenty chars"]
+
+    async def test_flux_language_list_becomes_secondary_languages(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``stt_languages`` is a Flux setting, so a list only gets here on the
+        fallback to Scribe. It used to raise, which failed every such call
+        (unless the agent also had keyterms, which skipped the check)."""
+        q = await _connect_uri(monkeypatch, AudioInputConfig(language="es-ES", languages=["es", "en", "en-US", "fr"]))
+        assert q["language_code"] == ["es-ES"]
+        assert q["secondary_languages"] == ["en", "fr"]
+        q = await _connect_uri(
+            monkeypatch,
+            AudioInputConfig(languages=["es", "en"], keyterms=["Acme"], extra={"secondary_languages": ["ca"]}),
+        )
+        assert q["secondary_languages"] == ["ca"]
+        assert "secondary_languages" not in await _connect_uri(
+            monkeypatch, AudioInputConfig(language="es", languages=["es"])
+        )
+
+
+class _ScriptedWs(_IdleWs):
+    """Replays server frames, then ends like a closed socket."""
+
+    def __init__(self, frames: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self._frames = [json.dumps(frame) for frame in frames]
+
+    async def __anext__(self) -> str:
+        if not self._frames:
+            raise StopAsyncIteration
+        return self._frames.pop(0)
+
+
+async def _transcripts(monkeypatch: pytest.MonkeyPatch, frames: list[dict[str, Any]]) -> list[TranscriptEvent]:
+    async def fake_connect(_uri: str, **_kw: Any) -> _ScriptedWs:
+        return _ScriptedWs(frames)
+
+    monkeypatch.setattr(el, "ws_connect", fake_connect)
+    stt = el.ElevenLabsRealtimeSTT(api_key="test-key")
+    await stt.connect(AudioInputConfig())
+    try:
+        return [event async for event in stt.events()]
+    finally:
+        await stt.close()
+
+
+def _word(text: str, speaker: str | None, start: float, end: float, kind: str = "word") -> dict[str, Any]:
+    return {"text": text, "start": start, "end": end, "type": kind, "speaker_id": speaker, "logprob": -0.4}
+
+
+class TestScribeRealtimeMessages:
+    """Frames below are the shapes ``scribe_v3_live`` and ``scribe_v2_realtime`` sent on 2026-11-10."""
+
+    async def test_v3_live_turn_probability_rides_on_partials(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        events = await _transcripts(
+            monkeypatch,
+            [
+                {"message_type": "session_started", "session_id": "s", "config": {}},
+                {"message_type": "partial_transcript", "text": "Hello", "turn_probability": 0.1},
+                {"message_type": "partial_transcript", "text": "Hello there.", "turn_probability": 0.93},
+                {"message_type": "partial_transcript", "text": "v2 has no score"},
+                {"message_type": "committed_transcript", "text": "Hello there."},
+            ],
+        )
+        assert [(e.type, e.text, e.confidence) for e in events] == [
+            ("partial", "Hello", 0.1),
+            ("partial", "Hello there.", 0.93),
+            ("partial", "v2 has no score", None),
+            ("committed", "Hello there.", None),
+        ]
+
+    async def test_timestamped_twin_does_not_commit_the_utterance_twice(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With ``include_timestamps`` both models send the plain commit and
+        then the same words again with timestamps."""
+        twin = {"message_type": "committed_transcript_with_timestamps", "text": "Yes.", "language_code": "en"}
+        events = await _transcripts(
+            monkeypatch,
+            [
+                {"message_type": "committed_transcript", "text": "Yes."},
+                {**twin, "words": []},
+                # The caller really does say it again: still its own commit.
+                {"message_type": "committed_transcript", "text": "Yes."},
+                {**twin, "words": []},
+                # A timestamped commit with no plain one before it is kept.
+                {**twin, "text": "Only timestamps.", "words": []},
+            ],
+        )
+        assert [(e.type, e.text) for e in events] == [
+            ("committed", "Yes."),
+            ("committed", "Yes."),
+            ("committed", "Only timestamps."),
+        ]
+
+    async def test_diarized_transcript_is_grouped_by_speaker_and_is_not_a_commit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events = await _transcripts(
+            monkeypatch,
+            [
+                {"message_type": "committed_transcript", "text": "Change it. Sure, where to?", "segment_index": 0},
+                {
+                    "message_type": "diarized_transcript",
+                    "segment_index": 0,
+                    "text": "Change it. Sure, where to?",
+                    "words": [
+                        _word("Change", "speaker_0", 0.1, 0.4),
+                        _word(" ", "speaker_0", 0.4, 0.5, "spacing"),
+                        _word("it.", "speaker_0", 0.5, 0.7),
+                        _word(" ", "speaker_1", 0.7, 1.4, "spacing"),
+                        _word("Sure,", "speaker_1", 1.4, 1.7),
+                        _word(" ", None, 1.7, 1.8, "spacing"),
+                        _word("where", "speaker_1", 1.8, 2.0),
+                        _word(" ", "speaker_1", 2.0, 2.1, "spacing"),
+                        _word("to?", "speaker_1", 2.1, 2.4),
+                    ],
+                },
+            ],
+        )
+        assert [e.type for e in events] == ["committed", "diarized"]
+        assert events[0].speakers is None
+        assert [(s.speaker_id, s.text, s.start, s.end) for s in events[1].speakers or []] == [
+            ("speaker_0", "Change it.", 0.1, 0.7),
+            ("speaker_1", "Sure, where to?", 1.4, 2.4),
+        ]
+
+    async def test_a_refused_query_surfaces_the_reason_elevenlabs_gave(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``invalid_request`` is followed by a 1008 close. It used to reach
+        the session as a bare "connection closed"."""
+        reason = "commit_strategy 'turn_prediction' is not supported by model_id 'scribe_v2_realtime'"
+        with pytest.raises(RuntimeError, match="invalid_request.*turn_prediction.*scribe_v2_realtime"):
+            await _transcripts(monkeypatch, [{"message_type": "invalid_request", "error": reason}])
+
+    async def test_commit_throttled_is_fatal_and_keeps_its_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Two commits within 0.3s of audio: Scribe closes the session."""
+        reason = "Session closed: only 0.00s of uncommitted audio. You need at least 0.3s of uncommitted audio."
+        with pytest.raises(RuntimeError, match="commit_throttled.*uncommitted audio"):
+            await _transcripts(monkeypatch, [{"message_type": "commit_throttled", "error": reason}])
+
+
+def _partial(text: str, probability: float) -> dict[str, Any]:
+    return {"message_type": "partial_transcript", "text": text, "turn_probability": probability}
+
+
+async def _commits_sent(
+    monkeypatch: pytest.MonkeyPatch, frames: list[dict[str, Any]], extra: dict[str, Any]
+) -> tuple[int, el.ElevenLabsRealtimeSTT]:
+    """How many ``commit: true`` frames the adapter sent while replaying `frames`."""
+    ws = _ScriptedWs(frames)
+
+    async def fake_connect(_uri: str, **_kw: Any) -> _ScriptedWs:
+        return ws
+
+    monkeypatch.setattr(el, "ws_connect", fake_connect)
+    stt = el.ElevenLabsRealtimeSTT(api_key="test-key")
+    await stt.connect(AudioInputConfig(extra=extra))
+    async for _ in stt.events():
+        pass
+    return sum(json.loads(frame)["commit"] for frame in ws.sent), stt
+
+
+class TestScribeCommitGap:
+    """Scribe closes the session on a commit with under 0.3s of uncommitted audio."""
+
+    async def test_a_commit_right_after_scribes_own_is_not_sent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The session's endpointer and Scribe (VAD silence, or turn
+        prediction) can reach the same boundary together. In the replay
+        harness that ended 4 of 78 calls at a 3s ceiling."""
+        _, stt = await _commits_sent(monkeypatch, [{"message_type": "committed_transcript", "text": "Yes."}], {})
+        await stt.commit()
+        assert [json.loads(frame)["commit"] for frame in stt._ws.sent] == []
+
+    async def test_back_to_back_commits_send_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _, stt = await _commits_sent(monkeypatch, [], {})
+        await stt.commit()
+        await stt.commit()
+        assert sum(json.loads(frame)["commit"] for frame in stt._ws.sent) == 1
+
+    async def test_a_later_commit_is_sent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _, stt = await _commits_sent(monkeypatch, [{"message_type": "committed_transcript", "text": "Yes."}], {})
+        stt._committed_at -= 2.0  # two seconds of audio since
+        await stt.commit()
+        assert sum(json.loads(frame)["commit"] for frame in stt._ws.sent) == 1
+
+
+class TestScribeTurnCommitThreshold:
+    """``turn_commit_threshold``: commit from Scribe v3 Live's own turn probability."""
+
+    async def test_it_is_ours_and_never_reaches_the_wire(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        q = await _connect_uri(
+            monkeypatch, AudioInputConfig(extra={"turn_commit_threshold": 0.75, "turn_commit_partials": 2})
+        )
+        assert "turn_commit_threshold" not in q
+        assert "turn_commit_partials" not in q
+        assert q["commit_strategy"] == ["vad"]
+
+    async def test_it_stands_down_under_turn_prediction(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Scribe commits on the same score. The two commits collide and
+        Scribe closes the session with ``commit_throttled`` (seen live).
+        ``VoiceConfig`` refuses the pair; a hello can still produce it."""
+        extra = {"commit_strategy": "turn_prediction", "turn_commit_threshold": 0.75}
+        sent, stt = await _commits_sent(monkeypatch, [_partial("Yes.", 0.80), _partial("Yes.", 0.85)], extra)
+        assert sent == 0
+        assert stt._turn_commit_threshold is None
+
+    async def test_on_at_075_for_v3_live_under_vad_and_nowhere_else(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def sent(config: AudioInputConfig, probability: float) -> int:
+            ws = _ScriptedWs([_partial("Yes.", probability)])
+
+            async def fake_connect(_uri: str, **_kw: Any) -> _ScriptedWs:
+                return ws
+
+            monkeypatch.setattr(el, "ws_connect", fake_connect)
+            stt = el.ElevenLabsRealtimeSTT(api_key="test-key")
+            await stt.connect(config)
+            async for _ in stt.events():
+                pass
+            return sum(json.loads(frame)["commit"] for frame in ws.sent)
+
+        assert el.DEFAULT_TURN_COMMIT_THRESHOLD == 0.75
+        assert await sent(AudioInputConfig(), 0.75) == 1
+        assert await sent(AudioInputConfig(), 0.74) == 0
+        assert await sent(AudioInputConfig(model="scribe_v3_live", extra={"commit_strategy": "vad"}), 0.8) == 1
+        # v2 sends no score. If it ever did, the default is still v3 Live's.
+        assert await sent(AudioInputConfig(model="scribe_v2_realtime"), 0.99) == 0
+        # A manual caller owns every commit. Scribe's own prediction would collide.
+        assert await sent(AudioInputConfig(extra={"commit_strategy": "manual"}), 0.99) == 0
+        assert await sent(AudioInputConfig(extra={"commit_strategy": "turn_prediction"}), 0.99) == 0
+        for off in (None, 0, 0.0):
+            assert await sent(AudioInputConfig(extra={"turn_commit_threshold": off}), 0.99) == 0
+        # Set explicitly, it works on manual too.
+        manual = AudioInputConfig(extra={"commit_strategy": "manual", "turn_commit_threshold": 0.9})
+        assert await sent(manual, 0.95) == 1
+
+    async def test_one_commit_per_utterance_once_the_score_is_reached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        frames = [
+            _partial("Yes, that", 0.02),
+            _partial("Yes, that works.", 0.60),
+            _partial("Yes, that works.", 0.79),
+            _partial("Yes, that works.", 0.86),  # already asked: no second commit
+            {"message_type": "committed_transcript", "text": "Yes, that works."},
+        ]
+        sent, _ = await _commits_sent(monkeypatch, frames, {"turn_commit_threshold": 0.75})
+        assert sent == 1
+
+    async def test_a_lone_spike_does_not_commit_when_two_partials_are_asked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sentence boundary mid-speech scores high for one partial, then the caller goes on."""
+        extra = {"turn_commit_threshold": 0.75, "turn_commit_partials": 2}
+        spike = [_partial("Hello.", 0.80), _partial("Hello. This is", 0.01), _partial("Hello. This is a test.", 0.80)]
+        assert (await _commits_sent(monkeypatch, spike, extra))[0] == 0
+        held = [*spike, _partial("Hello. This is a test.", 0.85)]
+        assert (await _commits_sent(monkeypatch, held, extra))[0] == 1
+
+    async def test_the_sessions_own_commit_is_not_doubled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The endpointer and the probability rule asking for the same commit would be throttled."""
+        _, stt = await _commits_sent(monkeypatch, [], {"turn_commit_threshold": 0.75})
+        ws = stt._ws
+        await stt.commit()
+        await stt._maybe_commit_on_turn_probability("Yes.", 0.95)
+        await stt.commit()
+        assert sum(json.loads(frame)["commit"] for frame in ws.sent) == 1
 
 
 class _TTSWs:

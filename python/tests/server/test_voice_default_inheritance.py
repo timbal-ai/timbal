@@ -201,3 +201,47 @@ def test_invalid_client_hangup_grace_preserves_server_default(grace):
     defaults = VoiceConfig(turn_detector="heuristic", hangup_grace_secs=0.4)
     session, _ = build_voice_session(agent, defaults, {"hangup_grace_secs": grace})
     assert session.hangup_grace_secs == 0.4
+
+
+def _reply_session(hello: dict):
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    defaults = VoiceConfig(turn_detector="heuristic", language="en", reply_language="ca")
+    return build_voice_session(agent, defaults, hello)[0]
+
+
+@pytest.mark.parametrize("bad", ["english", "en-", "say it in english", True, 1, "", "   ", None])
+def test_invalid_client_reply_language_keeps_the_server_pin(bad):
+    session = _reply_session({} if bad is None else {"reply_language": bad})
+    assert session.reply_language == "ca"
+    assert session.audio_input.language == "en"
+    assert session.effective_reply_language() == "ca"
+
+
+def test_client_follow_and_tag_apply_without_moving_each_other():
+    followed = _reply_session({"reply_language": " FOLLOW "})
+    assert followed.reply_language == "follow"
+    assert followed.audio_input.language == "en"
+    assert followed.effective_reply_language() is None
+
+    pinned = _reply_session({"reply_language": "es-ES", "language": "en"})
+    assert pinned.reply_language == "es-ES"
+    assert pinned.audio_input.language == "en"
+    assert pinned.effective_reply_language() == "es-ES"
+
+
+async def test_set_language_does_not_unlock_an_explicit_reply_policy():
+    session = _reply_session({"reply_language": "follow"})
+    await session.set_language("es")
+    assert session.audio_input.language == "es"
+    assert session.reply_language == "follow"
+    assert session.effective_reply_language() is None
+
+
+def test_client_hello_cannot_enable_speculative_generation():
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    session, _ = build_voice_session(
+        agent,
+        VoiceConfig(turn_detector="heuristic"),
+        {"speculative_generation": {"enabled": True, "preemptive_tts": True}},
+    )
+    assert session.speculative_generation.enabled is False

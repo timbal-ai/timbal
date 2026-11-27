@@ -11,6 +11,7 @@ provider SDKs stay behind ``timbal.voice``'s lazy ``__getattr__``.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -58,6 +59,159 @@ DEFAULT_FILLER_SYSTEM_PROMPT = (
 )
 
 
+# Flux multilingual accepts these primaries. Locale subtags (``es-ES``) map
+# to the primary. Catalan is not in the set. ``flux-general-en`` rejects hints.
+FLUX_MULTI_LANGUAGES = frozenset({"en", "es", "fr", "de", "hi", "ru", "pt", "ja", "it", "nl"})
+KEYTERMS_MAX = 100
+_KEYTERM_WEIGHT = re.compile(r".+:-?\d+(?:\.\d+)?\s*$")
+# ElevenLabs' realtime endpoint refuses the whole connection past either limit,
+# on ``scribe_v2_realtime`` and ``scribe_v3_live`` alike. (Batch Scribe v3
+# takes 1,000 terms of 50 characters. That is a different endpoint.)
+SCRIBE_REALTIME_KEYTERMS_MAX = 50
+SCRIBE_REALTIME_KEYTERM_MAX_CHARS = 20
+
+
+def scribe_realtime_keyterms_error(keyterms: list[str] | None) -> str | None:
+    """Why realtime Scribe would refuse this vocabulary, or ``None`` when it fits."""
+    terms = list(keyterms or [])
+    if len(terms) > SCRIBE_REALTIME_KEYTERMS_MAX:
+        return f"ElevenLabs Scribe accepts at most {SCRIBE_REALTIME_KEYTERMS_MAX} keyterms on a call, got {len(terms)}."
+    for term in terms:
+        if len(term) > SCRIBE_REALTIME_KEYTERM_MAX_CHARS:
+            return (
+                f"ElevenLabs Scribe keyterms are at most {SCRIBE_REALTIME_KEYTERM_MAX_CHARS} characters each "
+                f"on a call: {term!r} is {len(term)}."
+            )
+    return None
+
+
+def validate_keyterms(value: Any) -> list[str]:
+    """Plain phrases for speech recognition. No weights, at most 100."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raise TypeError("keyterms must be a list of phrases, not one string")
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("keyterms must be a list of phrases")
+    if len(value) > KEYTERMS_MAX:
+        raise ValueError(f"keyterms accepts at most {KEYTERMS_MAX} phrases")
+    terms: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise TypeError("each keyterm must be a string")
+        text = item.strip()
+        if not text:
+            raise ValueError("keyterms cannot contain a blank phrase")
+        if _KEYTERM_WEIGHT.fullmatch(text):
+            raise ValueError(f"keyterms are plain phrases, not weighted keywords: {text!r}")
+        terms.append(text)
+    return terms
+
+
+def validate_stt_languages(value: Any) -> list[str]:
+    """Expected Flux multilingual hints. Does not set the reply language."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raise TypeError("stt_languages must be a list of BCP-47 tags, not one string")
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("stt_languages must be a list of BCP-47 tags")
+    from .language import normalize_language_tag
+
+    tags: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise TypeError("each stt_languages entry must be a string")
+        tag = normalize_language_tag(item)
+        if tag is None:
+            raise ValueError(f"stt_languages entries must be BCP-47 tags, got {item!r}")
+        primary = language_key(tag)
+        if primary not in FLUX_MULTI_LANGUAGES:
+            raise ValueError(
+                f"{tag} is not a Deepgram Flux transcription language. "
+                "Flux multilingual accepts en, es, fr, de, hi, ru, pt, ja, it, and nl. "
+                "Catalan is not among them. Set reply_language separately if the reply should use another language."
+            )
+        tags.append(tag)
+    return tags
+
+
+_VOCAB_EXTRA_KEYS = ("keyterm", "keyterms", "keywords", "hotwords")
+
+
+def keyterms_extra_conflict(keyterms: list[str] | None, extra: dict[str, Any] | None) -> bool:
+    """A non-empty ``keyterms`` list conflicts with any of the legacy extra keys.
+
+    The extra value is not inspected. ``None``, ``""``, and ``[]`` still
+    conflict when the key is present. An empty ``keyterms`` (omitted, ``None``,
+    or ``[]``) does not, so a ``keyterm`` that lives only in ``stt_extra``
+    keeps the older passthrough.
+    """
+    if not keyterms:
+        return False
+    if not isinstance(extra, dict):
+        return False
+    return any(key in extra for key in _VOCAB_EXTRA_KEYS)
+
+
+def flux_transcription_error(
+    *,
+    provider: str,
+    model: str,
+    language: str | None,
+    stt_languages: list[str] | None,
+) -> str | None:
+    """Why this provider cannot take the hint, or ``None`` when it can.
+
+    ``flux-general-multi`` accepts ``en``, ``es``, ``fr``, ``de``, ``hi``,
+    ``ru``, ``pt``, ``ja``, ``it``, and ``nl``, including regional subtags.
+    Clearing the hint (``None`` or blank) is allowed. Other providers do not
+    use this list. ``reply_language`` is not an argument: a Catalan reply does
+    not make Flux recognize Catalan.
+    """
+    if stt_languages is not None and not _flux_multi(provider, model):
+        return "stt_languages is only supported on Deepgram flux-general-multi."
+    if not _flux_multi(provider, model) or not language or not str(language).strip():
+        return None
+    from .language import normalize_language_tag
+
+    tag = normalize_language_tag(language)
+    # A value that is not a tag is not a Flux language either, but construction
+    # has always left that to the provider. Only a real tag outside the ten
+    # fails here. A hello drops non-tags before this runs.
+    if tag is None or language_key(tag) in FLUX_MULTI_LANGUAGES:
+        return None
+    return (
+        f"{tag} is not a Deepgram Flux transcription language. "
+        "flux-general-multi accepts en, es, fr, de, hi, ru, pt, ja, it, and nl. "
+        "Catalan is not among them. Set reply_language if the reply should use another language. "
+        "Flux will not recognize that language."
+    )
+
+
+def _flux_multi(provider: str, model: str) -> bool:
+    if provider not in ("deepgram", "deepgram-flux"):
+        return False
+    chosen = (model or "flux-general-multi").strip()
+    if chosen.startswith("flux-general-en"):
+        return False
+    if chosen.startswith("nova") or chosen.startswith("scribe") or chosen.startswith("gpt-"):
+        return False
+    return True
+
+
+def _accepts_keyterms(provider: str, model: str) -> bool:
+    if provider in ("deepgram", "deepgram-flux"):
+        chosen = (model or "").strip()
+        return not chosen.startswith("nova-2")
+    if provider == "deepgram-nova":
+        chosen = (model or "nova-3").strip()
+        return chosen.startswith("nova-3") or chosen == ""
+    if provider == "elevenlabs":
+        return True
+    return False
+
+
 def language_key(code: str | None) -> str:
     """``"es-ES"`` / ``"es_es"`` / ``" ES "`` → ``"es"``; ``None`` → ``""``."""
     return (code or "").strip().lower().replace("_", "-").split("-")[0]
@@ -75,7 +229,8 @@ class FillerConfig(BaseModel):
     ``soft_timeout_secs`` is a separate, opt-in progress line for a tool that
     is still running after the caller has heard no agent audio for that long
     (ElevenLabs ``soft_timeout_config``, LiveKit ``ctx.with_filler(delay=)``).
-    Unset, tool waits keep the rules above.
+    Unset, tool waits keep the rules above. A hangup tool (``end_call``,
+    ``hangup``, or any call already inside ``commit_hangup``) does not get one.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -485,22 +640,53 @@ class VoiceConfig(BaseModel):
     language: str | None = None
     """Conversation language (BCP-47, e.g. ``"en"``, ``"es"``, ``"es-ES"``).
 
-    When set, the speech-to-text adapter receives it as a language hint and
-    the text model is told to reply in that language. ``None`` leaves
-    detection to the provider and tells the model to follow the user's latest
-    substantive message, unless the agent's own prompt already names one
-    reply language. It does not select a TTS voice. Change it on a live call
-    with :meth:`timbal.voice.session.VoiceSession.set_language`.
+    When set, the speech-to-text adapter receives it as a language hint and,
+    unless ``reply_language`` says otherwise, the text model is told to reply
+    in that language. ``None`` leaves detection to the provider and tells the
+    model to follow the user's latest substantive message, unless the agent's
+    own prompt already names one reply language. It does not select a TTS
+    voice. Change it on a live call with
+    :meth:`timbal.voice.session.VoiceSession.set_language`.
+    """
+    keyterms: list[str] = Field(default_factory=list)
+    """Phrases the speech provider should prefer: names, brands, acronyms.
+
+    Plain strings, at most 100, with no Nova keyword weights (``term:0.15``).
+    Set on the agent. A caller hello cannot set it, and it is not taken from
+    the caller's words or from an unheard reply. Deepgram Flux and Nova-3
+    and ElevenLabs Scribe accept them when the socket connects. Scribe takes
+    at most 50, of 20 characters each. Flux can
+    replace the whole list on the open socket. Empty leaves recognition
+    unchanged. This does not rewrite a transcript and does not promise the
+    words will be recognized.
+    """
+    stt_languages: list[str] | None = None
+    """Expected transcription languages for Deepgram ``flux-general-multi``.
+
+    Unset keeps today's single ``language`` hint. A list replaces that hint
+    for speech-to-text only. ``reply_language`` is unchanged. Catalan and
+    any other language outside Flux's ten are rejected. ``flux-general-en``
+    cannot take a hint.
+    """
+    reply_language: str | None = None
+    """Reply policy, separate from the speech-to-text hint.
+
+    Unset (the default) keeps the historical rule: the reply pin is
+    ``language``. ``"follow"`` follows the latest substantive message even
+    when ``language`` is set for transcription. A BCP-47 tag pins the reply
+    to that tag and does not change the hint ``language`` sends to
+    speech-to-text. It does not change behavior when left unset.
     """
     sample_rate: int = 16_000
     encoding: str = "pcm_s16le"
     stt_extra: dict[str, Any] = Field(default_factory=_default_stt_extra)
     tts_extra: dict[str, Any] = Field(default_factory=lambda: {"auto_mode": True})
     ignore_backchannels: bool = False
-    """Drop pure English and Spanish acknowledgements while the assistant is
-    speaking and for one second after playback. "yeah" and "vale" do not
-    interrupt; "no", "stop", "para", and "sí, pero…" still do. Server-side
-    only. Off leaves interruptions unchanged."""
+    """Drop pure acknowledgements while the assistant is speaking and for one
+    second after playback. English and Spanish ("yeah", "vale") and Catalan
+    ("d'acord", "entesos", "molt be") do not interrupt. "no", "stop", "para",
+    "espera", and "sí, pero…" still do. Server-side only. Off leaves
+    interruptions unchanged."""
     hold_unfinished_secs: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     """With provider turn detection, wait this long when a commit ends on a
     trailing conjunction, preposition, determiner, or filler, then merge the
@@ -648,6 +834,69 @@ class VoiceConfig(BaseModel):
             if not key or not key.isprintable() or key != key.strip():
                 raise ValueError(f"prompt_call_context_keys: {key!r} is not a plain key")
         return v
+
+    @field_validator("keyterms", mode="before")
+    @classmethod
+    def _keyterms_are_phrases(cls, value: Any) -> Any:
+        return validate_keyterms(value)
+
+    @field_validator("stt_languages", mode="before")
+    @classmethod
+    def _stt_languages_are_tags(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        return validate_stt_languages(value)
+
+    @model_validator(mode="after")
+    def _transcription_matches_provider(self) -> VoiceConfig:
+        provider = (self.stt_provider or "").strip()
+        model = (self.stt_model or "").strip()
+        extra = self.stt_extra if isinstance(self.stt_extra, dict) else {}
+        if keyterms_extra_conflict(self.keyterms, extra):
+            raise ValueError(
+                "Set vocabulary on keyterms. Do not also set keyterm, keyterms, keywords, or hotwords in stt_extra."
+            )
+        if self.keyterms and model.startswith("nova-2"):
+            raise ValueError("Nova-2 does not accept keyterms. Use nova-3, or leave keyterms unset.")
+        if self.keyterms and not _accepts_keyterms(provider, model):
+            raise ValueError(
+                f"{provider or 'this speech provider'} {model or ''}".strip()
+                + " does not accept keyterms. Use Deepgram Flux, Nova-3, or ElevenLabs Scribe."
+            )
+        if provider == "elevenlabs":
+            # Only when the agent names ElevenLabs. A Flux agent that falls back
+            # to Scribe keeps its list and the adapter sends the part that fits.
+            keyterms_error = scribe_realtime_keyterms_error(self.keyterms)
+            if keyterms_error is not None:
+                raise ValueError(keyterms_error)
+            threshold = extra.get("turn_commit_threshold")
+            if threshold is not None:
+                if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 <= threshold <= 1:
+                    raise ValueError("turn_commit_threshold is a turn probability between 0 and 1 (0 turns it off).")
+                if threshold and extra.get("commit_strategy") == "turn_prediction":
+                    # Scribe commits on the same score. A second commit next
+                    # to its own closes the session (``commit_throttled``).
+                    raise ValueError(
+                        "turn_commit_threshold needs commit_strategy 'vad' or 'manual', not 'turn_prediction'."
+                    )
+        error = flux_transcription_error(
+            provider=provider,
+            model=model,
+            language=self.language,
+            stt_languages=self.stt_languages,
+        )
+        if error is not None:
+            raise ValueError(error)
+        return self
+
+    @field_validator("reply_language", mode="before")
+    @classmethod
+    def _reply_language_is_explicit(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        from .language import parse_reply_language
+
+        return parse_reply_language(value)
 
     @field_validator("min_delay_secs", "stop_silence_secs", "first_flush_min_words", mode="before")
     @classmethod

@@ -30,6 +30,7 @@ def compose_voice_system_prompt(
     call_context: Mapping[str, str] | None,
     now: datetime,
     greeting_note: str | None = None,
+    continuation_note: str | None = None,
     reply_language: str | None = None,
     call_context_keys: Collection[str] | None = None,
 ) -> SystemPrompt:
@@ -63,7 +64,11 @@ def compose_voice_system_prompt(
     clock = f"Current date and time (UTC): {_utc_stamp(now)}"
     # Caller and customer are stable for the call, so they stay ahead of the
     # clock. OpenAI and Groq stop the cached prefix at the first changed byte.
-    dynamic_parts = [part for part in (facts, user_dynamic, clock, greeting_note or "", reply_language or "") if part]
+    dynamic_parts = [
+        part
+        for part in (facts, user_dynamic, clock, greeting_note or "", continuation_note or "", reply_language or "")
+        if part
+    ]
     return SystemPrompt(static=static, dynamic="\n\n".join(dynamic_parts))
 
 

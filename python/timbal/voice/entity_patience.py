@@ -206,6 +206,22 @@ def entity_capture(text: str) -> str | None:
     return None
 
 
+# A partial ending in one letter right after a space or comma, with nothing
+# after it: the provider's caption of a word still being said ("order t",
+# "Vámonos, v"), not a letter the caller spelled.
+_GROWING_LETTER = re.compile(r"(?<=[\s,])[^\W\d_]\Z")
+
+
+def entity_capture_partial(text: str) -> str | None:
+    """:func:`entity_capture` for a caption that is still growing.
+
+    The trailing letter of an unfinished word is ignored. A spelled sequence
+    ("R U I") still counts from its earlier letters, and the committed text
+    keeps the full rule, so "apellido J." still waits for the rest.
+    """
+    return entity_capture(_GROWING_LETTER.sub("", (text or "").rstrip()))
+
+
 def apply_entity_patience(
     decision: CommitDecision,
     text: str,
@@ -279,18 +295,20 @@ def _release(decision: CommitDecision, original: str, piece: str, held: str) -> 
     return CommitDecision(action=CommitAction.NEW_TURN, text=piece, reason=reason)
 
 
-def entity_capture_with_held(held: str | None, text: str) -> str | None:
+def entity_capture_with_held(held: str | None, text: str, *, partial: bool = False) -> str | None:
     """:func:`entity_capture` of ``text`` read after a parked fragment ``held``.
 
     During a hold, Flux sends each new group as a turn of its own (``"seis"``, ``"Z"``): alone it is too
     short to be an entity, but it continues the number or spelling the hold is keeping open.
+    ``partial`` reads ``text`` as a caption that is still growing (:func:`entity_capture_partial`).
     """
+    capture = entity_capture_partial if partial else entity_capture
     held = (held or "").strip()
     # Only a held entity is continued: after "my number is" (an unfinished-phrase hold) a lone "y" or "a" is
     # the start of a sentence, not a spelled letter.
     if not held or not text or _contains_held(held, text) or entity_capture(held) is None:
-        return entity_capture(text) if text else None
-    return entity_capture(_join_held(held, text.strip()))
+        return capture(text) if text else None
+    return capture(_join_held(held, text.strip()))
 
 
 def repeats_held(held: str, partial: str) -> bool:
