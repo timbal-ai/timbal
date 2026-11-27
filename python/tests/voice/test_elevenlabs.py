@@ -427,7 +427,7 @@ async def _collect(stream):
         return b"".join([chunk async for chunk in stream.audio()])
 
 
-@pytest.mark.parametrize("model", ["eleven_v4", "eleven_v4_turbo"])
+@pytest.mark.parametrize("model", ["eleven_v4", "eleven_v4_turbo", "eleven_v3_conversational"])
 async def test_dialogue_stream_registers_once_and_routes_audio(tts_factory, model):
     p, ws, seen = await tts_factory(model, auto_mode=True, inactivity_timeout=180)
     uri = urlsplit(seen["uri"])
@@ -729,7 +729,7 @@ async def test_end_prevents_pending_feed_from_reopening_context(tts_factory, mon
     assert not p._dialogue_contexts
 
 
-@pytest.mark.parametrize("model", ["eleven_v4", "eleven_v4_turbo"])
+@pytest.mark.parametrize("model", ["eleven_v4", "eleven_v4_turbo", "eleven_v3_conversational"])
 async def test_dialogue_voice_settings_register_each_context_not_url(tts_factory, model):
     p, ws, seen = await tts_factory(model, stability=0, similarity_boost=0.8)
     query = parse_qs(urlsplit(seen["uri"]).query)
