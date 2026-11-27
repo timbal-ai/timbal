@@ -63,7 +63,7 @@ class _Database:
     at a time anyway, and a queue in the process beats retrying ``SQLITE_BUSY``.
     """
 
-    def __init__(self, path: Path, synchronous: str, order: _FileOrder | None = None) -> None:
+    def __init__(self, path: Path | str, synchronous: str, order: _FileOrder | None = None) -> None:
         self.path = path
         self.lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), timeout=10, check_same_thread=False)
@@ -146,6 +146,14 @@ def _resolve(spelling: str) -> tuple[str, str]:
         _RESOLVED.clear()
     _RESOLVED[spelling] = found
     return found
+
+
+def _sqlite_name(spelling: str) -> bool:
+    """Whether SQLite gives ``spelling`` a meaning of its own instead of a file's: ``:memory:``, and a name that
+    starts with ``file:``, which a build that reads URIs takes for one (``file:x?mode=memory``). Such a name is
+    opened as given: resolved, it is an ordinary file of that name in the working directory. SQLite's own checks
+    are exact and case-sensitive."""
+    return spelling == ":memory:" or spelling.startswith("file:")
 
 
 def _registered(spelling: str, mode: str) -> tuple[str, "_Database | None", bool]:
@@ -266,16 +274,18 @@ def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
         raise ValueError(f"synchronous must be 'NORMAL' or 'FULL', got {synchronous!r}")
     # The connection under the path's key, while the path names its file (a file deleted and written again is
     # another file: don't write to the old inode).
-    resolved_path, db, names_it = _registered(os.fspath(path), mode)
+    spelling = os.fspath(path)
+    resolved_path, db, names_it = _registered(spelling, mode)
     if names_it:
         return db
     key = (resolved_path, mode)
     # Opened by its resolved path, which every spelling of the path shares and a stat can follow (SQLite would
     # open ``missing/../traces.db`` as ``traces.db``, where a stat of that spelling fails): the connection, the
-    # file it is to (``_file``, which finds the file's _FileOrder) and alive() go by one path. Outside the
-    # registry's lock, which every database of the process goes through: a file that cannot be opened now (a
-    # stalled mount) holds up its own callers, not those of every other file.
-    opened = _Database(Path(resolved_path), mode)
+    # file it is to (``_file``, which finds the file's _FileOrder) and alive() go by one path. A name of SQLite's
+    # own (``:memory:``, a ``file:`` URI) is opened as given, as it always was: it names no file to resolve to.
+    # Outside the registry's lock, which every database of the process goes through: a file that cannot be
+    # opened now (a stalled mount) holds up its own callers, not those of every other file.
+    opened = _Database(spelling if _sqlite_name(spelling) else Path(resolved_path), mode)
     ident = opened._file if opened._file is not None else key[0]
     with _DATABASES_LOCK:
         order = _ORDERS.get(ident)

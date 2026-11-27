@@ -845,6 +845,36 @@ class TestPerSpanStorage:
         assert sqlite_module.database(f"{path}/") is first
         assert sqlite_module.database(path) is first
 
+    @pytest.mark.parametrize("name", [":memory:", "file:sessions?mode=memory&cache=shared"])
+    async def test_sqlites_own_names_stay_off_disk(self, tmp_path, monkeypatch, name):
+        """SQLite gives ``:memory:``, and a ``file:`` URI where its build reads URIs, a meaning of its own. Such a
+        name is opened as given: resolved, it would be an ordinary file of that name in the working directory."""
+        from timbal.state.chat_store import SessionSnapshot, SqliteChatSessionStore
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        monkeypatch.chdir(tmp_path)
+        reads_uris = True
+        if name.startswith("file:"):
+            sqlite3.connect("file:probe?mode=memory").close()
+            reads_uris = not any(tmp_path.iterdir())
+            for left in tmp_path.iterdir():
+                left.unlink()
+        real, opened = sqlite3.connect, []
+
+        def connect(target, *args, **kwargs):
+            opened.append(target)
+            return real(target, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite_module.sqlite3, "connect", connect)
+        await SqliteChatSessionStore(name).save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
+        provider = SqliteTracingProvider.configured(_path=name)
+        context = RunContext(tracing_provider=provider)
+        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}
+        await provider._store(context)
+        assert opened and set(opened) == {name}  # SQLite gets the name itself, on any build
+        if reads_uris:  # a build that does not read URIs takes a file: name for a file's, as it always did
+            assert list(tmp_path.iterdir()) == []
+
     def test_a_path_through_a_moved_link_reaches_the_file_it_names_now(self, tmp_path):
         import os
 
