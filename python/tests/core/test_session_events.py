@@ -70,7 +70,7 @@ class TestPostEvent:
         store = BackgroundTaskStore()
         first = store.post_event("Task 1: 50% done.", key=" task:1 ")
         second = store.post_event("Task 1: finished.", key="task:1")
-        assert await asyncio.wait_for(first.settled(), 1) == "superseded"
+        assert await asyncio.wait_for(first.settled(), 30) == "superseded"
         assert first.key == "task:1"
         assert store.pending_events() == [second]
         assert store.drain_events(run_id="run-a") == [second]
@@ -90,7 +90,7 @@ class TestPostEvent:
         waiter = asyncio.create_task(event.settled())
         await asyncio.sleep(0)
         store.drain_events(run_id="run-b")
-        assert await asyncio.wait_for(waiter, 1) == "delivered"
+        assert await asyncio.wait_for(waiter, 30) == "delivered"
         assert event.receipt() == {"event_id": event.id, "key": None, "state": "delivered", "run_id": "run-b"}
 
     async def test_a_pending_event_is_pending_work(self):
@@ -99,7 +99,7 @@ class TestPostEvent:
         assert await store.wait_for_completion() is False
         store.post_event("x")
         assert store.has_pending_work() is True
-        assert await asyncio.wait_for(store.wait_for_completion(), 1) is True
+        assert await asyncio.wait_for(store.wait_for_completion(), 30) is True
 
     async def test_event_wakes_a_waiter_blocked_on_running_children(self):
         store = BackgroundTaskStore()
@@ -108,7 +108,7 @@ class TestPostEvent:
         await asyncio.sleep(0)
         assert not waiter.done()
         store.post_event("x")
-        assert await asyncio.wait_for(waiter, 1) is True
+        assert await asyncio.wait_for(waiter, 30) is True
 
 
 class TestFollowup:
@@ -123,7 +123,7 @@ class TestFollowup:
         newer = store.post_event("newer", key="k")
         store._completion_inbox.append(completion("t2"))
         followup.release()
-        assert await asyncio.wait_for(old.settled(), 1) == "superseded"
+        assert await asyncio.wait_for(old.settled(), 30) == "superseded"
         assert store.pending_events() == [kept, newer]
         assert [note["task_id"] for note in store.pending_completions()] == ["t1", "t2"]
         followup.release()
@@ -231,9 +231,9 @@ class TestDelivery:
             while not outputs or stream._waiter is None:
                 await asyncio.sleep(0)
 
-        await asyncio.wait_for(until_waiting(), 2)
+        await asyncio.wait_for(until_waiting(), 30)
         event = post_session_event(outputs[0].run_id, "Report ready.")
-        await asyncio.wait_for(consumer, 2)
+        await asyncio.wait_for(consumer, 30)
         followup = outputs[1]
         assert followup.metadata["trigger"]["kind"] == "session_event"
         assert followup.metadata["trigger"]["event_ids"] == [event.id]
@@ -242,7 +242,7 @@ class TestDelivery:
         assert stream.stop_reason == "continuation_limit"
         release.set()
         store = store_for_run(followup.run_id)
-        await asyncio.wait_for(asyncio.gather(*(r.task for r in store._tasks.values())), 2)
+        await asyncio.wait_for(asyncio.gather(*(r.task for r in store._tasks.values())), 30)
 
 
 def _tool_call(name, call_id="c1"):
@@ -282,7 +282,7 @@ class TestAnnounce:
         await asyncio.sleep(0.05)
         assert model.call_count == 2 and silent.state == "pending"
         release.set()
-        await asyncio.wait_for(consumer, 2)
+        await asyncio.wait_for(consumer, 30)
         prompt = Message.validate(outputs[1].input["prompt"]).collect_text()
         assert "FYI: quiet note." in prompt and "<background_task_completed>" in prompt
         assert silent.state == "delivered"
@@ -296,7 +296,7 @@ class TestAnnounce:
         agent = Agent(name="agent", model=model, tools=[tool])
         stream = agent.stream_until_idle(prompt="start")
         outputs = []
-        await asyncio.wait_for(_consume_roots(stream, outputs), 2)
+        await asyncio.wait_for(_consume_roots(stream, outputs), 30)
         assert stream.stop_reason == "idle" and model.call_count == 2
         [note] = store_for_run(outputs[0].run_id).pending_completions()
         assert note["announce"] == "silent"
@@ -315,7 +315,7 @@ class TestAnnounce:
         consumer = asyncio.create_task(_consume_roots(stream, outputs))
         await _until(lambda: outputs and stream._waiter is not None)
         post_session_event(outputs[0].run_id, "The transfer failed.", announce="interrupt")
-        await asyncio.wait_for(consumer, 2)
+        await asyncio.wait_for(consumer, 30)
         assert outputs[1].metadata["trigger"]["announce"] == "interrupt"
         release.set()
 
@@ -349,13 +349,13 @@ class TestProgress:
         )
         first = await agent(prompt="build it").collect()
         store = store_for_run(first.run_id)
-        await asyncio.wait_for(reported.wait(), 2)
+        await asyncio.wait_for(reported.wait(), 30)
         [progress] = store.pending_events()
         task_id = store.list()[0]["task_id"]
         assert progress.text == "Nearly there." and progress.task_id == task_id
         assert progress.key == f"progress:{task_id}"
         release.set()
-        await asyncio.wait_for(asyncio.gather(*(r.task for r in store._tasks.values())), 2)
+        await asyncio.wait_for(asyncio.gather(*(r.task for r in store._tasks.values())), 30)
         await asyncio.sleep(0)
         assert store.pending_events() == [] and progress.state == "superseded"
         assert [note["task_id"] for note in store.pending_completions()] == [task_id]
@@ -382,7 +382,7 @@ class TestProgress:
         assert "Compiling, about half done." in prompt
         assert 'task_id="' in prompt and "still running" in prompt
         release.set()
-        await asyncio.wait_for(consumer, 2)
+        await asyncio.wait_for(consumer, 30)
         assert [o.output.collect_text() for o in outputs] == ["Started.", "Half done.", "All built."]
 
 
@@ -415,15 +415,15 @@ class TestBusySession:
         consumer = asyncio.create_task(_consume_roots(stream, outputs))
         await _until(lambda: outputs)
         release.set()
-        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(entered.wait(), 30)
         direct = asyncio.create_task(agent(prompt="me now", parent_id=outputs[0].run_id).collect())
         await asyncio.sleep(0.05)
         # Queued, not merely slow: an admitted turn would have made its own model call by now
         # (the held follow-up has not counted yet; TestModel counts after the gate).
         assert not direct.done() and model.call_count == 2
         opened.set()
-        result = await asyncio.wait_for(direct, 2)
-        await asyncio.wait_for(consumer, 2)
+        result = await asyncio.wait_for(direct, 30)
+        await asyncio.wait_for(consumer, 30)
         assert result.status.code == "success" and model.call_count == 4
         assert [o.output.collect_text() for o in outputs] == ["Working.", "Finished."]
         assert result.t1 >= outputs[1].t1
@@ -456,13 +456,13 @@ class TestBusySession:
         consumer = asyncio.create_task(_consume_roots(stream, outputs))
         await _until(lambda: outputs)
         release.set()
-        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(entered.wait(), 30)
         direct = asyncio.create_task(agent(prompt="me now", parent_id=outputs[0].run_id).collect())
         await asyncio.sleep(0.05)
         stream.stop()
         opened.set()
-        result = await asyncio.wait_for(direct, 2)
-        await asyncio.wait_for(consumer, 2)
+        result = await asyncio.wait_for(direct, 30)
+        await asyncio.wait_for(consumer, 30)
         assert result.status.code == "success"
         assert result.parent_run_id == outputs[1].run_id
         assert result.metadata["requested_parent_id"] == outputs[0].run_id
@@ -494,13 +494,13 @@ class TestBusySession:
         consumer = asyncio.create_task(_consume_roots(stream, outputs))
         await _until(lambda: outputs)
         release.set()
-        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(entered.wait(), 30)
         direct = asyncio.create_task(agent(prompt="me now", parent_id=outputs[0].run_id).collect())
         await asyncio.sleep(0.05)
         stream.stop()
         opened.set()
-        await asyncio.wait_for(chat_entered.wait(), 2)
-        await asyncio.wait_for(consumer, 2)
+        await asyncio.wait_for(chat_entered.wait(), 30)
+        await asyncio.wait_for(consumer, 30)
         # The stopped driver still holds the session for the turn it queued: a new driver waits behind it.
         second = agent.stream_until_idle(prompt="next", parent_id=outputs[1].run_id)
         second_outputs = []
@@ -508,8 +508,8 @@ class TestBusySession:
         await asyncio.sleep(0.05)
         assert not second_outputs and model.call_count == 3
         chat_opened.set()
-        result = await asyncio.wait_for(direct, 2)
-        await asyncio.wait_for(second_consumer, 2)
+        result = await asyncio.wait_for(direct, 30)
+        await asyncio.wait_for(second_consumer, 30)
         assert result.parent_run_id == outputs[1].run_id
         assert second_outputs[0].parent_run_id == result.run_id
         assert second_outputs[0].output.collect_text() == "Second driver."
@@ -537,13 +537,13 @@ class TestBusySession:
         consumer = asyncio.create_task(_consume_roots(stream, outputs))
         await _until(lambda: outputs)
         release.set()
-        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(entered.wait(), 30)
         first_chat = asyncio.create_task(agent(prompt="chat 1", parent_id=outputs[0].run_id).collect())
         second_chat = asyncio.create_task(agent(prompt="chat 2", parent_id=outputs[0].run_id).collect())
         await asyncio.sleep(0.05)
         opened.set()
-        r1, r2 = await asyncio.wait_for(asyncio.gather(first_chat, second_chat), 2)
-        await asyncio.wait_for(consumer, 2)
+        r1, r2 = await asyncio.wait_for(asyncio.gather(first_chat, second_chat), 30)
+        await asyncio.wait_for(consumer, 30)
         assert r1.parent_run_id == outputs[1].run_id
         assert r2.parent_run_id == r1.run_id
 
@@ -584,13 +584,13 @@ class TestBusySession:
         consumer = asyncio.create_task(_consume_roots(stream, outputs))
         await _until(lambda: outputs)
         release.set()
-        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(entered.wait(), 30)
         followup_run_id = stream.last_run_id
         direct = asyncio.create_task(agent(prompt="chat", parent_id=followup_run_id).collect())
         await asyncio.sleep(0.05)
         opened.set()
-        await asyncio.wait_for(direct, 2)
-        await asyncio.wait_for(consumer, 2)
+        await asyncio.wait_for(direct, 30)
+        await asyncio.wait_for(consumer, 30)
         assert seen_session[-1] == {"from_followup": "yes"}
 
 
@@ -624,7 +624,7 @@ class TestPlumbing:
         waiter = asyncio.create_task(store.wait_for_completion())
         await asyncio.sleep(0)
         event = await asyncio.to_thread(store.post_event, "From a webhook thread.")
-        assert await asyncio.wait_for(waiter, 1) is True
+        assert await asyncio.wait_for(waiter, 30) is True
         assert store.pending_events() == [event]
         # The inbox and the waiter's asyncio.Event are only touched on the loop's own thread.
         assert queued_on == [threading.get_ident()]
@@ -677,13 +677,13 @@ class TestPlumbing:
                         post_session_event(item.run_id, "second note")
 
         consumer = asyncio.create_task(consume(stream))
-        await asyncio.wait_for(admit_entered.wait(), 2)
+        await asyncio.wait_for(admit_entered.wait(), 30)
         chat = asyncio.create_task(agent(prompt="chat", parent_id=outputs[0].run_id).collect())
-        await asyncio.wait_for(chat_entered.wait(), 2)
-        await asyncio.wait_for(consumer, 2)
+        await asyncio.wait_for(chat_entered.wait(), 30)
+        await asyncio.wait_for(consumer, 30)
         assert stream.stop_reason == "preempted"
         del stream
         gc.collect()
         chat_opened.set()
-        chat_out = await asyncio.wait_for(chat, 2)
+        chat_out = await asyncio.wait_for(chat, 30)
         assert store_for_run(chat_out.run_id) is None

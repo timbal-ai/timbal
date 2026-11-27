@@ -1,15 +1,18 @@
 """A text conversation that stays open: messages in at any time, one turn at a time, events out."""
 
 import asyncio
+import concurrent.futures
 import contextlib
 import copy
 import functools
+import inspect
 import json
 import math
 import os
 import re
 import time
 import weakref
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Collection
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -22,6 +25,7 @@ from ..state import RunContext, set_call_id, set_parent_call_id, set_run_context
 from ..state.background import (
     DEFAULT_BG_LOG_MAX_BYTES,
     DEFAULT_BG_LOG_MAX_EVENTS,
+    MAX_SESSION_EVENT_CHARS,
     BackgroundEventLog,
     BackgroundTaskStore,
     SessionEvent,
@@ -43,6 +47,7 @@ from ..types.approval import ApprovalResolution, Cancel
 from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.message import RUNTIME_SOURCE, Message
+from .peers import _leave_on_close
 from .runnable import ATTENDED_TRIGGER_KINDS, _own_copy
 from .session_scheduler import Followup, SessionScheduler, is_parked, pending_user_batch
 from .tool_policy import ReadOnlyWithin, read_only_within, restore_tool_policy
@@ -52,6 +57,7 @@ from .tool_policy import describe_tool_policy as _describe_policy
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .peers import PeerMembership, PeerPriority
 
 __all__ = ["SEND_MODES", "SILENT_REPLY", "ChatSession", "OnDeadTurn", "SendMode", "ToolPolicy"]
 
@@ -89,10 +95,26 @@ _RECOVERY_ADVICE = (
     "Continue where you left off. Do not repeat completed actions. Before redoing one that is not confirmed, "
     "check whether it already happened, or ask the user."
 )
+_AGENT_MESSAGES_KEPT = 512
+# How often a message handed to a session on another loop checks that loop is still there (a loop closed after it
+# took the receive and before it ran it settles nothing by itself).
+_HANDOVER_CHECK_S = 0.25
+# Ids a message from another agent also stands for (copies coalesced by their text): at most this many are kept.
+_AGENT_MESSAGE_ALIASES_KEPT = 16
 # A restored log continues this far past the saved cursor: further than any client of the old process read.
 _LOG_RESTART_GAP = 1_000_000_000
 _PERSISTED_KINDS = frozenset(
-    {"message", "message_settled", "wake", "wake_superseded", "turn_started", "turn_finished", "interrupt", "closed"}
+    {
+        "message",
+        "message_settled",
+        "agent_message",
+        "wake",
+        "wake_superseded",
+        "turn_started",
+        "turn_finished",
+        "interrupt",
+        "closed",
+    }
 )
 _READ_ONLY_NOTE = (
     "This turn can only read: tools that send, write, delete or buy are not available. If the task needs "
@@ -463,6 +485,38 @@ def _left_parked(turn: asyncio.Task | None) -> bool | None:
     return is_parked(output.status) if output is not None else None
 
 
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+def _settle(outcome: concurrent.futures.Future, *, result: Any = None, error: BaseException | None = None) -> None:
+    """Set ``outcome`` unless it is settled already: a check and a set would race a cancel from another thread
+    (InvalidStateError), so the set is tried and its refusal taken as that."""
+    with contextlib.suppress(concurrent.futures.InvalidStateError):
+        if error is not None:
+            outcome.set_exception(error)
+        else:
+            outcome.set_result(result)
+
+
+def _peer_hops_of(context: RunContext | None) -> int | None:
+    """How deep in a chain of agent messages a run was (``RunContext._peer_hops``): from the context while it lives,
+    else from its root span's record (``metadata.peer_hops``, :func:`~timbal.core.session_scheduler.note_peer_hops`)."""
+    if context is None:
+        return None
+    if context._peer_hops is not None:
+        return context._peer_hops
+    root = context.root_span()
+    record = root.metadata.get("peer_hops") if root is not None else None
+    if not isinstance(record, dict) or record.get("call_id") != root.call_id:
+        return None  # not the count's own record: the agent's own metadata, or none
+    hops = record.get("hops")
+    return hops if isinstance(hops, int) and not isinstance(hops, bool) else None
+
+
 def _brief(value: Any, limit: int = 160) -> str:
     text = value if isinstance(value, str) else repr(value)
     text = " ".join(text.split())
@@ -719,6 +773,16 @@ class ChatSession:
         self.last_status: dict[str, Any] | None = None
         self.last_activity = time.monotonic()
         self._agent = agent
+        # Messages from other agents (core/peers.py): the directory membership, and the last messages
+        # received, by sender and id, for dedupe and for the hops of a reply.
+        self._peer: PeerMembership | None = None
+        self._agent_messages: OrderedDict[tuple[str, str], SessionEvent] = OrderedDict()
+        # The loop that serves the session (its worker's): a message from another agent is taken there, whichever
+        # thread or loop sends it (receive_agent_message). Known once the session runs on one; set here, before
+        # anything below can start the worker.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        with contextlib.suppress(RuntimeError):
+            self._loop = asyncio.get_running_loop()
         self._kwargs = kwargs
         self._stored_kwargs, self._unstored_kwargs = _split_kwargs(kwargs)
         self._durability = durability
@@ -996,6 +1060,240 @@ class ChatSession:
             return
         self._record("task_message_settled", task_id=task_id, event_id=event.id, state=event.state, run_id=event.run_id)
 
+    async def receive_agent_message(
+        self,
+        text: str,
+        *,
+        sender: str,
+        message_id: str | None = None,
+        reply_to: str | None = None,
+        priority: "PeerPriority" = "normal",
+        hops: int = 0,
+    ) -> dict[str, Any]:
+        """Take a message another agent sent (:class:`~timbal.core.peers.AgentDirectory`); returns its receipt.
+
+        Taken on the loop that serves the session, whichever thread or loop calls it: its guardrails run there,
+        and its worker is started there. Raises :class:`~timbal.core.peers.PeerRejected`.
+        """
+        from .peers import PeerRejected
+
+        loop = self._loop
+        if loop is not None and loop is not _running_loop():
+            if loop.is_closed() or not loop.is_running():
+                raise PeerRejected("closed", "The agent's session is not being served.")
+            # The receive says what became of the message itself, in the step that posts it: its result reaches the
+            # hand-over (run_coroutine_threadsafe) only in a callback one step later, which a loop that stops in
+            # that step and closes never runs, and the sender would be told "closed" for a message in the inbox.
+            outcome: concurrent.futures.Future = concurrent.futures.Future()
+            receive = self._receive_and_report(
+                outcome, text, sender=sender, message_id=message_id, reply_to=reply_to, priority=priority, hops=hops
+            )
+            try:
+                handed = asyncio.run_coroutine_threadsafe(receive, loop)
+            except RuntimeError:
+                # Closed between the check above and the hand-over: nothing reached it (and nothing will run this).
+                receive.close()
+                raise PeerRejected("closed", "The agent's session is not being served.") from None
+            waiting = asyncio.wrap_future(outcome)
+            try:
+                while True:
+                    done, _ = await asyncio.wait({waiting}, timeout=_HANDOVER_CHECK_S)
+                    if done:
+                        return waiting.result()
+                    if loop.is_closed() and not outcome.done():
+                        # Closed after it took the receive and before the receive said anything (a loop that was
+                        # stopping, or closed with its tasks left as they were): nothing will settle it now, and
+                        # nothing was posted (a receive that posts says so in the same step). No cancel either:
+                        # it would call back into the closed loop.
+                        if inspect.getcoroutinestate(receive) == inspect.CORO_CREATED:
+                            receive.close()  # never started: no "never awaited" left behind
+                        raise PeerRejected("closed", "The agent's session stopped before the message reached it.")
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    # The wait first: what the cancelled receive then reports goes to a settled future, not to
+                    # one nobody reads (asyncio would log it as never retrieved).
+                    waiting.cancel()
+                    if not loop.is_closed():
+                        handed.cancel()  # (and with it the receive on the session's loop)
+                    raise  # the caller's own cancellation
+                raise PeerRejected("closed", "The agent's session stopped while it took the message.") from None
+        return await self._receive_agent_message(
+            text, sender=sender, message_id=message_id, reply_to=reply_to, priority=priority, hops=hops
+        )
+
+    async def _receive_and_report(self, outcome: concurrent.futures.Future, text: str, **kwargs: Any) -> None:
+        """:meth:`_receive_agent_message` on the session's loop, for a sender on another one: what became of the
+        message is set on ``outcome`` in the step that decides it (a receipt, a refusal; a cancelled receive posted
+        nothing: ``closed``). A sender that gave up has cancelled ``outcome`` from its own thread, at any moment:
+        settling it is then a no-op, never an error in this task (_settle)."""
+        from .peers import PeerRejected
+
+        try:
+            receipt = await self._receive_agent_message(text, **kwargs)
+        except asyncio.CancelledError:
+            _settle(outcome, error=PeerRejected("closed", "The agent's session stopped while it took the message."))
+            raise
+        except Exception as error:  # (said to the sender, who raises it: nothing is left for the loop to log)
+            _settle(outcome, error=error)
+            return
+        _settle(outcome, result=receipt)
+
+    async def _receive_agent_message(
+        self,
+        text: str,
+        *,
+        sender: str,
+        message_id: str | None = None,
+        reply_to: str | None = None,
+        priority: "PeerPriority" = "normal",
+        hops: int = 0,
+    ) -> dict[str, Any]:
+        """:meth:`receive_agent_message`, on the session's own loop.
+
+        It reaches the agent as a ``source="agent"`` event: the next turn takes it (one starts if the session
+        is idle), or with ``priority="urgent"`` the running turn does after its tool batch (``lane="next"``; it
+        never cuts what runs). A message id this session has from the same sender, or the same text from the
+        same sender while that one is unread, is a ``duplicate`` and delivered once. The agent's input
+        guardrails screen the text: a block, or a redaction that leaves nothing, refuses it. Raises
+        :class:`~timbal.core.peers.PeerRejected`.
+        """
+        from .peers import PeerRejected, _check_message_id, _check_name
+
+        if self.closed:
+            raise PeerRejected("closed", "The agent's session is closed.")
+        try:
+            sender = _check_name(sender)
+        except ValueError as e:
+            raise PeerRejected("invalid", f"The sender's name: {e}") from None
+        message_id = _check_message_id(message_id, "message_id")
+        reply_to = _check_message_id(reply_to, "reply_to")
+        if priority not in ("normal", "urgent"):
+            raise PeerRejected("invalid", f"priority must be 'normal' or 'urgent', got {priority!r}")
+        if not isinstance(hops, int) or isinstance(hops, bool):
+            raise PeerRejected("invalid", "hops must be an integer.")
+        if self._peer is not None and not self._peer.accepts_from(sender):
+            raise PeerRejected("not_accepted", f"{self._peer.name} does not take messages from {sender}.")
+        text = text.strip() if isinstance(text, str) else ""
+        if not text:
+            raise PeerRejected("invalid", "A message from an agent needs text.")
+        if len(text) > MAX_SESSION_EVENT_CHARS:
+            raise PeerRejected(
+                "invalid", f"A message from an agent is limited to {MAX_SESSION_EVENT_CHARS} characters."
+            )
+        earlier = self._agent_messages.get((sender, message_id)) if message_id else None
+        if earlier is not None:
+            return {**earlier.receipt(), "duplicate": True}
+        given_id, message_id = message_id, message_id or f"am_{uuid7(as_type='hex')}"
+        peer = {
+            "from": sender,
+            "message_id": message_id,
+            "reply_to": reply_to,
+            "priority": priority,
+            "hops": max(0, hops),
+        }
+        screened, triggered = await self._screen_agent_message(text, sender, peer)
+        # The screening may have taken a while: the session may be gone, and a copy of the message may have
+        # arrived meanwhile (a sender's retry). From here to the post nothing awaits.
+        if self.closed:
+            raise PeerRejected("closed", "The agent's session is closed.")
+        screened = screened.strip()
+        if not screened:
+            logger.warning("agent_message_blocked", rail="redaction", sender=sender, chars=len(text), emptied=True)
+            raise PeerRejected("blocked", "Blocked by the recipient's guardrails: nothing of the message was left.")
+        earlier = self._agent_messages.get((sender, given_id)) if given_id else None
+        if earlier is None:
+            earlier = next(
+                (
+                    event
+                    for event in self._store.pending_events()
+                    if event.peer is not None
+                    and (event.peer["from"], event.text, event.peer.get("reply_to"), event.peer.get("priority"))
+                    == (sender, screened, reply_to, priority)
+                ),
+                None,
+            )
+        if earlier is not None:
+            if given_id:
+                # The same message under another id (a sender's retry): a later copy under this one is it too,
+                # also once the first is taken. Forgotten with it if it is withdrawn (withdraw). Kept with the
+                # event's envelope too, which its snapshot holds: a restore remembers it.
+                self._remember_agent_message(earlier, (sender, given_id))
+                aliases = list(earlier.peer.get("aliases") or ())
+                if given_id not in aliases and given_id != earlier.peer.get("message_id"):
+                    earlier.peer = {**earlier.peer, "aliases": [*aliases, given_id][-_AGENT_MESSAGE_ALIASES_KEPT:]}
+                    self._persist()
+            return {**earlier.receipt(), "duplicate": True}
+        try:
+            # Urgent is the steering lane, and nothing more: no 'interrupt' policy, which would let another
+            # agent's model cut a reply in flight (a call that shares this session speaks its events).
+            event = self._store.post_event(
+                screened, source="agent", peer=peer, lane="next" if priority == "urgent" else "later"
+            )
+        except ValueError as e:
+            raise PeerRejected("invalid", str(e)) from None
+        event.guardrails.extend(triggered)
+        self._remember_agent_message(event)
+        self.last_activity = time.monotonic()
+        self._record(
+            "agent_message",
+            event_id=event.id,
+            sender=sender,
+            message_id=peer["message_id"],
+            reply_to=reply_to,
+            priority=priority,
+            hops=peer["hops"],
+            text=screened,
+        )
+        self._ensure_worker()
+        return {**event.receipt(), "duplicate": False}
+
+    def _agent_message(self, sender: str, message_id: str) -> SessionEvent | None:
+        """A message ``sender`` sent this session, by its id (while it is among the last ones kept)."""
+        return self._agent_messages.get((sender, message_id))
+
+    def _remember_agent_message(self, event: SessionEvent, key: tuple[str, str] | None = None) -> None:
+        """Keep a message from an agent by its sender and id (``key``: another id it stands for): for dedupe, and
+        for the hops of a reply to it."""
+        if key is None:
+            if event.peer is None or not event.peer.get("message_id"):
+                return
+            key = (event.peer["from"], event.peer["message_id"])
+            for alias in event.peer.get("aliases") or ():
+                if isinstance(alias, str):
+                    self._agent_messages[(event.peer["from"], alias)] = event
+        self._agent_messages[key] = event
+        while len(self._agent_messages) > _AGENT_MESSAGES_KEPT:
+            self._agent_messages.popitem(last=False)
+
+    async def _screen_agent_message(self, text: str, sender: str, peer: dict[str, Any]) -> tuple[str, list[Any]]:
+        """The agent's input guardrails on a message from another agent (as on a user's prompt): the text they
+        leave, and the rails that fired, for the guardrail report of the run that takes it. A rail gets the message
+        as ``ctx.payload``, as for a prompt: a ``user`` message from ``source="agent"`` with the envelope
+        (``metadata.peer``)."""
+        from ..guardrails.types import GuardrailContext, GuardrailStage
+        from ..types.message import SESSION_EVENT_KIND
+        from .peers import PeerRejected
+
+        runner = getattr(self._agent, "_guardrail_runner", None)
+        if runner is None or not runner.has_stage(GuardrailStage.INPUT):
+            return text, []
+        # Not marked as the runtime's own text (``is_runtime()``): a rail that lets the runtime's notices through
+        # must still screen another agent's words.
+        payload = Message(
+            role="user",
+            content=[TextContent(text=text)],
+            metadata={"source": "agent", "kind": SESSION_EVENT_KIND, "peer": dict(peer)},
+        )
+        ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._agent._path, payload=payload)
+        outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
+        if outcome.verdict is not None:
+            # No run exists yet to carry a guardrail report, so the log is the record. Not of the text: it is what
+            # the rail kept out (a card number, a secret).
+            logger.warning("agent_message_blocked", rail=outcome.rail.name, sender=sender, chars=len(text))
+            raise PeerRejected("blocked", f"Blocked by the recipient's {outcome.rail.name!r} guardrail.")
+        return outcome.text, list(outcome.triggered)
+
     def interrupt(self) -> bool:
         """Cut what the session is doing; queued messages then start the next turn.
 
@@ -1020,6 +1318,10 @@ class ChatSession:
         if any(event.id == work_id and not self._mine(event) for event in self._store.pending_events()):
             return False  # another session's, kept for its restore
         withdrawn = self._store.withdraw_event(work_id)
+        if withdrawn and self._agent_messages:
+            # A message from an agent taken back is not one the session has: a retry is not a duplicate of it.
+            for key in [key for key, event in self._agent_messages.items() if event.id == work_id]:
+                del self._agent_messages[key]
         if not withdrawn:
             wake = next((wake for wake in self._wakes if wake.id == work_id), None)
             if wake is not None:
@@ -1286,6 +1588,7 @@ class ChatSession:
         cut = self._in_flight if keep and self.busy else None
         self.closed = True
         self._keep = keep
+        _leave_on_close(self)  # under the directories' lock, whether it has joined one yet or not
         try:
             worker, self._worker = self._worker, None
             if worker is not None and not worker.done():
@@ -1498,6 +1801,9 @@ class ChatSession:
         """Pick up the state of the run the session continues (``parent_id``): one parked on an approval or
         ``ask_user`` leaves the session parked, so messages wait and :meth:`resume` answers it (a turn chained
         onto it would resume it and drop its prompt). Once; ``async with`` and the first turn call it."""
+        if self._worker is None or self._worker.done():
+            # Served from here (async with, the worker's first step); not when a worker serves it elsewhere already.
+            self._loop = asyncio.get_running_loop()
         if self._restoring is None or (self._restoring.done() and self._restore_from is not None):
             self._restoring = asyncio.get_running_loop().create_task(self._restore_parked())
         await asyncio.shield(self._restoring)
@@ -1672,7 +1978,9 @@ class ChatSession:
         if self._hold_worker:
             return
         if self._worker is None or self._worker.done():
-            self._worker = asyncio.get_running_loop().create_task(self._serve())
+            loop = asyncio.get_running_loop()
+            self._loop = loop  # the loop that serves it is its worker's (the one it was made on is only a guess)
+            self._worker = loop.create_task(self._serve())
 
     def _work_arrived(self) -> None:
         self._work.set()
@@ -1944,6 +2252,10 @@ class ChatSession:
             # The session hint: the thread's root run, or this turn when it starts the thread and the session
             # has none (it becomes the root once it is the head, see _pump).
             context._session_id = self.root_run_id or (context.id if context.parent_id is None else None)
+            context._peer = self._peer
+            if resume is not None and self._peer is not None:
+                # The same turn, after its pause: the agent messages it took count toward its hop limit still.
+                context._peer_hops = _peer_hops_of(self._last_context)
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
             context._cut = asyncio.Event()
@@ -2553,6 +2865,7 @@ class ChatSession:
             event = self._store.restore_event(data, held=self._kept_events.pop(data["id"], None))
             if event.source == "user":
                 self._watch(event)
+            self._remember_agent_message(event)
 
     def _drop_stopped(self, events: list[dict[str, Any]], wake: dict[str, Any] | None, dead_run_id: str | None) -> None:
         """The input of a dead turn its user stopped, its messages or its wake: delivered to it (the messages'
@@ -2584,6 +2897,7 @@ class ChatSession:
             self._store.restore_event(event.to_dict(), held=event)
             if event.source == "user":
                 self._watch(event)
+            self._remember_agent_message(event)
 
     async def _load_run(self, run_id: str | None) -> RunContext | None:
         """A stored run of this session as a context (its trace loaded), or None when it was never stored."""

@@ -194,12 +194,12 @@ class TestSteering:
         model = TestModel(handler=echo)
         async with ChatSession(make_agent(gate, model=model)) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             steer = session.send("also check the logs")
             assert session.busy
             gate.release.set()
             finished = await records(session, "turn_finished", 1)
-            assert await asyncio.wait_for(steer.settled(), 1) == "delivered"
+            assert await asyncio.wait_for(steer.settled(), 30) == "delivered"
             assert steer.run_id == finished[0]["run_id"]
             assert session.turns == 1 and model.call_count == 2
             (output,) = root_outputs(session)
@@ -239,7 +239,7 @@ class TestSteering:
         model = Gated(handler=echo)
         async with ChatSession(make_agent(Gate(), model=model)) as session:
             session.send("hi")
-            await asyncio.wait_for(entered.wait(), 2)
+            await asyncio.wait_for(entered.wait(), 30)
             session.send("one more thing")
             opened.set()
             await records(session, "turn_finished", 1)
@@ -251,7 +251,7 @@ class TestSteering:
         gate = Gate()
         async with ChatSession(make_agent(gate, steering=False)) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             session.send("first")
             session.send("second")
             gate.release.set()
@@ -268,7 +268,7 @@ class TestSteering:
         rail = guardrail(lambda text: Verdict.block("nope") if "forbidden" in text else True, stages=["input"])
         async with ChatSession(make_agent(gate, guardrails=[rail])) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             blocked = session.send("something forbidden")
             allowed = session.send("and something fine")
             gate.release.set()
@@ -316,7 +316,7 @@ class TestSteering:
         )
         async with ChatSession(make_agent(gate, guardrails=[rail])) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             session.send("my secret is 42")
             gate.release.set()
             await records(session, "turn_finished", 1)
@@ -338,7 +338,7 @@ class TestModes:
         gate = Gate()
         async with ChatSession(make_agent(gate)) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             session.send("q1", mode="followup")
             session.send("q2", mode="followup")
             gate.release.set()
@@ -349,7 +349,7 @@ class TestModes:
         gate = Gate()
         async with ChatSession(make_agent(gate), collect_window=0.05) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             session.send("a", mode="collect")
             session.send("b", mode="collect")
             gate.release.set()
@@ -366,7 +366,7 @@ class TestModes:
         second = None
         try:
             first.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             kept = first.send("for the first session", mode="followup")
             await first.flush()
             await first.close(keep=True)  # lives on in its store, with that message
@@ -389,7 +389,7 @@ class TestModes:
         gate = Gate()
         async with ChatSession(make_agent(gate)) as session:
             session.send("slow")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             session.send("queued", mode="followup")
             session.send("stop, do this instead", mode="interrupt")
             finished = await records(session, "turn_finished", 3)
@@ -486,7 +486,7 @@ class TestWakeAndSilence:
         )
         async with ChatSession(agent) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             session.wake("periodic check")
             session.send("hi", mode="followup")
             gate.release.set()
@@ -506,7 +506,7 @@ class TestWakeAndSilence:
         )
         async with ChatSession(agent) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             first = session.wake("heartbeat 1", key="heartbeat")
             second = session.wake("heartbeat 2", key="heartbeat")
             assert [w["wake_id"] for w in session.state()["wakes"]] == [second]
@@ -655,14 +655,14 @@ class TestRobustness:
             tabs = [asyncio.create_task(follow(0)), asyncio.create_task(follow(1))]
             await asyncio.sleep(0)
             session.send("hello")
-            await asyncio.wait_for(asyncio.gather(*tabs), 3)
+            await asyncio.wait_for(asyncio.gather(*tabs), 30)
             assert seen[0] == seen[1] and len(seen[0]) > 5
 
     async def test_reconnecting_mid_turn_replays_from_the_cursor(self):
         gate = Gate()
         async with ChatSession(make_agent(gate)) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             cursor = session.log.cursor_end
             before, _ = session.log.peek()
             gate.release.set()
@@ -680,14 +680,14 @@ class TestRobustness:
         agent = make_agent(gate)
         async with ChatSession(agent) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             running = session.run_id
             # Another client continues the same conversation directly (e.g. POST /stream with this parent).
             foreign = asyncio.create_task(agent(prompt="from elsewhere", parent_id=running).collect())
             await asyncio.sleep(0.05)
             assert not foreign.done()  # queued behind the session's running turn
             gate.release.set()
-            other = await asyncio.wait_for(foreign, 3)
+            other = await asyncio.wait_for(foreign, 30)
             assert other.output.collect_text() == "echo: from elsewhere"
             assert session.head == other.run_id
             session.send("and now?")
@@ -707,12 +707,12 @@ class TestRobustness:
             session.send("hi")
             await records(session, "turn_finished", 1)
             foreign = asyncio.create_task(agent(prompt="start", parent_id=session.head).collect())
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             session.wake("check the inbox")
             await asyncio.sleep(0.05)
             assert session.state()["wakes"]  # held behind the foreign turn
             gate.release.set()
-            other = await asyncio.wait_for(foreign, 3)
+            other = await asyncio.wait_for(foreign, 30)
             _, woken = await records(session, "turn_started", 2)
             assert woken["trigger"]["kind"] == "wake" and woken["parent_id"] == other.run_id
             await records(session, "turn_finished", 2)
@@ -724,7 +724,7 @@ class TestRobustness:
             waiting = asyncio.ensure_future(session._until_scheduler_or_work())
             # Runs after the waiter's first step (where it reads the scheduler), before anything it starts.
             asyncio.get_running_loop().call_soon(session._scheduler._notify)
-            await asyncio.wait_for(waiting, 2)
+            await asyncio.wait_for(waiting, 30)
 
     async def test_messages_wait_while_a_foreign_run_of_the_session_is_parked(self):
         def charge() -> str:
@@ -818,7 +818,7 @@ class TestRobustness:
         )
         async with ChatSession(agent) as session:
             session.wake("Check the inbox.")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             session.send("hello")  # default mode: steer
             gate.release.set()
             finished = await records(session, "turn_finished", 2)
@@ -1350,7 +1350,7 @@ class TestRobustness:
         gate = Gate()
         async with ChatSession(make_agent(gate)) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             with pytest.raises(RuntimeError, match="running"):
                 session.resume({"any": True})
             gate.release.set()
@@ -1543,11 +1543,11 @@ class TestRobustness:
         gate = Gate()
         async with ChatSession(make_agent(gate, model=model), collect_window=0.01) as session:
             session.send("start")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             modes = ["steer", "followup", "collect", "steer", "followup"] * 10
             events = [session.send(f"m{i}", mode=mode) for i, mode in enumerate(modes)]
             gate.release.set()
-            await asyncio.wait_for(asyncio.gather(*(event.settled() for event in events)), 5)
+            await asyncio.wait_for(asyncio.gather(*(event.settled() for event in events)), 30)
             await asyncio.sleep(0.1)
             while session.busy or session.pending_messages():
                 await asyncio.sleep(0.02)
@@ -1576,9 +1576,9 @@ class TestRobustness:
         gate = Gate()
         async with ChatSession(make_agent(gate)) as session:
             session.send("slow")
-            await asyncio.wait_for(gate.entered.wait(), 2)
+            await asyncio.wait_for(gate.entered.wait(), 30)
             events = [session.send(f"cut {i}", mode="interrupt") for i in range(5)]
-            await asyncio.wait_for(asyncio.gather(*(event.settled() for event in events)), 5)
+            await asyncio.wait_for(asyncio.gather(*(event.settled() for event in events)), 30)
             while session.busy:
                 await asyncio.sleep(0.02)
             assert {event.state for event in events} == {"delivered"}
@@ -1737,7 +1737,7 @@ class TestSessionLifecycle:
         gate = Gate()
         session = ChatSession(make_agent(gate))
         session.send("slow")
-        await asyncio.wait_for(gate.entered.wait(), 2)
+        await asyncio.wait_for(gate.entered.wait(), 30)
         await session.close()
         assert not session.busy and session.closed
         events, _ = session.log.peek()

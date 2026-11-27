@@ -92,8 +92,9 @@ from .attachment_limit import AttachmentSpills, apply_attachment_limit
 from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
 from .models import Model, base_usage_metric, get_context_window
+from .peers import _SEND_TO_AGENT_FALLBACKS, SEND_TO_AGENT_NAME, carry_sent_ids, start_batch
 from .runnable import Runnable, RunnableLike
-from .session_scheduler import record_delivery
+from .session_scheduler import note_peer_hops, record_delivery
 from .skill import ReadSkill, Skill
 from .tool import Tool
 from .tool_policy import READ_ONLY_POLICY, ReadOnlyWithin, describe_tool_policy
@@ -353,7 +354,7 @@ _CALL_TOOL_FALLBACKS = ("call_found_tool", "call_deferred_tool")
 _CALL_TOOL_NUMBERED = CALL_TOOL_NAME + "_"
 _FIRST_NUMBERED = 2
 # The agent's own tools whose names it picks at run time (Agent._note_pause keeps them across a pause).
-_PICKED_NAMES = frozenset({SEND_MESSAGE_NAME, MARK_SALIENT_NAME, SEARCH_TOOLS_NAME, CALL_TOOL_NAME})
+_PICKED_NAMES = frozenset({SEND_MESSAGE_NAME, MARK_SALIENT_NAME, SEARCH_TOOLS_NAME, CALL_TOOL_NAME, SEND_TO_AGENT_NAME})
 
 
 async def _no_events() -> AsyncGenerator[Any, None]:
@@ -637,6 +638,16 @@ def _card_ids(waiting_on: Any) -> set[str]:
 def _card_id(event: Any) -> str:
     """The id a resume answers a card by (an approval's, a question's)."""
     return getattr(event, "approval_id", None) or getattr(event, "interaction_id", None) or ""
+
+
+def _waiting_ids(paused_calls: Any, pending: Sequence[Any]) -> set[str]:
+    """The tool call ids a resumed run replays: those still waiting in its memory (``pending``), among the ones
+    the paused turn's record says were waiting (``bindings``) when it has them."""
+    ids = {call.id for call in pending}
+    bindings = paused_calls.get("bindings") if isinstance(paused_calls, dict) else None
+    if isinstance(bindings, dict) and bindings:
+        ids &= set(bindings)
+    return ids
 
 
 def _binding(tool: Any, providers: Mapping[int, str]) -> str:
@@ -1943,7 +1954,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 parent_trace = await run_context._get_parent_trace()
                 if parent_trace is None:
                     return {"unverified": True} if run_context._resume_values else None
-                return _paused_record(self._own_span(parent_trace))
+                paused_span = self._own_span(parent_trace)
+                paused_calls = _paused_record(paused_span)
+                if paused_span is not None and _is_pause(paused_span.status) and run_context._peer is not None:
+                    # As on the resume below: a send cut before its answer came back keeps its id.
+                    carry_sent_ids(
+                        current_span, paused_span, _waiting_ids(paused_calls, self._find_pending_tool_uses(loaded))
+                    )
+                return paused_calls
             return None
 
         # Memory stays unset until it holds the previous turns: a turn cancelled while loading
@@ -1990,6 +2008,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 current_span.metadata["end_turn"] = True
                 if paused.get("silent"):
                     current_span.metadata["silent"] = True  # it ended its turn by staying silent
+            # The ids the turn's sends to other agents used: a send cut before its answer came back runs again in
+            # this run, and must send the same message (peers._sent_message_id). Only in a directory, the one place
+            # the send is offered: elsewhere the record would only take the place of the agent's own key.
+            if run_context._peer is not None:
+                carry_sent_ids(
+                    current_span, previous_span, _waiting_ids(paused_calls, self._find_pending_tool_uses(memory))
+                )
         prepared = None
         if (
             self.memory_compaction is not None
@@ -2197,7 +2222,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # and events are the call's to speak (SessionScheduler.takes), so they stay pending for it.
             return
         notifications = store.drain_completions()
-        events = store.drain_events(settle=False, where=lambda event: event.source != "user")
+        if channel is None or run_context._steering is False:
+            # Messages from other agents are for a turn the session starts itself, with its tools and its send. Not
+            # a turn it did not start (another client's, chained onto one of its runs and admitted into it: no
+            # send), nor a wake (the application's turn: a routine, a heartbeat, a recovery turn), under whose tool
+            # policy the send may be hidden, or named so that the policy reaches another tool (one of the agent's
+            # own called send_to_agent). Whether or not the session is in a directory now: a restored one is in
+            # none until it joins again, and its recovery turn runs first. They start a turn of their own after it.
+            events = store.drain_events(settle=False, where=lambda event: event.source not in ("user", "agent"))
+        else:
+            events = store.drain_events(settle=False, where=lambda event: event.source != "user")
         if not notifications and not events:
             return
         notice = format_session_notice(notifications, events)
@@ -2269,8 +2303,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 settle=False, where=lambda event: event.lane == "next" and channel.takes(event, store)
             )
         else:
+            # Not a turn of the session's own: messages from other agents wait for one (see
+            # _inject_background_completions).
             events = store.drain_events(
-                settle=False, where=lambda event: event.lane == "next" and event.kept_for is None
+                settle=False,
+                where=lambda event: event.lane == "next" and event.kept_for is None and event.source != "agent",
             )
         if not events:
             return []
@@ -3467,6 +3504,52 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     warned.add(name)
             tools = [tool for tool in tools if tool.name != name]
         return [*tools, self._mark_salient_tool(name)], name
+
+    def _with_peer_tool(
+        self,
+        tools: list[Tool],
+        names: Collection[str],
+        name: str | None,
+        peer: Any,
+        policy: Any,
+        offered: bool,
+        kept: str | None = None,
+        warned: set[str] | None = None,
+    ) -> tuple[list[Tool], str | None]:
+        """A step's tools with ``send_to_agent`` (the session is in an :class:`~timbal.core.peers.AgentDirectory`:
+        ``peer``, its membership), and the tool's name.
+
+        Named as the salience tool is (:meth:`_with_salience_tool`): at the first step that offers it, among
+        every name the agent has there, fixed for the turn, and kept by the run that resumes a pause. Unlike
+        it, the run's tool policy applies (``policy``): a message to another agent starts work there, so a
+        read-only turn has none, and what a callable policy allows is recorded with the rest. A tool that takes
+        the name later in the turn is not offered, whether the policy shows the send or not. Not offered once the
+        session has left the directory (another session may have its name now).
+        """
+        if not offered or not peer.current:
+            return tools, name
+        if name is None:
+            name = kept or _unused_name(SEND_TO_AGENT_NAME, _SEND_TO_AGENT_FALLBACKS, set(names))
+        if name in names:
+            # A tool set that changed its catalog inside the turn, or since the turn paused: the name is the send's.
+            # (Said once a turn: ``warned``.)
+            if warned is None or name not in warned:
+                logger.warning(
+                    "A tool took the name of the send to agents mid-turn; it is not offered.",
+                    path=self._path,
+                    tool=name,
+                )
+                if warned is not None:
+                    warned.add(name)
+            tools = [t for t in tools if t.name != name]
+        tool = peer.tool(self, name)
+        if policy is not None and not self._tool_allowed(tool, policy):
+            return tools, name
+        tools = [*tools, tool]
+        if policy is not None:
+            # What the run may call, the send included (a parked wake restores a callable policy from it).
+            self._record_allowed_tools(tools, policy)
+        return tools, name
 
     def _delivered(self, current_span: Any, before: int = 0, rest: Sequence = ()) -> OutputEvent | None:
         """The turn's output with ``delivery="tool"``: what it sent, as one assistant message (None if nothing).
@@ -4680,6 +4763,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         send_name: str | None = None
         # salience_tool=True. The mark_salient tool's name, fixed at the first step that offers it.
         salience_name: str | None = None
+        # In an AgentDirectory. The send_to_agent tool's name, fixed at the first step that offers it.
+        peer_name: str | None = None
         # The names the agent's own tools had when the turn this run resumes paused (_note_pause): kept.
         kept_names = paused_calls.get("tool_names") if paused_calls is not None else None
         # Those of tool search among them: the agent's for the turn, on a step that searches or not.
@@ -4830,12 +4915,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             else:
                 content = event.output
             tool_name = event.path.rsplit(".", 1)[-1]
-            # A message sent to the user, or a moment marked worth remembering, is not a call that went
-            # through: the streak stands, and neither enters the window. (Looked at only when it matters.)
+            # A message sent to the user or to another agent, or a moment marked worth remembering, is not a call
+            # that went through: the streak stands, and none enters the window. (Looked at only when it matters.)
             if denied:
                 consecutive_denials += 1
             elif consecutive_denials and not (
-                (delivering and tool_name == send_name) or (salience_name is not None and tool_name == salience_name)
+                (delivering and tool_name == send_name)
+                or (salience_name is not None and tool_name == salience_name)
+                or (peer_name is not None and tool_name == peer_name)
             ):
                 consecutive_denials = 0
             if self.max_denials_window is not None and (
@@ -4843,6 +4930,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 or not (
                     (delivering and tool_name == send_name)
                     or (salience_name is not None and tool_name == salience_name)
+                    or (peer_name is not None and tool_name == peer_name)
                 )
             ):
                 window = await _denial_window()
@@ -4972,6 +5060,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Fixed for the turn; checked on every step. Not with an output_model: that turn ends on the model's first
         # answer, before any tool of it runs (a mark it chose would be neither recorded nor the declared output).
         offer_salience = self.salience_tool and current_span.parent_call_id is None and self.output_model is None
+        # The session's place in an AgentDirectory (core/peers.py), for its root agent: send_to_agent. Fixed for the
+        # turn, like the salience tool (and not with an output_model, for the same reason).
+        peer = run_context._peer if current_span.parent_call_id is None and self.output_model is None else None
+        if peer is not None:
+            # The hops a turn resumed after a pause carries (ChatSession): where a later resume finds them too.
+            note_peer_hops(run_context, current_span)
         # Fixed for the turn; checked after every tool batch.
         denial_window_on = self.max_denials_window is not None
         denial_limit = self.max_consecutive_denials
@@ -5127,6 +5221,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 withheld = withhold_tools
                 if withhold_tools:
                     tools, commands, withhold_tools = [], {}, False
+                if peer is not None:
+                    tools, peer_name = self._with_peer_tool(
+                        tools,
+                        tool_names,
+                        peer_name,
+                        peer,
+                        tool_policy,
+                        not withheld and i < self.max_iter,
+                        kept_names.get(SEND_TO_AGENT_NAME),
+                        warned_names,
+                    )
                 if delivering:
                     # Not with the tools withheld (a denial limit) nor past the budget: that step answers in text.
                     send_offered = not withheld and i < self.max_iter
@@ -5937,6 +6042,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     await run_context._save_trace(barrier=True)
                 first_pending: OutputEvent | None = None
                 lost_claim: OutputEvent | None = None
+                if peer is not None:
+                    start_batch(current_span)  # the sends' record holds the batch a pause can leave waiting: this one
                 if run_context._before_tool_dispatch is not None:
                     await run_context._before_tool_dispatch(
                         self._path, [(call.id, call.name, call.input) for call in tool_calls]
