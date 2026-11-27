@@ -728,6 +728,40 @@ class TestPlatformConnectionPerRun:
         assert [t.name for t in tools] == ["echo_meta"]
         assert len(opened) == 1 and opened[0][0]._session is None and not service._run_connections
 
+    @pytest.mark.asyncio
+    async def test_a_close_that_never_ends_holds_the_run_for_a_bounded_time(self, platform, monkeypatch):
+        """The platform never answers the session's teardown: the run still returns, ``_RUN_END_CLOSE_S`` after its
+        end (a call's own close ran inside the run's ``timeout`` before connections were per run), and the close goes
+        on behind it."""
+        from timbal.core import mcp as mcp_module
+        from timbal.core.test_model import TestModel
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        opened, _ = platform
+        release = asyncio.Event()
+        real_close = MCPServer.close
+
+        async def close(server):
+            if server._first_party:  # the run's connection: its teardown hangs until the test lets it go
+                await release.wait()
+            await real_close(server)
+
+        monkeypatch.setattr(MCPServer, "close", close)
+        monkeypatch.setattr(mcp_module, "_RUN_END_CLOSE_S", 0.2)
+        service = MCPServer(transport="http", service="api")
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        agent = Agent(name="agent", model=TestModel(handler=self.calls(1)), tools=[service])
+        try:
+            out = await asyncio.wait_for(agent(prompt="go").collect(), 5)
+            assert out.status.code == "success", out.error
+            assert len(opened) == 1 and opened[0][0]._session is not None  # still closing, behind the run
+        finally:
+            release.set()
+        await until(lambda: opened[0][0]._session is None)
+        await asyncio.wait_for(service.close(), 10)
+
 
 class TestPlatformConnectionLifetime:
     def test_close_says_so_when_a_connection_belongs_to_a_paused_loop(self):
@@ -1216,6 +1250,89 @@ class TestPlatformConnectionLifetime:
         finally:
             set_run_context(None)
 
+    @pytest.mark.asyncio
+    async def test_close_holds_what_it_took_so_a_new_connection_is_never_counted_as_one_of_them(self):
+        """close() let go of a connection, which closed, and still waits (here for the server's own lock): it holds
+        that connection, so a new one a run opens meanwhile cannot take its id (a freed one's id is the next one's
+        as a rule) and be counted as a connection close() set out to close and left open."""
+        import gc
+        import weakref
+
+        from timbal.core.mcp import _RunConnection
+
+        class Server:
+            async def close(self):
+                pass
+
+        class Connection(_RunConnection):
+            __slots__ = ("__weakref__",)  # for the test's weak reference only
+
+        service = MCPServer(transport="http", service="api")
+        loop = asyncio.get_running_loop()
+        service._run_connections["run"] = Connection(Server(), "fingerprint", loop)
+        taken = weakref.ref(service._run_connections["run"])
+        ident = id(taken())
+        holding, free = asyncio.Event(), asyncio.Event()
+
+        async def hold():
+            async with service._get_lock():
+                holding.set()
+                await free.wait()
+
+        holder = asyncio.ensure_future(hold())
+        await asyncio.wait_for(holding.wait(), 10)
+        closing = asyncio.ensure_future(service.close())  # its own session's close waits for the lock
+        try:
+            await until(lambda: "run" not in service._run_connections and not service._close_tasks)  # closed
+            gc.collect()
+            assert taken() is not None  # held by close() until it returns
+            others = []  # a run's first call meanwhile: at the taken one's address, if that one were freed
+            for _ in range(100):
+                others.append(Connection(Server(), "fingerprint", loop))
+                if id(others[-1]) == ident:
+                    break
+            service._run_connections["other"] = others[-1]
+        finally:
+            free.set()
+        await asyncio.wait_for(closing, 10)  # nothing it set out to close is left open
+        await asyncio.wait_for(holder, 10)
+
+    @pytest.mark.parametrize("reader", ["_wait_loop_closes", "_finish_handoff", "_forget_close"])
+    @pytest.mark.asyncio
+    async def test_closes_are_read_from_a_copy_while_another_loop_changes_them(self, reader):
+        """Another loop's thread starts or drops closes while close() goes over them: each reader goes over a copy.
+        Going over the set or dict itself raises "changed size during iteration". The change is made from inside
+        the read here (a close's ``get_loop()``, a hash), where another thread's would land."""
+        from timbal.core.mcp import _Left
+
+        service = MCPServer(transport="http", service="api")
+        elsewhere = asyncio.new_event_loop()
+        elsewhere.close()
+
+        class Close:
+            """A close of another loop, which starts one more while it is read."""
+
+            def get_loop(self):
+                service._close_tasks.add(Close())
+                return elsewhere
+
+        class Forgotten:
+            """A close being forgotten: while it is looked up, another run starts closing."""
+
+            def __hash__(self):
+                service._run_closes.setdefault(f"run-{len(service._run_closes)}", set())
+                return 0
+
+        if reader == "_forget_close":
+            service._run_closes.update({"a": {object()}, "b": {object()}})
+            service._forget_close(Forgotten())
+            return
+        service._close_tasks.update({Close(), Close()})
+        if reader == "_wait_loop_closes":
+            assert await service._wait_loop_closes() == _Left()
+        else:  # that loop closed: its closes are forgotten, which goes over them
+            assert await service._finish_handoff(None, elsewhere, []) == _Left()
+
 
 class TestStandaloneServerClose:
     def test_a_retry_from_another_loop_waits_for_the_owner_a_cut_close_signalled(self):
@@ -1258,6 +1375,34 @@ class TestStandaloneServerClose:
             owner_loop.call_soon_threadsafe(owner_loop.stop)
             thread.join(10)
             owner_loop.close()
+
+    @pytest.mark.parametrize("how", ["closed", "closes during the handoff"])
+    @pytest.mark.asyncio
+    async def test_a_session_whose_loop_closed_still_clears_the_caches(self, how):
+        """The session's loop closed with it, nothing having cancelled its tasks: close() forgets the session and
+        clears the tool list and the calls in flight, as every close() does. A call left there would make every
+        later elicitation look ambiguous (answered ``cancel``)."""
+        loop = TestPlatformConnectionLifetime.closing_loop() if how != "closed" else asyncio.new_event_loop()
+        if how == "closed":
+            loop.close()
+
+        class Owner:
+            """The session's owner task, on that loop."""
+
+            def get_loop(self):
+                return loop
+
+            def done(self):
+                return False
+
+        server = MCPServer(transport="stdio", command="unused")
+        server._session_task = Owner()
+        server._tools_cache, server._tools_cache_run_id, server._tools_stale = [object()], "run", True
+        server._inflight[1] = object()  # a call that died with its loop
+        await asyncio.wait_for(server.close(), 10)
+        assert server._session_task is None
+        assert server._tools_cache is None and server._tools_cache_run_id is None and not server._tools_stale
+        assert not server._inflight
 
 
 class TestCrossLoopClose:
@@ -1868,6 +2013,41 @@ class TestCrossLoopClose:
                 assert all(isinstance(o, RuntimeError) and "still open" in str(o) for o in outcomes), outcomes
 
             asyncio.run(both())
+        finally:
+            stop()
+
+    def test_a_connection_closed_before_a_handoff_failed_is_not_kept_as_open(self):
+        """The owner cancelled the work handed to it after a connection had closed there: only the connections not
+        closed are kept for a later close(). Kept, a closed one was counted as still open by every close() from
+        another loop until its run ended."""
+        import concurrent.futures
+
+        from timbal.core.mcp import _HandoffFailed, _RunConnection
+
+        class Server:
+            async def close(self):
+                pass
+
+        owner_loop, stop = self.owner_thread()
+        service = MCPServer(transport="http", service="api")
+        try:
+            entry = _RunConnection(Server(), "fingerprint", owner_loop)
+
+            async def close_there():
+                entry.close_task = asyncio.ensure_future(entry.server.close())
+                await entry.close_task
+
+            asyncio.run_coroutine_threadsafe(close_there(), owner_loop).result(10)
+            handed = concurrent.futures.Future()
+            handed.cancel()  # the work handed there, cancelled once that close was done
+
+            async def main():
+                with pytest.raises(_HandoffFailed):
+                    await asyncio.wait_for(service._finish_handoff(handed, owner_loop, [("run", entry)]), 10)
+                await asyncio.wait_for(service.close(), 10)  # from another loop: nothing is still open
+
+            asyncio.run(main())
+            assert not service._unclosed
         finally:
             stop()
 

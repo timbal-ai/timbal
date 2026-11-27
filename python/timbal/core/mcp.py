@@ -470,6 +470,9 @@ def _trace_claims(context: Mapping[str, Any]) -> dict[str, str]:
 
 # A run's platform connection outlives its last call this long (background children after the run's end).
 _RUN_CONNECTION_IDLE_S = 60.0
+# The run's end waits this long at most for its connections to close (a session's teardown has no bound of its own:
+# a platform that never answers it would hold the run past its ``timeout``); the closes go on past it.
+_RUN_END_CLOSE_S = 10.0
 
 
 class _RunConnection:
@@ -600,10 +603,13 @@ class _SessionCloseFailed(_HandoffFailed):
     """The server's own session's close, handed to the loop that owns it, ended there cancelled or failed."""
 
 
-async def _wait_all_closed(tasks: set[asyncio.Task]) -> None:
-    """``_wait_closed`` for several closes at once."""
-    with contextlib.suppress(Exception):
-        await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
+async def _wait_all_closed(tasks: set[asyncio.Task], label: str, timeout: float | None = None) -> None:
+    """``_wait_closed`` for several closes at once, for at most ``timeout`` seconds: the closes go on after it."""
+    waiting = asyncio.gather(*tasks, return_exceptions=True)
+    # wait(), not wait_for(): neither its timeout nor a cut of this wait cancels the closes.
+    done, _ = await asyncio.wait({waiting}, timeout=timeout)
+    if not done:
+        logger.warning("MCP run connection close still running at the run's end", server=label, seconds=timeout)
 
 
 async def _wait_closed(task: asyncio.Task) -> None:
@@ -1147,7 +1153,7 @@ class MCPServer(ToolSet):
             for ident, (_, entry) in list(self._unclosed.items()):  # its cut ones too, credential headers included
                 if entry.loop is owner:
                     self._unclosed.pop(ident, None)
-            for task in [task for task in self._close_tasks if task.get_loop() is owner]:
+            for task in [task for task in list(self._close_tasks) if task.get_loop() is owner]:
                 self._forget_close(task)
             return _Left()
         self._keep_unclosed(entries)  # what was not closed there waits for a later close()
@@ -1180,7 +1186,8 @@ class MCPServer(ToolSet):
         for a later close(), ``_close_done``). Shielded: a cut of this wait (the owner cancelling the handed work)
         must not cut the closes, which would leave sessions open with nothing left to close them."""
         loop = asyncio.get_running_loop()
-        closing = [task for task in self._close_tasks if task.get_loop() is loop]
+        # A copy first: another loop's thread adds and drops closes (iterating the set itself can raise).
+        closing = [task for task in list(self._close_tasks) if task.get_loop() is loop]
         if not closing:
             return _Left()
         results = await asyncio.shield(asyncio.gather(*closing, return_exceptions=True))
@@ -1242,7 +1249,7 @@ class MCPServer(ToolSet):
             if kept_key == key and (pair := self._unclosed.pop(ident, None)) is not None:
                 self._retire_run_connection(*pair)
         closes = self._run_closes.pop(key, None)
-        return _wait_all_closed(closes) if closes else None
+        return _wait_all_closed(closes, self._label, _RUN_END_CLOSE_S) if closes else None
 
     def _retire_run_connection(self, key: str, entry: "_RunConnection | None" = None) -> asyncio.Task | None:
         """Forget a run's connection and, if nothing uses it, start closing it (``close()`` waits for the close;
@@ -1276,10 +1283,11 @@ class MCPServer(ToolSet):
                 self._unclosed.pop(ident, None)
 
     def _keep_unclosed(self, entries: list[tuple[str, "_RunConnection"]]) -> None:
-        """Keep, for a later close(), the cut ones among ``entries`` that are not closing (the pool keeps its own)."""
+        """Keep, for a later close(), the cut ones among ``entries``: not pooled (the pool keeps its own), not closing,
+        and not closed (a close that succeeded there before the handoff ended)."""
         for key, entry in entries:
             if self._run_connections.get(key) is entry or (
-                entry.close_task is not None and not entry.close_task.done()
+                entry.close_task is not None and (not entry.close_task.done() or _succeeded(entry.close_task))
             ):
                 continue
             self._unclosed.setdefault(id(entry), (key, entry))
@@ -1287,7 +1295,7 @@ class MCPServer(ToolSet):
     def _forget_close(self, task: asyncio.Task) -> None:
         """Drop a close (its loop closed) from both collections, ``_close_done``'s callback never having run."""
         self._close_tasks.discard(task)
-        for key in [key for key, closes in self._run_closes.items() if task in closes]:
+        for key in [key for key, closes in list(self._run_closes.items()) if task in closes]:
             closes = self._run_closes[key]
             closes.discard(task)
             if not closes:
@@ -2073,7 +2081,8 @@ class MCPServer(ToolSet):
         # One still going after its waits is owed; one a call starts later is that call's.
         ledger = {task for task in list(self._close_tasks) if not task.done()}
         by_loop = self._take_run_connections(loop, _Left())
-        taken = {id(entry) for entries in by_loop.values() for _, entry in entries}
+        # The entries themselves, not only their ids: one freed meanwhile could leave its id to a new connection.
+        taken = {id(entry): entry for entries in by_loop.values() for _, entry in entries}
         # Before any wait, so a close() running beside this one sees all of it: this loop's connections let go
         # of, the other loops' handed over and registered (_handoffs).
         self._retire_all(by_loop.pop(loop, []), ledger)
@@ -2110,7 +2119,11 @@ class MCPServer(ToolSet):
                     await _wait_on_owner(handed, owner)
 
     def _owed(
-        self, loop: asyncio.AbstractEventLoop, taken: set[int], session: asyncio.Task | None, ledger: set[asyncio.Task]
+        self,
+        loop: asyncio.AbstractEventLoop,
+        taken: "dict[int, _RunConnection]",
+        session: asyncio.Task | None,
+        ledger: set[asyncio.Task],
     ) -> "_Left":
         """What is still owed once close() has done what it could, from the state it ends in: each connection,
         close or session once, whichever step left it. ``taken``: the connections this close() set out to close;
@@ -2124,7 +2137,7 @@ class MCPServer(ToolSet):
         for entry in list(self._run_connections.values()):
             if paused(entry.loop):
                 left.paused += 1
-            elif id(entry) in taken and not (entry.loop or loop).is_closed():
+            elif taken.get(id(entry)) is entry and not (entry.loop or loop).is_closed():
                 left.cut += 1  # set out to close it, and it is still there (its handoff ended without doing it)
         for _, entry in list(self._unclosed.values()):
             if paused(entry.loop):
@@ -2179,8 +2192,9 @@ class MCPServer(ToolSet):
         if owner is loop:
             await self._close_session_here()
             return _Left()
-        if owner.is_closed():
+        if owner.is_closed():  # its calls in flight died with it: the caches go too, as in _close_session_here
             self._forget_session()
+            self._drop_caches()
             return _Left()
         handed = _hand_to(owner, self._close_session_here()) if owner.is_running() else None
         if handed is not None and await _wait_on_owner(handed, owner):
@@ -2189,6 +2203,7 @@ class MCPServer(ToolSet):
             raise _SessionCloseFailed(1, asyncio.CancelledError() if handed.cancelled() else handed.exception())
         if owner.is_closed():
             self._forget_session()
+            self._drop_caches()
         return _Left()  # what is left is counted by _owed, once
 
     async def _close_session_here(self) -> None:
@@ -2202,10 +2217,14 @@ class MCPServer(ToolSet):
             self._forget_session()
             if task is not None and closed is not None:
                 await self._shutdown_owner(task, closed)
-            self._tools_cache = None
-            self._tools_cache_run_id = None
-            self._tools_stale = False
-            self._inflight.clear()
+            self._drop_caches()
+
+    def _drop_caches(self) -> None:
+        """What every close() clears with the session: the tool list and the calls in flight on it."""
+        self._tools_cache = None
+        self._tools_cache_run_id = None
+        self._tools_stale = False
+        self._inflight.clear()
 
     def _take_run_connections(
         self, loop: asyncio.AbstractEventLoop, left: "_Left"
