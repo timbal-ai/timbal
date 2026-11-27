@@ -1989,6 +1989,30 @@ class TestRunEndHooks:
         assert hook_call_id == seen["run"].root_span().call_id
         assert closer_after == (None, None)
 
+    async def test_unhashable_awaitables_from_hooks_are_awaited(self):
+        """A hook may return any awaitable: a dataclass implementing ``__await__`` is not hashable."""
+        from dataclasses import dataclass
+
+        from timbal.state.context import RunContext
+
+        ran = []
+
+        @dataclass
+        class Later:
+            name: str
+
+            def __await__(self):
+                async def go():
+                    ran.append(self.name)
+
+                return go().__await__()
+
+        context = RunContext()
+        context.on_end(lambda: Later("first"))
+        context.on_end(lambda: Later("second"))
+        await context._run_end_hooks()
+        assert sorted(ran) == ["first", "second"]
+
     async def test_they_run_once_when_the_root_ends_and_none_is_kept_after(self):
         from timbal import Agent
         from timbal.core.test_model import TestModel

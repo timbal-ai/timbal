@@ -672,6 +672,39 @@ class TestPlatformConnectionPerRun:
         assert all(server._session is None for server, _ in opened) and not service._run_connections
         await service.close()
 
+    def test_a_stream_closed_from_another_loop_leaves_its_session_to_a_close_on_its_own(self, platform):
+        """A streaming tool opened the run's platform session on an ``asyncio.Runner``'s loop; another loop closes
+        the stream while that one is paused. The end does not try to close the session from there (it hung): the
+        connection is kept, said in a warning, and a ``close()`` on its own loop closes it."""
+        from timbal import Tool
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        opened, _ = platform
+        service = MCPServer(transport="http", service="api")
+
+        async def streamer():
+            await service.resolve()
+            yield "first"
+            await asyncio.Event().wait()
+
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        stream = Tool(name="streamer", handler=streamer)._stream()
+
+        async def read_first():
+            async for event in stream:
+                if event.type == "DELTA":
+                    return
+
+        with asyncio.Runner() as runner:
+            runner.run(asyncio.wait_for(read_first(), 30))
+            assert len(opened) == 1 and opened[0][0]._session is not None
+            asyncio.run(asyncio.wait_for(stream.aclose(), 10))  # from another loop, the owner paused
+            assert opened[0][0]._session is not None and service._run_connections
+            runner.run(asyncio.wait_for(service.close(), 30))
+            assert opened[0][0]._session is None and not service._run_connections
+
     @pytest.mark.asyncio
     async def test_outside_a_run_each_call_closes_its_own(self, platform):
         opened, _ = platform
@@ -739,6 +772,52 @@ class TestPlatformConnectionLifetime:
 
             runner.run(finish())
         assert closed == [True] and not service._close_tasks
+
+    def test_close_says_so_when_the_owner_stops_after_the_handoff(self):
+        """The owner ran when close() handed it the work, then stopped before the session was closed: close() says so
+        instead of waiting for it to run again, and the close ends once it does."""
+        import threading
+
+        from timbal.core.mcp import _RunConnection
+
+        owner = asyncio.new_event_loop()
+        started, finished, closed = threading.Event(), threading.Event(), []
+
+        class SlowClose:
+            async def close(self):
+                started.set()
+                await release.wait()
+                closed.append(True)
+                finished.set()
+
+        async def make_event():
+            return asyncio.Event()
+
+        thread = threading.Thread(target=owner.run_forever)
+        thread.start()
+        release = asyncio.run_coroutine_threadsafe(make_event(), owner).result(10)
+        service = MCPServer(transport="http", service="api")
+        service._run_connections["run"] = _RunConnection(SlowClose(), "fingerprint", owner)
+
+        async def main():
+            closing = asyncio.ensure_future(service.close())
+            assert await asyncio.to_thread(started.wait, 10)  # the owner is closing it
+            owner.call_soon_threadsafe(owner.stop)
+            await asyncio.to_thread(thread.join, 10)
+            with pytest.raises(RuntimeError, match="not running"):
+                await asyncio.wait_for(closing, 10)
+
+        try:
+            asyncio.run(main())
+            assert closed == []
+            thread = threading.Thread(target=owner.run_forever)
+            thread.start()
+            owner.call_soon_threadsafe(release.set)
+            assert finished.wait(10) and closed == [True]  # finished once its loop ran again
+        finally:
+            owner.call_soon_threadsafe(owner.stop)
+            thread.join(10)
+            owner.close()
 
     @pytest.mark.asyncio
     async def test_connections_let_go_of_are_not_kept_alive_by_the_run(self, monkeypatch):

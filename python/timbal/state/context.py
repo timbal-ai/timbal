@@ -235,6 +235,10 @@ def _own_copy(value: Any) -> Any:
         return value
 
 
+async def _awaited(awaitable: Any) -> Any:
+    return await awaitable
+
+
 class RunContext(BaseModel):
     """Runtime execution context shared across all components in a run.
 
@@ -952,7 +956,8 @@ class RunContext(BaseModel):
             return
         # Every hook is called before any is waited for, and the waits are shielded: a cut while waiting (the
         # run cancelled as it ends) ends the wait, never a hook's work, and no hook is left uncalled.
-        waiting = asyncio.gather(*waits, return_exceptions=True)
+        # Each in a task first: gather hashes what it is given, and an awaitable a hook returns need not be hashable.
+        waiting = asyncio.gather(*(asyncio.ensure_future(_awaited(w)) for w in waits), return_exceptions=True)
         waiting.add_done_callback(self._log_end_hook_failures)
         await asyncio.shield(waiting)
 
