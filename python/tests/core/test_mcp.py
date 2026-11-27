@@ -898,7 +898,7 @@ class TestPlatformConnectionLifetime:
     @pytest.mark.asyncio
     async def test_a_session_close_that_is_cut_is_kept_for_the_next_close(self):
         """The close task itself cancelled (a loop cancelling its tasks) before the session closed: the connection is
-        kept, ended, and the next close() closes it."""
+        kept, ended and out of the pool, and the next close() closes it."""
         from timbal.core.mcp import _RunConnection
 
         started, closed = asyncio.Event(), []
@@ -919,10 +919,78 @@ class TestPlatformConnectionLifetime:
         await asyncio.wait_for(started.wait(), 10)
         task.cancel()
         await asyncio.wait({task})
-        await until(lambda: service._run_connections)  # kept
-        assert service._run_connections["run"].ended
+        await until(lambda: service._unclosed)  # kept, out of the pool
+        assert service._unclosed[0][1].ended and not service._run_connections
         await asyncio.wait_for(service.close(), 10)
-        assert closed == [True] and not service._run_connections
+        assert closed == [True] and not service._run_connections and not service._unclosed
+
+    @pytest.mark.asyncio
+    async def test_a_later_call_of_the_run_does_not_reuse_a_cut_connection(self, monkeypatch):
+        """Its server may still have a session closing: the run's next call gets a connection of its own, and the
+        run's end (or close()) closes the cut one again."""
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+
+        servers, started = [], asyncio.Event()
+
+        class Server:
+            def __init__(self):
+                self.closes = 0
+
+            async def close(self):
+                self.closes += 1
+                if self is servers[0] and self.closes == 1:
+                    started.set()
+                    await asyncio.Event().wait()  # cut here
+
+        def new(_self, _url, _headers):
+            servers.append(Server())
+            return servers[-1]
+
+        monkeypatch.setattr("timbal.platform.utils._resolve_url_and_headers", lambda *_: ("https://x.test/mcp", {}))
+        monkeypatch.setattr(MCPServer, "_new_project_server", new)
+        monkeypatch.setattr("timbal.core.mcp._run_connection_key", lambda _context: "run")
+        context = RunContext()
+        set_run_context(context)
+        service = MCPServer(transport="http", service="api")
+        try:
+            async with service._project_connection() as first:
+                pass
+            task = service._retire_run_connection("run")
+            await asyncio.wait_for(started.wait(), 10)
+            task.cancel()
+            await asyncio.wait({task})
+            async with service._project_connection() as second:
+                assert second is not first
+            await asyncio.wait_for(service.close(), 10)
+            assert first.closes == 2 and second.closes == 1
+        finally:
+            set_run_context(None)
+
+    @pytest.mark.asyncio
+    async def test_a_retried_close_waits_for_the_owner_a_cut_close_signalled(self):
+        """close() forgets the session, signals its owner task, and is cut waiting for it: the owner is still
+        shutting down, and the next close() waits for it."""
+        server = MCPServer(transport="stdio", command="unused")
+        closed, release = asyncio.Event(), asyncio.Event()
+
+        async def owner():
+            await closed.wait()
+            await release.wait()  # a transport that takes its time to shut down
+
+        owner_task = asyncio.ensure_future(owner())
+        server._session_task, server._session_closed = owner_task, closed
+        first = asyncio.ensure_future(server.close())
+        await asyncio.wait_for(closed.wait(), 10)  # signalled
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        retry = asyncio.ensure_future(server.close())
+        done, _ = await asyncio.wait({retry}, timeout=0.3)
+        assert not done  # waiting for that owner
+        release.set()
+        await asyncio.wait_for(retry, 10)
+        assert owner_task.done()
 
     def test_closes_of_a_closed_loop_leave_both_collections(self):
         """A close that finished on a loop that stopped before its done callback ran: dropped from the per-run sets

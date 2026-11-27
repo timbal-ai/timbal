@@ -878,6 +878,9 @@ class MCPServer(ToolSet):
     # The per-run connection a ``service="api"`` server opens to the platform: it sends the platform's claims.
     _first_party: bool = PrivateAttr(default=False)
     _session_task: asyncio.Task | None = PrivateAttr(default=None)
+    # Owner tasks a close() signalled to shut down and has not seen end (it was cut while waiting): the next close()
+    # waits for them, its session refs being gone by then.
+    _owners_closing: set[asyncio.Task] = PrivateAttr(default_factory=set)
     _session_closed: asyncio.Event | None = PrivateAttr(default=None)
     _get_session_id: Callable[[], str | None] | None = PrivateAttr(default=None)
     _tools_cache: list[Runnable] | None = PrivateAttr(default=None)
@@ -892,6 +895,9 @@ class MCPServer(ToolSet):
     # Closes of run connections still going (``close()`` waits for them), and those of each run's (its end waits).
     _close_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
     _run_closes: dict[str, set[asyncio.Task]] = PrivateAttr(default_factory=dict)
+    # Run connections whose close was cut before the session had closed: out of the pool (no call reuses them),
+    # closed again by the next close() or the end of their run.
+    _unclosed: list[tuple[str, "_RunConnection"]] = PrivateAttr(default_factory=list)
     # Runs whose end hook is registered, with the run's loop: one hook per run, which finds the run's connection
     # when the run ends (a connection let go of earlier is not kept alive by it), on that loop.
     _run_hooked: dict[str, asyncio.AbstractEventLoop] = PrivateAttr(default_factory=dict)
@@ -1031,6 +1037,7 @@ class MCPServer(ToolSet):
             for task in [task for task in self._close_tasks if task.get_loop() is owner]:
                 self._forget_close(task)
             return 0
+        self._keep_unclosed(entries)  # what was not closed there waits for a later close()
         if finished:  # cancelled or failed there (the loop cancelled its tasks): the sessions are still open
             raise _HandoffFailed(
                 max(len(entries), 1), asyncio.CancelledError() if handed.cancelled() else handed.exception()
@@ -1103,6 +1110,9 @@ class MCPServer(ToolSet):
         if entry is not None:
             entry.ended = True
             self._retire_run_connection(key, entry)
+        for pair in [pair for pair in self._unclosed if pair[0] == key]:
+            self._unclosed.remove(pair)
+            self._retire_run_connection(*pair)
         closes = self._run_closes.pop(key, None)
         return _wait_all_closed(closes) if closes else None
 
@@ -1128,6 +1138,16 @@ class MCPServer(ToolSet):
             task.add_done_callback(_log_close_failure)
         return entry.close_task
 
+    def _keep_unclosed(self, entries: list[tuple[str, "_RunConnection"]]) -> None:
+        """Keep, for a later close(), the cut ones among ``entries`` that are not closing (the pool keeps its own)."""
+        for key, entry in entries:
+            if self._run_connections.get(key) is entry or (
+                entry.close_task is not None and not entry.close_task.done()
+            ):
+                continue
+            if all(kept is not entry for _, kept in self._unclosed):
+                self._unclosed.append((key, entry))
+
     def _forget_close(self, task: asyncio.Task) -> None:
         """Drop a close (its loop closed) from both collections, ``_close_done``'s callback never having run."""
         self._close_tasks.discard(task)
@@ -1145,11 +1165,11 @@ class MCPServer(ToolSet):
             if not closes:
                 del self._run_closes[key]
         if task.cancelled() and not task.get_loop().is_closed():
-            # Cut before the session had closed: it may still be open. Kept (ended, nothing using it) for the next
-            # close() or end of the run to close again, under its own key unless a newer connection holds that.
+            # Cut before the session had closed: it may still be open. Kept out of the pool (a later call of the run
+            # must not reuse it and open a second session on its server) for the next close() or end of the run.
             entry.close_task = None
             entry.ended = True
-            self._run_connections.setdefault(key if key not in self._run_connections else f"{key}#{id(entry)}", entry)
+            self._unclosed.append((key, entry))
 
     # ------------------------------------------------------------------ session
 
@@ -1897,7 +1917,8 @@ class MCPServer(ToolSet):
         by_loop: dict[asyncio.AbstractEventLoop, list[tuple[str, _RunConnection]]] = {}
         paused = 0
         failed: list[_HandoffFailed] = []
-        for key, entry in list(self._run_connections.items()):
+        unclosed, self._unclosed = self._unclosed, []
+        for key, entry in [*self._run_connections.items(), *unclosed]:
             owner = entry.loop or loop
             if owner.is_closed():
                 if self._run_connections.get(key) is entry:
@@ -1905,6 +1926,7 @@ class MCPServer(ToolSet):
                 continue
             if owner is not loop and not owner.is_running():
                 paused += 1
+                self._keep_unclosed([(key, entry)])
                 continue
             by_loop.setdefault(owner, []).append((key, entry))
         for task in list(self._close_tasks):
@@ -1932,7 +1954,14 @@ class MCPServer(ToolSet):
             task, closed = self._session_task, self._session_closed
             self._forget_session()
             if task is not None and closed is not None:
+                self._owners_closing.add(task)
+                task.add_done_callback(self._owners_closing.discard)
                 await self._shutdown_owner(task, closed)
+            # One an earlier close() signalled and was cut while waiting for: its refs are gone, so wait for it here.
+            here = asyncio.get_running_loop()
+            closing = [owner for owner in self._owners_closing if not owner.done() and owner.get_loop() is here]
+            if closing:
+                await asyncio.wait(closing)
             self._tools_cache = None
             self._tools_cache_run_id = None
             self._tools_stale = False
