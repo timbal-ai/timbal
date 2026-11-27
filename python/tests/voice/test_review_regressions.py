@@ -280,6 +280,27 @@ class TestRepeatedRequestWhileProtected:
         assert session._deferred_user_text.startswith("My booking code is 415 555")
         assert session._deferred_user_text.endswith("1213, that's all.")
 
+    async def test_a_refinement_retracted_after_more_requests_keeps_them_in_order(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ran: list[str] = []
+        session = _flux_session(monkeypatch, ran)
+        session.hold_timeout_secs = 0.1
+        _protect(session)
+        await session._handle_provider_commit("Check the booking.")
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Check the booking today.", confidence=0.9)
+        )
+        session.started_at = 1.0  # a typed message is taken only once the call has started
+        await session.submit_user_text("Send a receipt.")  # deferred too: the tool still runs
+        assert session._deferred_user_text == "Check the booking today. Send a receipt."
+        session._turn_tool_batch_inflight = 0
+        await _until(lambda: session._eager_turn_task is not None)
+        await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
+        await _until(lambda: ran)
+        # Only the eager addition "today" goes; both confirmed requests stay, in order.
+        assert [e.text for e in session.transcript if e.role == "user"][-1] == "Check the booking. Send a receipt."
+
     async def test_new_words_after_the_request_are_still_taken_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         session = _flux_session(monkeypatch, [])
         _protect(session)
@@ -288,6 +309,63 @@ class TestRepeatedRequestWhileProtected:
         assert session._deferred_user_text == "Check the booking. and cancel it"
         await session._handle_provider_prediction(TranscriptEvent(type="resumed", text="", confidence=0.1))
         assert session._deferred_user_text == "Check the booking."
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "eager", "current", "left"),
+    [
+        (
+            "Check the booking.",
+            "Check the booking today.",
+            "Check the booking today.",
+            "Check the booking today.",
+            "Check the booking.",
+        ),
+        (
+            "Check the booking.",
+            "Check the booking today.",
+            "Check the booking today.",
+            "Check the booking today. Send a receipt.",
+            "Check the booking. Send a receipt.",
+        ),
+        (
+            "Check the booking.",
+            "Check the booking. and cancel it",
+            "and cancel it",
+            "Check the booking. and cancel it",
+            "Check the booking.",
+        ),
+        (
+            "My booking code is 415 555",
+            "My booking code is 415 555 1212, that's all.",
+            "1212, that's all.",
+            "My booking code is 415 555 1212, that's all.",
+            "My booking code is 415 555",
+        ),
+        (
+            "Also check my invoice.",
+            "Also check my invoice. cancel my booking.",
+            "cancel my booking.",
+            "Also check my invoice. Cancel my Booking!",
+            "Also check my invoice.",
+        ),
+        ("", "cancel my booking.", "cancel my booking.", "cancel my booking.", ""),
+    ],
+)
+def test_a_retraction_removes_only_what_the_eager_event_added(
+    before: str, after: str, eager: str, current: str, left: str
+) -> None:
+    from timbal.voice.session import _eager_addition, _without_addition
+
+    addition = _eager_addition(before, after, eager)
+    assert addition is not None
+    assert _without_addition(current, addition) == left
+
+
+def test_a_repeat_the_buffer_already_held_adds_nothing() -> None:
+    from timbal.voice.session import _eager_addition
+
+    assert _eager_addition("Check the booking.", "Check the booking.", "Check the booking.") is None
 
 
 class TestRetractedReplyStillQueued:
@@ -536,7 +614,6 @@ class TestToolModesAndDispatch:
         assert ran == ["call_tool:reserve"]
         assert suppressed_after == [False]
         assert "reserve" not in session._turn_open_tools
-
 
     @pytest.mark.parametrize(
         "call_input",

@@ -48,7 +48,6 @@ Omitted, the value is ``min(0.5, eot_threshold - 0.1)``.
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -74,7 +73,6 @@ EAGER_SILENCE_SECS = 0.16
 # Two 32 ms VAD frames: start the audio model as the pause begins, overlapping
 # its ~50–100 ms inference with the confirmation silence.
 PREDICT_SILENCE_SECS = 0.064
-_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 # How often to score the rolling window while speech is still active.
 ROLL_INTERVAL_SECS = 0.32
 
@@ -172,10 +170,6 @@ class EouSignals:
     """Lexical hedge, dangling token, or a trailing correction marker."""
 
 
-def _spoken_words(text: str) -> tuple[str, ...]:
-    return tuple(_WORD_RE.findall(text.casefold()))
-
-
 def prediction_is_complete(signals: EouSignals) -> bool:
     """Whether the short confirmation may replace the silence floor.
 
@@ -253,10 +247,9 @@ class SpeechEouPredictor:
         self._scored_text = ""
         self._p_text: float | None = None
         self._text_task: asyncio.Task[None] | None = None
-        # The words of a commit the endpointer sent whose transcript has not arrived: a partial that is
-        # still those words (late, or replayed) is that utterance's, not the next one's. None when no commit
-        # is outstanding, or once a partial with other words shows the next utterance has begun.
-        self._committed_words: tuple[str, ...] | None = None
+        # A commit the endpointer sent whose transcript has not arrived. Until it does, a partial cannot be
+        # told apart from the committed utterance's (late, replayed, or rewritten), so none votes.
+        self._commit_outstanding = False
 
         self._p_rolling: float | None = None
         self._last_roll = 0.0
@@ -277,21 +270,16 @@ class SpeechEouPredictor:
     def note_partial(self, text: str) -> None:
         """Score a partial transcript. The latest text wins.
 
-        While a commit the endpointer sent is outstanding, a partial that is still the committed words (the
-        same, or a prefix either way: late, or replayed after the STT's delay) does not vote: it describes the
-        utterance already committed. Other words are the next utterance, and score as usual.
+        While a commit the endpointer sent is outstanding, no partial votes: a late, replayed or rewritten
+        partial of the committed utterance looks like the next one's. The next utterance then waits out the
+        normal floor until a transcript arrives. The STT adapters drop an empty final, so a commit with no
+        words leaves this set until the next utterance's transcript: one utterance without the short wait.
         """
-        if self._closed:
+        if self._closed or self._commit_outstanding:
             return
         text = text.strip()
         if not text or text == self._text:
             return
-        if self._committed_words is not None:
-            words = _spoken_words(text)
-            committed = self._committed_words
-            if words[: len(committed)] == committed or committed[: len(words)] == words:
-                return
-            self._committed_words = None
         self._text = text
         self._text_gen += 1
         gen = self._text_gen
@@ -367,16 +355,24 @@ class SpeechEouPredictor:
             self._drop_text()
 
     def on_committed(self) -> None:
-        """A commit closed the utterance. Its text must not vote on the next one."""
-        self._committed_words = None
+        """A commit closed the utterance (its transcript arrived, words or not). Its text must not vote on
+        the next one."""
+        self._commit_outstanding = False
         self._drop_text()
 
     def on_commit_sent(self) -> None:
         """The endpointer asked the STT to commit: the utterance is over, though its transcript is still on
-        its way, however long that takes. The caller may speak again first; the text vote is the old
-        utterance's, and so are partials that repeat its words until the transcript arrives."""
-        self._committed_words = _spoken_words(self._text) or None
+        its way, however long that takes. Neither vote of the pause that ended it counts for the next one,
+        and partials do not vote until the transcript arrives."""
+        self._commit_outstanding = True
         self._drop_text()
+        self._pause_gen += 1
+        self._audio_gen += 1
+        self._p_audio = None
+        task = self._audio_task
+        self._audio_task = None
+        if task is not None and not task.done():
+            task.cancel()
 
     def _drop_text(self) -> None:
         self._text = ""
