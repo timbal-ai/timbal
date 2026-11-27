@@ -31,10 +31,19 @@
   .demo strong { display: block; font-size: 17px; margin-bottom: 4px; }
   .demo span { display: block; font-size: 14px; color: var(--suave); }
   .demo[aria-pressed="true"] { border-color: var(--acento); background: var(--acento-fondo); }
-  .demo:focus-visible, .chip input:focus-visible + span, #llamar:focus-visible { outline: 3px solid #8fc4b6; outline-offset: 2px; }
+  .demo:focus-visible, .chip input:focus-visible + span, #llamar:focus-visible, #micro:focus-visible,
+  .grupo select:focus-visible, .grupo input[type="range"]:focus-visible { outline: 3px solid #8fc4b6; outline-offset: 2px; }
 
   .grupo { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-  .grupo > b { width: 96px; font-size: 14px; font-weight: 600; }
+  .grupo > b { width: 128px; font-size: 14px; font-weight: 600; }
+  .grupo select {
+    font: inherit; font-size: 14px; color: inherit; background: var(--panel); border: 1.5px solid var(--borde);
+    border-radius: 10px; padding: 8px 10px; width: min(100%, 420px); cursor: pointer;
+  }
+  .grupo input[type="range"] { width: min(100%, 240px); accent-color: var(--acento); cursor: pointer; }
+  .grupo output { font-size: 14px; font-variant-numeric: tabular-nums; }
+  .grupo .ayuda { margin: 0; flex-basis: 100%; padding-left: 136px; }
+  @media (max-width: 560px) { .grupo .ayuda { padding-left: 0; } }
   .chip { position: relative; }
   .chip input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
   .chip span {
@@ -50,12 +59,18 @@
     border-radius: 16px; padding: 16px 44px; min-width: 190px; cursor: pointer;
   }
   #llamar[data-modo="colgar"] { background: var(--rojo); }
+  #micro {
+    font: inherit; font-size: 15px; font-weight: 600; color: inherit; background: var(--panel);
+    border: 1.5px solid var(--borde); border-radius: 12px; padding: 12px 18px; cursor: pointer;
+  }
+  #micro[data-silenciado="si"] { color: var(--rojo); border-color: var(--rojo); background: #fbeeeb; }
   #llamar:disabled { opacity: 0.6; cursor: default; }
   #estado { font-size: 17px; display: flex; align-items: center; gap: 10px; min-height: 28px; }
   #estado::before { content: ""; width: 11px; height: 11px; border-radius: 50%; background: #b9b5aa; flex: none; }
   #estado[data-tipo="espera"]::before { background: #d39a2c; animation: pulso 1s ease-in-out infinite; }
   #estado[data-tipo="escucha"]::before { background: var(--acento); }
   #estado[data-tipo="habla"]::before { background: #3767c9; animation: pulso 0.8s ease-in-out infinite; }
+  #estado[data-tipo="mudo"]::before { background: var(--rojo); }
   #estado[data-tipo="error"] { color: var(--rojo); }
   #estado[data-tipo="error"]::before { background: var(--rojo); }
   @keyframes pulso { 50% { opacity: 0.35; } }
@@ -101,16 +116,28 @@
 
   <section>
     <h2>2 · Variante (opcional)</h2>
+    <div id="grupo-voz"></div>
+    <div class="grupo">
+      <b><label for="voz-elegida">Voz</label></b>
+      <select id="voz-elegida"></select>
+      <p class="ayuda" id="voz-aviso" hidden></p>
+    </div>
+    <div class="grupo">
+      <b><label for="velocidad">Velocidad</label></b>
+      <input type="range" id="velocidad" min="0.7" max="1.5" step="0.05" value="1">
+      <output id="velocidad-valor" for="velocidad"></output>
+    </div>
     <div id="variantes"></div>
-    <p class="ayuda">Voz y Escucha se aplican en la siguiente llamada. Modelo y Naturalidad reinician la demo: tarda unos segundos.</p>
+    <p class="ayuda">Proveedor de voz, Voz, Velocidad y Escucha se aplican en la siguiente llamada. Modelo y Naturalidad reinician la demo: tarda unos segundos.</p>
   </section>
 
   <section>
     <div class="llamada">
       <button id="llamar" type="button" data-modo="llamar" disabled>Llamar</button>
+      <button id="micro" type="button" data-silenciado="no">Silenciar micro</button>
       <div id="estado" role="status" aria-live="polite">Cargando…</div>
     </div>
-    <p class="ayuda">Habla con normalidad y puedes interrumpir al agente. Con auriculares el agente no se oye a sí mismo por el micrófono.</p>
+    <p class="ayuda">Habla con normalidad y puedes interrumpir al agente. Con auriculares el agente no se oye a sí mismo por el micrófono. Con el micro silenciado el agente sigue hablando y no te oye.</p>
   </section>
 
   <section class="dos">
@@ -143,8 +170,12 @@ const CLAVE_GUARDADA = 'timbal-voice-demos';
 const $ = (id) => document.getElementById(id);
 const btn = $('llamar'), estadoEl = $('estado'), chat = $('chat');
 
+const VELOCIDAD_MIN = 0.7, VELOCIDAD_MAX = 1.5;
 let demos = [], variantes = [];
-let sel = { demo: '', voz: '', modelo: '', naturalidad: '', escucha: '' };
+// voz: proveedor de voz elegido. voces: la voz elegida con cada proveedor, {proveedor: {id, nombre}}.
+let sel = { demo: '', voz: '', modelo: '', naturalidad: '', escucha: '', velocidad: 1, voces: {} };
+/** Voces por proveedor, de /api/voces. null mientras se cargan. */
+let catalogo = null;
 
 // ---- Estado de la página ---------------------------------------------------------------------------------------
 function estado(tipo, texto) {
@@ -200,9 +231,11 @@ function pintarDemos() {
 }
 
 function pintarVariantes() {
-  const caja = $('variantes');
-  caja.innerHTML = '';
+  // El proveedor de voz va en su propia caja: debajo quedan, fijas, la voz y la velocidad.
+  $('grupo-voz').innerHTML = '';
+  $('variantes').innerHTML = '';
   for (const g of variantes) {
+    const caja = g.id === 'voz' ? $('grupo-voz') : $('variantes');
     if (oculta(g.id, sel[g.id])) sel[g.id] = '';
     const fila = document.createElement('div');
     fila.className = 'grupo';
@@ -229,6 +262,78 @@ function pintarVariantes() {
   }
 }
 
+// ---- Voz y velocidad -------------------------------------------------------------------------------------------
+/** El proveedor que va a hablar: el elegido o, con «Por defecto», el de la demo. */
+function proveedorDeVoz() {
+  const elegido = opcion('voz', sel.voz).hello;
+  const d = demoActual();
+  return (elegido && elegido.tts_provider) || (d && d.proveedor_voz) || 'elevenlabs';
+}
+/** La voz elegida para ese proveedor: {id, nombre}, o null si es la de la demo (o la del proveedor). */
+function vozElegida() {
+  const v = sel.voces[proveedorDeVoz()];
+  return v && typeof v.id === 'string' && v.id ? v : null;
+}
+
+function pintarVoces() {
+  const lista = $('voz-elegida'), aviso = $('voz-aviso');
+  const proveedor = proveedorDeVoz();
+  const deEsteProveedor = catalogo ? (catalogo[proveedor] || { voces: [], error: '' }) : null;
+  const voces = deEsteProveedor ? deEsteProveedor.voces : null;
+  // Una voz guardada que ya no está en la cuenta no se manda.
+  if (voces && voces.length && vozElegida() && !voces.some((v) => v.id === vozElegida().id)) delete sel.voces[proveedor];
+  const elegida = vozElegida();
+  // Gemini trae su voz de serie en la variante; con ElevenLabs la primera opción es la voz de la demo.
+  const deSerie = (opcion('voz', sel.voz).hello || {}).voice || '';
+  lista.innerHTML = '';
+  lista.add(new Option(deSerie ? `${deSerie} (por defecto)` : 'La de la demo', ''));
+  if (voces) {
+    let grupo = null, nombreGrupo = null;
+    for (const v of voces) {
+      if (v.id === deSerie) continue;
+      const o = new Option(v.detalle ? `${v.nombre} · ${v.detalle}` : v.nombre, v.id);
+      o.dataset.nombre = v.nombre;
+      if (!v.grupo) { lista.add(o); continue; }
+      if (v.grupo !== nombreGrupo) {
+        grupo = document.createElement('optgroup');
+        grupo.label = nombreGrupo = v.grupo;
+        lista.appendChild(grupo);
+      }
+      grupo.appendChild(o);
+    }
+  }
+  if (elegida && ![...lista.options].some((o) => o.value === elegida.id)) {
+    lista.add(new Option(elegida.nombre || elegida.id, elegida.id)); // aún cargando, o la lista no ha llegado
+  }
+  lista.value = elegida ? elegida.id : '';
+  const error = deEsteProveedor && deEsteProveedor.error;
+  aviso.hidden = Boolean(catalogo) && !error;
+  aviso.textContent = error ? `No se han podido cargar las voces: ${error}` : 'Cargando las voces…';
+}
+$('voz-elegida').addEventListener('change', (e) => {
+  const o = e.target.selectedOptions[0];
+  if (o && o.value) sel.voces[proveedorDeVoz()] = { id: o.value, nombre: o.dataset.nombre || o.textContent };
+  else delete sel.voces[proveedorDeVoz()];
+  cambio();
+});
+
+function textoVelocidad(v) {
+  if (Math.abs(v - 1) < 0.001) return '1,0× · la de la demo';
+  const cifra = v.toFixed(2).replace(/0$/, '').replace('.', ',');
+  return `${cifra}× · ${v > 1 ? 'más rápida' : 'más lenta'}`;
+}
+function pintarVelocidad() {
+  $('velocidad').value = String(sel.velocidad);
+  $('velocidad-valor').textContent = textoVelocidad(sel.velocidad);
+}
+$('velocidad').addEventListener('input', (e) => {
+  $('velocidad-valor').textContent = textoVelocidad(Number(e.target.value));
+});
+$('velocidad').addEventListener('change', (e) => {
+  const v = Number(e.target.value);
+  if (Number.isFinite(v) && v !== sel.velocidad) { sel.velocidad = v; cambio(); }
+});
+
 function pintarGuion() {
   const d = demoActual();
   const lista = $('guion');
@@ -247,6 +352,8 @@ function cambio() {
   guardar();
   pintarDemos();
   pintarVariantes();
+  pintarVoces();
+  pintarVelocidad();
   pintarGuion();
   if (enLlamada) {
     void colgar();
@@ -297,6 +404,8 @@ const fuentesSonando = new Set();
 /** Tras una interrupción se descartan los trozos de audio que aún venían de camino. */
 let descartarAudio = false;
 let generacion = 0, ocupado = false, sesionLista = false, errorVisibleHasta = 0;
+/** Micrófono silenciado por el usuario. Se queda como lo dejes de una llamada a la siguiente. */
+let micSilenciado = false;
 
 const MODULO_CAPTURA = `
   class Capture extends AudioWorkletProcessor {
@@ -359,7 +468,8 @@ async function abrirMicro(gen) {
   worklet = new AudioWorkletNode(ctx, 'capture');
   worklet.port.onmessage = (e) => {
     if (!micAlSocket || !ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(new Uint8Array(e.data));
+    // Silenciado se manda silencio, no nada: el servidor mide los turnos sobre un audio que no se interrumpe.
+    ws.send(micSilenciado ? new Uint8Array(e.data.byteLength) : new Uint8Array(e.data));
   };
   fuente.connect(worklet);
   const mudo = ctx.createGain();
@@ -427,10 +537,19 @@ function sonar(b64) {
 function refrescarEstadoDeLlamada() {
   if (!sesionLista || Date.now() < errorVisibleHasta) return;
   const sonando = Boolean(audioCtx) && siguienteInicio > audioCtx.currentTime + 0.02;
-  if (sonando) estado('habla', 'Hablando');
+  if (sonando) estado('habla', micSilenciado ? 'Hablando · tu micro está silenciado' : 'Hablando');
   else if (!micAlSocket) estado('espera', 'Haz clic en la página para activar el micrófono');
+  else if (micSilenciado) estado('mudo', 'Micro silenciado: el agente no te oye');
   else estado('escucha', 'Escuchando');
 }
+
+const btnMicro = $('micro');
+btnMicro.onclick = () => {
+  micSilenciado = !micSilenciado;
+  btnMicro.dataset.silenciado = micSilenciado ? 'si' : 'no';
+  btnMicro.textContent = micSilenciado ? 'Activar micro' : 'Silenciar micro';
+  refrescarEstadoDeLlamada();
+};
 
 // ---- Conversación ----------------------------------------------------------------------------------------------
 let burbujaAgente = null, ultimaAgente = null, burbujasTurno = [], respuestaHecha = false, parcial = null;
@@ -636,12 +755,17 @@ function conectar(gen, destino) {
     if (gen !== generacion) return;
     // La configuración TIENE que ser el primer mensaje del socket.
     frecuenciaSesion = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
-    socket.send(JSON.stringify({
+    const hello = {
       sample_rate: frecuenciaSesion,
       ...destino.hello,
       ...(opcion('voz', sel.voz).hello || {}),
       ...(opcion('escucha', sel.escucha).hello || {}),
-    }));
+    };
+    const voz = vozElegida();
+    if (voz) hello.voice = voz.id;
+    // tts_tempo cambia el ritmo sin cambiar el tono, con cualquier proveedor. En 1,0 no se manda: manda la demo.
+    if (Math.abs(sel.velocidad - 1) > 0.001) hello.tts_tempo = sel.velocidad;
+    socket.send(JSON.stringify(hello));
     relojAcuses = setInterval(() => { acusarReproduccion(false); refrescarEstadoDeLlamada(); }, ACUSE_MS);
     const armar = async () => {
       try { if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume(); } catch (_) {}
@@ -713,6 +837,8 @@ $('detalle-registro').addEventListener('toggle', (e) => {
     $('enlace-estado').hidden = !r.estado;
     if (r.playground) { $('enlace-playground').href = r.playground; $('enlace-playground').hidden = false; }
     try { sel = { ...sel, ...JSON.parse(localStorage.getItem(CLAVE_GUARDADA) || '{}') }; } catch (_) {}
+    if (!(Number.isFinite(sel.velocidad) && sel.velocidad >= VELOCIDAD_MIN && sel.velocidad <= VELOCIDAD_MAX)) sel.velocidad = 1;
+    if (!sel.voces || typeof sel.voces !== 'object' || Array.isArray(sel.voces)) sel.voces = {};
     if (!demos.some((d) => d.id === sel.demo)) sel.demo = demos.length ? demos[0].id : '';
     for (const g of variantes) {
       if (!g.opciones.some((o) => o.id === (sel[g.id] || ''))) sel[g.id] = '';
@@ -722,7 +848,16 @@ $('detalle-registro').addEventListener('toggle', (e) => {
     cambio();
   } catch (err) {
     estado('error', `Error: ${err.message}`);
+    return;
   }
+  // Las voces llegan después: la página ya se puede usar con la voz de cada demo.
+  try {
+    catalogo = await pedir('/api/voces');
+  } catch (err) {
+    catalogo = { elevenlabs: { voces: [], error: err.message }, gemini: { voces: [], error: err.message } };
+  }
+  pintarVoces();
+  guardar();
 })();
 window.addEventListener('pagehide', () => { if (ws) { try { ws.close(); } catch (_) {} } });
 </script>

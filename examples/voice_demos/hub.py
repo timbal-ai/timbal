@@ -11,8 +11,10 @@ valor vacío lo desactiva. ``GET /estado`` sirve ``estado.local.html`` si existe
 
 Qué cambia cada variante:
 
-- Voz y Escucha viajan en el primer mensaje de la llamada (el servidor las acepta del navegador): basta colgar y
-  volver a llamar.
+- Proveedor de voz, Voz, Velocidad y Escucha viajan en el primer mensaje de la llamada (el servidor las acepta del
+  navegador): basta colgar y volver a llamar. La voz se elige entre las del proveedor: ``GET /api/voces`` da las de
+  la cuenta de ElevenLabs (las pide este proceso con ``ELEVENLABS_API_KEY``; la clave no llega al navegador) y las
+  de Gemini. La velocidad es ``tts_tempo``, que vale para cualquier proveedor.
 - Modelo y Naturalidad son configuración del agente (``hesitation`` y ``tts_rhythm`` no se pueden pedir desde el
   navegador), así que se pasan como variables de entorno a la demo y hay que rearrancarla.
 
@@ -28,6 +30,10 @@ import os
 import signal
 import sys
 import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import webbrowser
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -48,7 +54,7 @@ TITUBEOS = ["eh...", "mm...", "a ver,"]
 VARIANTES: list[dict[str, Any]] = [
     {
         "id": "voz",
-        "titulo": "Voz",
+        "titulo": "Proveedor de voz",
         "aplica": "llamada",
         "opciones": [
             {"id": "", "nombre": "Por defecto"},
@@ -125,6 +131,148 @@ HESITATION_RATE = 0.6
 """Con el 0,15 de ``hesitation=True`` una llamada corta puede no tener ningún titubeo: en la demo se tienen que oír.
 Solo titubean las respuestas que empiezan por una frase de tres palabras o más, y nunca dos seguidas, así que con
 0,35 salían entre cero y dos en una llamada de cinco frases."""
+
+
+PROVEEDOR_DE_VOZ = "elevenlabs"
+"""El proveedor de voz de una demo que no dice otro (``proveedor_voz`` en su entrada): el de ``VoiceConfig``."""
+
+VOCES_GEMINI = [
+    ("Zephyr", "luminosa"), ("Puck", "animada"), ("Charon", "informativa"), ("Kore", "firme"),
+    ("Fenrir", "enérgica"), ("Leda", "juvenil"), ("Orus", "firme"), ("Aoede", "desenfadada"),
+    ("Callirrhoe", "relajada"), ("Autonoe", "luminosa"), ("Enceladus", "susurrante"), ("Iapetus", "clara"),
+    ("Umbriel", "relajada"), ("Algieba", "suave"), ("Despina", "suave"), ("Erinome", "clara"),
+    ("Algenib", "rasgada"), ("Rasalgethi", "informativa"), ("Laomedeia", "animada"), ("Achernar", "delicada"),
+    ("Alnilam", "firme"), ("Schedar", "equilibrada"), ("Gacrux", "madura"), ("Pulcherrima", "directa"),
+    ("Achird", "cercana"), ("Zubenelgenubi", "informal"), ("Vindemiatrix", "tranquila"), ("Sadachbia", "vivaz"),
+    ("Sadaltager", "experta"), ("Sulafat", "cálida"),
+]  # fmt: skip
+"""Las 30 voces de Gemini y cómo las describe Google (ai.google.dev/gemini-api/docs/speech-generation)."""
+
+ELEVENLABS_VOCES_URL = "https://api.elevenlabs.io/v2/voices"
+GRUPO_PROPIAS = "Propias de esta cuenta"
+GRUPO_OTROS = "Otros idiomas"
+_IDIOMAS = {"es": "Español", "ca": "Catalán", "en": "Inglés", "ar": "Árabe"}
+_GENEROS = {"male": "hombre", "female": "mujer", "neutral": "neutra"}
+_ACENTOS = {
+    "peninsular": "España", "es-peninsular": "España", "spain": "España", "castillian": "España",
+    "andalusian": "andaluz", "canary islands": "canario", "galician": "gallego", "argentine": "argentino",
+    "colombian": "colombiano", "chilean": "chileno", "venezuelan": "venezolano", "mexican": "mexicano",
+    "peruvian": "peruano", "ecuadorian": "ecuatoriano", "dominican": "dominicano",
+    "latin american": "latinoamericano", "american": "EE. UU.", "british": "británico", "standard": "estándar",
+    "moroccan": "marroquí",
+}  # fmt: skip
+_NOMBRE_MAX = 48
+
+
+def voces_elevenlabs(crudas: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Las voces de una cuenta de ElevenLabs como las enseña la página: ``{id, nombre, detalle, grupo}``.
+
+    Un grupo por idioma, con las clonadas o creadas en la cuenta delante. En cada grupo, primero las de España y
+    al final las que no dicen acento.
+    """
+    grupos = [GRUPO_PROPIAS, *_IDIOMAS.values(), GRUPO_OTROS]
+    voces: list[tuple[tuple[int, int, str, str], dict[str, str]]] = []
+    for v in crudas:
+        voice_id, nombre = str(v.get("voice_id") or "").strip(), " ".join(str(v.get("name") or "").split())
+        if not voice_id or not nombre:
+            continue
+        etiquetas = v.get("labels") if isinstance(v.get("labels"), dict) else {}
+        acento_crudo = str(etiquetas.get("accent") or "").strip().lower()
+        acento = _ACENTOS.get(acento_crudo, acento_crudo)
+        genero = _GENEROS.get(str(etiquetas.get("gender") or "").strip().lower(), "")
+        if v.get("category") in ("cloned", "generated"):
+            grupo = GRUPO_PROPIAS
+        else:
+            grupo = _IDIOMAS.get(str(etiquetas.get("language") or "").strip().lower(), GRUPO_OTROS)
+        if len(nombre) > _NOMBRE_MAX:
+            nombre = nombre[: _NOMBRE_MAX - 1].rstrip() + "…"
+        orden = (grupos.index(grupo), 0 if acento == "España" else 1 if acento else 2, acento, nombre.casefold())
+        voces.append(
+            (
+                orden,
+                {
+                    "id": voice_id,
+                    "nombre": nombre,
+                    "detalle": ", ".join(x for x in (genero, acento) if x),
+                    "grupo": grupo,
+                },
+            )
+        )
+    voces.sort(key=lambda par: par[0])
+    return [voz for _, voz in voces]
+
+
+class SinVoces(Exception):
+    """Las voces del proveedor no se han podido leer. El mensaje es para la página."""
+
+
+def _clave_elevenlabs() -> str:
+    """La del entorno o, como hace el playground con la demo, la del ``.env`` del repositorio."""
+    clave = os.environ.get("ELEVENLABS_API_KEY") or playground._read_dotenv(REPO / ".env").get("ELEVENLABS_API_KEY")
+    return (clave or "").strip()
+
+
+def _pedir_voces_elevenlabs() -> list[dict[str, Any]]:
+    clave = _clave_elevenlabs()
+    if not clave:
+        raise SinVoces("falta ELEVENLABS_API_KEY en el entorno o en el .env.")
+    voces: list[dict[str, Any]] = []
+    pagina_siguiente = ""
+    for _ in range(10):  # 100 voces por página
+        consulta = {"page_size": "100"}
+        if pagina_siguiente:
+            consulta["next_page_token"] = pagina_siguiente
+        peticion = urllib.request.Request(
+            f"{ELEVENLABS_VOCES_URL}?{urllib.parse.urlencode(consulta)}", headers={"xi-api-key": clave}
+        )
+        try:
+            with urllib.request.urlopen(peticion, timeout=15) as respuesta:
+                pagina = json.load(respuesta)
+        except urllib.error.HTTPError as e:
+            raise SinVoces(f"ElevenLabs respondió {e.code} al pedir las voces de la cuenta.") from None
+        except (OSError, ValueError):
+            raise SinVoces("no se pudo hablar con ElevenLabs para pedir las voces de la cuenta.") from None
+        if not isinstance(pagina, dict):
+            break
+        voces += [v for v in pagina.get("voices") or [] if isinstance(v, dict)]
+        pagina_siguiente = str(pagina.get("next_page_token") or "")
+        if not pagina.get("has_more") or not pagina_siguiente:
+            break
+    return voces
+
+
+_VOCES_VALEN_SECS = 600.0
+_VOCES_LEIDAS: dict[str, Any] = {"voces": None, "cuando": 0.0}
+_VOCES_CANDADO = threading.Lock()
+
+
+def catalogo_de_voces() -> dict[str, dict[str, Any]]:
+    """Las voces que se pueden elegir con cada proveedor: ``{proveedor: {"voces": [...], "error": ""}}``.
+
+    Las de ElevenLabs se piden a la cuenta y valen diez minutos: una voz nueva aparece sin reiniciar. Si la cuenta
+    no contesta se dan las últimas leídas, y sin ninguna, el motivo.
+    """
+    error = ""
+    with _VOCES_CANDADO:
+        if _VOCES_LEIDAS["voces"] is None or time.monotonic() - _VOCES_LEIDAS["cuando"] > _VOCES_VALEN_SECS:
+            try:
+                _VOCES_LEIDAS["voces"] = voces_elevenlabs(_pedir_voces_elevenlabs())
+                _VOCES_LEIDAS["cuando"] = time.monotonic()
+            except SinVoces as e:
+                error = "" if _VOCES_LEIDAS["voces"] else str(e)
+        de_elevenlabs = list(_VOCES_LEIDAS["voces"] or [])
+    de_gemini = [{"id": nombre, "nombre": nombre, "detalle": detalle, "grupo": ""} for nombre, detalle in VOCES_GEMINI]
+    return {
+        "elevenlabs": {"voces": de_elevenlabs, "error": error},
+        "gemini": {"voces": de_gemini, "error": ""},
+    }
+
+
+def demo_publica(demo: dict[str, Any]) -> dict[str, Any]:
+    """Lo que la página necesita de una demo. Sin la ruta del agente ni sus variables de entorno."""
+    publica = {k: demo[k] for k in ("id", "name", "description", "probar", "nota", "ocultar") if demo.get(k)}
+    publica["proveedor_voz"] = str(demo.get("proveedor_voz") or PROVEEDOR_DE_VOZ)
+    return publica
 
 
 def _opcion(grupo: str, opcion_id: str) -> dict[str, Any]:
@@ -274,14 +422,10 @@ def _make_handler(child: HubChild, local: Path | None):
             if path == "/demos":
                 demos = cargar_demos(local)
                 child.gestionadas = {d[k] for d in demos for k in ("model_env", "tuning_env") if d.get(k)}
-                publicas = [
-                    {k: d.get(k) for k in ("id", "name", "description", "probar", "nota", "ocultar") if d.get(k)}
-                    for d in demos
-                ]
                 self._send_json(
                     200,
                     {
-                        "demos": publicas,
+                        "demos": [demo_publica(d) for d in demos],
                         "variantes": VARIANTES,
                         "estado": estado_html.is_file(),
                         "playground": "/voice",
@@ -296,6 +440,9 @@ def _make_handler(child: HubChild, local: Path | None):
                 return
             if path == "/api/status":
                 self._send_json(200, _estado_publico(child))
+                return
+            if path == "/api/voces":
+                self._send_json(200, catalogo_de_voces())
                 return
             super().do_GET()  # /voice y /launcher/*: el playground completo
 
