@@ -479,11 +479,9 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
             logger.info("dg_flux_configure_ok", patient=self.patient_thresholds_live)
             return
         if mt == "ConfigureFailure":
-            patient = self._configure_acks.popleft().patient if self._configure_acks else None
-            # The thresholds on the socket did not change: a failed patient Configure leaves Flux not
-            # patient; a failed restore or language update leaves the state it had.
-            if patient:
-                self.patient_thresholds_live = False
+            if self._configure_acks:
+                self._configure_acks.popleft()
+            # Rejected: the socket keeps the settings of the last Configure it accepted, so does the flag.
             logger.warning(
                 "dg_flux_configure_failed",
                 description=msg.get("description") or msg.get("message") or msg.get("error"),

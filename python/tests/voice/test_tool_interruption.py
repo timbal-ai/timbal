@@ -171,7 +171,7 @@ async def test_disable_during_tool_finishes_and_carries_speech() -> None:
     carried = script.calls[-1]
     assert carried[-1].role == "user" and carried[-1].collect_text() == DURING_TOOL
     assert any(message.role == "assistant" and message.collect_text() == REPLY for message in carried)
-    assert session.agent._tool_interruption_modes == {"lookup": "disable_during_tool"}
+    assert session._tool_interruption_modes == {"lookup": "disable_during_tool"}
 
 
 @pytest.mark.asyncio
@@ -383,14 +383,14 @@ async def test_sub_agent_used_as_a_tool_can_block_barge_in() -> None:
 
     events = await _run(session, stt, drive, timeout=8)
     assert not any(isinstance(event, SessionInterrupted) for event in events)
-    assert session.agent._tool_interruption_modes == {"pricing": "disable_during_tool"}
+    assert session._tool_interruption_modes == {"pricing": "disable_during_tool"}
 
 
 def test_and_turn_pause_waits_for_the_turn_that_finishes_the_tool() -> None:
     """The wait stays open. A deferred turn does not spend the protection."""
     script = _Script()
     session, _stt = _voice(script, [])
-    session.agent._tool_interruption_modes = {"wire": "disable_during_tool_and_turn"}
+    session._tool_interruption_modes = {"wire": "disable_during_tool_and_turn"}
     session._is_speaking = True
     session._note_tool_call("wire", "c1")
     assert session._interruptions_suppressed()
@@ -413,7 +413,7 @@ def test_and_turn_pause_waits_for_the_turn_that_finishes_the_tool() -> None:
 def test_unfinished_tool_batch_does_not_lock_the_call() -> None:
     script = _Script()
     session, _stt = _voice(script, [])
-    session.agent._tool_interruption_modes = {"wire": "disable_during_tool"}
+    session._tool_interruption_modes = {"wire": "disable_during_tool"}
     session._is_speaking = True
     session._note_tool_call("wire", "c1")
     assert session._interruptions_suppressed()

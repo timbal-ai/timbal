@@ -121,9 +121,11 @@ def prepare_messages_request(
         anthropic_kwargs.pop("cache_control", None)
     # After provider_params, so an override TTL is the breakpoint's TTL too and
     # cache_control=None stays a full opt-out (no block marker either).
-    system = anthropic_system_param(system_prompt, anthropic_kwargs.get("cache_control"))
-    if system is not None:
-        anthropic_kwargs["system"] = system
+    # An explicit ``system`` in provider_params is the caller's override, as before: it wins.
+    if "system" not in provider_params:
+        system = anthropic_system_param(system_prompt, anthropic_kwargs.get("cache_control"))
+        if system is not None:
+            anthropic_kwargs["system"] = system
     _drop_stale_tool_references(
         anthropic_kwargs["messages"], {tool.get("name") for tool in anthropic_kwargs.get("tools") or ()}
     )

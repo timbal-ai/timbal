@@ -59,6 +59,8 @@ __all__ = [
     "SpeculativeGate",
     "install_speculative_gate",
     "reset_speculative_gate",
+    "spoken_numbers",
+    "ungroup_numbers",
     "transcripts_equivalent",
     "wait_for_turn_confirmation",
 ]
@@ -94,15 +96,49 @@ def transcripts_equivalent(first: str, second: str | None) -> bool:
 
     Adapted from LiveKit Agents ``_transcripts_equivalent`` (Apache-2.0):
     identical strings match; otherwise casefolded words, punctuation ignored,
-    CJK and Thai split into characters. An empty word list never matches, so
-    a blank attempt cannot be reused.
+    CJK and Thai split into characters. Numbers must match as written, sign
+    and decimal point included (``spoken_numbers``): a changed value is a new
+    turn, never a reused reply or tool call. An empty word list never matches,
+    so a blank attempt cannot be reused.
     """
     if first == second:
         return True
     if second is None:
         return False
     first_words = _words(first)
-    return bool(first_words) and first_words == _words(second)
+    return bool(first_words) and first_words == _words(second) and spoken_numbers(first) == spoken_numbers(second)
+
+
+# A number as written, sign and decimal / thousands separators included: ignoring punctuation must not make
+# "1.50" the same as "150", or "-20" the same as "20". A separator counts only between digits ("20." is 20).
+_NUMBER = re.compile(r"(?<![\w.,])[-+\u2212]?\d+(?:[.,]\d+)*")
+
+
+# Only thousands groups ("1,000", "1.500.000"): every separator is followed by exactly three digits.
+_GROUPED = re.compile(r"[-+]?\d{1,3}(?:[.,]\d{3})+")
+
+
+def ungroup_numbers(text: str) -> str:
+    """``text`` with thousands separators taken out of its numbers ("1,000" → "1000"), nothing else changed."""
+    return _NUMBER.sub(
+        lambda m: m.group(0).replace(",", "").replace(".", "") if _GROUPED.fullmatch(m.group(0)) else m.group(0),
+        text or "",
+    )
+
+
+def spoken_numbers(text: str) -> list[str]:
+    """The numbers in ``text``, in order, each with its sign and decimal point (``−`` read as ``-``).
+
+    Thousands separators are dropped ("1,000" and "1000" are one value); any other separator is a decimal
+    point and stays ("1.50" is not "150").
+    """
+    numbers = []
+    for match in _NUMBER.findall(text or ""):
+        number = match.replace("\u2212", "-")
+        if _GROUPED.fullmatch(number):
+            number = number.replace(",", "").replace(".", "")
+        numbers.append(number)
+    return numbers
 
 
 def _words(text: str) -> list[str]:
@@ -132,19 +168,24 @@ class AudioHold:
     """PCM produced before the turn is confirmed.
 
     Chunks are ``(pcm, segment_record)``. ``release`` lets the session emit
-    them; ``discard`` drops them. Synthesis after ``released`` emits directly.
+    them; ``discard`` drops them. Synthesis emits directly once the buffered
+    chunks have been emitted (``drained``), never ahead of them.
     """
 
     chunks: list[tuple[bytes, list]] = field(default_factory=list)
     released: bool = False
     discarded: bool = False
+    drained: bool = False
+    """Released and every buffered chunk emitted: from then on synthesis emits directly. Until then a new
+    chunk queues behind the buffered ones, so playback keeps the order they were synthesized in."""
+    flushing: bool = False
     ready: asyncio.Event = field(default_factory=asyncio.Event)
 
     def hold(self, chunk: bytes, record: list) -> bool:
         """Buffer ``chunk``. Return True when the caller should emit it now."""
         if self.discarded:
             return False
-        if self.released:
+        if self.drained:
             return True
         self.chunks.append((chunk, record))
         return False
@@ -175,3 +216,5 @@ class SpeculativeAttempt:
     prior_context: Any
     prior_head: str | None = None
     settled: bool = False
+    task: Any = None
+    """The turn task running this attempt: the only one a discard cancels."""

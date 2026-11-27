@@ -1354,10 +1354,6 @@ class Agent(Runnable):
         self._system_prompt_fn_is_async: bool = False
         self._system_prompt_skills: str | None = None
         self._path = self.name
-        # Name → non-allow interruption_mode for the tools resolved this iteration.
-        # VoiceSession reads it when a tool call is announced. Empty until the first
-        # resolve, and absent keys mean ``allow``.
-        self._tool_interruption_modes: dict[str, str] = {}
 
         # Handle callable system_prompt
         if callable(self.system_prompt):
@@ -2979,11 +2975,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 tools = [tool for tool in tools if self._tool_allowed(tool, tool_policy)]
                 commands = {key: tool for key, tool in commands.items() if tool in tools}
                 self._record_allowed_tools(tools, tool_policy)
-        # Voice barge-in policy, keyed by the name the LLM calls. Only the
-        # non-default modes are stored; VoiceSession treats a missing name as allow.
-        # Only on a call: everywhere else nothing reads it.
-        if CURRENT_VOICE_SESSION.get() is not None:
-            self._tool_interruption_modes = {
+        # Voice barge-in policy, keyed by the name the LLM calls, kept on the call's own session: concurrent
+        # calls share this Agent, and each resolves its own catalog. Only the non-default modes are stored;
+        # VoiceSession treats a missing name as allow. Only on a call: everywhere else nothing reads it.
+        session = CURRENT_VOICE_SESSION.get()
+        if session is not None and getattr(session, "agent", None) is self:
+            session._tool_interruption_modes = {
                 tool.name: mode for tool in tools if (mode := getattr(tool, "interruption_mode", "allow")) != "allow"
             }
         return tools, commands, tools_names, tool_providers

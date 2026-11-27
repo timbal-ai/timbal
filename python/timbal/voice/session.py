@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import contextvars
 import inspect
+import json
 import math
 import random
 import re
@@ -44,7 +45,7 @@ from urllib.parse import urlsplit
 import structlog
 from uuid_extensions import uuid7
 
-from ..core.agent import Agent, _render_sections
+from ..core.agent import Agent, _render_sections, is_call_tool_name
 from ..core.llm.prompt_cache import (
     SystemPrompt,
     bind_prompt_cache_key,
@@ -128,7 +129,9 @@ from .speculative import (
     SpeculativeGate,
     install_speculative_gate,
     reset_speculative_gate,
+    spoken_numbers,
     transcripts_equivalent,
+    ungroup_numbers,
 )
 from .turn_detection import (
     CommitAction,
@@ -169,21 +172,30 @@ _SPOKEN_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 def _same_spoken_words(a: str, b: str) -> bool:
     """True when two transcripts are the same words, ignoring case and punctuation."""
-    left = " ".join(_SPOKEN_WORD_RE.findall(a.lower()))
-    right = " ".join(_SPOKEN_WORD_RE.findall(b.lower()))
-    return bool(left) and left == right
+    left = " ".join(_SPOKEN_WORD_RE.findall(ungroup_numbers(a).lower()))
+    right = " ".join(_SPOKEN_WORD_RE.findall(ungroup_numbers(b).lower()))
+    # Punctuation is ignored, but not inside a number: "-20" is not "20", "1.50" is not "150".
+    return bool(left) and left == right and spoken_numbers(a) == spoken_numbers(b)
 
 
 def _contains_spoken_words(text: str, words: str) -> bool:
     """True when ``words`` appear in ``text`` as consecutive words, ignoring case and punctuation."""
-    inner = " ".join(_SPOKEN_WORD_RE.findall(words.lower()))
-    outer = " ".join(_SPOKEN_WORD_RE.findall(text.lower()))
-    return bool(inner) and f" {inner} " in f" {outer} "
+    inner = " ".join(_SPOKEN_WORD_RE.findall(ungroup_numbers(words).lower()))
+    outer = " ".join(_SPOKEN_WORD_RE.findall(ungroup_numbers(text).lower()))
+    if not inner or f" {inner} " not in f" {outer} ":
+        return False
+    # Numbers as written, sign and decimal point included, appear in ``text`` in the same order.
+    needed = spoken_numbers(words)
+    if not needed:
+        return True
+    found = spoken_numbers(text)
+    return any(found[i : i + len(needed)] == needed for i in range(len(found) - len(needed) + 1))
 
 
 def _without_spoken_words(text: str, words: str) -> str:
     """``text`` without its last run of ``words`` (same words, any case or punctuation), and the
     punctuation that closed that run. ``text`` unchanged when the words are not in it."""
+    text, words = ungroup_numbers(text), ungroup_numbers(words)  # "1,000" is one word, like "1000"
     needle = [w.lower() for w in _SPOKEN_WORD_RE.findall(words)]
     tokens = list(_SPOKEN_WORD_RE.finditer(text))
     if not needle or len(needle) > len(tokens):
@@ -600,12 +612,20 @@ class VoiceSession:
         self._eou_predictor: SpeechEouPredictor | None = None
         # Text of an EagerEndOfTurn turn that EndOfTurn has not confirmed.
         self._eager_unconfirmed: str | None = None
+        # Name → non-allow interruption_mode of this call's tools as its agent last resolved them (set by
+        # ``Agent._resolve_tools`` on this session, not on the Agent that concurrent calls share).
+        self._tool_interruption_modes: dict[str, str] = {}
         # Holds the tools of a turn an EagerEndOfTurn started until EndOfTurn confirms it (the speculative gate,
         # without holding audio): TurnResumed then discards it, so no tool of a cancelled turn has run.
         self._eager_gate: SpeculativeGate | None = None
         # The eager words the gate belongs to, and whether a turn took the gate (set by ``_eager_gate_for``).
         self._eager_gate_text = ""
         self._eager_gate_taken = False
+        # The turn that took the gate, its transcript row, and the words that row carried before the eager
+        # ones (a held fragment or a deferred prefix): what TurnResumed takes back.
+        self._eager_turn_task: asyncio.Task | None = None
+        self._eager_row: TranscriptEntry | None = None
+        self._eager_prefix = ""
         self._eager_commit = False
         # Mic PCM for a Smart Turn vote when the turn detector does not buffer
         # (provider mode on Flux). Unused when the detector already has audio.
@@ -1115,12 +1135,17 @@ class VoiceSession:
     def _hangup_audio_pending(self) -> bool:
         """Goodbye audio still going out. Ignores the turn task.
 
-        A tool awaiting :meth:`commit_hangup` *is* the turn task. Counting
-        that task as busy would wait forever. Playback, TTS tasks, and the
-        speaking flag are the goodbye. LiveKit's EndCallTool waits on the
-        speech handle the same way, not on the tool task itself.
+        A tool awaiting :meth:`commit_hangup` *is* the turn task, and
+        ``_is_speaking`` stays set for that whole turn: counting either would
+        wait for the cap and call a silent turn's goodbye heard. Synthesis,
+        audio held for a speculative turn, and playback are the goodbye.
+        LiveKit's EndCallTool waits on the speech handle the same way, not on
+        the tool task itself.
         """
-        if self._is_speaking or self._tts_tasks or self.playback.is_playing:
+        if self._tts_tasks or self.playback.is_playing:
+            return True
+        hold = self._audio_hold
+        if hold is not None and hold.chunks and not hold.discarded:
             return True
         if self._greeting_speaking or self._idle_prompt_speaking or self._greeting_pending_bytes() > 0:
             return True
@@ -2298,36 +2323,50 @@ class VoiceSession:
         return confidence >= threshold
 
     async def _cancel_unconfirmed_eager(self) -> None:
-        """``TurnResumed``: the early turn was wrong. Stop it.
+        """``TurnResumed`` (or a different final, or the STT ending): the eager words were not the turn.
 
-        Drop the speculative user line when the assistant never answered it,
-        tell the client to retract that bubble, and remove it from the run
-        memory so the next turn does not answer a cancelled utterance.
+        Takes them back wherever they are, and only there:
+
+        * a turn started on them (alone, or merged with a held fragment or a deferred prefix): that turn is
+          interrupted, its transcript row and its memory entry are retracted, and the words it carried
+          before the eager ones go back on hold, so the caller's final transcript joins them again;
+        * a hold keeps them: they leave the held text (the hold and its timer go if nothing else is left);
+        * they wait behind a protected tool (deferred): they leave the deferred text, and the turn that owns
+          the tool is not touched.
         """
         text = self._eager_unconfirmed
         if not text:
             return
         self._eager_unconfirmed = None
         self._settle_eager_gate(confirm=False)
-        # Words parked behind a protected tool are the cancelled ones: they must not start a turn later, ungated.
-        # The caller's EndOfTurn brings the whole utterance, deferred again if the tool still runs.
+        turn, self._eager_turn_task = self._eager_turn_task, None
+        row, self._eager_row = self._eager_row, None
+        prefix, self._eager_prefix = self._eager_prefix, ""
+        logger.info("flux_eager_cancelled")
         deferred = self._deferred_user_text
         if deferred and _contains_spoken_words(deferred, text):
             self._deferred_user_text = _without_spoken_words(deferred, text)
-        logger.info("flux_eager_cancelled")
+        held = self._held_user_text
+        if held and _contains_spoken_words(held, text):
+            rest = _without_spoken_words(held, text)
+            if rest:
+                self._held_user_text = rest  # the timer reads it when it fires
+            else:
+                self._cancel_hold()
+                self._held_user_text = None
+                self._hold_armed_timeout_secs = None
+        if turn is None or turn.done() or turn is not self._current_turn_task:
+            return  # no turn of these words runs now: nothing to interrupt
+        timeout = self._hold_armed_timeout_secs or self.hold_timeout_secs
         await self.interrupt()
-        retracted = False
-        if (
-            self._transcript
-            and self._transcript[-1].role == "user"
-            and self._transcript[-1].text == text
-            and not self._active_turn_user_text
-        ):
+        if row is not None and self._transcript and self._transcript[-1] is row:
             self._transcript.pop()
-            retracted = True
-        if retracted:
             await self._emit(TranscriptCommitted(text="", replace=True))
-            await self._align_continue_memory(fragment_user_text=text)
+            await self._align_continue_memory(fragment_user_text=row.text)
+        if prefix and not self._closed:
+            # What the caller said before the eager words is still theirs: held again, so the final transcript
+            # (or the hold's own timeout) makes the turn.
+            await self._arm_hold(prefix, timeout)
 
     async def _handle_provider_prediction(self, event: TranscriptEvent) -> None:
         """Flux ``EagerEndOfTurn`` / ``TurnResumed``.
@@ -2393,6 +2432,11 @@ class VoiceSession:
 
     def _settle_eager_gate(self, *, confirm: bool) -> None:
         """Release (EndOfTurn) or cancel (TurnResumed, a different final) the tools of an eager-started turn."""
+        if confirm:
+            # Confirmed: the turn is the caller's, nothing of it is taken back later.
+            self._eager_turn_task = None
+            self._eager_row = None
+            self._eager_prefix = ""
         gate, self._eager_gate = self._eager_gate, None
         if gate is None:
             return
@@ -2898,6 +2942,10 @@ class VoiceSession:
         task = self._spawn_session_task(
             self._run_turn(final_text, tool_gate=gate) if gate is not None else self._run_turn(final_text)
         )
+        if gate is not None:
+            self._eager_turn_task = task
+            self._eager_row = self._transcript[-1] if self._transcript else None
+            self._eager_prefix = _without_spoken_words(final_text, self._eager_gate_text)
         task.add_done_callback(self._turn_task_done)
         self._current_turn_task = task
         logger.debug(
@@ -2930,7 +2978,7 @@ class VoiceSession:
 
     def _tool_interruption_mode(self, name: str) -> str:
         """``allow`` unless this iteration's resolved tools say otherwise."""
-        modes = getattr(self.agent, "_tool_interruption_modes", None)
+        modes = self._tool_interruption_modes
         mode = modes.get(name) if isinstance(modes, dict) else None
         if mode not in _INTERRUPTION_RANK:
             mode = None
@@ -2960,15 +3008,28 @@ class VoiceSession:
             return None
         return rest
 
-    def _note_tool_call(self, name: str, call_id: str) -> None:
+    def _note_tool_call(self, name: str, call_id: str, arguments: Any = None) -> None:
         """Count one LLM tool call toward this turn's parallel batch.
 
         Called when the call is announced, before the tool starts, so a barge-in
         in that gap cannot cancel a tool that opted out. ``call_id`` dedupes a
         streaming ``ToolUse`` delta and the same call on the output message.
+
+        A ``call_tool`` dispatch (``tool_search="dispatch"``) runs, starts and
+        finishes as its target: it is counted under the target's name, once its
+        arguments name it. Until they do (a delta still streaming) it is not
+        counted: the call on the output message, or the target's start, does it.
         """
         if not name or not call_id or call_id in self._turn_tool_call_ids:
             return
+        if getattr(self.agent, "tool_search", None) == "dispatch" and is_call_tool_name(name):
+            if isinstance(arguments, str):
+                with contextlib.suppress(ValueError):
+                    arguments = json.loads(arguments)
+            target = arguments.get("name") if isinstance(arguments, dict) else None
+            if not isinstance(target, str) or not target:
+                return
+            name = target
         self._turn_tool_call_ids.add(call_id)
         self._turn_unmatched_arms[name] = self._turn_unmatched_arms.get(name, 0) + 1
         self._arm_tool_batch(name)
@@ -3270,6 +3331,7 @@ class VoiceSession:
         task = self._spawn_session_task(self._run_turn(text, speculative=True), name="speculative-turn")
         task.add_done_callback(self._turn_task_done)
         self._current_turn_task = task
+        attempt.task = task
 
     async def _discard_speculative(self, *, reason: str) -> None:
         async with self._user_turn_lock:
@@ -3314,8 +3376,13 @@ class VoiceSession:
             ctx.update_usage("speculative_generations:discarded", 1)
 
     async def _discard_speculative_held(self, *, reason: str) -> None:
+        attempt = self._speculative_attempt
+        if attempt is None or attempt.settled:
+            # Nothing speculative is live (a TurnResumed after an eager event that started no attempt, or one
+            # already confirmed): the turn running now is a confirmed one, and a discard must not touch it.
+            return
         self._abandon_speculative_attempt(reason=reason)
-        task = self._current_turn_task
+        task = attempt.task
         if task is not None and not task.done() and task is not asyncio.current_task():
             task.cancel()
             try:
@@ -3366,6 +3433,9 @@ class VoiceSession:
         await self._emit(TranscriptCommitted(text=final_text, replace=False))
         attempt.gate.confirm()
         attempt.hold.release()
+        # Out now, not when the turn loop next gets an event: a tool released by this confirmation (a hangup
+        # awaiting ``commit_hangup``) runs before that, and its goodbye must play while it waits.
+        self._spawn_session_task(self._flush_speculative_outputs(), name="speculative-flush")
         logger.info(
             "speculative_confirmed",
             source=attempt.source,
@@ -3456,8 +3526,18 @@ class VoiceSession:
         if hold is None or hold.discarded:
             return
         hold.released = True
-        for chunk, record in hold.take():
-            await self._emit_pcm(chunk, record, turnless=False)
+        if hold.flushing:
+            return  # the flush in progress empties the queue, chunks added meanwhile included
+        hold.flushing = True
+        try:
+            # Emitting awaits, and synthesis may add chunks meanwhile: they queue behind, so drain until empty.
+            while hold.chunks and not hold.discarded:
+                for chunk, record in hold.take():
+                    await self._emit_pcm(chunk, record, turnless=False)
+            if not hold.discarded:
+                hold.drained = True
+        finally:
+            hold.flushing = False
 
     async def _handle_committed(self, text: str) -> None:
         if self._closed:
@@ -3706,6 +3786,10 @@ class VoiceSession:
         # next turn. The detector may have glued it onto the in-flight prompt
         # (CONTINUE_TURN); that prompt already has a turn, so only the new words
         # are carried.
+        if self._speculative_attempt is not None and not self._speculative_matches(final_text):
+            # A different final for an unconfirmed attempt: drop it first. Its tools wait on its gate, and the
+            # protection below would otherwise defer this transcript behind the very tool that waits for it.
+            await self._discard_speculative(reason="transcript_changed")
         if self._interruptions_suppressed():
             # The detector already folded a pending hold into ``final_text`` when
             # it superseded one. Drop the hold itself so it cannot block the
@@ -4405,7 +4489,7 @@ class VoiceSession:
                     # Arm before the emit await so a barge-in cannot land in the
                     # gap between "the model called the tool" and the tool starting.
                     if (own_llm_path is None or event.path == own_llm_path) and not event.item.is_server_tool_use:
-                        self._note_tool_call(event.item.name, event.item.id)
+                        self._note_tool_call(event.item.name, event.item.id, getattr(event.item, "input", None))
                     # Dead air while a tool runs — surface it so the playground
                     # doesn't look hung (live: get_datetime slept 3–5s with no UI).
                     await self._emit(AgentStatus(text=f"Calling {event.item.name}…"))
@@ -4607,7 +4691,7 @@ class VoiceSession:
                             # ToolUse delta.
                             for block in out.content:
                                 if isinstance(block, ToolUseContent) and block.name and not block.is_server_tool_use:
-                                    self._note_tool_call(block.name, block.id)
+                                    self._note_tool_call(block.name, block.id, block.input)
                             for block in out.content:
                                 if isinstance(block, ToolUseContent) and block.name:
                                     await self._emit(AgentStatus(text=f"Calling {block.name}…"))
@@ -4891,7 +4975,18 @@ class VoiceSession:
                 self._active_turn_user_text = ""
                 self._turn_speculative = False
                 self._drop_speculative_context = False
-                if self._audio_hold is not None and (self._audio_hold.discarded or self._audio_hold.released):
+                hold = self._audio_hold
+                if (
+                    hold is not None
+                    and hold.released
+                    and not hold.drained
+                    and not hold.flushing
+                    and not hold.discarded
+                    and not self._cancel_turn.is_set()
+                ):
+                    # Confirmed audio still queued (nothing flushed it after the last chunk): out before the hold goes.
+                    await self._flush_audio_hold()
+                if hold is not None and (hold.discarded or hold.released):
                     self._audio_hold = None
                 self._turn_is_event = False
                 self._turn_asked_caller = False

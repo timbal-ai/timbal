@@ -230,6 +230,10 @@ async def change_tempo(
                 else:
                     chunk = await asyncio.wait_for(asyncio.shield(pending), IDLE_FLUSH_SECS)
             except TimeoutError:
+                if pending.done():
+                    # The source itself timed out (a provider read): its error, not our idle timer.
+                    failed, pending = pending, None
+                    failed.result()
                 for out in _blocks(engine, buf, frame_n, cap_n, force=True):
                     yield out
                 continue
