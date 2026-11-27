@@ -295,17 +295,21 @@ class _EagerAddition:
     tail: str
 
 
-def _keys(text: str) -> list[str]:
-    return [key for key, _, _ in _spoken_tokens(text, strict=False)]
+def _keys(text: str, *, strict: bool = False) -> list[str]:
+    return [key for key, _, _ in _spoken_tokens(text, strict=strict)]
 
 
 def _eager_addition(before: str, after: str, eager: str) -> _EagerAddition | None:
     """How ``eager`` changed a buffer from ``before`` to ``after``; None when it added nothing (a repeat of
-    a request the buffer held already, deduplicated)."""
-    b, a = _keys(before), _keys(after)
-    if a == b:
+    a request the buffer held already, deduplicated).
+
+    Decided on values (strict keys): "Record 5 - 3" changed "Record 5 + 3", and "1.250" changed "1250",
+    though they are said with the same words.
+    """
+    if _keys(after, strict=True) == _keys(before, strict=True):
         return None
-    if b and a[: len(b)] == b:
+    b, a = _keys(before), _keys(after)
+    if b and a[: len(b)] == b and _keys(after, strict=True)[: len(b)] == _keys(before, strict=True):
         last_end = _spoken_tokens(before, strict=False)[-1][2]
         return _EagerAddition(before, after, tuple(b[-_ANCHOR_WORDS:]), tuple(a[len(b) :]), before[last_end:].strip())
     # Not an extension: the eager words rewrote the buffer (or it was empty). Their words are the fallback.
@@ -327,17 +331,43 @@ def _rejoin(before: str, rest: str, after: str) -> str:
     return f"{before}{sep} {rest.lstrip()}"
 
 
+def _replace_span(text: str, start: int, end: int, replacement: str) -> str:
+    """``text`` with ``text[start:end]`` replaced by ``replacement``, punctuation and spacing kept sane."""
+    left, right, rep = text[:start].rstrip(), text[end:], replacement.strip()
+    if not rep or rep[-1] in _CLOSING_PUNCTUATION:
+        # Removed outright, the words take their closing punctuation with them; replaced by text with its own,
+        # that stands for what followed them.
+        right = right.lstrip(_CLOSING_PUNCTUATION)
+    joined = f"{left} {rep}".strip() if rep else left
+    if not right.strip():
+        return joined.strip()
+    if not joined:
+        return right.strip()
+    return f"{joined} {right.lstrip()}" if right[:1].isspace() else joined + right
+
+
 def _without_addition(text: str, addition: _EagerAddition) -> str:
-    """``text`` as it would read without the eager event: ``before`` itself while the buffer still reads
-    ``after``, ``before`` and what followed when it starts with it ("Check the booking today. Send a
-    receipt." → "Check the booking. Send a receipt."), else ``text`` without the event's words (found after
-    their anchor, at the start for a buffer that was empty, else as their last run)."""
+    """``text`` as it would read without the eager event: ``before`` put back where the buffer still says
+    ``after`` (as written, at its start with more requests behind: "Check the booking today. Send a
+    receipt." → "Check the booking. Send a receipt."; or the same words recased or repunctuated since),
+    else ``text`` without the event's words (found after their anchor, at the start for a buffer that was
+    empty, else as their last run)."""
     if text == addition.after:
         return addition.before
     if addition.after and text.startswith(addition.after):
         return _rejoin(addition.before, text[len(addition.after) :], addition.after)
     tokens = _spoken_tokens(text, strict=False)
     keys = [key for key, _, _ in tokens]
+    after_keys = tuple(_keys(addition.after))
+    n = len(after_keys)
+    if n and len(keys) >= n:
+        # The buffer still says what the event left, written differently: put the earlier text in its place.
+        # At the start first (requests queue behind), else its last run.
+        starts = [0] if tuple(keys[:n]) == after_keys else []
+        starts += [i for i in range(len(keys) - n, 0, -1) if tuple(keys[i : i + n]) == after_keys]
+        if starts:
+            i = starts[0]
+            return _replace_span(text, tokens[i][1], tokens[i + n - 1][2], addition.before)
     words, m = addition.words, len(addition.words)
     span: tuple[int, int] | None = None
     anchored = False
