@@ -88,9 +88,11 @@ def fine_timer():
     3 ms sleep often takes two ticks: each poll of :meth:`Client.settle`, each tool's pause and the window a
     second restore is watched in took 15-31 ms there instead of 3-10 ms (a third of a sweep's time on
     windows-latest / py3.13). This asks for a 1 ms timer for the test's length, as Linux and macOS have: a 3 ms
-    sleep then takes 3.4-4 ms there. Clocks are left as they are: before Python 3.13 ``time.monotonic`` still moves
-    in 15-16 ms steps (measured), so the coarse-clock cases of CLAUDE.md still run. Since Windows 10 2004 the
-    request is the process's own: other workers keep theirs."""
+    sleep then takes 3.4-4 ms there. Before Python 3.13 ``time.monotonic`` still moves in 15-16 ms steps under it
+    (measured), so its coarse-clock cases of CLAUDE.md still run; ``time.time`` and ``time.time_ns`` may move in
+    finer ones (not measured). No test here reads the wall clock, and one that needs two events to share a
+    wall-clock timestamp sets that clock itself. Since Windows 10 2004 the timer request is the process's own:
+    other workers' waits keep their ticks."""
     if sys.platform != "win32":
         yield
         return
