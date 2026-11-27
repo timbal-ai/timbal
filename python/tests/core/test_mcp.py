@@ -983,6 +983,50 @@ class TestPlatformConnectionLifetime:
         assert not service._unclosed
 
     @pytest.mark.asyncio
+    async def test_a_session_close_cut_while_close_waits_is_reported(self):
+        """The session's own close task cancelled while close() waits for it: the session is still open (kept for
+        the next close()), and close() says so instead of returning as if it were closed."""
+        from timbal.core.mcp import _RunConnection
+
+        started = asyncio.Event()
+
+        class Hangs:
+            async def close(self):
+                started.set()
+                await asyncio.Event().wait()
+
+        service = MCPServer(transport="http", service="api")
+        service._run_connections["run"] = _RunConnection(Hangs(), "fingerprint", asyncio.get_running_loop())
+        closing = asyncio.ensure_future(service.close())
+        await asyncio.wait_for(started.wait(), 10)
+        next(iter(service._close_tasks)).cancel()
+        with pytest.raises(RuntimeError, match="still open"):
+            await asyncio.wait_for(closing, 10)
+        assert service._unclosed  # owed, for the next close()
+
+    @pytest.mark.asyncio
+    async def test_two_close_calls_both_wait_for_the_retry_one_of_them_took(self):
+        """After a cut, two close() at once: the second sees the retry the first took and waits for it."""
+        from timbal.core.mcp import _RunConnection
+
+        release, closed = asyncio.Event(), []
+
+        class Slow:
+            async def close(self):
+                await release.wait()
+                closed.append(True)
+
+        service = MCPServer(transport="http", service="api")
+        await self.cut(service, "run", _RunConnection(Slow(), "fingerprint", asyncio.get_running_loop()))
+        first = asyncio.ensure_future(service.close())
+        second = asyncio.ensure_future(service.close())
+        done, _ = await asyncio.wait({second}, timeout=0.3)
+        assert not done  # waiting for the first's retry
+        release.set()
+        await asyncio.wait_for(asyncio.gather(first, second), 10)
+        assert closed == [True]
+
+    @pytest.mark.asyncio
     async def test_a_later_call_of_the_run_does_not_reuse_a_cut_connection(self, monkeypatch):
         """Its server may still have a session closing: the run's next call gets a connection of its own, and the
         run's end (or close()) closes the cut one again."""
@@ -1154,6 +1198,49 @@ class TestPlatformConnectionLifetime:
             assert len(context._end_hooks) == 1
         finally:
             set_run_context(None)
+
+
+class TestStandaloneServerClose:
+    def test_a_retry_from_another_loop_waits_for_the_owner_a_cut_close_signalled(self):
+        """A stdio server's first close() ran on its owner's loop, signalled the owner and was cut waiting for it; a
+        retry from another, running loop waits for that owner on its own loop instead of returning at once."""
+        import threading
+
+        owner_loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=owner_loop.run_forever)
+        thread.start()
+        server = MCPServer(transport="stdio", command="unused")
+        try:
+
+            async def install():
+                closed, release = asyncio.Event(), asyncio.Event()
+
+                async def owner():
+                    await closed.wait()
+                    await release.wait()  # a transport that takes its time to shut down
+
+                task = asyncio.ensure_future(owner())
+                server._session_task, server._session_closed = task, closed
+                return task, closed, release
+
+            owner, closed, release = asyncio.run_coroutine_threadsafe(install(), owner_loop).result(10)
+            first = asyncio.run_coroutine_threadsafe(server.close(), owner_loop)
+
+            async def retry():
+                await until(closed.is_set)  # the first close() has signalled the owner
+                first.cancel()
+                attempt = asyncio.ensure_future(server.close())
+                done, _ = await asyncio.wait({attempt}, timeout=0.3)
+                assert not done  # waiting for that owner, on its loop
+                owner_loop.call_soon_threadsafe(release.set)
+                await asyncio.wait_for(attempt, 10)
+                assert owner.done()
+
+            asyncio.run(retry())
+        finally:
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+            thread.join(10)
+            owner_loop.close()
 
 
 class TestPlatformConnectionOutsideARun:
