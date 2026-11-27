@@ -573,6 +573,15 @@ class TestTraceClaims:
         assert pseudonym(args=["a b"]) != pseudonym(args=["a", "b"])  # argv is not its join
         assert pseudonym(args=["x"], env={"K": "v"}) == pseudonym(args=["x"], env={"K": "v"})
 
+    def test_a_stdio_command_line_with_lone_surrogates_still_gets_its_pseudonyms(self):
+        """A command line read with ``surrogateescape``: the origin is escaped JSON (``ensure_ascii``), never a raise."""
+        server = MCPServer(
+            transport="stdio", command="\udcffproxy", args=["\udc80"], env={"K": "\udcfe"}, provenance=True
+        )
+        meta = meta_of(platform_context(), server=server)
+        assert {PROVENANCE_RUN_KEY, PROVENANCE_CALL_KEY} <= set(meta)
+        json.dumps(meta).encode()  # what goes on the wire
+
     def test_a_third_party_gets_pseudonyms_only_of_ids_the_claims_carry(self):
         context = platform_context()
         context.parent_id = "not an id"
