@@ -723,6 +723,35 @@ class TestCommitHangup:
         session._last_commit_at = time.monotonic()
         assert await session.commit_hangup() is hangs_up
 
+    @pytest.mark.parametrize(
+        ("text", "hangs_up"),
+        [
+            # Refused before: only listed acknowledgements could precede the goodbye, so the
+            # agent said goodbye and then "don't hang up, I'm still here".
+            ("Eso era todo, gracias. Hasta luego.", True),
+            ("Perfecto, muchas gracias. Hasta luego.", True),
+            ("Vale, pues nada, gracias, hasta luego.", True),
+            ("Muchas gracias por la ayuda, que tengas buen día. Adiós.", True),
+            ("Muchas gracias hasta luego", True),
+            ("That's everything, thank you. Goodbye.", True),
+            ("Perfect, thank you so much. Bye bye.", True),
+            # Done or thanks without a goodbye still does not end the call.
+            ("Eso era todo, gracias.", False),
+            ("No, nada más, gracias.", False),
+            # A goodbye inside a sentence is a mention.
+            ("Me dijo adiós y no me arregló nada.", False),
+            ("He just said bye.", False),
+            # A retract or a request around the goodbye keeps the call up.
+            ("Gracias, espera. Adiós.", False),
+            ("Hasta luego, y cancela el pedido.", False),
+        ],
+    )
+    async def test_a_turn_that_closes_on_a_goodbye_hangs_up(self, text: str, hangs_up: bool) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.05)
+        session._active_turn_user_text = text
+        session._last_commit_at = time.monotonic()
+        assert await session.commit_hangup() is hangs_up
+
     @pytest.mark.parametrize("text", ["Thank you so much.", "Vamos, vámonos.", "Gracias."])
     async def test_thanks_and_vamos_do_not_start_a_hangup(self, text: str) -> None:
         session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.2)
@@ -793,7 +822,23 @@ class TestHangupUtterance:
             ("Thank you. Goodbye.", "goodbye"),
             ("Vale, gracias.", "ack"),
             ("Gracias, espera. Adiós.", "retract"),
-            ("Thank you so much, bye.", "retract"),
+            # A turn that closes on a goodbye is one, whatever came before it.
+            ("Thank you so much, bye.", "goodbye"),
+            ("Eso era todo, gracias. Hasta luego.", "goodbye"),
+            ("Perfecto, muchas gracias. Hasta luego.", "goodbye"),
+            ("Muchas gracias hasta luego", "goodbye"),
+            ("Venga, hasta luego.", "goodbye"),
+            ("No, nada más. Adiós.", "goodbye"),
+            ("Perfecto, hasta luego, gracias.", "goodbye"),
+            ("Great, thanks a lot. Bye.", "goodbye"),
+            ("Have a good day, bye.", "goodbye"),
+            ("Moltes gràcies, adéu.", "goodbye"),
+            # A goodbye that is mentioned, or followed by a request, is not.
+            ("Vino el técnico, me dijo adiós.", "retract"),
+            ("No me digas adiós.", "retract"),
+            ("Don't say goodbye.", "retract"),
+            ("Adiós. Ah, y mándame la factura.", "retract"),
+            ("Quiero cambiar la nota, nada más.", "retract"),
         ],
     )
     def test_kind(self, text: str, kind: str) -> None:

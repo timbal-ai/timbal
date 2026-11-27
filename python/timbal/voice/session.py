@@ -628,6 +628,41 @@ def _is_hangup_goodbye(norm: str) -> bool:
     return False
 
 
+# Where a transcript breaks a turn into clauses. "?" is left out: a question is never a goodbye.
+_CLAUSE_BREAK_RE = re.compile(r"[.,;:!¡…\n]+")
+# The word before a closing goodbye that makes it a mention of one, not a goodbye:
+# "me dijo adiós", "don't say goodbye", "it was a goodbye".
+_GOODBYE_MENTION_LEADS = frozenset(
+    {"say", "says", "said", "saying", "a", "the", "my", "your", "his", "her", "not", "is", "was", "of", "without"}
+    | {"decir", "digo", "dice", "dices", "dijo", "dije", "dijiste", "dijeron", "diga", "digas", "di", "dicho"}
+    | {"diciendo", "un", "el", "mi", "tu", "su", "es", "era", "fue", "de", "del", "sin"}
+)
+
+
+def _closes_with_goodbye(text: str) -> bool:
+    """The caller's turn ends on a goodbye, whatever they said before it.
+
+    Callers close in their own words: "Eso era todo, gracias. Hasta luego.", "Perfecto, muchas
+    gracias. Adiós.", "Great, thanks a lot. Bye." A list of what may come before the goodbye
+    cannot keep up with that, and each miss refuses a hangup the agent has already said goodbye
+    for. The last clause ending on a goodbye word is enough, with acknowledgements allowed after
+    it ("Hasta luego, gracias."). The word before it must not make it a mention ("me dijo adiós").
+    Only goodbye words count: "that's all" closing a request is not one.
+    """
+    clauses = [clause for clause in (_normalize_spoken(part) for part in _CLAUSE_BREAK_RE.split(text)) if clause]
+    while len(clauses) > 1 and _is_ack_only(clauses[-1]):
+        clauses.pop()
+    if not clauses:
+        return False
+    last = clauses[-1]
+    for tail in _HANGUP_GOODBYE_TAILS:
+        if last == tail:
+            return True
+        if last.endswith(" " + tail):
+            return last[: -(len(tail) + 1)].split()[-1] not in _GOODBYE_MENTION_LEADS
+    return False
+
+
 def _grows_into_non_retract(norm: str) -> bool:
     """True when ``norm`` is an unfinished ack or goodbye, not a new request.
 
@@ -705,7 +740,7 @@ def _hangup_utterance_kind(text: str) -> str:
         return "retract"
     if norm in _INTERRUPT_COMMANDS:
         return "retract"
-    if _is_hangup_goodbye(norm):
+    if _is_hangup_goodbye(norm) or _closes_with_goodbye(text):
         return "goodbye"
     if _is_ack_only(norm) or _is_pure_backchannel(text):
         return "ack"
@@ -853,10 +888,12 @@ def _drop_hangup_politeness(text: str) -> str:
 def _caller_ends_call(text: str, last_assistant: str = "") -> bool:
     """Whether this caller turn ends the call, so a model's hangup may proceed.
 
-    A goodbye, an explicit hangup request ("Can you hang up?"), a goodbye with
-    only acknowledgements around it ("Bye, thank you."), or a yes to the agent
-    asking whether to end the call. Thanks alone, "vámonos", and any retract
-    ("wait", "don't hang up") are not.
+    A turn that closes on a goodbye ("Eso era todo, gracias. Hasta luego."), an
+    explicit hangup request ("Can you hang up?"), a goodbye with only
+    acknowledgements around it ("Bye, thank you."), or a yes to the agent
+    asking whether to end the call. Thanks alone, "vámonos", a goodbye that is
+    only mentioned ("me dijo adiós"), and any retract ("wait", "don't hang up")
+    are not.
     """
     if _hangup_utterance_kind(text) == "goodbye":
         return True
