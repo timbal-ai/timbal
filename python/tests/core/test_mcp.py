@@ -1721,6 +1721,33 @@ class TestCrossLoopClose:
         assert seen == [True]
 
     @pytest.mark.asyncio
+    async def test_a_connect_cut_twice_during_its_handshake_leaves_no_opening_owner(self, monkeypatch):
+        """Cancelled in its handshake, then again while it waits for its owner to shut down: the opening owner is
+        still cleared, so no later close() finds a session that is gone, nor a reconnect a stale owner."""
+        closing, release = asyncio.Event(), asyncio.Event()
+
+        async def run_session(_self, _ready, closed):  # a handshake that never ends, and a slow teardown
+            await closed.wait()
+            closing.set()
+            await release.wait()
+
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        server = MCPServer(transport="stdio", command="unused")
+        connecting = asyncio.ensure_future(server._connect())
+        await until(lambda: server._opening_task is not None)
+        owner = server._opening_task
+        connecting.cancel()
+        await asyncio.wait_for(closing.wait(), 10)  # waiting for its owner's teardown
+        connecting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await connecting
+        try:
+            assert server._opening_task is None
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.wait({owner}), 10)
+
+    @pytest.mark.asyncio
     async def test_a_reconnect_after_close_let_go_of_the_session_is_not_its_failure(self, monkeypatch):
         """A call reconnects once close() has closed the old session: the new handshake is not close()'s to report,
         and close() succeeds, as it did before close() worked across loops."""

@@ -1504,9 +1504,11 @@ class MCPServer(ToolSet):
             session = await ready
         except BaseException:
             closed.set()
-            await asyncio.wait({task})
-            if self._opening_task is task:
-                self._opening_task = None
+            try:
+                await asyncio.wait({task})
+            finally:  # also when this wait is cut too (a connect cancelled twice)
+                if self._opening_task is task:
+                    self._opening_task = None
             raise
         self._session = session
         self._session_task = task
