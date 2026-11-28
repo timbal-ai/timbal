@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import contextvars
+import dataclasses
 import functools
 import hashlib
 import hmac
@@ -27,6 +28,7 @@ try:
 except ImportError:
     from typing_extensions import override
 
+import anyio
 import httpx
 import structlog
 from mcp import ClientSession, StdioServerParameters
@@ -34,6 +36,7 @@ from mcp import types as mcp_types
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
+from mcp.shared.message import SessionMessage
 from pydantic import BaseModel, Field, PrivateAttr, computed_field, model_validator
 
 from ..errors import RunCancelled
@@ -267,6 +270,69 @@ def _is_session_terminated(error: BaseException) -> bool:
         and error.error is not None
         and (error.error.code == _SESSION_TERMINATED_CODE or error.error.message == "Session terminated")
     )
+
+
+_STREAM_ENDED = "timbal: the response stream ended without an answer"
+
+
+def _stream_ended(error: BaseException) -> bool:
+    """The error ``_fail_unanswered`` sends for a request whose response stream ended unanswered."""
+    return (
+        isinstance(error, McpError)
+        and error.error is not None
+        and error.error.code == mcp_types.CONNECTION_CLOSED
+        and error.error.message == _STREAM_ENDED
+    )
+
+
+class _Answered:
+    """A request's read-stream writer, as the SDK's handling of its event stream sends through it: notes whether the
+    request's answer (a response or an error with its id) went through."""
+
+    def __init__(self, writer: Any, request_id: Any) -> None:
+        self._writer = writer
+        self._request_id = request_id
+        self.answered = False
+
+    async def send(self, item: Any) -> None:
+        root = getattr(getattr(item, "message", None), "root", None)
+        if isinstance(root, mcp_types.JSONRPCResponse | mcp_types.JSONRPCError) and root.id == self._request_id:
+            self.answered = True
+        await self._writer.send(item)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._writer, name)
+
+
+def _fail_unanswered(get_session_id: Any) -> None:
+    """A request whose response stream ends before its answer arrives fails at once (#292). The SDK's transport (of
+    which ``get_session_id`` is a method) reads a POST's event stream in ``_handle_sse_response``, and resumes it there
+    from an event's id. When that returns without the request's answer having gone through, nothing will answer it,
+    and the SDK leaves it pending: ``_request`` waited its whole ``timeout``. Wrapped for this session's transport
+    alone: the request then gets a connection-closed error through the SDK's own writer, in the SDK's task, after all
+    the stream did send, which ``_request`` raises as ``ConnectionError``. Decided once the SDK is done with the
+    stream, not from its bytes, which an auth flow may read first, which may be compressed, and whose last event the
+    SDK may dispatch only at their end. An SDK without these pieces is left as it is."""
+    transport = getattr(get_session_id, "__self__", None)
+    handle = getattr(transport, "_handle_sse_response", None)
+    if handle is None:
+        return
+
+    async def handle_sse_response(response: Any, ctx: Any, *args: Any, **kwargs: Any) -> None:
+        root = getattr(getattr(getattr(ctx, "session_message", None), "message", None), "root", None)
+        fields = {field.name for field in dataclasses.fields(ctx)} if dataclasses.is_dataclass(ctx) else set()
+        if not isinstance(root, mcp_types.JSONRPCRequest) or "read_stream_writer" not in fields:
+            return await handle(response, ctx, *args, **kwargs)  # not one it knows: as the SDK does
+        answered = _Answered(ctx.read_stream_writer, root.id)
+        await handle(response, dataclasses.replace(ctx, read_stream_writer=answered), *args, **kwargs)
+        if answered.answered:
+            return
+        error = mcp_types.ErrorData(code=mcp_types.CONNECTION_CLOSED, message=_STREAM_ENDED)
+        message = mcp_types.JSONRPCMessage(mcp_types.JSONRPCError(jsonrpc="2.0", id=root.id, error=error))
+        with contextlib.suppress(anyio.ClosedResourceError, anyio.BrokenResourceError):  # the session has ended
+            await ctx.read_stream_writer.send(SessionMessage(message))
+
+    transport._handle_sse_response = handle_sse_response
 
 
 def _approval_policy_arity(policy: Callable[..., Any]) -> int:
@@ -866,9 +932,9 @@ class MCPServer(ToolSet):
     timeout: float | None = DEFAULT_TIMEOUT_SECONDS
     """Seconds to wait for the server to answer a request on an established session
     (``tools/list``, ``tools/call``). Defaults to ``DEFAULT_TIMEOUT_SECONDS`` (10 minutes);
-    ``None`` waits forever. Per-tool overrides go in ``tool_timeouts``. A dead transport is
-    detected independently of this and fails the call immediately. Does not cover
-    connecting — see ``connect_timeout``."""
+    ``None`` waits forever. Per-tool overrides go in ``tool_timeouts``. A dead transport, and
+    an HTTP response stream that ends before its answer arrives, are detected independently
+    of this and fail the call immediately. Does not cover connecting — see ``connect_timeout``."""
 
     tool_timeouts: dict[str, float | None] = Field(default_factory=dict)
     """Per-tool override of ``timeout`` for ``tools/call``, keyed by the server's bare tool
@@ -1309,6 +1375,7 @@ class MCPServer(ToolSet):
             follow_redirects=True,
         ) as http_client:
             async with streamable_http_client(self.url, http_client=http_client) as (read, write, get_session_id):
+                _fail_unanswered(get_session_id)  # before any request goes out
                 async with self._client_session(read, write) as session:
                     await session.initialize()
                     self._get_session_id = get_session_id
@@ -1578,6 +1645,16 @@ class MCPServer(ToolSet):
             try:
                 return request.result()
             except McpError as e:
+                if _stream_ended(e):  # its response stream ended unanswered (#292): as a lost connection
+                    if idempotent and attempt == 1:
+                        logger.warning(
+                            "MCP response stream ended without an answer; retrying", server=self.name, what=what
+                        )
+                        continue
+                    raise ConnectionError(
+                        f"MCP server '{self._label}': connection lost during {what} (its response stream ended "
+                        "without an answer)"
+                    ) from None
                 if attempt == 1 and _is_session_terminated(e):
                     logger.warning(
                         "MCP server no longer knows our session; reconnecting",
@@ -1596,6 +1673,8 @@ class MCPServer(ToolSet):
         message: Any,
     ) -> None:
         if isinstance(message, Exception):
+            if isinstance(message, RuntimeError) and _STREAM_ENDED in str(message):
+                return  # the error _fail_unanswered sent for a request no longer waiting (cancelled, timed out)
             logger.warning("MCP session error", server=self.name, error=str(message))
             return
         if isinstance(message, mcp_types.ServerNotification) and isinstance(

@@ -7,10 +7,14 @@ Runs a real FastMCP streamable-http server in a subprocess so the transport code
 
 import asyncio
 import contextlib
+import gzip
+import json
 import socket
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
@@ -302,3 +306,219 @@ class TestStatelessHttp:
             assert "sampling" in result.error["message"] and "stateless" in result.error["message"]
         finally:
             await client.close()
+
+
+class _CutStreamHandler(BaseHTTPRequestHandler):
+    """An MCP server whose answer to a request is an event stream (#292). ``server.mode`` decides what the stream holds:
+
+    - ``eof`` / ``reset``: a comment, then the body ends cleanly / is cut short, with no answer (a gateway cutting the
+      stream of a server that died);
+    - ``event id``: an event that carries an id (and ``retry: 10``), then the end: the SDK resumes from it, and this
+      server refuses the resumption (405);
+    - ``resumed``: the same, and the resumption (GET with ``Last-Event-ID``) sends the answer;
+    - ``cut in an event``: the stream ends inside an event, after its ``id`` line: no event was dispatched;
+    - ``answer``, ``gzip answer``, ``bare cr answer``: the answer, as the last bytes of the stream (gzip-encoded, or
+      with bare CR line endings, which the SDK's parser dispatches only at the end of the stream).
+
+    ``server.cut`` names the methods answered that way (others get a JSON answer); ``server.calls`` counts them."""
+
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_):
+        pass
+
+    def _empty(self, status):
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _json(self, payload):
+        out = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+    def _chunk(self, data: bytes):
+        self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+        self.wfile.flush()
+
+    def _stream(self, gzip_body=False):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        if gzip_body:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+    @staticmethod
+    def _answer(request_id, eol=b"\n"):
+        result = {"content": [{"type": "text", "text": "answered"}], "isError": False}
+        data = json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}).encode()
+        return b"event: message" + eol + b"data: " + data + eol + eol
+
+    def do_GET(self):
+        if self.server.mode == "resumed" and self.headers.get("Last-Event-ID") == "1":
+            self.server.calls.append("resume")
+            self._stream()
+            self._chunk(self._answer(self.server.request_id))
+            self._chunk(b"")
+            self.close_connection = True
+            return
+        self._empty(405)  # no standalone stream, and no resumption
+
+    def do_DELETE(self):
+        self._empty(204)
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        method, server = body.get("method"), self.server
+        if method == "initialize":
+            return self._json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "result": {
+                        "protocolVersion": body["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "cut", "version": "0"},
+                    },
+                }
+            )
+        if method not in ("tools/call", "tools/list"):  # notifications, our answers to the server
+            return self._empty(202)
+        server.calls.append(method)
+        if method not in server.cut or (method == "tools/list" and server.calls.count("tools/list") > 1):
+            return self._json({"jsonrpc": "2.0", "id": body["id"], "result": {"tools": []}})
+        server.request_id, mode = body["id"], server.mode
+        if mode in ("answer", "gzip answer", "bare cr answer"):
+            payload = self._answer(body["id"], b"\r" if mode == "bare cr answer" else b"\n")
+            self._stream(gzip_body=mode == "gzip answer")
+            self._chunk(gzip.compress(payload) if mode == "gzip answer" else payload)
+            self._chunk(b"")
+            self.close_connection = True
+            return
+        self._stream()
+        if mode in ("event id", "resumed"):
+            note = {"jsonrpc": "2.0", "method": "notifications/message", "params": {"level": "info", "data": "x"}}
+            self._chunk(b"id: 1\nretry: 10\ndata: %s\n\n" % json.dumps(note).encode())
+        elif mode == "cut in an event":  # the body ends right after: the event never completes
+            self._chunk(b'id: 7\ndata: {"jsonrpc": "2.0", ')
+            self._chunk(b"")
+            self.close_connection = True
+            return
+        self._chunk(b": working\n\n")
+        time.sleep(0.2)
+        if mode != "reset":
+            self._chunk(b"")  # the chunked body's end: a clean end of the stream
+        self.close_connection = True
+
+
+@contextlib.contextmanager
+def _cut_stream_server(mode, cut=("tools/call",)):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CutStreamHandler)
+    server.mode, server.cut, server.calls, server.request_id = mode, cut, [], None
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server, f"http://127.0.0.1:{server.server_address[1]}/mcp"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(10)
+
+
+class _ReadsBodies(httpx.Auth):
+    """An auth whose flow reads every response body before the client sees it (httpx's ``requires_response_body``,
+    as a refresh-token flow does)."""
+
+    requires_response_body = True
+
+    def auth_flow(self, request):
+        yield request
+
+
+async def until(condition, timeout):
+    """Wait for ``condition()``, failing after ``timeout`` seconds."""
+
+    async def poll():
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
+async def _call(client):
+    return await asyncio.wait_for(client._request(lambda s: s.call_tool("anything", {}), what="tools/call"), 10)
+
+
+class TestResponseStreamEnds:
+    """A request whose response stream ends before its answer arrives fails at once as a lost connection, instead
+    of waiting its whole ``timeout`` (600 s by default) for an answer nothing will send (#292). The SDK's own client
+    waits too: it reads the stream, finds no answer, and returns without failing the request. Decided once the SDK
+    is done with the stream (and with resuming it), so a request whose answer did come is never failed."""
+
+    @pytest.mark.parametrize("mode", ["eof", "reset", "cut in an event", "event id"])
+    async def test_a_tool_call_whose_stream_ends_unanswered_fails_at_once(self, mode):
+        """Also when the stream is cut inside an event after its ``id`` (no event was dispatched, so the SDK has
+        nothing to resume from), and when the SDK resumes and the resumption fails (it gives up after two tries)."""
+        with _cut_stream_server(mode) as (server, url):
+            client = MCPServer(name="cut", transport="http", url=url, timeout=60)
+            try:
+                t0 = time.monotonic()
+                with pytest.raises(ConnectionError, match="connection lost during tools/call"):
+                    await _call(client)
+                assert time.monotonic() - t0 < 5
+                assert server.calls == ["tools/call"]  # not sent again: the tool may have run
+                with pytest.raises(ConnectionError):  # the session is still up: the next call is its own
+                    await _call(client)
+                assert server.calls == ["tools/call", "tools/call"]
+            finally:
+                await client.close()
+
+    @pytest.mark.parametrize("mode", ["answer", "gzip answer", "bare cr answer", "resumed"])
+    @pytest.mark.parametrize("auth", [None, "reads bodies"])
+    async def test_a_tool_call_whose_answer_comes_gets_it(self, mode, auth):
+        """An answer that comes is never taken for a missing one: as the stream's last bytes, compressed, with bare
+        CR line endings (dispatched only at the stream's end), read first by an auth flow, or on a resumed stream
+        (review of the fix for #292: deciding from the stream's bytes failed each of these)."""
+        with _cut_stream_server(mode) as (server, url):
+            client = MCPServer(name="cut", transport="http", url=url, timeout=60, auth=_ReadsBodies() if auth else None)
+            try:
+                result = await _call(client)
+                assert result.content[0].text == "answered" and not result.isError
+                assert server.calls.count("tools/call") == 1
+                assert ("resume" in server.calls) == (mode == "resumed")
+            finally:
+                await client.close()
+
+    async def test_a_tools_list_whose_stream_ends_is_asked_again(self):
+        """``tools/list`` changes nothing, so a lost answer is asked for again, as after a lost connection."""
+        with _cut_stream_server("eof", cut=("tools/list",)) as (server, url):
+            client = MCPServer(name="cut", transport="http", url=url, timeout=60)
+            try:
+                assert await asyncio.wait_for(client.resolve(), 10) == []
+                assert server.calls == ["tools/list", "tools/list"]
+            finally:
+                await client.close()
+
+    async def test_a_call_that_stopped_waiting_leaves_no_warning(self, monkeypatch):
+        """A request that timed out before its stream ended gets the error all the same, from the SDK's task: the
+        session finds no request waiting for it and passes it on as an error, which is not worth a warning."""
+        seen, on_message = [], MCPServer._on_message
+
+        async def recording(self, message):
+            seen.append(message)
+            return await on_message(self, message)
+
+        monkeypatch.setattr(MCPServer, "_on_message", recording)
+        with _cut_stream_server("eof") as (_server, url), structlog.testing.capture_logs() as logs:
+            client = MCPServer(name="cut", transport="http", url=url, timeout=0.05)
+            try:
+                with pytest.raises(TimeoutError):
+                    await _call(client)
+                await until(lambda: any("timbal: the response stream ended" in str(m) for m in seen), 10)
+                assert not [entry for entry in logs if entry.get("event") == "MCP session error"], logs
+            finally:
+                await client.close()
