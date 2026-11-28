@@ -2060,6 +2060,54 @@ class TestRunEndHooks:
         assert hook_call_id == seen["run"].root_span().call_id
         assert closer_after == (None, None)
 
+    def test_the_time_left_for_the_hooks_is_read_on_the_clock_that_set_it(self):
+        """A root Tool's stream is closed from another loop, whose clock has another origin (120 s behind), once its
+        budget has run out: the run returns at once, its end hook's work going on behind it. Read on the closing
+        loop's clock, the budget looked 120 s long and the run waited for the hook."""
+        import threading
+
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        called = []
+
+        def hook():
+            called.append(True)
+            return asyncio.Event().wait()  # work that outlives the run's budget
+
+        async def streamer():
+            get_run_context().on_end(hook)
+            yield "first"
+            await asyncio.Event().wait()
+
+        class Behind(asyncio.SelectorEventLoop):
+            def time(self):
+                return super().time() - 120
+
+        owner_loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=owner_loop.run_forever)
+        thread.start()
+        try:
+
+            async def read_first():
+                set_run_context(None)
+                set_call_id(None)
+                set_parent_call_id(None)
+                stream = Tool(name="streamer", handler=streamer, timeout=0.05)._stream()
+                async for event in stream:
+                    if event.type == "DELTA":
+                        return stream, asyncio.get_running_loop().time()
+
+            stream, read_at = asyncio.run_coroutine_threadsafe(read_first(), owner_loop).result(30)
+            while owner_loop.time() < read_at + 0.1:  # the budget, set before that, has run out on its own clock
+                threading.Event().wait(0.01)
+            with asyncio.Runner(loop_factory=Behind) as runner:
+                runner.run(asyncio.wait_for(stream.aclose(), 5))  # back at once, no budget left to wait in
+            assert called == [True]
+        finally:
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+            thread.join(10)
+            owner_loop.close()
+
     async def test_unhashable_awaitables_from_hooks_are_awaited(self):
         """A hook may return any awaitable: a dataclass implementing ``__await__`` is not hashable."""
         from dataclasses import dataclass
@@ -2084,13 +2132,22 @@ class TestRunEndHooks:
         await context._run_end_hooks()
         assert sorted(ran) == ["first", "second"]
 
-    async def test_a_hook_returning_another_loops_task_is_awaited_on_that_loop(self):
-        """A producer's pending flush, a task of its own loop, returned by a hook while another loop ends the run: the
-        end waits for it there instead of failing on 'attached to a different loop'."""
+    async def test_a_hook_returning_another_loops_pending_task_fails_without_waiting_for_it(self, monkeypatch):
+        """A hook returns a pending task of another, running loop (a producer's flush) while this loop ends the run:
+        the end does not hand it to that loop nor wait for it there. The hook fails at once, logged as its failure,
+        and the task is left to its loop, neither awaited nor cancelled; the other hooks still run."""
         import threading
 
+        from timbal.state import context as context_module
         from timbal.state.context import RunContext
 
+        logged = []
+
+        class Recorder:
+            def __getattr__(self, _level):
+                return lambda event, **fields: logged.append((event, fields))
+
+        monkeypatch.setattr(context_module, "_get_logger", lambda: Recorder())
         owner = asyncio.new_event_loop()
         thread = threading.Thread(target=owner.run_forever)
         thread.start()
@@ -2106,15 +2163,55 @@ class TestRunEndHooks:
                 return release, asyncio.ensure_future(flush())
 
             release, flush = asyncio.run_coroutine_threadsafe(make(), owner).result(10)
-            context = RunContext()
+            context, ran = RunContext(), []
             context.on_end(lambda: flush)
+            context.on_end(lambda: ran.append("next"))
+            hooks = asyncio.ensure_future(context._run_end_hooks())
+            done, _ = await asyncio.wait({hooks}, timeout=5)
+            assert done  # not waiting for the flush on its loop
+            assert ran == ["next"] and not flush.done()  # the task is that loop's, untouched
+            failures = [fields for event, fields in logged if event == "run_end_hook_failed"]
+            assert len(failures) == 1 and "another event loop" in failures[0]["error"]
+            assert "asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, that_loop))" in failures[0]["error"]
+
+            async def outcome():  # read on its own loop, once let go
+                return await flush
+
+            owner.call_soon_threadsafe(release.set)
+            reading = asyncio.wrap_future(asyncio.run_coroutine_threadsafe(outcome(), owner))
+            assert await asyncio.wait_for(reading, 10) == "flushed"
+        finally:
+            owner.call_soon_threadsafe(owner.stop)
+            thread.join(10)
+            owner.close()
+
+    async def test_a_hook_hands_work_to_another_loop_the_way_its_error_says(self):
+        """The way the error above gives: the hook hands its work to the other loop and returns
+        ``asyncio.wrap_future`` of it, a future of the loop ending the run, which the end waits for."""
+        import threading
+
+        from timbal.state.context import RunContext
+
+        owner = asyncio.new_event_loop()
+        thread = threading.Thread(target=owner.run_forever)
+        thread.start()
+        try:
+            flushed, release = [], threading.Event()
+
+            async def flush():  # runs on its own loop
+                await asyncio.to_thread(release.wait, 30)
+                flushed.append(asyncio.get_running_loop() is owner)
+
+            context = RunContext()
+            context.on_end(lambda: asyncio.wrap_future(asyncio.run_coroutine_threadsafe(flush(), owner)))
             hooks = asyncio.ensure_future(context._run_end_hooks())
             done, _ = await asyncio.wait({hooks}, timeout=0.3)
-            assert not done  # waiting for the flush, on its loop
-            owner.call_soon_threadsafe(release.set)
+            assert not done  # waiting for the flush
+            release.set()
             await asyncio.wait_for(hooks, 10)
-            assert flush.done() and flush.result() == "flushed"
+            assert flushed == [True]
         finally:
+            release.set()
             owner.call_soon_threadsafe(owner.stop)
             thread.join(10)
             owner.close()

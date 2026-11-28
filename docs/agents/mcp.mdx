@@ -59,11 +59,17 @@ Local development uses the API port's `/mcp`; deployed projects use the project
 origin's `/api/mcp`. Do not point MCP at the UI origin's `/mcp`, capture a caller
 bearer during module import, or put a project service secret in source.
 
-Service mode cannot be combined with a manual URL or headers. Discovery and each
-tool call open and close their own connection, so concurrent users never share a
-connection authenticated as someone else. This adds a handshake per operation;
-explicit-URL MCP servers retain their existing persistent connection behavior.
-Discovery does not invoke application tools, and tool approvals still apply.
+Service mode cannot be combined with a manual URL or headers. Each run gets its
+own connection: opened on its first discovery or tool call and reused by the run's
+other calls. It is closed when the run ends or once it has been idle for 60
+seconds, whichever comes first, so the run's calls share one session only while
+they are less than 60 seconds apart: a call after a longer gap opens a new
+connection, and so does background work that outlives the run. Connections are
+never shared across runs,
+so concurrent users never share a connection authenticated as someone else, and a
+run whose credential changes (a refreshed token) gets a new one. Calls outside a
+run open and close their own. Discovery does not invoke application tools, and
+tool approvals still apply.
 
 ## Configuration
 
@@ -239,7 +245,22 @@ async def ask() -> None:
 For long-running processes (servers, bots), create the `MCPServer` once and reuse it across runs — reconnecting per request adds latency, especially for stdio servers that spawn a subprocess.
 </Warning>
 
-Each connection is owned by a dedicated task, so `close()` can be called from any task and in any order across servers. Failure handling on top of the SDK:
+Each connection is owned by a dedicated task, so `close()` can be called from any task of the event loop that opened it, and in any order across servers. From another event loop it raises `RuntimeError` without touching the connection, because only the loop that owns it can close it. Call `close()` there instead:
+
+```python fragment
+import asyncio
+
+# The server was used on a loop running in another thread:
+asyncio.run_coroutine_threadsafe(server.close(), loop).result()
+# ...the same from async code:
+await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(server.close(), loop))
+# ...or on an asyncio.Runner, between two run() calls:
+runner.run(server.close())
+```
+
+A connection whose event loop has closed went with it, and `close()` from any loop forgets it. With `service="api"`, `close()` closes the connections of runs on its own loop; those of runs on another loop are left to their run, which closes them when it ends.
+
+Failure handling on top of the SDK:
 
 - **Transport dies mid-call** (server process exits, HTTP connection refused): the in-flight call fails immediately with `connection lost during tools/call ...` instead of hanging, the connection is forgotten, and the next call reconnects. The cached tools stay valid.
 - **Stale session** (an HTTP server restarted or expired the session while you were idle, so it 404s your `Mcp-Session-Id` with `Session terminated`): the session is reset and the request retried once, transparently. Safe for any request — a 404 means the server never saw it.
