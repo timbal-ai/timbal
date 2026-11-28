@@ -1548,6 +1548,56 @@ class TestCloseOnAnotherLoop:
             owner_loop.close()
         assert server._session is None
 
+    def test_an_ended_owners_error_is_read_and_logged_when_close_forgets_it(self, monkeypatch):
+        """The transport died with an error and its loop paused before the owner task's done callback ran. close()
+        from another loop forgets the session, and reads and logs the task's error as a close on its loop does: the
+        done callback, finding the session already forgotten, no longer reads it, and asyncio would report it later
+        as never retrieved (Bugbot on #334)."""
+        import gc
+        import threading
+
+        from timbal.core import mcp as mcp_module
+
+        logged, unretrieved, gates = [], [], {}
+
+        class Recorder:
+            def __getattr__(self, level):
+                return lambda event, **fields: logged.append((event, fields))
+
+        monkeypatch.setattr(mcp_module, "logger", Recorder())
+        owner_loop = asyncio.new_event_loop()
+        owner_loop.set_exception_handler(lambda _loop, context: unretrieved.append(context["message"]))
+
+        async def run_session(_self, ready, _closed):
+            gates["drop"] = asyncio.Event()
+            ready.set_result(object())
+            await gates["drop"].wait()
+            asyncio.get_running_loop().stop()  # pauses before the task's done callbacks run
+            raise ConnectionError("the server process exited")
+
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        server = MCPServer(transport="stdio", command="unused")
+        thread = threading.Thread(target=owner_loop.run_forever)
+        thread.start()
+        try:
+            asyncio.run_coroutine_threadsafe(server._connect(), owner_loop).result(10)
+            owner_loop.call_soon_threadsafe(gates["drop"].set)
+            thread.join(10)
+            assert server._owner_task.done() and server._session is not None  # its done callback has not run
+            asyncio.run(asyncio.wait_for(server.close(), 10))
+            assert server._session is None
+            errors = [fields["error"] for event, fields in logged if event == "Error closing MCP connection"]
+            assert errors == ["ConnectionError: the server process exited"]
+        finally:
+            if not thread.is_alive():  # its pending callbacks run, finding the session forgotten
+                thread = threading.Thread(target=owner_loop.run_forever)
+                thread.start()
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+            thread.join(10)
+            owner_loop.close()
+        gc.collect()
+        assert not [message for message in unretrieved if "never retrieved" in message]
+
     def test_forgetting_an_ended_owner_keeps_a_session_its_loop_opened_since(self):
         """close() on another loop forgets an owner task that has ended; that owner's loop, still running, opens a new
         session just as close() comes to forget: only the ended owner's references go, never the new session's (it

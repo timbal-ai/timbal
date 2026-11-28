@@ -1339,6 +1339,11 @@ class MCPServer(ToolSet):
         # wait() rather than await: the owner task's own cancellation must not
         # surface here as if the caller itself had been cancelled.
         await asyncio.wait({task})
+        self._read_owner_error(task)
+
+    def _read_owner_error(self, task: asyncio.Task) -> None:
+        """Read a finished owner task's error, which close() reports (and asyncio would otherwise log as never
+        retrieved)."""
         error = None if task.cancelled() else task.exception()
         if error is not None:
             logger.error("Error closing MCP connection", server=self.name, error=_describe_error(error))
@@ -2039,10 +2044,16 @@ class MCPServer(ToolSet):
             task = closing[0] if closing else None
         if task is not None and task.get_loop() is not loop and (task.done() or task.get_loop().is_closed()):
             # Only references that are still that owner's: its loop, if it runs, may have opened a session since.
+            # Its error is read here, as a close on its loop reads it: its done callback, finding the session
+            # forgotten, does not.
             if self._session_task is task:
                 self._forget_session(task)
+                if task.done():
+                    self._read_owner_error(task)
             elif self._owner_task is task:
                 self._owner_task = None
+                if task.done():
+                    self._read_owner_error(task)
             self._drop_caches()
             return
         if task is not None and task.get_loop() is not loop:
