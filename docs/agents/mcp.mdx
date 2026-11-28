@@ -60,9 +60,12 @@ origin's `/api/mcp`. Do not point MCP at the UI origin's `/mcp`, capture a calle
 bearer during module import, or put a project service secret in source.
 
 Service mode cannot be combined with a manual URL or headers. Each run gets its
-own connection: opened on its first discovery or tool call, reused by the run's
-other calls, and closed when the run ends (or 60 seconds after its last call, for
-background work that outlives the run). Connections are never shared across runs,
+own connection: opened on its first discovery or tool call and reused by the run's
+other calls. It is closed when the run ends or once it has been idle for 60
+seconds, whichever comes first, so the run's calls share one session only while
+they are less than 60 seconds apart: a call after a longer gap opens a new
+connection, and so does background work that outlives the run. Connections are
+never shared across runs,
 so concurrent users never share a connection authenticated as someone else, and a
 run whose credential changes (a refreshed token) gets a new one. Calls outside a
 run open and close their own. Discovery does not invoke application tools, and

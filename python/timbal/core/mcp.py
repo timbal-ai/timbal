@@ -1978,9 +1978,11 @@ class MCPServer(ToolSet):
         """Raise, before close() touches anything, when the server's own session belongs to another event loop that
         has not closed (open, in its handshake, or still shutting down after a close() that was cut): its owner task,
         locks and transport are bound to that loop. The owner reference is read first: a close there moves the owner
-        to ``_owners_closing`` before it lets go of the reference, so one of the two reads finds it."""
+        to ``_owners_closing`` before it lets go of the reference, so one of the two reads finds it. An owner task
+        that has ended is not refused: nothing of its session is live, and close() forgets it where it runs (its
+        loop may not have run the task's done callback yet: paused, or busy in a callback)."""
         owner = self._owner_task
-        owners = [owner] if owner is not None else []
+        owners = [owner] if owner is not None and not owner.done() else []
         owners += [task for task in list(self._owners_closing) if not task.done()]
         if any(_elsewhere(task.get_loop(), loop) for task in owners):
             raise RuntimeError(
@@ -2027,15 +2029,20 @@ class MCPServer(ToolSet):
 
     async def _close_own_session(self, loop: asyncio.AbstractEventLoop) -> None:
         """The server's own session (a standalone server's), closed on this loop, which owns it and its locks. One
-        whose loop has closed went with it: only the references are dropped, and the caches cleared."""
+        of another loop whose owner task has ended, or whose loop has closed, is gone: only the references are
+        dropped, and the caches cleared (its calls in flight died with it), without its locks or its loop."""
         task = self._owner_task  # (a handshake under way, or the published session: one read)
         if task is None:
             # Its refs gone (an earlier close() forgot them and is still shutting it down, holding the locks): the
             # owner it signalled.
             closing = [owner for owner in list(self._owners_closing) if not owner.done()]
             task = closing[0] if closing else None
-        if task is not None and _gone(task.get_loop(), loop):  # its calls in flight died with it: the caches go too
-            self._forget_session(task)
+        if task is not None and task.get_loop() is not loop and (task.done() or task.get_loop().is_closed()):
+            # Only references that are still that owner's: its loop, if it runs, may have opened a session since.
+            if self._session_task is task:
+                self._forget_session(task)
+            elif self._owner_task is task:
+                self._owner_task = None
             self._drop_caches()
             return
         if task is not None and task.get_loop() is not loop:

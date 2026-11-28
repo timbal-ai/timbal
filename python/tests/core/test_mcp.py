@@ -1497,6 +1497,82 @@ class TestCloseOnAnotherLoop:
         finally:
             stop()
 
+    @pytest.mark.parametrize("owner", ["paused", "busy"])
+    def test_a_session_whose_owner_has_ended_is_forgotten_from_another_loop(self, monkeypatch, owner):
+        """The transport's owner task ended on its loop (the server process exited), and that loop paused, or is busy
+        in a callback, before the task's done callback forgot the session. Nothing of it is live: close() from
+        another loop does not refuse, and forgets the session where it runs, without its locks or its loop, clearing
+        the caches, as on 0e7071e4 (review on #334)."""
+        import threading
+
+        owner_loop = asyncio.new_event_loop()
+        hold, holding, gates = threading.Event(), threading.Event(), {}
+
+        def block():  # a callback that does not yield
+            holding.set()
+            hold.wait(30)
+
+        async def run_session(_self, ready, _closed):
+            gates["drop"] = asyncio.Event()
+            ready.set_result(object())
+            await gates["drop"].wait()  # the transport, until the server process exits
+            if owner == "paused":
+                asyncio.get_running_loop().stop()  # stops before the task's done callbacks run
+            else:
+                asyncio.get_running_loop().call_soon(block)  # queued ahead of the task's done callbacks
+
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        server = MCPServer(transport="stdio", command="unused")
+        thread = threading.Thread(target=owner_loop.run_forever)
+        thread.start()
+        try:
+            asyncio.run_coroutine_threadsafe(server._connect(), owner_loop).result(10)
+            server._tools_cache, server._inflight[1] = ["the list"], "a call that died with the transport"
+            owner_loop.call_soon_threadsafe(gates["drop"].set)
+            if owner == "paused":
+                thread.join(10)
+                assert not thread.is_alive() and not owner_loop.is_running()
+            else:
+                assert holding.wait(10)
+            assert server._owner_task.done() and server._session is not None  # its done callback has not run
+            asyncio.run(asyncio.wait_for(server.close(), 10))
+            assert server._session is None and server._session_task is None and server._owner_task is None
+            assert server._tools_cache is None and not server._inflight
+        finally:
+            hold.set()
+            if not thread.is_alive():  # its pending callbacks run, finding the session already forgotten
+                thread = threading.Thread(target=owner_loop.run_forever)
+                thread.start()
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+            thread.join(10)
+            owner_loop.close()
+        assert server._session is None
+
+    def test_forgetting_an_ended_owner_keeps_a_session_its_loop_opened_since(self):
+        """close() on another loop forgets an owner task that has ended; that owner's loop, still running, opens a new
+        session just as close() comes to forget: only the ended owner's references go, never the new session's (it
+        would be left open with nothing referring to it)."""
+        other = asyncio.new_event_loop()  # the owner's loop: alive, not this one
+        ended, new, fresh = other.create_future(), other.create_future(), object()
+        ended.set_result(None)
+        armed = [True]
+
+        class Raced(MCPServer):
+            def __getattr__(self, name):
+                if name == "_session_task" and armed:
+                    armed.clear()  # close() looks at the session as the owner's loop publishes a new one
+                    self.__pydantic_private__.update(_owner_task=new, _session_task=new, _session=fresh)
+                return super().__getattr__(name)
+
+        server = Raced(transport="stdio", command="unused")
+        server.__pydantic_private__.update(_owner_task=ended, _session_task=ended, _session=object())
+        try:
+            asyncio.run(asyncio.wait_for(server.close(), 10))
+            assert not armed
+            assert server._session is fresh and server._session_task is new and server._owner_task is new
+        finally:
+            other.close()
+
     @pytest.mark.asyncio
     async def test_the_refusal_reads_the_owner_before_the_owners_shutting_down(self):
         """A close on the session's loop moves its owner to ``_owners_closing`` and then lets go of the reference.
