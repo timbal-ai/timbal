@@ -7,11 +7,16 @@ mutable row per session, written ahead of every change (a message is durable bef
 A lease (owner + expiry, renewed while the session is open) keeps two processes from serving one session,
 and every save is a compare-and-swap on ``version`` that also checks the lease: an owner whose lease another
 process took (it expired, or renewing it failed) cannot write, so the new owner is never the one to give up.
+
+A store can also hold an **inbox** per session (``supports_inbox``): work another process takes for a session it
+does not serve (a message, a wake, a message from another agent), for the lease owner to apply. See
+:class:`ChatSessionStore`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import socket
@@ -19,6 +24,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
+from collections.abc import Collection
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,7 +37,12 @@ logger = structlog.get_logger("timbal.state.chat_store")
 __all__ = [  # ``PROCESS_OWNER`` is still readable (module __getattr__), for code written before process_owner()
     "process_owner",
     "ChatSessionStore",
+    "INBOX_KEY_KEPT_S",
+    "INBOX_KINDS",
+    "InboxFull",
     "InMemoryChatSessionStore",
+    "MAX_INBOX_ITEMS",
+    "MAX_INBOX_KEY_CHARS",
     "SessionLeased",
     "SessionNotStored",
     "SessionSnapshot",
@@ -130,6 +141,105 @@ class SnapshotConflict(RuntimeError):
     """The stored snapshot is not the version this owner last wrote: another owner took the session."""
 
 
+class InboxFull(RuntimeError):
+    """The session's inbox already holds as many waiting items as its store lets wait (``max_inbox_items``):
+    nothing was queued. Its owner applies them within moments while it runs; a full inbox means it does not."""
+
+
+INBOX_KINDS = ("message", "wake", "agent_message")
+"""What another process can queue for a session's owner (:meth:`ChatSessionStore.post_inbox`), as the platform's
+session store names them: a user message ``{text, mode}``, a wake ``{text, key, tool_policy, silent_ok, trigger}``,
+a message from another agent ``{from, text, message_id, reply_to, priority, hops}``."""
+
+MAX_INBOX_ITEMS = 256
+"""How many items may wait (posted, not acked) in one session's inbox: a post past it raises :class:`InboxFull`
+(the platform's ``MAX_INBOX_ITEMS``). The one constant for both halves of the inbox's dedupe: a session that keeps
+the ids it applied in its snapshot (``SessionSnapshot.inbox_seen``, for a store that acks apart from its saves)
+keeps at least this many, since every item pulled again after a crash is one of those still waiting."""
+
+INBOX_KEY_KEPT_S = 86_400.0
+"""How long a post's ``idempotency_key`` keeps naming its item after the owner acked it (a day, as on the
+platform): the sender may not have had the answer, and a repeat within that time queues nothing."""
+
+MAX_INBOX_KEY_CHARS = 255
+"""The longest ``idempotency_key`` (the platform's ``MAX_ID_CHARS``)."""
+
+
+def _inbox_body(kind: str, body: Any, idempotency_key: str | None) -> str:
+    """A post's checks, before anything is stored: the body as it is stored (JSON text)."""
+    if kind not in INBOX_KINDS:
+        raise ValueError(f"kind must be one of {list(INBOX_KINDS)}, got {kind!r}")
+    if not isinstance(body, dict):
+        raise TypeError("an inbox item's body must be a dict")
+    if idempotency_key is not None and (
+        not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= MAX_INBOX_KEY_CHARS
+    ):
+        raise ValueError(f"idempotency_key must be 1 to {MAX_INBOX_KEY_CHARS} characters")
+    try:
+        return _encode(body)
+    except (TypeError, ValueError, RecursionError) as e:
+        raise TypeError(f"an inbox item's body must be JSON a snapshot can hold: {e}") from None
+
+
+def _inbox_item(item_id: str, kind: str, raw: str, posted_at: float) -> dict[str, Any]:
+    """An item as a pull hands it out: its own copy of the body. A body that cannot be read (a row written by
+    something else) comes out as None, which the owner refuses and acks, rather than failing every pull."""
+    try:
+        body = json.loads(raw)
+    except (TypeError, ValueError, RecursionError):
+        body = None
+    return {"id": item_id, "kind": kind, "body": body, "posted_at": posted_at}
+
+
+def _new_inbox_id() -> str:
+    return f"in_{uuid7(as_type='hex')}"
+
+
+def _wake_pull(future: asyncio.Future) -> None:
+    if not future.done():
+        future.set_result(None)
+
+
+class _InboxWaiters:
+    """The pulls waiting for a session's next item, each on the loop it runs on: woken from any thread."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._waiting: dict[str, set[tuple[asyncio.AbstractEventLoop, asyncio.Future]]] = {}
+
+    @contextlib.contextmanager
+    def watching(self, session_id: str):
+        """A future set once something is posted for ``session_id``. Registered before the pull's first look,
+        so a post landing between that look and the wait still ends the wait."""
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        entry = (loop, future)
+        with self._lock:
+            self._waiting.setdefault(session_id, set()).add(entry)
+        try:
+            yield future
+        finally:
+            with self._lock:
+                entries = self._waiting.get(session_id)
+                if entries is not None:
+                    entries.discard(entry)
+                    if not entries:
+                        del self._waiting[session_id]
+            if not future.done():
+                future.cancel()
+
+    def sessions(self) -> list[str]:
+        with self._lock:
+            return list(self._waiting)
+
+    def wake(self, session_id: str) -> None:
+        with self._lock:
+            entries = list(self._waiting.get(session_id, ()))
+        for loop, future in entries:
+            with contextlib.suppress(RuntimeError):  # its loop is closed: nobody waits there any more
+                loop.call_soon_threadsafe(_wake_pull, future)
+
+
 def _encode(value: Any) -> str:
     """The one JSON encoding a snapshot is written with. No ``default=`` (a value JSON cannot carry is not
     written as its ``str()``) and no NaN or Infinity (Python would write them; no other JSON reader takes them)."""
@@ -182,6 +292,10 @@ class SessionSnapshot:
     their answers. 1, what a snapshot without the field holds: as given, a ``Cancel`` as ``{"$cancel": reason}``.
     2: the same, and an answer that has a ``$cancel`` or ``$answer`` key of its own as ``{"$answer": answer}``, so
     that it is never read back as a ``Cancel``. Read by the rules of the format that wrote it. Last, as above."""
+    inbox_seen: list[str] = field(default_factory=list)
+    """Ids of the inbox items the session applied (the last :data:`MAX_INBOX_ITEMS` or more), with a store that
+    acks them apart from its saves: an item pulled again after a crash between the save and the ack is skipped.
+    Empty with a store that acks in the save itself (memory, SQLite). Last, as above."""
 
     def to_json(self) -> str:
         """Raises for a value JSON cannot carry (TypeError; ValueError for NaN and Infinity, which Python would
@@ -203,19 +317,51 @@ class SessionSnapshot:
 
 
 class ChatSessionStore(ABC):
-    """Where snapshots live. Implementations must make ``save`` and ``acquire_lease`` atomic."""
+    """Where snapshots live. Implementations must make ``save`` and ``acquire_lease`` atomic.
+
+    A store that ``supports_inbox`` also carries work other processes take for a session they do not serve (a
+    server worker that is asked for a session another worker holds): :meth:`post_inbox` queues it, the lease
+    owner long-polls :meth:`pull_inbox`, applies each item, stores the session, and the item is acked. At least
+    once: an item stays until acked, and is pulled again after a crash. Two dedupes, for two failures:
+
+    - a post repeated with its ``idempotency_key`` is the same item, for :data:`INBOX_KEY_KEPT_S` after its ack
+      too (a sender that retries because it never got the answer);
+    - the owner applies an item once, also when it is pulled again because the process died after storing the
+      session and before the ack. A store that ``acks_with_save`` closes that window: the save that stores an
+      item's effect acks it in the same write (``save(..., inbox_acked=)``). Otherwise the session acks with
+      :meth:`ack_inbox` after the save, and its snapshot names what it applied (``inbox_seen``).
+
+    At most ``max_inbox_items`` items wait per session (:class:`InboxFull` past it). Every write the owner makes
+    names it (``owner``), and a pull or an ack by a process that does not hold the lease is refused
+    (:class:`SessionLeased`). A session that is closed or gone takes no items (``LookupError``), and the write
+    that closes or deletes it discards what still waited.
+    """
 
     lease_ttl_s: float = 30.0
+    supports_inbox: bool = False
+    acks_with_save: bool = False
+    max_inbox_items: int = MAX_INBOX_ITEMS
 
     @abstractmethod
     async def load(self, session_id: str) -> SessionSnapshot | None: ...
 
     @abstractmethod
-    async def save(self, snapshot: SessionSnapshot, *, expect_version: int | None, owner: str | None = None) -> int:
+    async def save(
+        self,
+        snapshot: SessionSnapshot,
+        *,
+        expect_version: int | None,
+        owner: str | None = None,
+        inbox_acked: Collection[str] = (),
+    ) -> int:
         """Write ``snapshot`` if the stored version is ``expect_version`` (None: the row must not exist) and, with
         ``owner``, no other owner holds the lease (expired or not: one that took it may not have written yet).
         A new row is created with ``owner``'s lease, in the same write: a session never exists unowned.
-        Returns the new version; raises :class:`SnapshotConflict` otherwise."""
+        Returns the new version; raises :class:`SnapshotConflict` otherwise.
+
+        ``inbox_acked`` (a store that ``acks_with_save``; needs ``owner``): inbox items the snapshot holds the
+        effect of, acked in the same write, so neither lands without the other. A session passes it only to a
+        store that says it ``acks_with_save`` and whose ``save`` takes it: other stores never see it."""
 
     @abstractmethod
     async def delete(self, session_id: str, *, expect_version: int | None = None, owner: str | None = None) -> None:
@@ -234,18 +380,84 @@ class ChatSessionStore(ABC):
     @abstractmethod
     async def release_lease(self, session_id: str, owner: str) -> None: ...
 
+    async def post_inbox(
+        self,
+        session_id: str,
+        kind: str,
+        body: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+        agent: str | None = None,
+    ) -> str:
+        """Queue ``kind`` (:data:`INBOX_KINDS`) with ``body`` for the session's owner; returns the item's id.
+
+        With ``idempotency_key``, a repeat is the same item (its id comes back, nothing is queued), while it
+        waits and for :data:`INBOX_KEY_KEPT_S` after its ack. ``agent``: only a session of that agent takes it
+        (several agents can share a store, and a session id alone does not say whose it is). ``LookupError``:
+        no such session, a closed one, or another agent's. :class:`InboxFull`: ``max_inbox_items`` wait already.
+        ``ValueError`` / ``TypeError``: a kind, key or body the store cannot take."""
+        raise NotImplementedError(f"{type(self).__name__} has no inbox")
+
+    async def find_inbox_key(self, session_id: str, key: str) -> tuple[str, bool] | None:  # noqa: ARG002
+        """The item ``key`` names in the session's inbox, while it waits and for :data:`INBOX_KEY_KEPT_S` after its
+        ack (as a post with the key would find it): ``(id, acked)``, or None. Needs no lease: a worker that takes a
+        request directly asks whether it was queued before. A store without it answers None."""
+        return None
+
+    async def inbox_waiting(self, session_id: str) -> int:
+        """How many items wait in the session's inbox (no lease needed: a worker that queued for a session another
+        serves looks, to restore it if that one lets it go with items waiting). The base class answers from
+        :meth:`list_ids`, which counts a session's other work too: 1 when the session has any."""
+        return int(session_id in await self.list_ids(with_work=True))
+
+    async def pull_inbox(self, session_id: str, owner: str, *, wait_s: float = 0.0) -> list[dict[str, Any]]:
+        """The items not acked yet, oldest first (``{id, kind, body, posted_at}``), waiting up to ``wait_s`` for a
+        first one. Only for the holder of a lease that has not run out: :class:`SessionLeased` otherwise.
+        ``LookupError``: no stored session."""
+        raise NotImplementedError(f"{type(self).__name__} has no inbox")
+
+    async def ack_inbox(self, session_id: str, owner: str, ids: Collection[str], *, forget: bool = False) -> None:
+        """Remove items the owner applied and stored (one with a key stays as its key alone, for
+        :data:`INBOX_KEY_KEPT_S`). ``forget``: their keys go too, for items the owner refused (a retry of one is
+        screened again, not answered as the item that was refused). :class:`SessionLeased` when another owner holds
+        the lease, and then nothing is removed. ``LookupError``: no stored session."""
+        raise NotImplementedError(f"{type(self).__name__} has no inbox")
+
+
+class _MemoryItem:
+    __slots__ = ("id", "kind", "raw", "key", "posted_at", "acked_at")
+
+    def __init__(self, item_id: str, kind: str, raw: str, key: str | None, posted_at: float) -> None:
+        self.id, self.kind, self.raw, self.key = item_id, kind, raw, key
+        self.posted_at, self.acked_at = posted_at, None
+
 
 class InMemoryChatSessionStore(ChatSessionStore):
     """Process-local (the default): what sessions did before they were durable, through the same interface."""
 
+    supports_inbox = True
+    acks_with_save = True
+
     def __init__(self) -> None:
         self._rows: dict[str, tuple[SessionSnapshot, str | None, float]] = {}
+        # Per session, oldest first: the waiting items and the keys kept after an ack.
+        self._inbox: dict[str, list[_MemoryItem]] = {}
+        self._inbox_waiters = _InboxWaiters()
 
     async def load(self, session_id: str) -> SessionSnapshot | None:
         row = self._rows.get(session_id)
         return SessionSnapshot.from_json(row[0].to_json()) if row is not None else None
 
-    async def save(self, snapshot: SessionSnapshot, *, expect_version: int | None, owner: str | None = None) -> int:
+    async def save(
+        self,
+        snapshot: SessionSnapshot,
+        *,
+        expect_version: int | None,
+        owner: str | None = None,
+        inbox_acked: Collection[str] = (),
+    ) -> int:
+        if inbox_acked and owner is None:
+            raise ValueError("A save that acks inbox items names its owner.")
         row = self._rows.get(snapshot.session_id)
         current = row[0].version if row is not None else None
         if current != expect_version:
@@ -261,6 +473,11 @@ class InMemoryChatSessionStore(ChatSessionStore):
         else:
             holder, until = (owner, time.time() + self.lease_ttl_s) if owner is not None else (None, 0.0)
         self._rows[snapshot.session_id] = (stored, holder, until)
+        # In the same step as the snapshot (nothing awaits in between): neither is ever stored without the other.
+        if stored.closed:
+            self._inbox.pop(snapshot.session_id, None)  # nothing restores a closed session: what waited is dropped
+        elif inbox_acked:
+            self._ack(snapshot.session_id, inbox_acked)
         return stored.version
 
     async def delete(self, session_id: str, *, expect_version: int | None = None, owner: str | None = None) -> None:
@@ -272,11 +489,103 @@ class InMemoryChatSessionStore(ChatSessionStore):
         if owner is not None and row[1] not in (None, owner):
             raise SnapshotConflict(f"session {session_id}: leased by {row[1]}")
         del self._rows[session_id]
+        self._inbox.pop(session_id, None)
 
     async def list_ids(self, *, with_work: bool = False) -> list[str]:
         return [
-            sid for sid, (snap, _, _) in self._rows.items() if not snap.closed and (not with_work or snap.has_work())
+            sid
+            for sid, (snap, _, _) in self._rows.items()
+            if not snap.closed and (not with_work or snap.has_work() or self._waiting(sid))
         ]
+
+    def _waiting(self, session_id: str) -> list[_MemoryItem]:
+        return [item for item in self._inbox.get(session_id, ()) if item.acked_at is None]
+
+    def _ack(self, session_id: str, ids: Collection[str], *, forget: bool = False) -> None:
+        done, now = set(ids), time.time()
+        kept = []
+        for item in self._inbox.get(session_id, ()):
+            if forget and item.id in done:
+                continue  # the item and its key
+            if item.acked_at is None and item.id in done:
+                if item.key is None:
+                    continue
+                item.acked_at, item.raw = now, "{}"  # its key alone stays, so a repeated post still finds it
+            elif item.acked_at is not None and item.acked_at < now - INBOX_KEY_KEPT_S:
+                continue
+            kept.append(item)
+        if session_id in self._inbox:
+            self._inbox[session_id] = kept
+
+    def _holder(self, session_id: str, owner: str, *, running: bool) -> None:
+        row = self._rows.get(session_id)
+        if row is None:
+            raise LookupError(f"No stored chat session {session_id!r}.")
+        if row[1] != owner or (running and row[2] < time.time()):
+            raise SessionLeased(f"session {session_id} is not leased to {owner}")
+
+    async def post_inbox(
+        self,
+        session_id: str,
+        kind: str,
+        body: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+        agent: str | None = None,
+    ) -> str:
+        raw = _inbox_body(kind, body, idempotency_key)
+        row = self._rows.get(session_id)
+        if row is None or row[0].closed or (agent is not None and row[0].agent != agent):
+            raise LookupError(f"No stored chat session {session_id!r}" + (f" of agent {agent!r}." if agent else "."))
+        items = self._inbox.setdefault(session_id, [])
+        now = time.time()
+        if idempotency_key is not None:
+            # A key kept past its time is forgotten here, by the post that names it: the post is a new item.
+            items[:] = [
+                item
+                for item in items
+                if not (
+                    item.key == idempotency_key and item.acked_at is not None and item.acked_at < now - INBOX_KEY_KEPT_S
+                )
+            ]
+            for item in items:
+                if item.key == idempotency_key:
+                    return item.id
+        if sum(1 for item in items if item.acked_at is None) >= self.max_inbox_items:
+            raise InboxFull(f"Chat session {session_id!r} already has {self.max_inbox_items} inbox items waiting.")
+        item = _MemoryItem(_new_inbox_id(), kind, raw, idempotency_key, now)
+        items.append(item)
+        self._inbox_waiters.wake(session_id)
+        return item.id
+
+    async def pull_inbox(self, session_id: str, owner: str, *, wait_s: float = 0.0) -> list[dict[str, Any]]:
+        with self._inbox_waiters.watching(session_id) as posted:
+            items = self._pull(session_id, owner)
+            if items or wait_s <= 0:
+                return items
+            await asyncio.wait({posted}, timeout=wait_s)
+        return self._pull(session_id, owner)
+
+    def _keyed(self, session_id: str, key: str, now: float) -> _MemoryItem | None:
+        for item in self._inbox.get(session_id, ()):
+            if item.key == key and (item.acked_at is None or item.acked_at >= now - INBOX_KEY_KEPT_S):
+                return item
+        return None
+
+    async def find_inbox_key(self, session_id: str, key: str) -> tuple[str, bool] | None:
+        item = self._keyed(session_id, key, time.time())
+        return (item.id, item.acked_at is not None) if item is not None else None
+
+    async def inbox_waiting(self, session_id: str) -> int:
+        return len(self._waiting(session_id))
+
+    def _pull(self, session_id: str, owner: str) -> list[dict[str, Any]]:
+        self._holder(session_id, owner, running=True)
+        return [_inbox_item(item.id, item.kind, item.raw, item.posted_at) for item in self._waiting(session_id)]
+
+    async def ack_inbox(self, session_id: str, owner: str, ids: Collection[str], *, forget: bool = False) -> None:
+        self._holder(session_id, owner, running=False)
+        self._ack(session_id, ids, forget=forget)
 
     async def acquire_lease(self, session_id: str, owner: str) -> None:
         row = self._rows.get(session_id)
@@ -372,10 +681,66 @@ def _store_thread(path: Path) -> _StoreThread:
         return thread
 
 
+class _InboxWatch:
+    """The pulls waiting on one SQLite file's inbox, answered by one query per ``poll_s`` for all of them.
+
+    Other processes post to the file and nothing tells this one, so a waiting pull has to look again. One
+    thread per file does that for every session waited on in this process, while any pull waits, and wakes the
+    pulls whose session has an item. A pull per session asking on its own would put a query per open session
+    and per poll on the file's one store thread (:class:`_StoreThread`), ahead of the saves behind them. A post
+    made in this process wakes its session's pulls at once.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.waiters = _InboxWaiters()
+        self._name = name
+        self._lock = threading.Lock()
+        self._running = False
+
+    @contextlib.contextmanager
+    def watching(self, session_id: str, ready: Any, poll_s: float):
+        """``ready(session_ids)`` answers which of those sessions have items waiting (on the watch's thread)."""
+        with self.waiters.watching(session_id) as posted:
+            with self._lock:
+                start, self._running = not self._running, True
+            if start:
+                threading.Thread(target=self._poll, args=(ready, poll_s), name=self._name, daemon=True).start()
+            yield posted
+
+    def _poll(self, ready: Any, poll_s: float) -> None:
+        while True:
+            time.sleep(poll_s)
+            with self._lock:
+                watched = self.waiters.sessions()
+                if not watched:
+                    self._running = False  # under the lock a pull that starts now checks: it starts a new thread
+                    return
+            try:
+                found = ready(watched)
+            except Exception as e:  # the file is away: the pulls end on their own deadlines
+                logger.warning("chat_session_inbox_poll_failed", error=str(e))
+                continue
+            for session_id in found:
+                self.waiters.wake(session_id)
+
+
+_INBOX_WATCHES: dict[str, _InboxWatch] = {}
+
+
+def _inbox_watch(path: Path) -> _InboxWatch:
+    key = str(path.resolve())
+    with _STORE_THREADS_LOCK:
+        watch = _INBOX_WATCHES.get(key)
+        if watch is None:
+            watch = _INBOX_WATCHES[key] = _InboxWatch(f"timbal-chat-inbox:{path.name}")
+        return watch
+
+
 def _forget_store_threads() -> None:
     """In a forked child: the parent's threads did not come along, and a lock one of them held stays held."""
     global _STORE_THREADS_LOCK
     _STORE_THREADS.clear()
+    _INBOX_WATCHES.clear()
     _STORE_THREADS_LOCK = threading.Lock()
 
 
@@ -389,12 +754,83 @@ if hasattr(os, "register_at_fork"):
 _WITH_WORK_SQL = (
     "SELECT rowid, session_id, CASE WHEN has_work IS NULL THEN snapshot END FROM chat_sessions WHERE has_work IS NOT 0"
 )
+# The sessions with inbox items waiting, found from the inbox's index of waiting items (a few rows at most, since
+# their owners take them within moments). A row these come with is open: the write that closes a session drops
+# its inbox, and a closed one takes no posts. The snapshot comes along for a row from before the mark, as above.
+_WITH_INBOX_SQL = (
+    "SELECT rowid, session_id, CASE WHEN has_work IS NULL THEN snapshot END FROM chat_sessions "
+    "WHERE session_id IN (SELECT session_id FROM chat_inbox WHERE acked_at IS NULL)"
+)
+_WAITING_SESSIONS_SQL = "SELECT DISTINCT session_id FROM chat_inbox WHERE acked_at IS NULL"
+# SQLite's smallest limit on the parameters of one statement is 999.
+_IDS_PER_STATEMENT = 500
+
+
+def _settled(conn: Any) -> Any:
+    """The shared connection with no transaction left open, for a call that holds its lock. Every call on it ends
+    its own (a trace save commits or rolls back inside the lock), so one still open was left by a statement that
+    failed before its commit (``database is locked``): kept, it would hold a read of the file as it was then, and
+    the inbox would not see what other processes posted since; a write would join it."""
+    if conn.in_transaction:
+        conn.rollback()
+    return conn
+
+
+def _transaction(conn: Any, fn: Any) -> Any:
+    """``fn()`` in one write transaction: a check and the write that follows it cannot be split by another
+    process's write, and a failure leaves nothing (the connection is shared: an open transaction would take the
+    next caller's statements into it)."""
+    _settled(conn).execute("BEGIN IMMEDIATE")
+    try:
+        result = fn()
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
+    return result
+
+
+def _ack_rows(conn: Any, session_id: str, ids: Collection[str], now: float, *, forget: bool = False) -> None:
+    """Ack inbox items (inside the caller's transaction): an item without a key goes, one with a key stays as its
+    key alone (body emptied) for :data:`INBOX_KEY_KEPT_S`, unless ``forget`` (refused: key and all go); the
+    session's keys kept longer than that go too."""
+    ids = list(ids)
+    for at in range(0, len(ids), _IDS_PER_STATEMENT):
+        chunk = ids[at : at + _IDS_PER_STATEMENT]
+        marks = ",".join("?" * len(chunk))
+        if forget:
+            conn.execute(f"DELETE FROM chat_inbox WHERE session_id = ? AND id IN ({marks})", (session_id, *chunk))
+            continue
+        conn.execute(
+            f"DELETE FROM chat_inbox WHERE session_id = ? AND acked_at IS NULL AND idempotency_key IS NULL "
+            f"AND id IN ({marks})",
+            (session_id, *chunk),
+        )
+        conn.execute(
+            f"UPDATE chat_inbox SET acked_at = ?, body = '{{}}' WHERE session_id = ? AND acked_at IS NULL "
+            f"AND idempotency_key IS NOT NULL AND id IN ({marks})",
+            (now, session_id, *chunk),
+        )
+    conn.execute("DELETE FROM chat_inbox WHERE session_id = ? AND acked_at < ?", (session_id, now - INBOX_KEY_KEPT_S))
+
+
+def _closed(raw: str) -> bool:
+    try:
+        return json.loads(raw).get("closed") is True
+    except (TypeError, ValueError, AttributeError, RecursionError):
+        return False  # unreadable: not known to be closed (list_ids skips it; a restore would fail on it)
 
 
 class SqliteChatSessionStore(ChatSessionStore):
     """Snapshots in the ``chat_sessions`` table of a SQLite file, next to
     :class:`~timbal.state.tracing.providers.SqliteTracingProvider`'s runs (same connection when it is the
-    same file)."""
+    same file). The inbox is the ``chat_inbox`` table of the same file, acked in the save that stores what an
+    item did (one transaction)."""
+
+    supports_inbox = True
+    acks_with_save = True
+    inbox_poll_s: float = 0.25
+    """How often waiting pulls look for items other processes posted (:class:`_InboxWatch`: one query per file)."""
 
     def __init__(self, path: Path | str, *, synchronous: str = "NORMAL") -> None:
         from .tracing.providers.sqlite import refuse_in_memory
@@ -430,15 +866,32 @@ class SqliteChatSessionStore(ChatSessionStore):
         snapshot.version = row[1]
         return snapshot
 
-    async def save(self, snapshot: SessionSnapshot, *, expect_version: int | None, owner: str | None = None) -> int:
+    async def save(
+        self,
+        snapshot: SessionSnapshot,
+        *,
+        expect_version: int | None,
+        owner: str | None = None,
+        inbox_acked: Collection[str] = (),
+    ) -> int:
+        if inbox_acked and owner is None:
+            raise ValueError("A save that acks inbox items names its owner.")
         new_version = (expect_version or 0) + 1
         body = SessionSnapshot.from_json(snapshot.to_json())
         body.version = new_version
         raw, now = body.to_json(), int(time.time() * 1000)
         lease_until = time.time() + self.lease_ttl_s if owner is not None else None
         work = int(body.has_work())  # the row's mark for list_ids(with_work=True): never read from the snapshot
+        acked = list(inbox_acked)
 
         def write(conn):
+            try:
+                return written(_settled(conn))
+            except BaseException:
+                conn.rollback()  # nothing of it stays open on the shared connection
+                raise
+
+        def written(conn):
             if expect_version is None:
                 cursor = conn.execute(
                     "INSERT OR IGNORE INTO chat_sessions "
@@ -458,6 +911,13 @@ class SqliteChatSessionStore(ChatSessionStore):
                     "WHERE session_id = ? AND version = ? AND (lease_owner IS NULL OR lease_owner = ?)",
                     (raw, new_version, now, work, snapshot.session_id, expect_version, owner),
                 )
+            if cursor.rowcount == 1 and expect_version is not None and (body.closed or acked):
+                # In the transaction the statement above opened: the inbox changes with the snapshot or not at all.
+                if body.closed:
+                    # Nothing restores a closed session: what still waited cannot be delivered.
+                    conn.execute("DELETE FROM chat_inbox WHERE session_id = ?", (snapshot.session_id,))
+                else:
+                    _ack_rows(conn, snapshot.session_id, acked, time.time())
             conn.commit()
             return cursor.rowcount
 
@@ -483,6 +943,13 @@ class SqliteChatSessionStore(ChatSessionStore):
             gone = cursor.rowcount == 1 or (
                 conn.execute("SELECT 1 FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone() is None
             )
+            if gone:
+                try:
+                    # In the delete's transaction: no item outlives its session.
+                    conn.execute("DELETE FROM chat_inbox WHERE session_id = ?", (session_id,))
+                except BaseException:
+                    conn.rollback()
+                    raise
             conn.commit()
             return gone
 
@@ -494,14 +961,17 @@ class SqliteChatSessionStore(ChatSessionStore):
     async def list_ids(self, *, with_work: bool = False) -> list[str]:
         def query(conn):
             if with_work:
+                rows = {row[0]: (row[0], row[1], row[2], False) for row in conn.execute(_WITH_WORK_SQL).fetchall()}
+                for row in conn.execute(_WITH_INBOX_SQL).fetchall():
+                    rows[row[0]] = (row[0], row[1], row[2], True)  # items wait for it: it has work
                 # Oldest first, as the table itself is read.
-                return [(row[1], row[2]) for row in sorted(conn.execute(_WITH_WORK_SQL).fetchall())]
-            return conn.execute("SELECT session_id, snapshot FROM chat_sessions").fetchall()
+                return [(row[1], row[2], row[3]) for row in sorted(rows.values())]
+            return [(row[0], row[1], False) for row in conn.execute("SELECT session_id, snapshot FROM chat_sessions")]
 
         ids = []
-        for session_id, raw in await self._run(query):
+        for session_id, raw, queued in await self._run(query):
             if raw is None:
-                ids.append(session_id)  # marked as having work by the save that wrote it
+                ids.append(session_id)  # marked as having work by the save that wrote it, or items wait for it
                 continue
             try:
                 snapshot = SessionSnapshot.from_json(raw)
@@ -510,9 +980,141 @@ class SqliteChatSessionStore(ChatSessionStore):
                 # session next to it, at startup and on each later look.
                 logger.error("chat_session_snapshot_unreadable", session_id=session_id, error=str(e))
                 continue
-            if not snapshot.closed and (not with_work or snapshot.has_work()):
+            if not snapshot.closed and (not with_work or queued or snapshot.has_work()):
                 ids.append(session_id)
         return ids
+
+    async def post_inbox(
+        self,
+        session_id: str,
+        kind: str,
+        body: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+        agent: str | None = None,
+    ) -> str:
+        raw = _inbox_body(kind, body, idempotency_key)
+        item_id, cap = _new_inbox_id(), self.max_inbox_items
+
+        def write(conn):
+            def post():
+                now = time.time()
+                row = conn.execute(
+                    "SELECT snapshot, agent FROM chat_sessions WHERE session_id = ?", (session_id,)
+                ).fetchone()
+                if row is None or _closed(row[0]) or (agent is not None and row[1] != agent):
+                    raise LookupError(
+                        f"No stored chat session {session_id!r}" + (f" of agent {agent!r}." if agent else ".")
+                    )
+                if idempotency_key is not None:
+                    # A key kept past its time is forgotten here, by the post that names it: the post is a new item.
+                    conn.execute(
+                        "DELETE FROM chat_inbox WHERE session_id = ? AND idempotency_key = ? AND acked_at < ?",
+                        (session_id, idempotency_key, now - INBOX_KEY_KEPT_S),
+                    )
+                    found = conn.execute(
+                        "SELECT id FROM chat_inbox WHERE session_id = ? AND idempotency_key = ?",
+                        (session_id, idempotency_key),
+                    ).fetchone()
+                    if found is not None:
+                        return found[0]
+                waiting = conn.execute(
+                    "SELECT count(*) FROM chat_inbox WHERE session_id = ? AND acked_at IS NULL", (session_id,)
+                ).fetchone()[0]
+                if waiting >= cap:
+                    raise InboxFull(f"Chat session {session_id!r} already has {cap} inbox items waiting.")
+                conn.execute(
+                    "INSERT INTO chat_inbox (id, session_id, kind, body, idempotency_key, posted_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (item_id, session_id, kind, raw, idempotency_key, now),
+                )
+                return item_id
+
+            # The session's row, the key, the count and the insert in one transaction: another process's post or
+            # the write that closes the session comes before all of it or after.
+            return _transaction(conn, post)
+
+        posted = await self._run(write)
+        _inbox_watch(self.path).waiters.wake(session_id)  # a pull of this process waiting for it: at once
+        return posted
+
+    async def pull_inbox(self, session_id: str, owner: str, *, wait_s: float = 0.0) -> list[dict[str, Any]]:
+        def query(conn):
+            held = (
+                _settled(conn)
+                .execute("SELECT lease_owner, lease_until FROM chat_sessions WHERE session_id = ?", (session_id,))
+                .fetchone()
+            )
+            if held is None:
+                raise LookupError(f"No stored chat session {session_id!r}.")
+            if held[0] != owner or (held[1] or 0) < time.time():
+                raise SessionLeased(f"session {session_id} is not leased to {owner}")
+            rows = conn.execute(
+                "SELECT id, kind, body, posted_at FROM chat_inbox WHERE session_id = ? AND acked_at IS NULL "
+                "ORDER BY rowid",
+                (session_id,),
+            ).fetchall()
+            return [_inbox_item(*row) for row in rows]
+
+        if wait_s <= 0:
+            return await self._run(query)
+        with _inbox_watch(self.path).watching(session_id, self._sessions_with_items, self.inbox_poll_s) as posted:
+            items = await self._run(query)
+            if items:
+                return items
+            await asyncio.wait({posted}, timeout=wait_s)
+        return await self._run(query)
+
+    async def find_inbox_key(self, session_id: str, key: str) -> tuple[str, bool] | None:
+        def query(conn):
+            return (
+                _settled(conn)
+                .execute(
+                    "SELECT id, acked_at FROM chat_inbox WHERE session_id = ? AND idempotency_key = ? "
+                    "AND (acked_at IS NULL OR acked_at >= ?)",
+                    (session_id, key, time.time() - INBOX_KEY_KEPT_S),
+                )
+                .fetchone()
+            )
+
+        row = await self._run(query)
+        return (row[0], row[1] is not None) if row is not None else None
+
+    async def inbox_waiting(self, session_id: str) -> int:
+        def query(conn):
+            return (
+                _settled(conn)
+                .execute("SELECT count(*) FROM chat_inbox WHERE session_id = ? AND acked_at IS NULL", (session_id,))
+                .fetchone()[0]
+            )
+
+        return await self._run(query)
+
+    def _sessions_with_items(self, session_ids: list[str]) -> set[str]:
+        """For the watch's thread: which of ``session_ids`` have items waiting."""
+        db = self._db()
+        with db.lock:
+            found = {row[0] for row in _settled(db.conn).execute(_WAITING_SESSIONS_SQL).fetchall()}
+        return found.intersection(session_ids)
+
+    async def ack_inbox(self, session_id: str, owner: str, ids: Collection[str], *, forget: bool = False) -> None:
+        ids = list(ids)
+
+        def write(conn):
+            def ack():
+                held = conn.execute(
+                    "SELECT lease_owner FROM chat_sessions WHERE session_id = ?", (session_id,)
+                ).fetchone()
+                if held is None:
+                    raise LookupError(f"No stored chat session {session_id!r}.")
+                if held[0] != owner:
+                    # The items are the new owner's to apply now; what this one stored says it applied them.
+                    raise SessionLeased(f"session {session_id} is not leased to {owner}")
+                _ack_rows(conn, session_id, ids, time.time(), forget=forget)
+
+            _transaction(conn, ack)
+
+        await self._run(write)
 
     async def acquire_lease(self, session_id: str, owner: str) -> None:
         now, until = time.time(), time.time() + self.lease_ttl_s

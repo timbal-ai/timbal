@@ -68,6 +68,8 @@ def _slow_storage(delay: float) -> None:
 
     slowed(SqliteChatSessionStore, "save")
     slowed(SqliteChatSessionStore, "load")
+    for name in ("post_inbox", "pull_inbox", "ack_inbox"):  # (keeps the signature: save's `inbox_acked` too)
+        slowed(SqliteChatSessionStore, name)
     slowed(SqliteTracingProvider, "_store")
     slowed(JsonlTracingProvider, "_store")
 

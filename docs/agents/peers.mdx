@@ -80,6 +80,8 @@ directory.add_remote(
 
 Only the peer's own `headers` go with a message: the run's platform credentials never do. The route answers `202` with the receipt, and a refusal as `{"detail", "reason"}` (403 for `not_accepted` and `blocked`, 404, 409 for `closed`, 422 for `invalid`).
 
+When the session is durable and another worker of that server serves it, the route queues the message for that worker (`202 {"queued": "inbox", "inbox_id"}`). The sender reads it as sent, with `state: "queued"` and the `inbox_id` in place of an event: the recipient's `accepts` and guardrails decide on it there, and what they refuse is not reported back.
+
 The route takes the sender's name as the caller gives it, so `accepts` is routing, not authentication: anyone who may call the server's API may message its sessions, as they may send them user messages.
 
 ## Durable sessions

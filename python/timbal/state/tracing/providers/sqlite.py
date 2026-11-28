@@ -291,6 +291,27 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_chat_sessions_work ON chat_sessions (session_id) WHERE has_work IS NOT 0"
     )
+    # A chat session's inbox (SqliteChatSessionStore.post_inbox): work another process took for a session this
+    # file's lease owner serves. An item waits until acked (acked_at NULL); one posted with an idempotency key
+    # then stays as its key alone, body emptied, for a day. Read in rowid order, oldest first.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_inbox (
+            id              TEXT    PRIMARY KEY,
+            session_id      TEXT    NOT NULL,
+            kind            TEXT    NOT NULL,
+            body            TEXT    NOT NULL,
+            idempotency_key TEXT,
+            posted_at       REAL    NOT NULL,
+            acked_at        REAL
+        )
+    """)
+    # The waiting items, by session: what pulls, counts and the startup listing read (the keys kept after an ack
+    # are not in it).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_inbox_waiting ON chat_inbox (session_id) WHERE acked_at IS NULL")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_inbox_key ON chat_inbox (session_id, idempotency_key) "
+        "WHERE idempotency_key IS NOT NULL"
+    )
     conn.commit()
 
 

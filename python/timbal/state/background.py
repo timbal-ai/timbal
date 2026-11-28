@@ -1782,6 +1782,7 @@ class BackgroundTaskStore:
         lane: SessionEventLane | None = None,
         mode: UserMessageMode | None = None,
         peer: dict[str, Any] | None = None,
+        event_id: str | None = None,
     ) -> SessionEvent:
         """Queue an event for this session's next turn and wake a waiting scheduler.
 
@@ -1795,8 +1796,12 @@ class BackgroundTaskStore:
         current tool batch. ``source="agent"`` is a message from another agent
         and needs its ``peer`` envelope (``from`` at least); post those through
         :class:`~timbal.core.peers.AgentDirectory`, which stamps the sender.
-        Safe to call from another thread.
+        ``event_id``: the event's id instead of a new one (a durable session
+        gives an item from its store's inbox the item's own, so that a turn's
+        stored memory says which item it took). Safe to call from another thread.
         """
+        if event_id is not None and (not isinstance(event_id, str) or not event_id):
+            raise ValueError("event_id must be a non-empty string")
         if source not in ("app", "client", "user", "agent"):
             raise ValueError(f"source must be 'app', 'client', 'user' or 'agent', got {source!r}")
         if (source == "agent") != (peer is not None):
@@ -1830,6 +1835,8 @@ class BackgroundTaskStore:
         event = SessionEvent(
             text, key=key, source=source, announce=announce, task_id=task_id, lane=lane, mode=mode, peer=peer
         )
+        if event_id is not None:
+            event.id = event_id
         if source == "user":
             # Posted by a call's code (a tool, with text a model may have written), or by something that code
             # started: a call id is ambient there, also in a task the call left running after it ended. Taken

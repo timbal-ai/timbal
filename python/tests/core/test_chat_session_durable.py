@@ -533,14 +533,16 @@ class TestThePlatformChatsPath:
     @staticmethod
     def _as_written_before_root_run_id(store, session_id):
         """The stored snapshot as 54473c37 wrote it: its JSON object without ``root_run_id`` (nor the
-        ``answer_format`` that came after it)."""
+        ``answer_format`` and ``inbox_seen`` that came after it)."""
         import json
 
         stored, holder, until = store._rows[session_id]
         runtime = json.loads(stored.to_json())
         runtime.pop("version")
-        assert set(runtime) - {"root_run_id", "answer_format"} == set(FIELDS_BEFORE_ROOT_RUN_ID) - {"version"}
-        del runtime["root_run_id"], runtime["answer_format"]
+        later = {"root_run_id", "answer_format", "inbox_seen"}
+        assert set(runtime) - later == set(FIELDS_BEFORE_ROOT_RUN_ID) - {"version"}
+        for name in later:
+            del runtime[name]
         older = SessionSnapshot.from_json(json.dumps(runtime))
         older.version = stored.version
         store._rows[session_id] = (older, holder, until)

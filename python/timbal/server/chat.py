@@ -7,6 +7,10 @@ sessions go in the same file) or ``TIMBAL_CHAT_STORE`` names a store
 does not hold is restored on first use, those with work waiting at startup,
 and shutdown keeps them for the next process. Otherwise a request for a
 session another worker (or an earlier process) held is a 404.
+
+With several workers on one store, a message, wake or agent message for a
+session another worker serves is queued in the store's inbox for that worker
+(``202 {"queued": "inbox", "inbox_id"}``) instead of refused with a 409.
 """
 
 import asyncio
@@ -23,9 +27,16 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from ..core.chat_session import SEND_MODES, ChatSession
+from ..core.chat_session import SEND_MODES, ChatSession, check_agent_message, check_wake
 from ..state.background import BACKGROUND_LOG_GAPPED
-from ..state.chat_store import ChatSessionStore, SessionLeased, SessionNotStored, SqliteChatSessionStore
+from ..state.chat_store import (
+    MAX_INBOX_KEY_CHARS,
+    ChatSessionStore,
+    InboxFull,
+    SessionLeased,
+    SessionNotStored,
+    SqliteChatSessionStore,
+)
 from ..utils import json_response_carries
 
 logger = structlog.get_logger("timbal.server.chat")
@@ -200,13 +211,219 @@ async def _restore(request: Request, session_id: str) -> ChatSession | None:
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except SessionLeased as e:
-        raise HTTPException(status_code=409, detail=f"Chat session {session_id!r} is served by another process.") from e
+        # Met before the snapshot is read (from_store takes the lease first): whose session it is decides between
+        # another worker of this agent (409, or queued for it) and a session this agent has none of (404).
+        try:
+            snapshot = await asyncio.wait_for(store.load(session_id), timeout)
+        except Exception as error:
+            why = str(error) or type(error).__name__  # (a timeout says nothing of itself)
+            logger.error("chat_session_restore_failed", session_id=session_id, error=why)
+            raise HTTPException(
+                status_code=503, detail=f"Chat session {session_id!r} could not be read: {why}", headers=_RETRY
+            ) from error
+        if snapshot is None or snapshot.closed or snapshot.agent != agent.name:
+            raise HTTPException(status_code=404, detail=f"No chat session {session_id!r}.") from e
+        raise _HeldElsewhere(session_id) from e
     except Exception as e:
         # The store or the run's trace could not be read: nothing was taken over, the stored state stays.
         logger.error("chat_session_restore_failed", session_id=session_id, error=str(e))
         raise HTTPException(
             status_code=503, detail=f"Chat session {session_id!r} could not be restored: {e}", headers=_RETRY
         ) from e
+
+
+class _HeldElsewhere(HTTPException):
+    """Another live process holds the session's lease: a 409, unless the route queues the request for it
+    (:func:`_queue`)."""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(status_code=409, detail=f"Chat session {session_id!r} is served by another process.")
+
+
+def _idempotency_key(request: Request) -> str | None:
+    """The request's ``Idempotency-Key`` header: a queued post repeated with it is the same item."""
+    key = request.headers.get("idempotency-key")
+    if key is None:
+        return None
+    if not 1 <= len(key) <= MAX_INBOX_KEY_CHARS:
+        raise HTTPException(status_code=400, detail=f"Idempotency-Key must be 1 to {MAX_INBOX_KEY_CHARS} characters.")
+    if key.startswith(_AGENT_KEY_PREFIX):
+        # The keys the server gives messages from agents (_agent_message_key): a client's would take over one.
+        raise HTTPException(status_code=400, detail=f"Idempotency-Key cannot start with {_AGENT_KEY_PREFIX!r}.")
+    return key
+
+
+_AGENT_KEY_PREFIX = "agent_message:"
+
+
+async def _queue(
+    request: Request,
+    session_id: str,
+    held: _HeldElsewhere | None,
+    kind: str,
+    item: dict[str, Any],
+    *,
+    key: str | None = None,
+) -> JSONResponse:
+    """``item`` (checked as the route checks it) queued in the store's inbox for the process that serves the
+    session: ``202 {"queued": "inbox", "inbox_id", "session_id"}``. That process applies it within moments and
+    stores it before it is acked. A store without an inbox: the ``409`` as before.
+
+    ``key`` (the ``Idempotency-Key`` header unless the route derives one): a repeat is the same item, for a day
+    after its ack too. A full inbox is a ``429``. A store that does not answer, or fails: ``503`` without
+    ``Retry-After`` (the route's rule: only when nothing was accepted, and the post may have landed); a retry
+    with the same key is the same item."""
+    store = _store(request)
+    if store is None or not store.supports_inbox:
+        assert held is not None  # (a request this process serves comes here only with a store that has an inbox)
+        raise held
+    timeout = _store_timeout()
+    agent = _agent(request)
+    try:
+        # The agent, to a store that takes it (one written before ``agent=`` is not handed it): the post then
+        # checks it in its own write. _restore checked it already, by the snapshot.
+        mine = {"agent": agent.name} if _posts_take_agent(store) else {}
+        posted = store.post_inbox(session_id, kind, item, idempotency_key=key, **mine)
+        inbox_id = await asyncio.wait_for(posted, timeout)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=f"No chat session {session_id!r}.") from e
+    except InboxFull as e:
+        raise HTTPException(status_code=429, detail=str(e), headers=_RETRY) from e
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        hung = isinstance(e, TimeoutError)
+        why = f"The session store did not answer within {timeout:g} s" if hung else f"The session store failed: {e}"
+        logger.error("chat_session_inbox_post_failed", session_id=session_id, kind=kind, error=why)
+        then = (
+            "a retry with the same Idempotency-Key is the same item"
+            if key is not None
+            else "do not resend (an Idempotency-Key makes a retry safe)"
+        )
+        _watch_queued(request.app, agent, store, session_id)  # if it was
+        raise HTTPException(status_code=503, detail=f"{why}. It may have been queued: {then}.") from e
+    _watch_queued(request.app, agent, store, session_id)
+    return _json({"queued": "inbox", "inbox_id": inbox_id, "session_id": session_id}, status_code=202)
+
+
+def _posts_take_agent(store: ChatSessionStore) -> bool:
+    """Whether the store's ``post_inbox`` takes ``agent=`` by name (``**kwargs`` may not hand it on)."""
+    import inspect
+
+    try:
+        return "agent" in inspect.signature(store.post_inbox).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _watch_queued(app: Any, agent: Any, store: ChatSessionStore, session_id: str) -> None:
+    """After queuing for a session (or a post that may have landed): the worker that serves it, this one or
+    another, may let it go (idle reaping, a shutdown) before it takes the item, and nothing else would restore the
+    session until a request asked for it or a server started. So this worker watches it (``_watch_inbox``) until
+    nothing waits in its inbox. One per session."""
+    if getattr(app.state, "chat_closing", False):
+        return
+    watches: dict[str, asyncio.Task] = getattr(app.state, "chat_queued_watch", None) or {}
+    app.state.chat_queued_watch = watches
+    task = watches.get(session_id)
+    if task is not None and not task.done():
+        return
+    task = watches[session_id] = asyncio.get_running_loop().create_task(_watch_inbox(app, agent, store, session_id))
+    task.add_done_callback(lambda done: _watch_done(watches, session_id, done))
+
+
+async def _watch_inbox(app: Any, agent: Any, store: ChatSessionStore, session_id: str) -> None:
+    """Every third of a lease, while items wait in the session's inbox: nothing to do while this process serves the
+    session (its drain takes them) or another live one does (its lease holds); restored here once it is free, which
+    applies them. Ends once nothing waits, whatever other work the session has (a turn, a parked question): its
+    owner's own business, and each round of a restore attempt is a write to the store."""
+    interval = _RESTORE_RETRY_S if _RESTORE_RETRY_S is not None else max(store.lease_ttl_s / 3, 0.05)
+    while not getattr(app.state, "chat_closing", False):
+        await asyncio.sleep(interval)
+        if getattr(app.state, "chat_closing", False):
+            return
+        try:
+            if not await asyncio.wait_for(store.inbox_waiting(session_id), _STARTUP_DISCOVERY_S):
+                return
+            sessions = _app_sessions(app)
+            current = sessions.get(session_id)
+            if current is not None:
+                if not current.handed_off:
+                    continue  # served here: its drain takes them
+                # Let go or lost, and maybe still closing: a copy made now would be bound to the task store while
+                # this one still holds it (its turn may still run), as _session() waits for too.
+                await asyncio.wait_for(current.wait_closed(), _STARTUP_DISCOVERY_S)
+                if sessions.get(session_id) is current:
+                    sessions.pop(session_id)
+            await asyncio.wait_for(_restore_once(app, agent, store, session_id), _STARTUP_DISCOVERY_S)
+        except SessionLeased:
+            continue  # another worker serves it
+        except (LookupError, ValueError):
+            return  # gone, or not this agent's
+        except Exception as e:  # (a timeout included) looked at again next round
+            logger.warning("chat_session_inbox_watch_failed", session_id=session_id, error=str(e) or type(e).__name__)
+
+
+def _watch_done(watches: dict[str, asyncio.Task], session_id: str, task: asyncio.Task) -> None:
+    if watches.get(session_id) is task:
+        del watches[session_id]
+    if not task.cancelled():
+        task.exception()  # retrieved (it logs what it meets)
+
+
+async def _apply_queued(session: ChatSession) -> bool:
+    """What other workers queued for the session, applied before the route takes its own request
+    (:meth:`ChatSession.apply_queued`), within the routes' store bound. When that cannot be read the request is
+    not taken (taken, it would go ahead of work another worker accepted first): ``503`` with ``Retry-After``, since
+    nothing of it was accepted. False: the store says another process holds the session now (this copy has let
+    it go), and the route queues the request for that one, as for any session another worker serves."""
+    timeout = _store_timeout()
+    try:
+        await asyncio.wait_for(session.apply_queued(), timeout)
+    except SessionLeased:
+        return False
+    except Exception as e:
+        # A timeout may be the store, or a batch the drain is applying (another agent's message being screened):
+        # either way the request would go ahead of it.
+        hung = isinstance(e, TimeoutError)
+        why = f"not done within {timeout:g} s" if hung else f"the session store failed: {e}"
+        logger.error("chat_session_inbox_read_failed", session_id=session.id, error=why)
+        raise HTTPException(
+            status_code=503,
+            detail=f"What other workers queued for the session could not be applied first ({why}). Nothing was "
+            "accepted: retry.",
+            headers=_RETRY,
+        ) from e
+    # Let go meanwhile (another request found the lease gone, idle reaping): this copy takes nothing more.
+    return not session.handed_off
+
+
+class _LetGo(Exception):
+    """The copy a route was using was let go (another process took the session, or it was closed and kept for the
+    next one) before the request was stored here: nothing of it is (a copy let go writes nothing more), so the
+    route queues it for whoever serves the session now."""
+
+
+async def _stored_here(request: Request, session: ChatSession, mark: int, undo: Any) -> None:
+    """:func:`_stored` for a request the route took itself. :class:`_LetGo` when the copy was let go before the
+    request was stored, with a store that has an inbox (without one, the ``409`` as before). Stored before it was
+    let go, it stands; a write that may hold it still out is a ``503`` that says not to resend."""
+    try:
+        await _stored(session, mark, undo)
+    except HTTPException as e:
+        if e.status_code != 409 or not session.handed_off or not _has_inbox(request):
+            raise
+        if session.stored_since(mark):
+            return  # whoever restores the session has it
+        if session.may_be_stored(mark):
+            raise HTTPException(
+                status_code=503,
+                detail=f"Chat session {session.id!r} moved to another process while this was stored: it may have "
+                "been stored. Do not resend.",
+            ) from e
+        if undo is not None:
+            undo()
+        raise _LetGo from e
 
 
 def _app_sessions(app: Any) -> dict[str, ChatSession]:
@@ -376,7 +593,7 @@ async def _retry_restores(app: Any, agent: Any, store: ChatSessionStore, session
                 continue
             try:
                 snapshot = await asyncio.wait_for(store.load(session_id), _STARTUP_DISCOVERY_S)
-                if snapshot is None or not snapshot.has_work():
+                if snapshot is None or not (snapshot.has_work() or await _has_items(store, session_id)):
                     waiting.remove(session_id)
                     continue
                 # Shielded (_restore_once): given up here, it goes on, and its session is in the map (found
@@ -400,6 +617,14 @@ async def _retry_restores(app: Any, agent: Any, store: ChatSessionStore, session
             else:
                 waiting.remove(session_id)
                 logger.info("chat_session_restored_late", session_id=session_id)
+
+
+async def _has_items(store: ChatSessionStore, session_id: str) -> bool:
+    """Whether items wait in the session's inbox: what ``list_ids(with_work=True)`` counts as work too (the store
+    lists; nothing but the lease holder may pull)."""
+    if not store.supports_inbox:
+        return False
+    return session_id in await asyncio.wait_for(store.list_ids(with_work=True), _STARTUP_DISCOVERY_S)
 
 
 def _agent(request: Request) -> Any:
@@ -439,8 +664,9 @@ async def close_chat_sessions(app: Any) -> None:
     recovered there."""
     app.state.chat_closing = True  # no restore starts from here on
     timeout = _store_timeout()
-    for name in ("chat_discovery", "chat_restore_retry"):
-        task = getattr(app.state, name, None)
+    watches = list((getattr(app.state, "chat_queued_watch", None) or {}).items())
+    named = [(name, getattr(app.state, name, None)) for name in ("chat_discovery", "chat_restore_retry")]
+    for name, task in named + [(f"chat_queued_watch:{session_id}", task) for session_id, task in watches]:
         if task is not None and not task.done():
             task.cancel()
             # Not `await task`: it may be inside a store call that does not end when it is cancelled.
@@ -694,14 +920,31 @@ async def delete_session(request: Request, session_id: str) -> JSONResponse:
 
 @router.post("/sessions/{session_id}/messages")
 async def send_message(request: Request, session_id: str) -> JSONResponse:
-    """Send a user message: ``{"text", "mode"?}`` (``steer`` | ``followup`` | ``collect`` | ``interrupt``)."""
-    session = await _session(request, session_id)
-    body = await _body(request)
-    _answerable(body, "The message", ("text", "mode"))
-    text = body.get("text")
-    mode = body.get("mode") or None
-    if not isinstance(text, str):
-        raise HTTPException(status_code=400, detail="'text' must be a string.")
+    """Send a user message: ``{"text", "mode"?}`` (``steer`` | ``followup`` | ``collect`` | ``interrupt``).
+
+    For a session another worker serves: queued for it (``202 {"queued": "inbox", "inbox_id"}``, see
+    :func:`_queue`). With an ``Idempotency-Key`` it goes through the store's inbox here too, so that a retry is
+    the same message whichever worker it reaches."""
+    session, held, key = await _session_or_held(request, session_id)
+    text, mode = _message_fields(await _body(request))
+    if session is not None and key is None and not await _apply_queued(session):
+        # What other workers queued comes first; and a copy that finds its lease gone has let the session go: the
+        # request is queued for the process that holds it now.
+        session, held = None, _HeldElsewhere(session_id)
+    if session is not None and key is None:
+        try:
+            return await _send_here(request, session, text, mode)
+        except _LetGo:
+            held = _HeldElsewhere(session_id)  # let go meanwhile: queued for whoever serves it now
+    if mode is not None and mode not in SEND_MODES:
+        # What send() refuses there, refused here: the worker that applies it can tell nobody.
+        raise HTTPException(status_code=400, detail=f"mode must be one of {list(SEND_MODES)}, got {mode!r}")
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="A session event needs non-empty text.")  # (as send())
+    return await _queue(request, session_id, held, "message", {"text": text, "mode": mode}, key=key)
+
+
+async def _send_here(request: Request, session: ChatSession, text: str, mode: Any) -> JSONResponse:
     busy = session.busy
     try:
         # The message is only queued here: 'now' and 'interrupt' cut the running turn once it is stored, so a
@@ -710,14 +953,45 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
+        if session.handed_off and _has_inbox(request):
+            raise _LetGo from e  # closed and kept since the route found it: nothing was posted
         raise HTTPException(status_code=409, detail=str(e)) from e
     mark = session.mark()
-    await _stored(session, mark, lambda: session.withdraw(event.id))  # the 202 means it survives a restart
+    await _stored_here(request, session, mark, lambda: session.withdraw(event.id))  # a 202 survives a restart
     session.cut_for(event, mode)
     return _json(
         {"message": {**event.receipt(), "text": event.text}, "mode": mode or session.busy_mode, "busy": busy},
         status_code=202,
     )
+
+
+async def _session_or_held(
+    request: Request, session_id: str
+) -> tuple[ChatSession | None, _HeldElsewhere | None, str | None]:
+    """The session, or None and why when another live process serves it and the store has an inbox (the route
+    queues the request); and the request's ``Idempotency-Key``. Without an inbox the ``409`` comes first, before
+    the body is read, and the header is not looked at, as before the inbox."""
+    try:
+        session, held = await _session(request, session_id), None
+    except _HeldElsewhere as error:
+        if not _has_inbox(request):
+            raise
+        session, held = None, error
+    return session, held, _idempotency_key(request) if _has_inbox(request) else None
+
+
+def _has_inbox(request: Request) -> bool:
+    store = _store(request)
+    return store is not None and store.supports_inbox
+
+
+def _message_fields(body: dict[str, Any]) -> tuple[str, Any]:
+    _answerable(body, "The message", ("text", "mode"))
+    text = body.get("text")
+    mode = body.get("mode") or None
+    if not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="'text' must be a string.")
+    return text, mode
 
 
 _REJECTED_STATUS = {"not_accepted": 403, "blocked": 403, "closed": 409, "invalid": 422, "unknown": 404}
@@ -734,22 +1008,30 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
     session's ``accepts`` refuses the sender (``not_accepted``) or its input
     guardrails block the text (``blocked``), 409 ``closed``, 422 ``invalid``.
     The 202 means it survives a restart (a durable session stored it).
+
+    For a session another worker serves: checked as here (the recipient's
+    ``accepts`` and guardrails are that worker's, and what they refuse there is
+    dropped with a log line), then queued for it: ``202 {"queued": "inbox",
+    "inbox_id"}``. A repeat of the same ``message_id`` from the same sender is
+    the same queued item. With an ``Idempotency-Key`` (which wins) it goes
+    through the store's inbox here too.
     """
     from ..core.peers import PeerRejected
 
-    session = await _session(request, session_id)
+    session, held, key = await _session_or_held(request, session_id)
     body = await _body(request)
-    _answerable(body, "The message", ("from", "text", "message_id", "reply_to", "priority", "hops"))
-    sender, text, hops = body.get("from"), body.get("text"), body.get("hops", 0)
-    if not isinstance(sender, str) or not isinstance(text, str):
-        raise HTTPException(status_code=400, detail="'from' and 'text' must be strings.")
-    if not isinstance(hops, int) or isinstance(hops, bool):
-        raise HTTPException(status_code=400, detail="'hops' must be an integer.")
-    for name in ("message_id", "reply_to"):
-        if body.get(name) is not None and not isinstance(body[name], str):
-            raise HTTPException(status_code=400, detail=f"{name!r} must be a string.")
+    sender, text, hops = _agent_message_fields(body)
+    if session is not None and key is None and not await _apply_queued(session):
+        # What other workers queued comes first; and a copy that finds its lease gone has let the session go: the
+        # request is queued for the process that holds it now.
+        session, held = None, _HeldElsewhere(session_id)
+    if session is not None and key is None:
+        try:
+            return await _receive_here(request, session, session_id, body, sender, text, hops)
+        except _LetGo:
+            held = _HeldElsewhere(session_id)  # let go meanwhile: queued for whoever serves it now
     try:
-        receipt = await session.receive_agent_message(
+        _, sender, message_id, _ = check_agent_message(
             text,
             sender=sender,
             message_id=body.get("message_id"),
@@ -761,11 +1043,97 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
         return JSONResponse(
             status_code=_REJECTED_STATUS.get(e.reason, 422), content={"detail": str(e), "reason": e.reason}
         )
+    if key is None and message_id is not None:
+        key = _agent_message_key(sender, message_id)
+    item = {name: body.get(name) for name in ("from", "text", "message_id", "reply_to")}
+    item.update(priority=body.get("priority") or "normal", hops=hops)
+    return await _queue(request, session_id, held, "agent_message", item, key=key)
+
+
+async def _receive_here(
+    request: Request, session: ChatSession, session_id: str, body: dict[str, Any], sender: str, text: str, hops: int
+) -> JSONResponse:
+    from ..core.peers import PeerRejected
+
+    # The message's key in the store, also here: queued before (to another worker, or to this one before a restore,
+    # which forgets what the session held in memory), it is that item. Asked only when the session's own dedupe
+    # does not know the message (which says how it stands), and never written here: a worker that never queues pays
+    # one read, no write. A key whose item the session refused was forgotten (ack_inbox(forget=True)), or is being:
+    # the retry is screened again.
+    store = _store(request)
+    if store is not None and store.supports_inbox:
+        try:
+            _, known_sender, known_id, _ = check_agent_message(
+                text,
+                sender=sender,
+                message_id=body.get("message_id"),
+                reply_to=body.get("reply_to"),
+                priority=body.get("priority") or "normal",
+                hops=hops,
+            )
+        except PeerRejected:
+            known_id = None  # refused below, as before
+        if known_id is not None and session._agent_message(known_sender, known_id) is None:
+            key = _agent_message_key(known_sender, known_id)
+            found = await _bounded(store.find_inbox_key(session_id, key), session_id)
+            if found is not None and not session.refused_from_inbox(found[0]):
+                item_id, acked = found
+                receipt = {"event_id": item_id, "key": None, "state": "delivered" if acked else "pending"}
+                receipt.update(run_id=None, message_id=known_id, duplicate=True)
+                return _json(receipt, status_code=202)
+    try:
+        receipt = await session.receive_agent_message(
+            text,
+            sender=sender,
+            message_id=body.get("message_id"),
+            reply_to=body.get("reply_to"),
+            priority=body.get("priority") or "normal",
+            hops=hops,
+        )
+    except PeerRejected as e:
+        if e.reason == "closed" and session.handed_off and _has_inbox(request):
+            raise _LetGo from e  # closed and kept since the route found it: nothing was posted
+        return JSONResponse(
+            status_code=_REJECTED_STATUS.get(e.reason, 422), content={"detail": str(e), "reason": e.reason}
+        )
     mark = session.mark()
     # A copy of one it has: nothing new to take back if the store fails.
     undo = None if receipt["duplicate"] else (lambda: session.withdraw(receipt["event_id"]))
-    await _stored(session, mark, undo)
+    await _stored_here(request, session, mark, undo)
     return _json(receipt, status_code=202)
+
+
+def _agent_message_key(sender: str, message_id: str) -> str:
+    """An agent message's idempotency key: its sender and id, which may both hold colons, so the sender's length
+    comes first (``support:eu`` + ``7`` and ``support`` + ``eu:7`` are two keys). At most 210 characters. A
+    client's ``Idempotency-Key`` cannot take this prefix (_idempotency_key)."""
+    return f"{_AGENT_KEY_PREFIX}{len(sender)}:{sender}:{message_id}"
+
+
+async def _bounded(call: Any, session_id: str) -> Any:
+    """A store call a route makes, within the routes' store bound: ``503`` with ``Retry-After`` when it fails
+    (the call this is for, a lookup, changes nothing)."""
+    timeout = _store_timeout()
+    try:
+        return await asyncio.wait_for(call, timeout)
+    except Exception as e:
+        hung = isinstance(e, TimeoutError)
+        why = f"The session store did not answer within {timeout:g} s" if hung else f"The session store failed: {e}"
+        logger.error("chat_session_inbox_key_failed", session_id=session_id, error=why)
+        raise HTTPException(status_code=503, detail=f"{why}. Nothing was accepted: retry.", headers=_RETRY) from e
+
+
+def _agent_message_fields(body: dict[str, Any]) -> tuple[str, str, int]:
+    _answerable(body, "The message", ("from", "text", "message_id", "reply_to", "priority", "hops"))
+    sender, text, hops = body.get("from"), body.get("text"), body.get("hops", 0)
+    if not isinstance(sender, str) or not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="'from' and 'text' must be strings.")
+    if not isinstance(hops, int) or isinstance(hops, bool):
+        raise HTTPException(status_code=400, detail="'hops' must be an integer.")
+    for name in ("message_id", "reply_to"):
+        if body.get(name) is not None and not isinstance(body[name], str):
+            raise HTTPException(status_code=400, detail=f"{name!r} must be a string.")
+    return sender, text, hops
 
 
 @router.post("/sessions/{session_id}/wake")
@@ -776,21 +1144,40 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
     tool, a list of names only those. The wake runs once the user has nothing
     pending, as a turn of its own, and may stay silent. ``trigger`` (an object)
     is merged into the turn's root ``metadata.trigger`` (a routine fire's ids).
+
+    For a session another worker serves: checked as the session would check it,
+    then queued for it (``202 {"queued": "inbox", "inbox_id"}``). With an
+    ``Idempotency-Key`` it goes through the store's inbox here too.
     """
-    session = await _session(request, session_id)
+    session, held, key = await _session_or_held(request, session_id)
     body = await _body(request)
-    _answerable(body, "The wake", ("text", "key", "tool_policy", "trigger"))  # (silent_ok: made a bool)
-    text = body.get("text")
-    if not isinstance(text, str):
-        raise HTTPException(status_code=400, detail="'text' must be a string.")
-    if body.get("key") is not None and not isinstance(body["key"], str):
-        raise HTTPException(status_code=400, detail="'key' must be a string or null.")
-    policy = body.get("tool_policy", "read_only")
-    if policy is not None and not (policy == "read_only" or isinstance(policy, list)):
-        raise HTTPException(status_code=400, detail="'tool_policy' must be 'read_only', a list of tool names, or null.")
-    trigger = body.get("trigger")
-    if trigger is not None and not isinstance(trigger, dict):
-        raise HTTPException(status_code=400, detail="'trigger' must be an object.")
+    text, policy, trigger = _wake_fields(body)
+    if session is not None and key is None and not await _apply_queued(session):
+        # What other workers queued comes first; and a copy that finds its lease gone has let the session go: the
+        # request is queued for the process that holds it now.
+        session, held = None, _HeldElsewhere(session_id)
+    if session is not None and key is None:
+        try:
+            return await _wake_here(request, session, body, text, policy, trigger)
+        except _LetGo:
+            held = _HeldElsewhere(session_id)  # let go meanwhile: queued for whoever serves it now
+    try:
+        check_wake(text, key=body.get("key"), tool_policy=policy, trigger=trigger)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    item = {
+        "text": text,
+        "key": body.get("key"),
+        "tool_policy": policy,
+        "silent_ok": bool(body.get("silent_ok", True)),
+        "trigger": trigger,
+    }
+    return await _queue(request, session_id, held, "wake", item, key=key)
+
+
+async def _wake_here(
+    request: Request, session: ChatSession, body: dict[str, Any], text: str, policy: Any, trigger: Any
+) -> JSONResponse:
     try:
         wake_id = session.wake(
             text,
@@ -803,9 +1190,27 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
         # TypeError: a trigger a durable session cannot store (the body parser lets NaN through).
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
+        if session.handed_off and _has_inbox(request):
+            raise _LetGo from e  # closed and kept since the route found it: nothing was queued
         raise HTTPException(status_code=409, detail=str(e)) from e
-    await _stored(session, session.mark(), lambda: session.withdraw(wake_id))
+    await _stored_here(request, session, session.mark(), lambda: session.withdraw(wake_id))
     return _json({"wake_id": wake_id, "busy": session.busy}, status_code=202)
+
+
+def _wake_fields(body: dict[str, Any]) -> tuple[str, Any, Any]:
+    _answerable(body, "The wake", ("text", "key", "tool_policy", "trigger"))  # (silent_ok: made a bool)
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="'text' must be a string.")
+    if body.get("key") is not None and not isinstance(body["key"], str):
+        raise HTTPException(status_code=400, detail="'key' must be a string or null.")
+    policy = body.get("tool_policy", "read_only")
+    if policy is not None and not (policy == "read_only" or isinstance(policy, list)):
+        raise HTTPException(status_code=400, detail="'tool_policy' must be 'read_only', a list of tool names, or null.")
+    trigger = body.get("trigger")
+    if trigger is not None and not isinstance(trigger, dict):
+        raise HTTPException(status_code=400, detail="'trigger' must be an object.")
+    return text, policy, trigger
 
 
 @router.post("/sessions/{session_id}/interrupt")

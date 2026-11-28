@@ -17,7 +17,11 @@ process would restore it, driven until it is idle, and checked:
   pending, and what it stores then matches what it holds;
 - **the thread keeps its root**: ``root_run_id`` (the MCP session hint) is the run the thread started with,
   never a run that died and was run again under another id; restored from snapshots written before the field
-  existed (``rooted_legacy``), it is that run or unknown.
+  existed (``rooted_legacy``), it is that run or unknown;
+- **what another worker queued is applied once**: a message posted to the session's inbox (a worker that does not
+  serve the session took it, ``from_the_inbox``) whose post returned is in the conversation exactly once, also
+  when the store acks it apart from the save that stored it and the process dies in between
+  (``from_the_inbox_acked_apart``), and nothing is left waiting in the inbox.
 
 Further sweeps: the process dies a second time, during the recovery; it shuts down in order at that write
 instead of dying; it lives on while the session store, or the trace store, is away for a stretch of writes; it
@@ -38,7 +42,7 @@ from timbal.core.agent import _is_pause
 from timbal.core.chat_session import ChatSession
 from timbal.core.test_model import TestModel
 from timbal.state import background, set_call_id, set_parent_call_id, set_run_context, suspend
-from timbal.state.chat_store import SessionNotStored, SqliteChatSessionStore
+from timbal.state.chat_store import InboxFull, SessionNotStored, SqliteChatSessionStore
 from timbal.state.tracing.providers import SqliteTracingProvider
 from timbal.types.content import ToolUseContent
 from timbal.types.events import OutputEvent
@@ -221,12 +225,13 @@ class FaultySqlite(SqliteTracingProvider):
         return await super().claim_approval(parent_id, approval_id, run_id)
 
 
-def faulty_store(path, fault, *, legacy=False):
+def faulty_store(path, fault, *, legacy=False, acks_apart=False):
     """``legacy``: every snapshot loads without ``root_run_id`` (nor ``in_flight.starts_thread``), as one written
-    before the fields existed."""
+    before the fields existed. ``acks_apart``: the store acks inbox items with a call of its own after the save
+    (as the platform's does), and that call is a write the fault counts: a crash can come between the two."""
     store = SqliteChatSessionStore(path)
     real_save, real_acquire, real_release = store.save, store.acquire_lease, store.release_lease
-    real_load = store.load
+    real_load, real_pull, real_ack = store.load, store.pull_inbox, store.ack_inbox
 
     async def load(session_id):
         snapshot = await real_load(session_id)
@@ -236,14 +241,26 @@ def faulty_store(path, fault, *, legacy=False):
                 snapshot.in_flight.pop("starts_thread", None)
         return snapshot
 
-    async def save(snapshot, *, expect_version, owner=None):
+    async def save(snapshot, *, expect_version, owner=None, inbox_acked=()):
         if not fault.write():
             raise asyncio.CancelledError
         if fault.failing("store"):
             raise OSError("the session store is unreachable")
         if fault.kind == "taken" and fault.at is not None and fault.writes > fault.at and fault.taken is None:
             fault.taken = await take_over(store, snapshot.session_id)
-        return await real_save(snapshot, expect_version=expect_version, owner=owner)
+        return await real_save(snapshot, expect_version=expect_version, owner=owner, inbox_acked=inbox_acked)
+
+    async def pull_inbox(session_id, owner, *, wait_s=0.0):
+        if fault.dead:
+            raise asyncio.CancelledError
+        return await real_pull(session_id, owner, wait_s=wait_s)
+
+    async def ack_inbox(session_id, owner, ids):
+        if not fault.write():
+            raise asyncio.CancelledError
+        if fault.failing("store"):
+            raise OSError("the session store is unreachable")
+        return await real_ack(session_id, owner, ids)
 
     async def acquire_lease(session_id, owner):
         if fault.dead:
@@ -256,7 +273,31 @@ def faulty_store(path, fault, *, legacy=False):
         return await real_release(session_id, owner)
 
     store.save, store.acquire_lease, store.release_lease, store.load = save, acquire_lease, release_lease, load
+    store.pull_inbox, store.ack_inbox = pull_inbox, ack_inbox
+    if acks_apart:
+        store.acks_with_save = False
     return store
+
+
+# The inbox of the scenarios that post to it holds at most this many waiting items: a post past it is refused.
+INBOX_CAP = 2
+
+
+def another_worker(path):
+    """The inbox as a worker that does not serve the session sees it: a store of its own on the same file, which
+    no fault of this process touches."""
+    store = SqliteChatSessionStore(path)
+    store.max_inbox_items = INBOX_CAP
+    return store
+
+
+async def inbox_waiting(path, session_id) -> int:
+    def count(conn):
+        return conn.execute(
+            "SELECT count(*) FROM chat_inbox WHERE session_id = ? AND acked_at IS NULL", (session_id,)
+        ).fetchone()[0]
+
+    return await SqliteChatSessionStore(path)._run(count)
 
 
 TAKER = "another-host:1:x"
@@ -419,10 +460,11 @@ def make_agent(provider, calls):
 class Client:
     """What a caller does, and what it was told: ``acked`` holds what a ``flush()`` returned for."""
 
-    def __init__(self, session, fault, calls):
-        self.session, self.fault, self.calls = session, fault, calls
+    def __init__(self, session, fault, calls, path=None):
+        self.session, self.fault, self.calls, self.path = session, fault, calls, path
         self.acked: dict[str, str] = {}  # event id -> text
         self.acked_wakes: list[str] = []
+        self.acked_posts: dict[str, str] = {}  # inbox item id -> text (posted by another worker)
         self.must_not_run: set[str] = set()  # tools an acknowledged stop has ruled out
         self.approved = False  # the client has said yes to what the session asked
         fault.stop = self.stop
@@ -473,6 +515,20 @@ class Client:
             if self._alive() and not receipt["duplicate"]:
                 self.session.withdraw(receipt["event_id"])  # as the route does before its 503
         return False
+
+    async def post(self, text, *, key=None) -> bool:
+        """A message another worker queued for the session (``POST .../messages`` reaching a worker that does not
+        serve it). True: the post returned, so its sender was told it is queued."""
+        if not self._alive():
+            return False
+        try:
+            item_id = await another_worker(self.path).post_inbox(
+                self.session.id, "message", {"text": text, "mode": None}, idempotency_key=key
+            )
+        except (LookupError, InboxFull):
+            return False  # not stored yet (nothing to queue for), or the cap: refused, its sender was told
+        self.acked_posts[item_id] = text
+        return True
 
     def stop(self) -> None:
         """Stop the session as ``POST .../interrupt`` does. Once a turn has started (a message no turn has
@@ -537,13 +593,14 @@ class Client:
         return True
 
     async def settle(self, timeout=60.0) -> None:
-        """Until the session has nothing left to do, answering whatever it parks on."""
+        """Until the session has nothing left to do, answering whatever it parks on, with nothing left waiting in
+        its inbox (another worker's posts)."""
         deadline = asyncio.get_running_loop().time() + timeout
         while self._alive():
             assert asyncio.get_running_loop().time() < deadline, f"never settled: {self.session.state()}"
             if self.session.parked and not self.session.busy and self.session._resume is None:
                 await self.answer()
-            elif self.at_rest():
+            elif self.at_rest() and not await inbox_waiting(self.path, self.session.id):
                 return
             await asyncio.sleep(0.003)
 
@@ -687,8 +744,27 @@ async def from_an_agent_urgently(c):
     await c.settle()
 
 
+async def from_the_inbox(c):
+    """Another worker queued messages for the session (the server's ``202 queued``): the first one's sender retried
+    it with its key (the same item), and the inbox lets ``INBOX_CAP`` wait, so the last post is refused if the
+    session has not taken the others by then. As ``from_the_inbox_acked_apart`` the store acks after the save.
+
+    The first is posted with the session idle. A message steered into a turn that then runs a tool is repeated
+    by a recovery whose trace store was away (the dead run's memory does not show it, so it is queued again):
+    that is so for a message sent to the session as well, and is not the inbox's (see CLAUDE.md, Known gaps)."""
+    await c.send("check")  # stored, and leased here: a worker that does not serve it queues for it
+    await c.settle()
+    await c.post("work (queued)", key="q1")
+    await c.post("work (queued)", key="q1")
+    await c.post("later (queued)")
+    await c.post("last (queued)")
+    await c.settle()
+
+
 # Scenarios whose snapshots load as ones written before ``root_run_id`` existed.
 LEGACY_SNAPSHOTS = {"rooted_legacy"}
+# Scenarios whose store acks inbox items after the save that stored them, with a call of its own.
+ACKS_APART = {"from_the_inbox_acked_apart"}
 
 SCENARIOS = {
     "plain": plain,
@@ -713,6 +789,8 @@ SCENARIOS = {
     "rooted_legacy": rooted,
     "from_an_agent": from_an_agent,
     "from_an_agent_urgently": from_an_agent_urgently,
+    "from_the_inbox": from_the_inbox,
+    "from_the_inbox_acked_apart": from_the_inbox,
 }
 
 
@@ -798,12 +876,12 @@ async def run_once(tmp_path, scenario, durability, *faults):
     path = tmp_path / DATABASE
     faults = list(faults) or [Fault()]
     fault = faults.pop(0)
-    legacy = scenario in LEGACY_SNAPSHOTS
+    legacy, acks_apart = scenario in LEGACY_SNAPSHOTS, scenario in ACKS_APART
     provider = FaultySqlite.configured(_path=path, fault=fault, durability=durability)
-    store = faulty_store(path, fault, legacy=legacy)
+    store = faulty_store(path, fault, legacy=legacy, acks_apart=acks_apart)
     session = ChatSession(make_agent(provider, calls), session_store=store, collect_window=0.0)
     fault.session = session
-    client = Client(session, fault, calls)
+    client = Client(session, fault, calls, path)
     await SCENARIOS[scenario](client)
     await stalled(fault, session)
     writes = [fault.writes]
@@ -815,18 +893,20 @@ async def run_once(tmp_path, scenario, durability, *faults):
             await fault.closing
             forget(session)
         acked, acked_wakes, must_not_run = client.acked, client.acked_wakes, client.must_not_run
+        acked_posts = client.acked_posts
         fault = faults.pop(0) if faults else Fault()
         provider = FaultySqlite.configured(_path=path, fault=fault, durability=durability)
-        store = faulty_store(path, fault, legacy=legacy)
+        store = faulty_store(path, fault, legacy=legacy, acks_apart=acks_apart)
         try:
             session = await ChatSession.from_store(make_agent(provider, calls), store, session.id)
         except LookupError:
             # It died before the session itself was stored: nothing can have been acknowledged.
-            assert not acked and not acked_wakes, "acknowledged, but the session was never stored"
+            assert not acked and not acked_wakes and not acked_posts, "acknowledged, but the session was never stored"
             return {"writes": writes, "calls": calls, "session": None, "before": before, "path": path}
         fault.session = session
-        client = Client(session, fault, calls)
+        client = Client(session, fault, calls, path)
         client.acked, client.acked_wakes, client.must_not_run = acked, acked_wakes, must_not_run
+        client.acked_posts = acked_posts
         await client.settle()
         await stalled(fault, session)
         writes.append(fault.writes)
@@ -870,6 +950,12 @@ async def _check(result, label):
         assert taken[event_id] or f'"{text}"' in notices, f"{label}: acknowledged message {text!r} was lost"
     for text in client.acked_wakes:
         assert any(text in texts(m) for m in memory), f"{label}: acknowledged wake {text!r} was lost"
+    for text in set(client.acked_posts.values()):
+        # Each text is posted once (or retried with its key: the same item), so it is in the conversation once.
+        said = sum(texts(m).count(text) for m in memory if m.get("role") == "user" and RECOVERY not in texts(m))
+        assert said <= 1, f"{label}: the queued message {text!r} was applied {said} times"
+        assert said == 1 or f'"{text}"' in notices, f"{label}: queued message {text!r} was lost"
+    assert not await inbox_waiting(result["path"], session.id), f"{label}: items left waiting in the inbox"
     twice = [event_id for event_id, count in taken.items() if count > 1]
     assert not twice, f"{label}: answered twice: {[client.acked.get(e, e) for e in twice]}"
     if len(result["writes"]) == 1:
@@ -1056,12 +1142,12 @@ async def test_a_takeover_at_any_write_is_never_written_over(tmp_path, scenario)
         calls = collections.Counter()
         path = tmp_path / DATABASE
         provider = FaultySqlite.configured(_path=path, fault=fault, durability="sync")
-        store = faulty_store(path, fault)
+        store = faulty_store(path, fault, acks_apart=scenario in ACKS_APART)
         session = ChatSession(make_agent(provider, calls), session_store=store, collect_window=0.0)
         fault.session = session
         label = f"{scenario}/taken before write {at + 1}"
         try:
-            await SCENARIOS[scenario](Client(session, fault, calls))
+            await SCENARIOS[scenario](Client(session, fault, calls, path))
             if fault.taken is None:
                 await session.close(keep=True)
                 continue  # the scenario was over before that write: nothing was taken
