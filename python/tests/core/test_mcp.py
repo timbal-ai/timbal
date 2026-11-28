@@ -2413,6 +2413,44 @@ class TestInflightCallsPerSession:
             thread.join(10)
             loop.close()
 
+    def test_a_stateless_servers_question_fails_a_call_on_another_loop_on_that_loop(self):
+        """A stateless HTTP server (no ``Mcp-Session-Id``) asks a question during a call made on another loop than the
+        session's: the client cannot deliver an answer, so it fails the call fast through its ``abort`` future. That
+        future is the call's loop's and is not thread-safe: it is completed there (``call_soon_threadsafe``), not from
+        the session's loop, where asyncio's debug check refused it and a loop not in debug could miss the wake-up and
+        leave the call waiting for its timeout (Bugbot on #334)."""
+        import threading
+
+        loop = asyncio.new_event_loop()
+        loop.set_debug(True)  # asyncio then checks which thread schedules on it
+        thread = threading.Thread(target=loop.run_forever)
+        thread.start()
+        server = MCPServer(transport="http", url="http://unused.test/mcp")
+        server._get_session_id = lambda: None  # connected, and the server gave no session id
+        session = object()
+
+        async def begin():  # the call sends on the session and waits, as _request races its abort future
+            call = self.sent_on(server._begin_call("ask"), session)
+            waiting = asyncio.ensure_future(asyncio.wait({call.abort}))
+            await asyncio.sleep(0)
+            return call, waiting
+
+        async def outcome(waiting):
+            await asyncio.wait_for(waiting, 10)
+            return waiting
+
+        try:
+            call, waiting = asyncio.run_coroutine_threadsafe(begin(), loop).result(10)
+            params = mcp_types.ElicitRequestFormParams(**self.QUESTION)
+            answer = asyncio.run(asyncio.wait_for(server._on_elicitation(self.on(session), params), 10))
+            assert answer.code == mcp_types.INVALID_REQUEST
+            asyncio.run_coroutine_threadsafe(outcome(waiting), loop).result(10)
+            assert "stateless" in str(call.abort.exception())
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(10)
+            loop.close()
+
     def test_a_call_another_thread_began_is_asked_after_close_from_another_loop(self):
         """A call begun on a loop running in another thread, not connected yet: close() from this loop has nothing open
         to refuse, and keeps that call's record. When the call has sent its request and the server's question

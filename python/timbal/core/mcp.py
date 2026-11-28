@@ -368,6 +368,12 @@ def _coerce_elicit_resume(
     return mcp_types.ElicitResult(action="accept", content=content), None
 
 
+def _fail_future(future: asyncio.Future, error: BaseException) -> None:
+    """Fail ``future`` unless it is done already; run on the future's own loop."""
+    if not future.done():
+        future.set_exception(error)
+
+
 _CALL_KEYS = itertools.count(1)
 """Keys of in-flight call records, unique in the process and never reused: ``next()`` of a count is one step, so
 calls begun on two threads at once never share a key (an attribute's ``+= 1`` could hand both the same one)."""
@@ -1303,17 +1309,25 @@ class MCPServer(ToolSet):
         return [call for call in list(self._inflight.values()) if call.session is session]
 
     def _abort_inflight_for_stateless(self, calls: list["_InflightCall"], kind: str) -> None:
-        """Fail every in-flight call fast: the server is blocked on an answer it can never get."""
+        """Fail every in-flight call fast: the server is blocked on an answer it can never get. Each call's ``abort``
+        future is completed on the call's own loop: this runs on the session's receive loop, a call sent on the
+        session may be on another one, and a future is not thread-safe (completed from here, asyncio's debug check
+        refused it, and a loop not in debug could miss the wake-up, the call waiting for its timeout; Bugbot on #334).
+        A call whose loop has closed died with it."""
+        here = asyncio.get_running_loop()
         for call in calls:
-            if not call.abort.done():
-                call.abort.set_exception(
-                    RuntimeError(
-                        f"MCP server '{self._label}' asked the client for {kind} during '{call.tool_name}', "
-                        "but the server is stateless (no Mcp-Session-Id) so the answer cannot be delivered "
-                        "and the call would never complete. Use approval= for confirmations, or a "
-                        "sessionful server."
-                    )
-                )
+            error = RuntimeError(
+                f"MCP server '{self._label}' asked the client for {kind} during '{call.tool_name}', "
+                "but the server is stateless (no Mcp-Session-Id) so the answer cannot be delivered "
+                "and the call would never complete. Use approval= for confirmations, or a "
+                "sessionful server."
+            )
+            owner = call.abort.get_loop()
+            if owner is here:
+                _fail_future(call.abort, error)
+            elif not owner.is_closed():
+                with contextlib.suppress(RuntimeError):  # it closed meanwhile: the call went with it
+                    owner.call_soon_threadsafe(_fail_future, call.abort, error)
 
     async def _run_session(self, ready: asyncio.Future, closed: asyncio.Event) -> None:
         """Own the transport for its whole life.
