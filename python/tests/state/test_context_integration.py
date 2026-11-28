@@ -2132,13 +2132,22 @@ class TestRunEndHooks:
         await context._run_end_hooks()
         assert sorted(ran) == ["first", "second"]
 
-    async def test_a_hook_returning_another_loops_task_is_awaited_on_that_loop(self):
-        """A producer's pending flush, a task of its own loop, returned by a hook while another loop ends the run: the
-        end waits for it there instead of failing on 'attached to a different loop'."""
+    async def test_a_hook_returning_another_loops_pending_task_fails_without_waiting_for_it(self, monkeypatch):
+        """A hook returns a pending task of another, running loop (a producer's flush) while this loop ends the run:
+        the end does not hand it to that loop nor wait for it there. The hook fails at once, logged as its failure,
+        and the task is left to its loop, neither awaited nor cancelled; the other hooks still run."""
         import threading
 
+        from timbal.state import context as context_module
         from timbal.state.context import RunContext
 
+        logged = []
+
+        class Recorder:
+            def __getattr__(self, _level):
+                return lambda event, **fields: logged.append((event, fields))
+
+        monkeypatch.setattr(context_module, "_get_logger", lambda: Recorder())
         owner = asyncio.new_event_loop()
         thread = threading.Thread(target=owner.run_forever)
         thread.start()
@@ -2154,14 +2163,22 @@ class TestRunEndHooks:
                 return release, asyncio.ensure_future(flush())
 
             release, flush = asyncio.run_coroutine_threadsafe(make(), owner).result(10)
-            context = RunContext()
+            context, ran = RunContext(), []
             context.on_end(lambda: flush)
+            context.on_end(lambda: ran.append("next"))
             hooks = asyncio.ensure_future(context._run_end_hooks())
-            done, _ = await asyncio.wait({hooks}, timeout=0.3)
-            assert not done  # waiting for the flush, on its loop
+            done, _ = await asyncio.wait({hooks}, timeout=5)
+            assert done  # not waiting for the flush on its loop
+            assert ran == ["next"] and not flush.done()  # the task is that loop's, untouched
+            failures = [fields for event, fields in logged if event == "run_end_hook_failed"]
+            assert len(failures) == 1 and "another event loop" in failures[0]["error"]
+
+            async def outcome():  # read on its own loop, once let go
+                return await flush
+
             owner.call_soon_threadsafe(release.set)
-            await asyncio.wait_for(hooks, 10)
-            assert flush.done() and flush.result() == "flushed"
+            reading = asyncio.wrap_future(asyncio.run_coroutine_threadsafe(outcome(), owner))
+            assert await asyncio.wait_for(reading, 10) == "flushed"
         finally:
             owner.call_soon_threadsafe(owner.stop)
             thread.join(10)
