@@ -164,6 +164,7 @@ class TestRefusedBeforeQueuing:
         ("route", "body", "status"),
         [
             ("messages", {"text": 5}, 400),
+            ("messages", {"text": "   "}, 400),
             ("messages", {"text": "hi", "mode": "sideways"}, 400),
             ("messages", {"text": "NaN", "mode": float("nan")}, 400),
             ("wake", {"text": "   "}, 400),
@@ -212,7 +213,10 @@ class TestTheCap:
 
 class TestAStoreThatDoesNotAnswer:
     @pytest.mark.parametrize("keyed", [False, True])
-    def test_a_post_that_may_have_landed_says_whether_a_retry_is_safe(self, client, monkeypatch, keyed):
+    def test_a_post_that_may_have_landed_is_a_503_without_retry_after(self, client, monkeypatch, keyed):
+        """``Retry-After`` on a ``503`` from these routes means nothing was accepted (``RemotePeer`` reads it as
+        "not sent", and a model then sends again under a new id). A post that may have landed never says so,
+        keyed or not; the detail says whether a retry with the key is safe."""
         session_id = served_elsewhere(client)
         monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", "0.1")
         store = client.app.state.chat_store
@@ -224,7 +228,8 @@ class TestAStoreThatDoesNotAnswer:
         headers = {"Idempotency-Key": "send-1"} if keyed else {}
         response = post(client, session_id, "messages", {"text": "hi"}, **headers)
         assert response.status_code == 503, response.text
-        assert ("Retry-After" in response.headers) is keyed
+        assert "Retry-After" not in response.headers
+        assert ("same Idempotency-Key" in response.json()["detail"]) is keyed
 
     def test_a_store_that_fails_says_so(self, client, monkeypatch):
         session_id = served_elsewhere(client)
@@ -254,3 +259,120 @@ class TestAStoreWithoutAnInbox:
         assert response.status_code == 409, response.text
         assert "served by another process" in response.json()["detail"]
         assert waiting(client, session_id) == []
+
+
+def turns_and_applied(client, session_id):
+    state = client.get(f"/chat/sessions/{session_id}").json()
+    log = client.get(f"/chat/sessions/{session_id}/log", params={"after": 0, "limit": 2000}).json()
+    records = [e["data"] for e in log["events"] if isinstance(e["data"], dict) and e["data"].get("type") == "SESSION"]
+    return state, records
+
+
+def settled(client, session_id, done, timeout=30.0):
+    deadline = time.monotonic() + timeout  # a hang guard
+    while time.monotonic() < deadline:
+        state, records = turns_and_applied(client, session_id)
+        if done(state, records) and not state["busy"] and not state["pending"]:
+            return state, records
+        time.sleep(0.02)
+    raise AssertionError(f"never settled: {state}")
+
+
+class TestAKeyedRequestToTheServingWorker:
+    """With a key, the serving worker queues the request in the inbox too: a retry is the same item whichever
+    worker it reaches (it was a second message when the retry reached the serving worker directly)."""
+
+    def test_a_retry_that_reaches_the_serving_worker_is_the_same_message(self, client):
+        session_id = served_elsewhere(client)
+        first = post(client, session_id, "messages", {"text": "pay me"}, **{"Idempotency-Key": "send-1"})
+        assert first.json()["queued"] == "inbox"
+        client.portal.call(client.app.state.chat_store.release_lease, session_id, ELSEWHERE)
+        assert client.get(f"/chat/sessions/{session_id}").status_code == 200  # served here from now on
+        again = post(client, session_id, "messages", {"text": "pay me"}, **{"Idempotency-Key": "send-1"})
+        assert again.status_code == 202 and again.json()["inbox_id"] == first.json()["inbox_id"], again.text
+        state, records = settled(client, session_id, lambda st, _rs: st["turns"] >= 1)
+        assert [r["text"] for r in records if r["kind"] == "message"] == ["pay me"]
+        assert state["turns"] == 1
+
+    def test_a_keyed_message_to_the_serving_worker_is_applied(self, client):
+        session_id = client.post("/chat/sessions", json={"busy_mode": "followup"}).json()["session_id"]
+        response = post(client, session_id, "messages", {"text": "hi"}, **{"Idempotency-Key": "k"})
+        assert response.status_code == 202 and response.json()["queued"] == "inbox", response.text
+        again = post(client, session_id, "messages", {"text": "hi"}, **{"Idempotency-Key": "k"})
+        assert again.json()["inbox_id"] == response.json()["inbox_id"]
+        state, records = settled(client, session_id, lambda st, _rs: st["turns"] >= 1)
+        assert [r["text"] for r in records if r["kind"] == "message"] == ["hi"] and state["turns"] == 1
+
+    def test_without_a_key_the_serving_worker_answers_as_before(self, client):
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        response = post(client, session_id, "messages", {"text": "hi"})
+        assert response.status_code == 202 and "message" in response.json() and "queued" not in response.json()
+
+    def test_a_store_without_an_inbox_ignores_the_header(self, client, monkeypatch):
+        """As before the inbox: not looked at (one a store could not take is no 400)."""
+        monkeypatch.setattr(client.app.state.chat_store, "supports_inbox", False)
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        response = post(client, session_id, "messages", {"text": "hi"}, **{"Idempotency-Key": "k" * 300})
+        assert response.status_code == 202 and "message" in response.json(), response.text
+
+    def test_a_store_without_an_inbox_refuses_a_held_session_before_reading_the_body(self, client, monkeypatch):
+        session_id = served_elsewhere(client)
+        monkeypatch.setattr(client.app.state.chat_store, "supports_inbox", False)
+        response = client.post(
+            f"/chat/sessions/{session_id}/messages", content="not json", headers={"Content-Type": "application/json"}
+        )
+        assert response.status_code == 409, response.text
+
+
+class TestOrder:
+    def test_a_queued_message_comes_before_a_later_direct_one(self, client):
+        """Queued by another process (its sender had its 202), then a direct one: the serving worker's drain
+        sees the other's post only at its watch's next look, and the direct message went first."""
+        store = client.app.state.chat_store
+        store.inbox_poll_s = 60.0  # (before the session starts its drain: the watch looks this rarely)
+        session_id = client.post("/chat/sessions", json={"busy_mode": "followup"}).json()["session_id"]
+
+        def other_process():
+            import sqlite3
+
+            conn = sqlite3.connect(str(store.path), timeout=10)
+            conn.execute(
+                "INSERT INTO chat_inbox (id, session_id, kind, body, posted_at) VALUES (?, ?, ?, ?, ?)",
+                ("in_first", session_id, "message", '{"text": "first", "mode": null}', time.time()),
+            )
+            conn.commit()
+            conn.close()
+
+        other_process()
+        assert post(client, session_id, "messages", {"text": "second"}).status_code == 202
+        _, records = settled(client, session_id, lambda st, _rs: st["turns"] >= 2, timeout=10)
+        assert [r["text"] for r in records if r["kind"] == "message"] == ["first", "second"]
+
+
+def test_startup_restores_a_session_whose_only_work_is_its_inbox(tmp_path, monkeypatch):
+    """Skipped at startup (its old process's lease still looked live), retried until it is free: a session with
+    nothing pending but items in its inbox has work too (it was dropped at the first retry, its items left)."""
+    import timbal.server.chat as chat_module
+    from timbal.state.chat_store import SessionSnapshot, SqliteChatSessionStore
+
+    (tmp_path / "agent.py").write_text(AGENT)
+    monkeypatch.setenv("E2E_DIR", str(tmp_path))
+    monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tmp_path / 'agent.py'}::agent")
+    monkeypatch.delenv("TIMBAL_CHAT_STORE", raising=False)
+    monkeypatch.setattr(chat_module, "_RESTORE_RETRY_S", 0.1)
+    store = SqliteChatSessionStore(tmp_path / "timbal.db")
+    store.lease_ttl_s = 60.0
+
+    async def seed():
+        await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None, owner=ELSEWHERE)
+        await store.post_inbox("s1", "message", {"text": "queued while it moved", "mode": None})
+
+    asyncio.run(seed())
+    with TestClient(create_app()) as client:
+        sessions = client.app.state.chat_sessions
+        assert "s1" not in sessions  # skipped: the lease was still live
+        client.portal.call(client.app.state.chat_store.release_lease, "s1", ELSEWHERE)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (sessions.get("s1") and sessions["s1"].turns == 1):
+            time.sleep(0.05)
+        assert sessions.get("s1") is not None and sessions["s1"].turns == 1

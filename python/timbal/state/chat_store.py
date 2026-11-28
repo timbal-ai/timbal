@@ -725,12 +725,21 @@ _WAITING_SESSIONS_SQL = "SELECT DISTINCT session_id FROM chat_inbox WHERE acked_
 _IDS_PER_STATEMENT = 500
 
 
+def _settled(conn: Any) -> Any:
+    """The shared connection with no transaction left open, for a call that holds its lock. Every call on it ends
+    its own (a trace save commits or rolls back inside the lock), so one still open was left by a statement that
+    failed before its commit (``database is locked``): kept, it would hold a read of the file as it was then, and
+    the inbox would not see what other processes posted since; a write would join it."""
+    if conn.in_transaction:
+        conn.rollback()
+    return conn
+
+
 def _transaction(conn: Any, fn: Any) -> Any:
     """``fn()`` in one write transaction: a check and the write that follows it cannot be split by another
     process's write, and a failure leaves nothing (the connection is shared: an open transaction would take the
     next caller's statements into it)."""
-    if not conn.in_transaction:
-        conn.execute("BEGIN IMMEDIATE")
+    _settled(conn).execute("BEGIN IMMEDIATE")
     try:
         result = fn()
     except BaseException:
@@ -831,6 +840,13 @@ class SqliteChatSessionStore(ChatSessionStore):
         acked = list(inbox_acked)
 
         def write(conn):
+            try:
+                return written(_settled(conn))
+            except BaseException:
+                conn.rollback()  # nothing of it stays open on the shared connection
+                raise
+
+        def written(conn):
             if expect_version is None:
                 cursor = conn.execute(
                     "INSERT OR IGNORE INTO chat_sessions "
@@ -852,15 +868,11 @@ class SqliteChatSessionStore(ChatSessionStore):
                 )
             if cursor.rowcount == 1 and expect_version is not None and (body.closed or acked):
                 # In the transaction the statement above opened: the inbox changes with the snapshot or not at all.
-                try:
-                    if body.closed:
-                        # Nothing restores a closed session: what still waited cannot be delivered.
-                        conn.execute("DELETE FROM chat_inbox WHERE session_id = ?", (snapshot.session_id,))
-                    else:
-                        _ack_rows(conn, snapshot.session_id, acked, time.time())
-                except BaseException:
-                    conn.rollback()
-                    raise
+                if body.closed:
+                    # Nothing restores a closed session: what still waited cannot be delivered.
+                    conn.execute("DELETE FROM chat_inbox WHERE session_id = ?", (snapshot.session_id,))
+                else:
+                    _ack_rows(conn, snapshot.session_id, acked, time.time())
             conn.commit()
             return cursor.rowcount
 
@@ -973,9 +985,11 @@ class SqliteChatSessionStore(ChatSessionStore):
 
     async def pull_inbox(self, session_id: str, owner: str, *, wait_s: float = 0.0) -> list[dict[str, Any]]:
         def query(conn):
-            held = conn.execute(
-                "SELECT lease_owner, lease_until FROM chat_sessions WHERE session_id = ?", (session_id,)
-            ).fetchone()
+            held = (
+                _settled(conn)
+                .execute("SELECT lease_owner, lease_until FROM chat_sessions WHERE session_id = ?", (session_id,))
+                .fetchone()
+            )
             if held is None:
                 raise LookupError(f"No stored chat session {session_id!r}.")
             if held[0] != owner or (held[1] or 0) < time.time():
@@ -1000,7 +1014,7 @@ class SqliteChatSessionStore(ChatSessionStore):
         """For the watch's thread: which of ``session_ids`` have items waiting."""
         db = self._db()
         with db.lock:
-            found = {row[0] for row in db.conn.execute(_WAITING_SESSIONS_SQL).fetchall()}
+            found = {row[0] for row in _settled(db.conn).execute(_WAITING_SESSIONS_SQL).fetchall()}
         return found.intersection(session_ids)
 
     async def ack_inbox(self, session_id: str, owner: str, ids: Collection[str]) -> None:

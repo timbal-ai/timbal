@@ -747,8 +747,13 @@ async def from_an_agent_urgently(c):
 async def from_the_inbox(c):
     """Another worker queued messages for the session (the server's ``202 queued``): the first one's sender retried
     it with its key (the same item), and the inbox lets ``INBOX_CAP`` wait, so the last post is refused if the
-    session has not taken the others by then. As ``from_the_inbox_acked_apart`` the store acks after the save."""
+    session has not taken the others by then. As ``from_the_inbox_acked_apart`` the store acks after the save.
+
+    The first is posted with the session idle. A message steered into a turn that then runs a tool is repeated
+    by a recovery whose trace store was away (the dead run's memory does not show it, so it is queued again):
+    that is so for a message sent to the session as well, and is not the inbox's (see CLAUDE.md, Known gaps)."""
     await c.send("check")  # stored, and leased here: a worker that does not serve it queues for it
+    await c.settle()
     await c.post("work (queued)", key="q1")
     await c.post("work (queued)", key="q1")
     await c.post("later (queued)")

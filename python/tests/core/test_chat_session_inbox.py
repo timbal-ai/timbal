@@ -285,8 +285,7 @@ class TestAckedWithItsEffect:
         assert len(session.pending_messages()) == 1  # ...and applied it once
         assert len(await store.pull_inbox(session.id, process_owner())) == 1  # not acked: nothing was stored
         monkeypatch.setattr(store, "save", real_save)
-        await until(lambda: not session._inbox_unacked and not session._dirty)
-        assert await store.pull_inbox(session.id, process_owner()) == []
+        await acked(store, session.id)  # (with a store that acks apart, once the save that stores it landed)
         assert [e["text"] for e in (await store.load(session.id)).pending] == ["hi"]
         go.set()
         await until(lambda: session.turns == 1)
@@ -483,3 +482,119 @@ async def test_a_snapshot_from_before_the_inbox_restores_with_nothing_seen(tmp_p
     restored = await ChatSession.from_store(make_agent(provider), store, session.id)
     assert list(restored._inbox_seen) == []
     await restored.close()
+
+
+class TestStoresThatDoNotTakeTheAck:
+    async def test_a_save_that_takes_only_kwargs_is_acked_apart(self, tmp_path):
+        """It may not hand ``inbox_acked`` on: trusted, the ack it drops left the item to be applied on every pull."""
+
+        class KwargsSqlite(SqliteChatSessionStore):
+            async def save(self, snapshot, **kwargs):
+                return await super().save(snapshot, expect_version=kwargs["expect_version"], owner=kwargs.get("owner"))
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "timbal.db")
+        store = KwargsSqlite(tmp_path / "timbal.db")
+        store.inbox_poll_s = 0.01
+        session = await stored_session(provider, store)
+        assert not session._acks_with_save
+        await store.post_inbox(session.id, "message", {"text": "hi", "mode": None})
+        await records(session, "inbox_item")
+        await until(lambda: session.turns == 1)
+        await acked(store, session.id)
+        await idle(session)
+        assert await history(provider, session) == ["hi", "echo: hi"]
+        await session.close()
+
+    async def test_an_item_pulled_again_after_its_ack_is_not_applied_again(self, tmp_path, monkeypatch):
+        """A store that takes ``inbox_acked`` and does not ack (or a pull that read the inbox before the save that
+        acked it committed): the item comes back, and the session knows it applied it."""
+
+        class DropsAcks(SqliteChatSessionStore):
+            async def save(self, snapshot, *, expect_version, owner=None, inbox_acked=()):  # noqa: ARG002
+                return await super().save(snapshot, expect_version=expect_version, owner=owner)
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "timbal.db")
+        store = DropsAcks(tmp_path / "timbal.db")
+        store.inbox_poll_s = 0.01
+        pulls = []
+        real_pull = store.pull_inbox
+
+        async def counted(*args, **kwargs):
+            items = await real_pull(*args, **kwargs)
+            pulls.append(len(items))
+            return items
+
+        monkeypatch.setattr(store, "pull_inbox", counted)
+        session = await stored_session(provider, store)
+        await store.post_inbox(session.id, "message", {"text": "hi", "mode": None})
+        await until(lambda: pulls.count(1) >= 4)  # handed out again and again
+        await until(lambda: session.turns == 1)
+        await idle(session)
+        applied = [e for e in session.log.peek(session.log.forgotten_through)[0] if isinstance(e, dict)
+                   and e.get("kind") == "inbox_item"]  # fmt: skip
+        assert len(applied) == 1
+        assert await history(provider, session) == ["hi", "echo: hi"]
+        await session.close()
+
+
+class TestAnItemThatMustWait:
+    async def test_an_agent_message_for_a_loop_that_is_not_running_waits_for_it(self, tmp_path):
+        """The session is open and the loop that serves it is not running (``receive_agent_message`` says
+        "closed"): the item is neither refused nor the drain stopped (it stopped for good, and the inbox filled)."""
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "timbal.db")
+        store = SqliteChatSessionStore(tmp_path / "timbal.db")
+        store.inbox_poll_s = 0.01
+        session = await stored_session(provider, store)
+        served_on, stopped = session._loop, asyncio.new_event_loop()
+        session._loop = stopped
+        try:
+            pulls = []
+            real_pull = store.pull_inbox
+
+            async def counted(*args, **kwargs):
+                items = await real_pull(*args, **kwargs)
+                pulls.append(len(items))
+                return items
+
+            store.pull_inbox = counted
+            await store.post_inbox(session.id, "agent_message", {"from": "bob", "text": "ping", "message_id": "am_1"})
+            await until(lambda: pulls.count(1) >= 3)  # tried, and kept for later, more than once
+            assert not session._inbox_task.done() and not session.pending_messages()
+            session._loop = served_on
+            (applied,) = await records(session, "inbox_item")
+            assert applied["item_kind"] == "agent_message"
+        finally:
+            session._loop = served_on
+            stopped.close()
+        await idle(session)
+        await session.close()
+
+
+class TestACutAfterAWriteThatFailed:
+    async def test_a_queued_interrupt_cuts_once_stored_even_when_the_next_write_fails(self, tmp_path, monkeypatch):
+        """The save that stores the message lands and a later one fails: the message is stored, so it cuts (it
+        waited for every later write to land, unlike the route)."""
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "timbal.db")
+        store = SqliteChatSessionStore(tmp_path / "timbal.db")
+        store.inbox_poll_s = 0.01
+        gate = Gate()
+        session = await stored_session(provider, store, gate)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 30)
+        turn, real_save, landed = session._turn, store.save, []
+
+        async def then_away(snapshot, **kwargs):
+            if landed:
+                raise OSError("the session store is unreachable")
+            version = await real_save(snapshot, **kwargs)
+            if any(e.get("text") == "stop" for e in snapshot.pending):
+                landed.append(1)
+                session.wake("a change after it")  # stored next, and that write fails
+            return version
+
+        monkeypatch.setattr(store, "save", then_away)
+        await store.post_inbox(session.id, "message", {"text": "stop", "mode": "interrupt"})
+        await asyncio.wait_for(asyncio.wait({turn}), 30)
+        assert turn.done() and landed
+        monkeypatch.setattr(store, "save", real_save)
+        await session.close()

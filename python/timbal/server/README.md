@@ -127,9 +127,10 @@ A change the store already holds is acknowledged as usual, even if a later write
 A durable session is served by one process at a time (its lease). A request that reaches another worker sharing the store (`--workers 2`, two servers on one SQLite file) is answered there:
 
 - `POST .../messages`, `.../wake` and `.../agent_messages` are checked as the session would check them (a bad request is refused here, `400` / `422`, since the worker that serves the session could tell nobody), then **queued** in the store's inbox for that worker: `202 {"queued": "inbox", "inbox_id", "session_id"}`. That worker applies each item within moments (SQLite: a quarter of a second for a post from another process), stores the session with it, and only then is the item gone from the inbox. Its log says what became of it: `inbox_item` (`inbox_id`, `item_kind`, and the `event_id` or `wake_id` it became) or `inbox_refused` (what its `accepts` or guardrails refused there: the sender was told only that it was queued).
-- An `Idempotency-Key` header (1 to 255 characters) makes a repeat the same item, for a day after it was applied too. A message from another agent with a `message_id` is keyed by its sender and that id when the header is absent.
+- An `Idempotency-Key` header (1 to 255 characters) makes a repeat the same item, for a day after it was applied too, whichever worker each attempt reaches: with the header, the worker that serves the session queues the request in the inbox too, and answers the same `queued` form. One key is one item, whatever the route or body of a repeat. A message from another agent with a `message_id` is keyed by its sender and that id when the header is absent.
+- Order: the worker that serves the session applies what is already queued before a request it takes itself, so a message queued earlier comes first.
 - At most 256 items wait per session: past that, `429` with `Retry-After`.
-- A store that fails or does not answer: `503`, with `Retry-After` only when the request carried a key (it may have been queued, and a retry with the key cannot queue it twice).
+- A store that fails or does not answer: `503` without `Retry-After` (it may have been queued). A retry with the same `Idempotency-Key` is safe; without one, do not resend.
 - Everything else (reads, `/resume`, `/interrupt`, `DELETE`) answers `409` there, as before. So does every route with a store that has no inbox.
 
 Items left for a session nobody serves (its worker shut down) are applied by the worker that restores it next: startup restores sessions with items waiting.

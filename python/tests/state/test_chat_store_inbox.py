@@ -285,6 +285,7 @@ class TestAckedInTheSave:
             owner=OWNER,
             inbox_acked=[f"in_unknown_{n}" for n in range(600)] + ids,  # more than SQLite takes in one statement
         )
+        await store.acquire_lease("s1", OWNER)  # (256 posts on a slow disk outlast the lease)
         assert await store.pull_inbox("s1", OWNER) == []
 
     async def test_sqlite_stores_the_snapshot_and_the_ack_together_or_neither(self, tmp_path, monkeypatch):
@@ -414,3 +415,45 @@ class TestWaitingForAnItem:
         await asyncio.gather(*(store.pull_inbox(f"s{n}", OWNER, wait_s=0.5) for n in range(20)))
         assert len(calls) == 40  # each pull: one look before its wait, one after it
         assert polls and max(polls) == 20  # the watch asked once per poll, for every session at once
+
+
+class TestATransactionLeftOpen:
+    """A statement that failed before its commit (``database is locked``) left a transaction open on the shared
+    connection: the inbox read the file as it was then, and a post joined that transaction."""
+
+    async def test_a_pull_sees_what_another_process_posted_since(self, tmp_path):
+        path = tmp_path / "sessions.db"
+        store = SqliteChatSessionStore(path)
+        await stored(store)
+        db = store._db()
+        with db.lock:
+            db.conn.execute("BEGIN")
+            db.conn.execute("SELECT count(*) FROM chat_inbox").fetchone()  # a read, left open
+
+        def other_process():
+            conn = sqlite3.connect(str(path), timeout=10)
+            conn.execute(
+                "INSERT INTO chat_inbox (id, session_id, kind, body, posted_at) VALUES ('in_other', 's1', 'message', "
+                '\'{"text": "x"}\', ?)',
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+
+        await asyncio.to_thread(other_process)
+        assert [i["id"] for i in await store.pull_inbox("s1", OWNER)] == ["in_other"]
+
+    async def test_a_post_does_not_commit_what_was_left_open(self, tmp_path):
+        store = SqliteChatSessionStore(tmp_path / "sessions.db")
+        await stored(store)
+        db = store._db()
+        with db.lock:
+            db.conn.execute("BEGIN")
+            db.conn.execute("UPDATE chat_sessions SET agent = 'half-written' WHERE session_id = 's1'")
+        await store.post_inbox("s1", "message", message("x"))
+
+        def column(conn):
+            return conn.execute("SELECT agent FROM chat_sessions WHERE session_id = 's1'").fetchone()[0]
+
+        assert await store._run(column) == "agent"  # the statement left open was not committed with the post
+        assert await waiting(store) == ["x"]

@@ -101,6 +101,8 @@ _AGENT_MESSAGES_KEPT = 512
 # poll), and this long before trying again after a pull, a save or an ack that failed.
 _INBOX_WAIT_S = 20.0
 _INBOX_RETRY_S = 1.0
+# What applying an inbox item came to (ChatSession._apply_inbox).
+_INBOX_APPLIED, _INBOX_CLOSED, _INBOX_LATER = object(), object(), object()
 # How often a message handed to a session on another loop checks that loop is still there (a loop closed after it
 # took the receive and before it ran it settles nothing by itself).
 _HANDOVER_CHECK_S = 0.25
@@ -280,7 +282,9 @@ def _acks_in_its_saves(store: ChatSessionStore | None) -> bool:
         parameters = inspect.signature(store.save).parameters
     except (TypeError, ValueError):
         return False
-    return "inbox_acked" in parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+    # By name only: a save that takes ``**kwargs`` may not hand them on, and an ack it drops would leave the items
+    # in the inbox, to be pulled again.
+    return "inbox_acked" in parameters
 
 
 def _with_note(prompt: Message, note: str) -> Message:
@@ -925,10 +929,14 @@ class ChatSession:
         self._inbox_task: asyncio.Task | None = None
         self._acks_with_save = _acks_in_its_saves(session_store)
         self._inbox_unacked: dict[str, None] = {}
-        self._inbox_seen: deque[str] = deque(
-            maxlen=max(MAX_INBOX_ITEMS, getattr(session_store, "max_inbox_items", 0) or 0)
-        )
+        window = max(MAX_INBOX_ITEMS, getattr(session_store, "max_inbox_items", 0) or 0)
+        self._inbox_seen: deque[str] = deque(maxlen=window)
+        # With a store that acks in its saves: the last ids applied here, also once acked (in memory only), so that
+        # one a pull hands out again is not applied again (see _inbox_applied).
+        self._inbox_recent: deque[str] = deque(maxlen=window)
         self._inbox_cuts: list[tuple[SessionEvent, SendMode | None, int]] = []
+        # The drain and apply_queued() apply one item at a time, in the order the store holds them.
+        self._inbox_lock = asyncio.Lock()
         # When the request that last confirmed the lease was sent (monotonic): the store counted the lease
         # from no earlier than that, so it holds at least until this plus `lease_ttl_s`.
         self._lease_from: float | None = None
@@ -2772,6 +2780,10 @@ class ChatSession:
                 raise
             for item_id in acks or ():
                 self._inbox_unacked.pop(item_id, None)  # acked, with the effect it had
+            if self._inbox_cuts:
+                # A queued now / interrupt message this save stored cuts now, whoever made the save (a step of its
+                # own: cutting cancels a turn, which this loop is not the place for).
+                asyncio.get_running_loop().call_soon(self._cut_stored)
             if created:
                 # Inserted with this process's lease, in the same write (ChatSessionStore.save): the row never
                 # exists without an owner, and there is no second write that could fail and leave it so.
@@ -2830,15 +2842,45 @@ class ChatSession:
                 self._inbox_seen.append(item_id)
 
     def _inbox_applied(self, item_id: str) -> bool:
-        return item_id in self._inbox_unacked or item_id in self._inbox_seen
+        if item_id in self._inbox_unacked or item_id in self._inbox_seen:
+            return True
+        if item_id in self._inbox_recent:
+            # Applied here, and acked by the save that stored it, yet pulled again: a pull that read the inbox
+            # before that save committed, or a store that did not take the ack. Not applied again: the next save
+            # acks it again (nothing, for one already gone).
+            self._inbox_unacked[item_id] = None
+            return True
+        return False
 
     def _mark_applied(self, item_id: str) -> None:
         """Called in the same step as the item's effect (nothing awaits in between): no snapshot holds one without
         the other."""
         if self._acks_with_save:
             self._inbox_unacked[item_id] = None
+            self._inbox_recent.append(item_id)
         else:
             self._inbox_seen.append(item_id)
+
+    async def apply_queued(self) -> None:
+        """Apply what other processes queued for the session and the drain has not taken yet, without waiting for
+        more. A route calls it before it takes a request itself: an item queued before that request (its sender
+        had its ``202``) comes before it, also when the drain has not seen it yet (another process's post reaches
+        a waiting pull at the watch's next look). Nothing to do without a store that has an inbox, or the lease;
+        a pull that fails is left to the drain."""
+        store = self._session_store
+        if store is None or not store.supports_inbox or not self._leased or self.closed or self._lost:
+            return
+        try:
+            items = await store.pull_inbox(self.id, process_owner())
+        except Exception as e:
+            logger.warning("chat_session_inbox_pull_failed", session_id=self.id, error=str(e))
+            return
+        if not items:
+            return
+        async with self._inbox_lock:
+            _, fresh, _ = await self._take_items(items)
+        if fresh:
+            self._persist()  # stored with the caller's own change (and acked with it, by a store that acks so)
 
     async def _drain_inbox(self) -> None:
         """Apply what other processes queued for the session (a message, a wake, a message from another agent sent
@@ -2852,6 +2894,7 @@ class ChatSession:
         store = self._session_store
         assert store is not None
         owner = process_owner()
+        stale = 0
         while not self.closed and not self._lost:
             try:
                 items = await store.pull_inbox(self.id, owner, wait_s=_INBOX_WAIT_S)
@@ -2866,16 +2909,33 @@ class ChatSession:
                 continue
             if not items:
                 continue
-            taken, fresh = [], False
-            for item in items:
-                item_id = str(item.get("id"))
-                if not self._inbox_applied(item_id):
-                    if self.closed or self._lost or not await self._apply_inbox(item_id, item):
-                        return  # the session closed: the rest is left for its next owner
-                    fresh = True
-                taken.append(item_id)
-            if not await self._inbox_stored(store, owner, taken, fresh=fresh):
-                await asyncio.sleep(_INBOX_RETRY_S)  # pulled again then: what it applied is not applied twice
+            async with self._inbox_lock:
+                taken, fresh, outcome = await self._take_items(items)
+            if outcome is _INBOX_CLOSED:
+                return  # the session closed: the rest is left for its next owner
+            stored = await self._inbox_stored(store, owner, taken, fresh=fresh)
+            stale = 0 if fresh else stale + 1
+            if not stored or outcome is _INBOX_LATER or stale > 1:
+                # Pulled again then: what it applied is not applied twice. Nothing new twice in a row: the items
+                # wait for an ack that has not landed, and a pull at once would hand the same ones out again.
+                await asyncio.sleep(_INBOX_RETRY_S)
+
+    async def _take_items(self, items: list[dict[str, Any]]) -> tuple[list[str], bool, object]:
+        """Apply, in order, the pulled items not applied yet (under ``_inbox_lock``: the drain and
+        :meth:`apply_queued` take turns). The ids taken (applied now or before), whether any was new, and why it
+        stopped early, if it did (``_INBOX_CLOSED``, ``_INBOX_LATER``: the item and those after it wait)."""
+        taken, fresh = [], False
+        for item in items:
+            item_id = str(item.get("id"))
+            if not self._inbox_applied(item_id):
+                if self.closed or self._lost:
+                    return taken, fresh, _INBOX_CLOSED
+                outcome = await self._apply_inbox(item_id, item)
+                if outcome is not _INBOX_APPLIED:
+                    return taken, fresh, outcome
+                fresh = True
+            taken.append(item_id)
+        return taken, fresh, _INBOX_APPLIED
 
     async def _inbox_stored(self, store: ChatSessionStore, owner: str, ids: list[str], *, fresh: bool) -> bool:
         """Store what the items did and have them acked. False: they stay queued (stored or acked not yet)."""
@@ -2885,14 +2945,7 @@ class ChatSession:
             await self.flush()
         except (SessionNotStored, SessionLeased):
             return False
-        waiting = []
-        for event, mode, mark in self._inbox_cuts:
-            if self.stored_since(mark):
-                self.cut_for(event, mode)  # as a route does once the message is stored
-            else:
-                waiting.append((event, mode, mark))
-        self._inbox_cuts = waiting
-        if self._acks_with_save or self.closed or self._lost:
+        if self._acks_with_save or self.closed or self._lost or not ids:
             return True
         try:
             await store.ack_inbox(self.id, owner, ids)
@@ -2906,10 +2959,23 @@ class ChatSession:
             return False
         return True
 
-    async def _apply_inbox(self, item_id: str, item: dict[str, Any]) -> bool:
-        """One queued item, as the route that queued it would have taken it here. True once it is marked applied
-        (with its effect, or refused: logged, and acked so that it never comes back; its sender was told only
-        that it was queued); False when the session closed first, which leaves it for the next owner."""
+    def _cut_stored(self) -> None:
+        """Cut for the queued ``now`` / ``interrupt`` messages the store holds now, as a route does once its message
+        is stored: after any save that covers one (not only the drain's own)."""
+        waiting = []
+        for event, mode, mark in self._inbox_cuts:
+            if self.stored_since(mark):
+                self.cut_for(event, mode)
+            else:
+                waiting.append((event, mode, mark))
+        self._inbox_cuts = waiting
+
+    async def _apply_inbox(self, item_id: str, item: dict[str, Any]) -> object:
+        """One queued item, as the route that queued it would have taken it here. ``_INBOX_APPLIED`` once it is
+        marked applied (with its effect, or refused: logged, and acked so that it never comes back; its sender was
+        told only that it was queued); ``_INBOX_CLOSED`` when the session closed first, which leaves it for the
+        next owner; ``_INBOX_LATER`` when it cannot be taken now (the loop that serves the session is not
+        running), which leaves it for the next round."""
         from .peers import PeerRejected
 
         kind, body = item.get("kind"), item.get("body")
@@ -2950,14 +3016,18 @@ class ChatSession:
             else:
                 raise ValueError(f"unknown inbox kind {kind!r}")
         except Exception as e:
-            if self.closed or (isinstance(e, PeerRejected) and e.reason == "closed"):
-                return False
+            if self.closed:
+                return _INBOX_CLOSED
+            if isinstance(e, PeerRejected) and e.reason == "closed":
+                # The session is open, and the loop that serves it is not running (receive_agent_message): it is
+                # not refused, it waits for that loop.
+                return _INBOX_LATER
             self._mark_applied(item_id)
             logger.warning("chat_session_inbox_item_refused", session_id=self.id, inbox_id=item_id, error=str(e))
             self._record("inbox_refused", inbox_id=item_id, item_kind=kind, error=str(e))
-            return True
+            return _INBOX_APPLIED
         self._record("inbox_item", inbox_id=item_id, item_kind=kind, **done)
-        return True
+        return _INBOX_APPLIED
 
     async def _keep_lease(self) -> None:
         """Renew the lease every third of it, and stop the session when it runs out unrenewed.

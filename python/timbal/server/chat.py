@@ -241,7 +241,7 @@ def _idempotency_key(request: Request) -> str | None:
 async def _queue(
     request: Request,
     session_id: str,
-    held: _HeldElsewhere,
+    held: _HeldElsewhere | None,
     kind: str,
     item: dict[str, Any],
     *,
@@ -252,10 +252,12 @@ async def _queue(
     stores it before it is acked. A store without an inbox: the ``409`` as before.
 
     ``key`` (the ``Idempotency-Key`` header unless the route derives one): a repeat is the same item, for a day
-    after its ack too. A full inbox is a ``429``. A store that does not answer, or fails: ``503``, with
-    ``Retry-After`` only when a retry cannot queue it twice (it carries a key)."""
+    after its ack too. A full inbox is a ``429``. A store that does not answer, or fails: ``503`` without
+    ``Retry-After`` (the route's rule: only when nothing was accepted, and the post may have landed); a retry
+    with the same key is the same item."""
     store = _store(request)
     if store is None or not store.supports_inbox:
+        assert held is not None  # (a request this process serves comes here only with a store that has an inbox)
         raise held
     timeout = _store_timeout()
     try:
@@ -270,14 +272,12 @@ async def _queue(
         hung = isinstance(e, TimeoutError)
         why = f"The session store did not answer within {timeout:g} s" if hung else f"The session store failed: {e}"
         logger.error("chat_session_inbox_post_failed", session_id=session_id, kind=kind, error=why)
-        if key is not None:
-            raise HTTPException(
-                status_code=503, detail=f"{why}. Retry with the same Idempotency-Key.", headers=_RETRY
-            ) from e
-        raise HTTPException(
-            status_code=503,
-            detail=f"{why}. It may have been queued: do not resend (send an Idempotency-Key to make a retry safe).",
-        ) from e
+        then = (
+            "a retry with the same Idempotency-Key is the same item"
+            if key is not None
+            else "do not resend (an Idempotency-Key makes a retry safe)"
+        )
+        raise HTTPException(status_code=503, detail=f"{why}. It may have been queued: {then}.") from e
     return _json({"queued": "inbox", "inbox_id": inbox_id, "session_id": session_id}, status_code=202)
 
 
@@ -448,7 +448,7 @@ async def _retry_restores(app: Any, agent: Any, store: ChatSessionStore, session
                 continue
             try:
                 snapshot = await asyncio.wait_for(store.load(session_id), _STARTUP_DISCOVERY_S)
-                if snapshot is None or not snapshot.has_work():
+                if snapshot is None or not (snapshot.has_work() or await _has_items(store, session_id)):
                     waiting.remove(session_id)
                     continue
                 # Shielded (_restore_once): given up here, it goes on, and its session is in the map (found
@@ -472,6 +472,14 @@ async def _retry_restores(app: Any, agent: Any, store: ChatSessionStore, session
             else:
                 waiting.remove(session_id)
                 logger.info("chat_session_restored_late", session_id=session_id)
+
+
+async def _has_items(store: ChatSessionStore, session_id: str) -> bool:
+    """Whether items wait in the session's inbox: what ``list_ids(with_work=True)`` counts as work too (the store
+    lists; nothing but the lease holder may pull)."""
+    if not store.supports_inbox:
+        return False
+    return session_id in await asyncio.wait_for(store.list_ids(with_work=True), _STARTUP_DISCOVERY_S)
 
 
 def _agent(request: Request) -> Any:
@@ -769,20 +777,18 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
     """Send a user message: ``{"text", "mode"?}`` (``steer`` | ``followup`` | ``collect`` | ``interrupt``).
 
     For a session another worker serves: queued for it (``202 {"queued": "inbox", "inbox_id"}``, see
-    :func:`_queue`; ``Idempotency-Key`` makes a retry the same message)."""
-    try:
-        session = await _session(request, session_id)
-    except _HeldElsewhere as held:
-        text, mode = _message_fields(await _body(request))
+    :func:`_queue`). With an ``Idempotency-Key`` it goes through the store's inbox here too, so that a retry is
+    the same message whichever worker it reaches."""
+    session, held, key = await _session_or_held(request, session_id)
+    text, mode = _message_fields(await _body(request))
+    if session is None or key is not None:
         if mode is not None and mode not in SEND_MODES:
             # What send() refuses there, refused here: the worker that applies it can tell nobody.
-            raise HTTPException(
-                status_code=400, detail=f"mode must be one of {list(SEND_MODES)}, got {mode!r}"
-            ) from None
-        return await _queue(
-            request, session_id, held, "message", {"text": text, "mode": mode}, key=_idempotency_key(request)
-        )
-    text, mode = _message_fields(await _body(request))
+            raise HTTPException(status_code=400, detail=f"mode must be one of {list(SEND_MODES)}, got {mode!r}")
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="A session event needs non-empty text.")  # (as send())
+        return await _queue(request, session_id, held, "message", {"text": text, "mode": mode}, key=key)
+    await session.apply_queued()  # what other workers queued before this comes first
     busy = session.busy
     try:
         # The message is only queued here: 'now' and 'interrupt' cut the running turn once it is stored, so a
@@ -799,6 +805,26 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
         {"message": {**event.receipt(), "text": event.text}, "mode": mode or session.busy_mode, "busy": busy},
         status_code=202,
     )
+
+
+async def _session_or_held(
+    request: Request, session_id: str
+) -> tuple[ChatSession | None, _HeldElsewhere | None, str | None]:
+    """The session, or None and why when another live process serves it and the store has an inbox (the route
+    queues the request); and the request's ``Idempotency-Key``. Without an inbox the ``409`` comes first, before
+    the body is read, and the header is not looked at, as before the inbox."""
+    try:
+        session, held = await _session(request, session_id), None
+    except _HeldElsewhere as error:
+        if not _has_inbox(request):
+            raise
+        session, held = None, error
+    return session, held, _idempotency_key(request) if _has_inbox(request) else None
+
+
+def _has_inbox(request: Request) -> bool:
+    store = _store(request)
+    return store is not None and store.supports_inbox
 
 
 def _message_fields(body: dict[str, Any]) -> tuple[str, Any]:
@@ -829,15 +855,15 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
     ``accepts`` and guardrails are that worker's, and what they refuse there is
     dropped with a log line), then queued for it: ``202 {"queued": "inbox",
     "inbox_id"}``. A repeat of the same ``message_id`` from the same sender is
-    the same queued item (or ``Idempotency-Key``, which wins).
+    the same queued item. With an ``Idempotency-Key`` (which wins) it goes
+    through the store's inbox here too.
     """
     from ..core.peers import PeerRejected
 
-    try:
-        session = await _session(request, session_id)
-    except _HeldElsewhere as held:
-        body = await _body(request)
-        sender, text, hops = _agent_message_fields(body)
+    session, held, key = await _session_or_held(request, session_id)
+    body = await _body(request)
+    sender, text, hops = _agent_message_fields(body)
+    if session is None or key is not None:
         try:
             _, sender, message_id, _ = check_agent_message(
                 text,
@@ -851,14 +877,12 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
             return JSONResponse(
                 status_code=_REJECTED_STATUS.get(e.reason, 422), content={"detail": str(e), "reason": e.reason}
             )
-        key = _idempotency_key(request)
         if key is None and message_id is not None:
             key = f"agent_message:{sender}:{message_id}"  # (at most 207 characters: a name, an id)
         item = {name: body.get(name) for name in ("from", "text", "message_id", "reply_to")}
         item.update(priority=body.get("priority") or "normal", hops=hops)
         return await _queue(request, session_id, held, "agent_message", item, key=key)
-    body = await _body(request)
-    sender, text, hops = _agent_message_fields(body)
+    await session.apply_queued()  # what other workers queued before this comes first
     try:
         receipt = await session.receive_agent_message(
             text,
@@ -902,14 +926,13 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
     is merged into the turn's root ``metadata.trigger`` (a routine fire's ids).
 
     For a session another worker serves: checked as the session would check it,
-    then queued for it (``202 {"queued": "inbox", "inbox_id"}``;
-    ``Idempotency-Key`` makes a retry the same wake).
+    then queued for it (``202 {"queued": "inbox", "inbox_id"}``). With an
+    ``Idempotency-Key`` it goes through the store's inbox here too.
     """
-    try:
-        session = await _session(request, session_id)
-    except _HeldElsewhere as held:
-        body = await _body(request)
-        text, policy, trigger = _wake_fields(body)
+    session, held, key = await _session_or_held(request, session_id)
+    body = await _body(request)
+    text, policy, trigger = _wake_fields(body)
+    if session is None or key is not None:
         try:
             check_wake(text, key=body.get("key"), tool_policy=policy, trigger=trigger)
         except (ValueError, TypeError) as e:
@@ -921,9 +944,8 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
             "silent_ok": bool(body.get("silent_ok", True)),
             "trigger": trigger,
         }
-        return await _queue(request, session_id, held, "wake", item, key=_idempotency_key(request))
-    body = await _body(request)
-    text, policy, trigger = _wake_fields(body)
+        return await _queue(request, session_id, held, "wake", item, key=key)
+    await session.apply_queued()  # what other workers queued before this comes first
     try:
         wake_id = session.wake(
             text,
