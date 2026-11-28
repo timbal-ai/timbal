@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .agicap import AgicapAuth, AgicapMCP
     from .aircall import (
         AircallCreateContact,
         AircallGetCall,
@@ -744,6 +745,7 @@ if TYPE_CHECKING:
         OutlookUpdateEmail,
     )
     from .parallel import ParallelExtract, ParallelSearch, ParallelTaskRun
+    from .payhawk import PayhawkAuth, PayhawkMCP
     from .pinecone import (
         PineconeCreateIndex,
         PineconeDeleteVectors,
@@ -2489,6 +2491,10 @@ __all__ = [
     "HappyScribeListStyleGuides",
     "HappyScribeListTranscriptions",
     "HappyScribeUploadFile",
+    "AgicapAuth",
+    "AgicapMCP",
+    "PayhawkAuth",
+    "PayhawkMCP",
     "HiggsfieldCancelRequest",
     "HiggsfieldCheckStatus",
     "HiggsfieldExpandImage",
@@ -3798,6 +3804,10 @@ _LAZY_IMPORTS = {
     "HappyScribeListStyleGuides": ".happy_scribe",
     "HappyScribeListTranscriptions": ".happy_scribe",
     "HappyScribeUploadFile": ".happy_scribe",
+    "AgicapAuth": ".agicap",
+    "AgicapMCP": ".agicap",
+    "PayhawkAuth": ".payhawk",
+    "PayhawkMCP": ".payhawk",
     "HiggsfieldCancelRequest": ".higgsfield",
     "HiggsfieldCheckStatus": ".higgsfield",
     "HiggsfieldExpandImage": ".higgsfield",
