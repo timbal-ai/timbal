@@ -51,6 +51,81 @@ class TestFromFqn:
             ImportSpec.from_fqn("main.py")
 
 
+class TestHomeExpansion:
+    def test_tilde_workspace_base(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        spec = ImportSpec.from_fqn("entry.py::handler", base_path=Path("~/project"))
+        assert spec.path == tmp_path / "project" / "entry.py"
+
+    @pytest.mark.parametrize("name", ["~definitely_not_a_user_734.py", "~definitely_not_a_user_734/entry.py"])
+    def test_literal_tilde_name_in_workspace(self, tmp_path, name):
+        spec = ImportSpec.from_fqn(name + "::handler", base_path=tmp_path)
+        assert spec.path == tmp_path / name
+
+    def test_literal_tilde_name_with_dot_base(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        spec = ImportSpec.from_fqn("~draft.py::handler", base_path=Path("."))
+        assert spec.path == tmp_path / "~draft.py"
+
+    def test_dot_prefixed_home_component_is_literal(self, tmp_path):
+        spec = ImportSpec.from_fqn("./~/entry.py::handler", base_path=tmp_path)
+        assert spec.path == tmp_path / "~" / "entry.py"
+
+    @pytest.mark.parametrize("fqn,base", [("~/entry.py::handler", None), ("entry.py::handler", Path("~/project"))])
+    def test_unresolvable_home_raises_value_error(self, monkeypatch, fqn, base):
+        def unavailable_home(_path):
+            raise RuntimeError("Could not determine home directory.")
+
+        monkeypatch.setattr(Path, "expanduser", unavailable_home)
+        with pytest.raises(ValueError, match="[Hh]ome"):
+            ImportSpec.from_fqn(fqn, base_path=base)
+
+    @pytest.mark.parametrize("with_base", [False, True])
+    def test_home_entry_point_can_be_loaded(self, tmp_path: Path, monkeypatch, with_base):
+        home = tmp_path / "home"
+        home.mkdir()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        entry = home / "home_entry.py"
+        entry.write_text("handler = 42\n")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        # load() intentionally retains its module and import path.
+        monkeypatch.setattr(sys, "path", list(sys.path))
+        monkeypatch.delitem(sys.modules, "home_entry", raising=False)
+        base = workspace if with_base else None
+
+        spec = ImportSpec.from_fqn("~/home_entry.py::handler", base_path=base)
+
+        assert spec.path == entry
+        try:
+            assert spec.load() == 42
+        finally:
+            sys.modules.pop("home_entry", None)
+
+    def test_codegen_reads_home_entry_point_from_yaml(self, tmp_path: Path, monkeypatch):
+        from timbal.codegen import parse_fqn
+
+        home = tmp_path / "home"
+        home.mkdir()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "timbal.yaml").write_text("fqn: '~/entry.py::handler'\n")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+
+        assert parse_fqn(workspace).path == home / "entry.py"
+
+    @pytest.mark.parametrize("absolute", [False, True])
+    def test_workspace_and_absolute_paths_keep_their_meaning(self, tmp_path: Path, absolute):
+        workspace = tmp_path / "workspace"
+        target = tmp_path / "elsewhere.py" if absolute else workspace / "entry.py"
+        supplied = str(target) if absolute else "entry.py"
+
+        assert ImportSpec.from_fqn(supplied + "::handler", base_path=workspace).path == target
+
+
 class TestLoad:
     def test_returns_target(self, workforce: Path):
         handler = ImportSpec.from_fqn("main.py::handler", base_path=workforce).load()
