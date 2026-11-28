@@ -272,6 +272,12 @@ def _check_agent_text(text: Any) -> str:
     return text
 
 
+def _inbox_event_id(item_id: str) -> str:
+    """The id of the event an inbox item becomes: the item's own (``in_…``), so that what a turn's stored memory
+    shows it took (``metadata.event_ids``) names the item too, whatever process applied it."""
+    return item_id if item_id.startswith("in_") else f"in_{item_id}"
+
+
 def _acks_in_its_saves(store: ChatSessionStore | None) -> bool:
     """Whether a session acks its inbox items in the saves that store them (``save(..., inbox_acked=)``): the store
     says it does, and its ``save`` takes the argument. A subclass written before it, whose ``save`` does not,
@@ -1019,6 +1025,11 @@ class ChatSession:
         ``defer_cut``: ``now`` and ``interrupt`` only queue the message; the caller cuts the running turn
         with :meth:`cut_for` once the message is stored (a route that may still answer "not accepted").
         """
+        return self._send(text, mode=mode, defer_cut=defer_cut)
+
+    def _send(
+        self, text: str, *, mode: SendMode | None = None, defer_cut: bool = False, event_id: str | None = None
+    ) -> SessionEvent:
         if self.closed:
             raise RuntimeError("The chat session is closed.")
         mode = mode or self.busy_mode
@@ -1026,10 +1037,14 @@ class ChatSession:
             raise ValueError(f"mode must be one of {list(SEND_MODES)}, got {mode!r}")
         busy = self.busy
         if mode == "interrupt":
-            event = self._store.post_event(text, source="user", mode="followup", announce="interrupt")
+            event = self._store.post_event(
+                text, source="user", mode="followup", announce="interrupt", event_id=event_id
+            )
         else:
             # 'now' joins the running turn like steer, after cutting what is in flight.
-            event = self._store.post_event(text, source="user", mode="steer" if mode == "now" else mode)
+            event = self._store.post_event(
+                text, source="user", mode="steer" if mode == "now" else mode, event_id=event_id
+            )
         self.last_activity = time.monotonic()
         self._record("message", event_id=event.id, text=event.text, mode=mode, busy=busy)
         self._watch(event)
@@ -1235,6 +1250,7 @@ class ChatSession:
         reply_to: str | None = None,
         priority: "PeerPriority" = "normal",
         hops: int = 0,
+        event_id: str | None = None,
     ) -> dict[str, Any]:
         """:meth:`receive_agent_message`, on the session's own loop.
 
@@ -1300,7 +1316,7 @@ class ChatSession:
             # Urgent is the steering lane, and nothing more: no 'interrupt' policy, which would let another
             # agent's model cut a reply in flight (a call that shares this session speaks its events).
             event = self._store.post_event(
-                screened, source="agent", peer=peer, lane="next" if priority == "urgent" else "later"
+                screened, source="agent", peer=peer, lane="next" if priority == "urgent" else "later", event_id=event_id
             )
         except ValueError as e:
             raise PeerRejected("invalid", str(e)) from None
@@ -2979,6 +2995,13 @@ class ChatSession:
         from .peers import PeerRejected
 
         kind, body = item.get("kind"), item.get("body")
+        event_id = _inbox_event_id(item_id)
+        if event_id in self._shown_events:
+            # A turn of the process that died took it (steered into a running turn, its trace stored) before the
+            # snapshot that would have acked it landed: it was applied. Acked now, not applied again.
+            self._mark_applied(item_id)
+            self._record("inbox_item", inbox_id=item_id, item_kind=kind, event_id=event_id, taken_before=True)
+            return _INBOX_APPLIED
         try:
             if not isinstance(body, dict):
                 raise ValueError("an inbox item's body must be an object")
@@ -2986,7 +3009,7 @@ class ChatSession:
                 raise ValueError("an inbox item's text must be a string")
             if kind == "message":
                 mode = body.get("mode") or None
-                event = self.send(body["text"], mode=mode, defer_cut=True)
+                event = self._send(body["text"], mode=mode, defer_cut=True, event_id=event_id)
                 self._mark_applied(item_id)
                 if (mode or self.busy_mode) in ("now", "interrupt"):
                     self._inbox_cuts.append((event, mode, self._changes))
@@ -3003,14 +3026,17 @@ class ChatSession:
                 done = {"wake_id": wake_id}
             elif kind == "agent_message":
                 hops = body.get("hops", 0)
-                receipt = await self.receive_agent_message(
-                    body["text"],
-                    sender=body.get("from"),
-                    message_id=body.get("message_id"),
-                    reply_to=body.get("reply_to"),
-                    priority=body.get("priority") or "normal",
-                    hops=0 if hops is None else hops,
-                )
+                fields = {
+                    "sender": body.get("from"),
+                    "message_id": body.get("message_id"),
+                    "reply_to": body.get("reply_to"),
+                    "priority": body.get("priority") or "normal",
+                    "hops": 0 if hops is None else hops,
+                }
+                if self._loop is None or self._loop is _running_loop():
+                    receipt = await self._receive_agent_message(body["text"], **fields, event_id=event_id)
+                else:  # (the session is served on another loop: handed over there, with an id of its own)
+                    receipt = await self.receive_agent_message(body["text"], **fields)
                 self._mark_applied(item_id)  # (from its post to here nothing awaits)
                 done = {"event_id": receipt["event_id"], "duplicate": receipt["duplicate"]}
             else:

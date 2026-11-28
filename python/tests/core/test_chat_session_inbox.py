@@ -598,3 +598,50 @@ class TestACutAfterAWriteThatFailed:
         assert turn.done() and landed
         monkeypatch.setattr(store, "save", real_save)
         await session.close()
+
+
+class TestTakenByATurnBeforeItsSnapshotLanded:
+    @pytest.mark.parametrize("store_class", [SqliteChatSessionStore, AcksApart], ids=["acks in the save", "acks apart"])
+    async def test_an_item_a_dead_turn_took_is_not_applied_again(self, tmp_path, monkeypatch, store_class):
+        """Steered into the running turn, the item reached that turn's trace before the snapshot holding it (and
+        its ack) landed; the process died. Pulled again by the next process, it is the event the dead run's
+        memory shows (the item's own id): acked, not applied a second time."""
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "timbal.db")
+        store = store_class(tmp_path / "timbal.db")
+        store.inbox_poll_s = 0.01
+        gate = Gate()
+        session = await stored_session(provider, store, gate)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 30)  # the turn's call is stored, and runs
+        real_save = store.save
+
+        async def away(_snapshot, **_kwargs):
+            raise OSError("the session store is unreachable")
+
+        monkeypatch.setattr(store, "save", away)
+        await store.post_inbox(session.id, "message", {"text": "also", "mode": "steer"})
+        await records(session, "inbox_item")
+        run_id = session._turn_context.id
+        gate.release.set()  # the turn takes the message after its call, answers, and its trace is stored
+
+        async def shown():
+            from timbal.state import RunContext
+
+            while True:
+                trace = await provider.get(RunContext(parent_id=run_id, tracing_provider=provider))
+                memory = trace.get_path("agent")[0].memory if trace is not None else None
+                texts = [b.get("text") for m in memory or [] for b in m.get("content") or [] if isinstance(b, dict)]
+                if "also" in texts:
+                    return
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(shown(), 30)  # the turn's stored memory shows the item; its snapshot is not stored
+        await kill(session)
+        monkeypatch.setattr(store, "save", real_save)
+
+        restored = await ChatSession.from_store(make_agent(provider), store, session.id)
+        await acked(store, restored.id)
+        await idle(restored)
+        said = [t for t in await history(provider, restored) if t == "also"]
+        assert said == ["also"]  # once, by the turn that died
+        await restored.close()
