@@ -753,6 +753,40 @@ class TestPlatformConnectionPerRun:
             runner.run(asyncio.wait_for(service.close(), 30))
             assert opened[0][0]._session is None and not service._run_connections
 
+    def test_a_stream_closed_from_another_loop_after_close_ends_quietly(self, platform):
+        """As above, but ``close()`` on the Runner's loop closed the run's connection first: the run's end on the other
+        loop has nothing left to close, so its hook returns instead of raising a failure the run logs
+        (``run_end_hook_failed``, saying the connection still had to close; review on #334)."""
+        import structlog
+        from timbal import Tool
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        opened, _ = platform
+        service = MCPServer(transport="http", service="api")
+
+        async def streamer():
+            await service.resolve()
+            yield "first"
+            await asyncio.Event().wait()
+
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        stream = Tool(name="streamer", handler=streamer)._stream()
+
+        async def read_first():
+            async for event in stream:
+                if event.type == "DELTA":
+                    return
+
+        with asyncio.Runner() as runner:
+            runner.run(asyncio.wait_for(read_first(), 30))
+            runner.run(asyncio.wait_for(service.close(), 30))
+            assert opened[0][0]._session is None and not service._run_connections and not service._unclosed
+            with structlog.testing.capture_logs() as logs:
+                asyncio.run(asyncio.wait_for(stream.aclose(), 10))  # from another loop, the owner paused
+            assert not [entry for entry in logs if entry.get("event") == "run_end_hook_failed"], logs
+
     @pytest.mark.asyncio
     async def test_outside_a_run_each_call_closes_its_own(self, platform):
         opened, _ = platform
@@ -1987,6 +2021,40 @@ class TestCloseOnAnotherLoop:
         finally:
             stop()
 
+    @pytest.mark.parametrize("left", ["nothing", "a cut connection", "a close still going"])
+    def test_a_runs_end_on_another_loop_refuses_only_while_the_run_has_something_to_close(self, left):
+        """The run's end on another loop than the run's: with nothing of the run's left (a close() on its loop closed it
+        all), it returns, so the run logs no failure (review on #334); with a connection whose close was cut, or a
+        close still going there, it raises as when the connection is pooled."""
+        from timbal.core.mcp import _RunConnection
+
+        owner_loop, stop = self.owner_thread()
+        service = MCPServer(transport="http", service="api")
+        try:
+            if left == "a cut connection":
+                cut = _RunConnection(object(), "fingerprint", owner_loop)
+                service._unclosed[id(cut)] = ("run", cut)
+            elif left == "a close still going":
+                service._run_closes["run"] = {owner_loop.create_future()}
+            elif left == "nothing":
+                done = owner_loop.create_future()
+                owner_loop.call_soon_threadsafe(done.set_result, None)
+                asyncio.run_coroutine_threadsafe(asyncio.sleep(0), owner_loop).result(10)
+                service._run_closes["run"] = {done}  # one that finished, its record not dropped yet
+            service._run_hooked["run"] = owner_loop
+
+            async def end_the_run():
+                return service._run_ended("run", owner_loop)
+
+            if left == "nothing":
+                assert asyncio.run(asyncio.wait_for(end_the_run(), 10)) is None
+            else:
+                with pytest.raises(RuntimeError, match=self.OWNS):
+                    asyncio.run(asyncio.wait_for(end_the_run(), 10))
+            assert "run" not in service._run_hooked
+        finally:
+            stop()
+
     def test_a_run_ended_elsewhere_as_its_first_call_registers_the_hook_is_refused(self, monkeypatch):
         """Another loop closes the run's stream right after the run's first call registered the end hook, before that
         call went on. The hook knows the run's loop from its registration: it is refused there, the connection is
@@ -2188,46 +2256,70 @@ class TestCloseOnAnotherLoop:
         assert not errors and not service._run_connections
 
 
-class TestInflightCallsPerLoop:
+class TestInflightCallsPerSession:
     """The records of the ``tools/call``s in flight (``_inflight``), which the elicitation and sampling callbacks read
-    to find the call that asked: each belongs to its call's loop."""
+    to find the call that asked. A record lives as long as its call (a ``close()`` keeps it); a server request on a
+    session counts only the calls whose request is outstanding on that session (``_InflightCall.session``)."""
 
     QUESTION = {"message": "Which one?", "requestedSchema": {"type": "object", "properties": {}}}
 
     @staticmethod
-    def left_behind(server):
-        """A call begun on a loop that then stopped without closing (an abandoned ``run_until_complete``): its record
-        stays, since a close() cannot tell that loop from an ``asyncio.Runner`` between two ``run()`` calls."""
-        import threading
+    def on(session):
+        """The request context the SDK hands a callback: the session the server's request arrived on."""
+        from types import SimpleNamespace
 
-        stopped, begun = asyncio.new_event_loop(), []
+        return SimpleNamespace(session=session)
 
-        async def begin():
-            begun.append(server._begin_call("left_behind"))
+    @staticmethod
+    def sent_on(call, session):
+        """The call's request sent on ``session``, as ``_request`` notes it."""
+        call.session = session
+        return call
 
-        thread = threading.Thread(target=stopped.run_until_complete, args=(begin(),))
-        thread.start()
-        thread.join(10)
-        return stopped, begun[0]
+    @staticmethod
+    def asking_session(server, on):
+        """A session whose ``tools/call`` of ``ask`` makes the server ask the question first (it answers with what the
+        client said); any other tool just answers."""
+
+        class Session:
+            async def call_tool(self, name, **_request):
+                if name != "ask":
+                    return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text="done")])
+                params = mcp_types.ElicitRequestFormParams(**TestInflightCallsPerSession.QUESTION)
+                answer = await on(self)(server._on_elicitation, params)
+                return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=answer.action)])
+
+        return Session
+
+    @staticmethod
+    def assert_asked(result):
+        """The question reached the call: its run stopped for the answer, instead of the tool completing on a
+        ``cancel`` it never showed."""
+        assert result.status.reason == "input_required", (result.status, result.output)
+        assert result.output["kind"] == "mcp_elicitation" and result.output["payload"]["message"] == "Which one?"
 
     @pytest.mark.asyncio
-    async def test_an_elicitation_counts_only_the_calls_on_its_loop(self):
-        """A record another loop left behind does not make the lone call here ambiguous: the question goes to that
-        call (outside a run it is declined), not answered ``cancel`` for two calls in flight."""
+    async def test_an_elicitation_counts_only_the_calls_with_a_request_on_its_session(self):
+        """A call still waiting to send (in ``auth.prepare()``, or to connect) and one sent on another session are not
+        counted: the question goes to the one call whose request is on its session (outside a run it is declined),
+        not answered ``cancel`` for three calls in flight. Two calls sent on that session are ambiguous, as before."""
         server = MCPServer(transport="stdio", command="unused")
-        stopped, left = self.left_behind(server)
-        try:
-            call = server._begin_call("ask")
-            result = await server._on_elicitation(None, mcp_types.ElicitRequestFormParams(**self.QUESTION))
-            assert result.action == "decline"
-            assert call.ambiguous_with == 0 and left.ambiguous_with == 0
-        finally:
-            stopped.close()
+        session, other = object(), object()
+        asking = self.sent_on(server._begin_call("ask"), session)
+        waiting = server._begin_call("waiting")
+        elsewhere = self.sent_on(server._begin_call("elsewhere"), other)
+        result = await server._on_elicitation(self.on(session), mcp_types.ElicitRequestFormParams(**self.QUESTION))
+        assert result.action == "decline"
+        assert asking.ambiguous_with == waiting.ambiguous_with == elsewhere.ambiguous_with == 0
+        also = self.sent_on(server._begin_call("also"), session)
+        result = await server._on_elicitation(self.on(session), mcp_types.ElicitRequestFormParams(**self.QUESTION))
+        assert result.action == "cancel" and asking.ambiguous_with == also.ambiguous_with == 2
+        assert waiting.ambiguous_with == elsewhere.ambiguous_with == 0
 
     @pytest.mark.asyncio
-    async def test_a_sampling_request_counts_only_the_calls_on_its_loop(self, monkeypatch):
-        """With a record another loop left behind, sampling still runs in the lone call's context here (its span
-        under the tool), not outside the run."""
+    async def test_a_sampling_request_counts_only_the_calls_with_a_request_on_its_session(self, monkeypatch):
+        """With another call still waiting to send, sampling runs in the context of the one call whose request is on
+        its session (its span under the tool), not outside the run."""
         import contextvars
 
         from timbal.core.test_model import TestModel
@@ -2239,21 +2331,93 @@ class TestInflightCallsPerLoop:
 
         monkeypatch.setattr(MCPServer, "_sample", sample)
         server = MCPServer(transport="stdio", command="unused", sampling_model=TestModel(responses=["unused"]))
-        stopped, _left = self.left_behind(server)
+        session = object()
+        server._begin_call("waiting")
+        token = whose.set("the call's")
+        self.sent_on(server._begin_call("ask"), session)  # its context is taken here
+        whose.reset(token)
+        params = mcp_types.CreateMessageRequestParams(messages=[], maxTokens=16)
+        result = await server._on_sampling(self.on(session), params)
+        assert result.content.text == "the call's"
+
+    @pytest.mark.asyncio
+    async def test_a_call_waiting_in_prepare_across_close_leaves_another_calls_question_to_it(self, monkeypatch):
+        """One loop: a call waits in ``auth.prepare()`` while close() runs, and outlives it (its record kept); another
+        call then opens a new session, and the server asks it a question. The question reaches that call, the first
+        one having sent nothing (counted, the two were ambiguous and the question answered ``cancel``; review on
+        #334). The first call then completes on the new session."""
+        import httpx
+
+        held, release = asyncio.Event(), asyncio.Event()
+
+        class Auth(httpx.Auth):
+            async def prepare(self):
+                if not held.is_set():
+                    held.set()
+                    await release.wait()  # the first call only: a token fetch that takes a while
+
+        def on(session):
+            return lambda callback, params: callback(self.on(session), params)
+
+        async def run_session(_self, ready, closed):
+            ready.set_result(session_class())
+            await closed.wait()
+
+        server = MCPServer(name="srv", transport="http", url="http://unused.test/mcp", auth=Auth())
+        session_class = self.asking_session(server, on)
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        await server._connect()
+        other = server._make_tool(mcp_types.Tool(name="other", inputSchema={"type": "object"}))
+        ask = server._make_tool(mcp_types.Tool(name="ask", inputSchema={"type": "object"}))
         try:
-            token = whose.set("the call's")
-            server._begin_call("ask")  # its context is taken here
-            whose.reset(token)
-            params = mcp_types.CreateMessageRequestParams(messages=[], maxTokens=16)
-            result = await server._on_sampling(None, params)
-            assert result.content.text == "the call's"
+            first = asyncio.create_task(other().collect())
+            await asyncio.wait_for(held.wait(), 10)
+            await asyncio.wait_for(server.close(), 10)
+            assert len(server._inflight) == 1  # the first call's record, kept
+            self.assert_asked(await asyncio.wait_for(ask().collect(), 10))
+            release.set()
+            assert (await asyncio.wait_for(first, 10)).output == "done"
         finally:
-            stopped.close()
+            release.set()
+            await server.close()
+
+    def test_a_call_on_another_loop_using_this_session_is_asked(self, monkeypatch):
+        """The tools were resolved, and the session opened, on a loop running in another thread; the tool is called on
+        this loop and its request goes out on that session, whose callbacks run on that loop. The question reaches
+        the call (it was answered ``cancel`` when only the calls of the callback's loop counted; review on #334)."""
+        import threading
+
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever)
+        thread.start()
+
+        def on(session):  # the SDK runs the callback on the session's receive loop: that thread's
+            return lambda callback, params: asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(callback(self.on(session), params), loop)
+            )
+
+        async def run_session(_self, ready, closed):
+            ready.set_result(session_class())
+            await closed.wait()
+
+        server = MCPServer(name="srv", transport="stdio", command="unused")
+        session_class = self.asking_session(server, on)
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        try:
+            asyncio.run_coroutine_threadsafe(server._connect(), loop).result(10)
+            ask = server._make_tool(mcp_types.Tool(name="ask", inputSchema={"type": "object"}))
+            self.assert_asked(asyncio.run(asyncio.wait_for(ask().collect(), 10)))
+        finally:
+            asyncio.run_coroutine_threadsafe(server.close(), loop).result(10)
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(10)
+            loop.close()
 
     def test_a_call_another_thread_began_is_asked_after_close_from_another_loop(self):
         """A call begun on a loop running in another thread, not connected yet: close() from this loop has nothing open
-        to refuse, and keeps that call's record. When the server's question arrives there, it reaches the call (its
-        payload recorded for the suspend), instead of finding no call and being answered ``cancel``."""
+        to refuse, and keeps that call's record. When the call has sent its request and the server's question
+        arrives on that session, it reaches the call (its payload recorded for the suspend), instead of finding no
+        call and being answered ``cancel`` (Bugbot on #334)."""
         import threading
         from types import SimpleNamespace
 
@@ -2261,6 +2425,7 @@ class TestInflightCallsPerLoop:
         thread = threading.Thread(target=loop.run_forever)
         thread.start()
         server = MCPServer(transport="stdio", command="unused")
+        session = object()
 
         async def begin():
             call = server._begin_call("ask")
@@ -2269,12 +2434,13 @@ class TestInflightCallsPerLoop:
             return call
 
         async def ask():
-            return await server._on_elicitation(None, mcp_types.ElicitRequestFormParams(**self.QUESTION))
+            return await server._on_elicitation(self.on(session), mcp_types.ElicitRequestFormParams(**self.QUESTION))
 
         try:
             call = asyncio.run_coroutine_threadsafe(begin(), loop).result(10)
             asyncio.run(asyncio.wait_for(server.close(), 10))
             assert list(server._inflight.values()) == [call]
+            self.sent_on(call, session)
             asyncio.run_coroutine_threadsafe(ask(), loop).result(10)
             assert call.pending_payload is not None and call.pending_payload["message"] == "Which one?"
         finally:
@@ -2286,27 +2452,24 @@ class TestInflightCallsPerLoop:
     async def test_a_call_waiting_to_connect_while_close_shuts_down_is_still_asked(self, monkeypatch):
         """One loop: close() is shutting the session down (it holds the session's lock) when a tool call begins and
         waits for that lock; it then reconnects, and the server asks a question during it. The question reaches the
-        call, whose run stops for the answer (reason ``input_required``), instead of being answered ``cancel`` for no call in
-        flight while the tool returns as if nothing was asked: close() dropped the record of a call that went on
-        (review on #334)."""
+        call, instead of being answered ``cancel`` for no call in flight while the tool returns as if nothing was
+        asked: close() dropped the record of a call that went on (review on #334)."""
         shutting_down, finish, sessions = asyncio.Event(), asyncio.Event(), []
-        question = self.QUESTION
 
-        class Session:
-            async def call_tool(self, _name, **_request):
-                answer = await server._on_elicitation(None, mcp_types.ElicitRequestFormParams(**question))
-                return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=answer.action)])
+        def on(session):
+            return lambda callback, params: callback(self.on(session), params)
 
         async def run_session(_self, ready, closed):
             sessions.append(True)
-            ready.set_result(Session())
+            ready.set_result(session_class())
             await closed.wait()
             if len(sessions) == 1:
                 shutting_down.set()
                 await finish.wait()  # a slow teardown, the lock held meanwhile
 
-        monkeypatch.setattr(MCPServer, "_run_session", run_session)
         server = MCPServer(name="srv", transport="stdio", command="unused")
+        session_class = self.asking_session(server, on)
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
         await server._connect()
         tool = server._make_tool(mcp_types.Tool(name="ask", inputSchema={"type": "object"}))
         try:
@@ -2318,8 +2481,7 @@ class TestInflightCallsPerLoop:
             await asyncio.wait_for(closing, 10)
             result = await asyncio.wait_for(calling, 10)
             assert len(sessions) == 2  # it reconnected
-            assert result.status.reason == "input_required", (result.status, result.output)
-            assert result.output["kind"] == "mcp_elicitation" and result.output["payload"]["message"] == "Which one?"
+            self.assert_asked(result)
         finally:
             finish.set()
             await server.close()

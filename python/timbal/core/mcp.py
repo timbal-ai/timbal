@@ -399,6 +399,10 @@ class _InflightCall:
     cancel: Cancel | None = None
     invalid_resume: str | None = None
     ambiguous_with: int = 0
+    session: Any = None
+    """The session its ``tools/call`` was sent on (``_request``, set before the request goes out, and again on a
+    retry): a server request arriving on a session can only be about a call whose request is outstanding there. A call
+    still waiting to send (in ``auth.prepare()``, or to connect) is on none."""
 
 
 PROVENANCE_SECRET_ENV = "TIMBAL_PROVENANCE_SECRET"
@@ -1102,7 +1106,9 @@ class MCPServer(ToolSet):
         Only on the run's loop, which owns the sessions. A run's loop that has closed took them with it: they are
         forgotten. Another loop (a stream closed from there) closes nothing: ``RuntimeError``, which the run logs
         (``run_end_hook_failed``); its connections are closed by their idle close (a cut one's too, ``_retry_unclosed``)
-        or a ``close()`` on their loop. ``owner``: the run's loop, bound when the hook was registered."""
+        or a ``close()`` on their loop. With nothing of the run's left to close (a ``close()`` on its loop closed it
+        all), there is nothing to refuse: it returns (review on #334). ``owner``: the run's loop, bound when the hook
+        was registered."""
         self._run_hooked.pop(key, None)  # the hook runs once, whatever it finds
         loop = asyncio.get_running_loop()
         if owner is loop:
@@ -1110,11 +1116,23 @@ class MCPServer(ToolSet):
         if owner.is_closed():
             self._drop_run(key)
             return None
+        if not self._run_holds(key):
+            return None
         raise RuntimeError(
             f"MCP server {self._label!r}: the platform connection of a run that ended belongs to another event loop "
             "than the one ending the run, so it was not closed here. It closes on its own loop once idle "
             f"({_RUN_CONNECTION_IDLE_S:g} s after its last call or a close that failed). {_CLOSE_ON_OWNER}"
         )
+
+    def _run_holds(self, key: str) -> bool:
+        """Whether the run ``key`` has anything left to close: its pooled connection, one whose close was cut or
+        failed, or a close still going. Read from another loop's thread, each collection from a copy: what the run's
+        loop opens after the read (a background child calling once the run has ended) is closed by its idle close."""
+        if key in self._run_connections:
+            return True
+        if any(kept == key for kept, _ in list(self._unclosed.values())):
+            return True
+        return any(not task.done() for task in list(self._run_closes.get(key, ())))
 
     def _end_run_here(self, key: str) -> Awaitable[None] | None:
         entry = self._run_connections.get(key)
@@ -1275,13 +1293,14 @@ class MCPServer(ToolSet):
         who asked. The server's ``elicit()`` / ``create_message()`` then waits forever."""
         return self.transport == "http" and self._get_session_id is not None and self._get_session_id() is None
 
-    def _calls_here(self) -> list["_InflightCall"]:
-        """The calls in flight that a server request arriving now can be about: those on this loop, the session's (a
-        call runs on the loop of the session it uses). A call another loop began is not counted: it is on no session of
-        this loop, and its loop may have stopped without closing (an abandoned ``run_until_complete``), its record kept
-        for good (``_drop_caches``), which would make every later elicitation look ambiguous."""
-        loop = asyncio.get_running_loop()
-        return [call for call in list(self._inflight.values()) if call.abort.get_loop() is loop]
+    def _calls_on(self, session: Any) -> list["_InflightCall"]:
+        """The calls a server request arriving on ``session`` can be about: those whose request went out there and
+        that have not ended (``_InflightCall.session``; one whose answer came back counts until ``_end_call``, as on
+        ``main``). Not a call still waiting to send, which may have outlived a ``close()``
+        (``_drop_caches`` keeps its record), nor one on another session; counted, either would make the call that
+        asked look ambiguous, its question answered ``cancel`` (review on #334). A call on any loop counts, as long
+        as its request went out on this session."""
+        return [call for call in list(self._inflight.values()) if call.session is session]
 
     def _abort_inflight_for_stateless(self, calls: list["_InflightCall"], kind: str) -> None:
         """Fail every in-flight call fast: the server is blocked on an answer it can never get."""
@@ -1459,7 +1478,7 @@ class MCPServer(ToolSet):
         *,
         what: str,
         idempotent: bool = False,
-        abort: asyncio.Future | None = None,
+        call: "_InflightCall | None" = None,
         timeout: float | None = _USE_SERVER_TIMEOUT,
     ) -> T:
         """Run one request against the live session, with the failure modes the SDK leaves to us.
@@ -1473,8 +1492,10 @@ class MCPServer(ToolSet):
         - **No answer within** ``timeout`` (server alive, never replies): ``TimeoutError``.
           The session stays up; the server may still be running the tool. Defaults to
           ``self.timeout``; ``tools/call`` passes the tool's ``tool_timeouts`` entry.
-        - ``abort``: a future a callback may fail when it learns the call can never complete
-          (stateless server asked us something); raised here instead of waiting.
+        - ``call``: the ``tools/call``'s in-flight record. The session the request goes out on is noted on it, so
+          the server's requests on that session find it (``_calls_on``); its ``abort`` future, which a callback may
+          fail when it learns the call can never complete (stateless server asked us something), is raised here
+          instead of waiting.
         - ``idempotent=True`` also retries once after a mid-request connection loss
           (``tools/list``); ``tools/call`` never does, the tool may have run.
         """
@@ -1486,6 +1507,9 @@ class MCPServer(ToolSet):
         for attempt in (1, 2):
             session = await self._connect()
             owner = self._session_task
+            abort = call.abort if call is not None else None
+            if call is not None:
+                call.session = session  # before the request can reach the server
             request: asyncio.Future = asyncio.ensure_future(send(session))
             try:
                 waiting: set[asyncio.Future] = {request}
@@ -1568,7 +1592,7 @@ class MCPServer(ToolSet):
 
     async def _on_elicitation(
         self,
-        _context: Any,
+        context: Any,
         params: mcp_types.ElicitRequestParams,
     ) -> mcp_types.ElicitResult | mcp_types.ErrorData:
         """Answer a server ``elicitation/create`` from resume values, or arrange a suspend.
@@ -1577,7 +1601,7 @@ class MCPServer(ToolSet):
         it records the request on the in-flight call and returns ``cancel`` so the
         server unwinds; the handler then raises ``Suspend`` once ``call_tool`` returns.
         """
-        calls = self._calls_here()
+        calls = self._calls_on(context.session)
         if self._stateless_http():
             # Whatever we answer cannot reach the handler that asked; don't let it hang.
             self._abort_inflight_for_stateless(calls, "elicitation")
@@ -1624,7 +1648,7 @@ class MCPServer(ToolSet):
 
     async def _on_sampling(
         self,
-        _context: Any,
+        context: Any,
         params: mcp_types.CreateMessageRequestParams,
     ) -> mcp_types.CreateMessageResult | mcp_types.ErrorData:
         """Serve ``sampling/createMessage`` with ``sampling_model`` via the LLM router.
@@ -1634,7 +1658,7 @@ class MCPServer(ToolSet):
         """
         if not self.sampling_model:
             return mcp_types.ErrorData(code=mcp_types.INVALID_REQUEST, message="Sampling not supported")
-        calls = self._calls_here()
+        calls = self._calls_on(context.session)
         if self._stateless_http():
             self._abort_inflight_for_stateless(calls, "sampling")
             return mcp_types.ErrorData(
@@ -1851,7 +1875,7 @@ class MCPServer(ToolSet):
                 result = await self._request(
                     lambda session: session.call_tool(bare_name, arguments=kwargs, meta=meta),
                     what=f"tools/call {bare_name}",
-                    abort=call.abort,
+                    call=call,
                     timeout=self._tool_timeout(bare_name),
                 )
             finally:
@@ -2110,9 +2134,10 @@ class MCPServer(ToolSet):
         cancelled too), so a call on a loop that has not closed keeps it, this loop's included: cleared, an
         elicitation during it (a call waiting to connect while close() shut the session down, which then reconnects;
         a call on another thread's loop) found no call to ask for, and the tool completed without the question
-        (Bugbot on #334). A stopped loop never closed keeps its calls' records for good, holding memory; the callbacks
-        do not count them (``_calls_here``). One by one, never ``clear()``: another loop may begin a call meanwhile
-        (keys are never reused, ``_CALL_KEYS``)."""
+        (Bugbot on #334). A stopped loop never closed keeps its calls' records for good, holding memory (and the
+        session each was sent on); the callbacks count only the calls whose request went out on their session
+        (``_calls_on``). One by one, never ``clear()``: another loop may begin a call meanwhile (keys are never
+        reused, ``_CALL_KEYS``)."""
         self._tools_cache = None
         self._tools_cache_run_id = None
         self._tools_stale = False
