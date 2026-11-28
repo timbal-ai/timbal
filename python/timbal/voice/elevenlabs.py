@@ -3,6 +3,7 @@
 Uses the official WebSocket APIs:
 
 * ``wss://api.elevenlabs.io/v1/speech-to-text/realtime`` — Scribe realtime
+  (``scribe_v3_live`` by default; ``scribe_v2_realtime`` is still served)
 * ``wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input`` — TTS stream
 * ``wss://api.elevenlabs.io/v1/text-to-dialogue/multi-stream-input`` — v4 TTS
 
@@ -16,6 +17,7 @@ import base64
 import contextlib
 import json
 import os
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -25,13 +27,16 @@ from pydantic import SecretStr
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
+from .config import SCRIBE_REALTIME_KEYTERM_MAX_CHARS, SCRIBE_REALTIME_KEYTERMS_MAX
 from .providers import (
     AudioInputConfig,
     AudioOutputConfig,
+    SpeakerSegment,
     SpeechToText,
     TextToSpeech,
     TranscriptEvent,
     TTSStream,
+    reported_language,
 )
 
 logger = structlog.get_logger("timbal.voice.elevenlabs")
@@ -52,15 +57,93 @@ _DIALOGUE_FLUSH_END_CHARS = frozenset(".!?;:\n…。！？؟؛")
 STT_FATAL_MESSAGE_TYPES = frozenset(
     {
         "auth_error",
+        # "Session closed: only 0.00s of uncommitted audio": a manual commit
+        # sent within 0.3s of audio after another commit. Scribe closes the
+        # socket on it.
+        "commit_throttled",
+        # A rejected query: an unknown model, ``commit_strategy=turn_prediction``
+        # or ``diarize`` on a model without it, a keyterm over the limit. The
+        # server closes with 1008 right after. Without this entry the session
+        # only saw "connection closed" and the reason was lost.
+        "invalid_request",
         "quota_exceeded",
         "rate_limited",
         "resource_exhausted",
         "session_time_limit_exceeded",
+        "unaccepted_terms",
     }
 )
 
-_DEFAULT_STT_MODEL = "scribe_v2_realtime"
+_DEFAULT_STT_MODEL = "scribe_v3_live"
+# Scribe needs 0.3s of uncommitted audio. The margin covers the time its own
+# commit takes to reach us.
+_MIN_COMMIT_GAP_SECS = 0.4
+# Commit when Scribe v3 Live's turn probability reaches this, ahead of its VAD
+# silence. Measured in benchmarks/voice (README, "Scribe v3 Live scores the
+# turn"): 0.75 cut a caller off mid-speech in 2 of 32 clip runs, 0.6 in 7.
+DEFAULT_TURN_COMMIT_THRESHOLD = 0.75
+_UNSET: Any = object()
 _DEFAULT_TTS_MODEL = "eleven_v4_turbo"
+_DIALOGUE_MODEL_PREFIXES = ("eleven_v4", "eleven_v3")
+
+
+def _fit_scribe_keyterms(keyterms: list[str]) -> list[str]:
+    """The terms realtime Scribe will take, in order.
+
+    One term too many, or one too long, fails the whole connection and the
+    call with it. An agent that declared its vocabulary for Deepgram Flux (100
+    phrases, any length) lands here when ``DEEPGRAM_API_KEY`` is unset, so the
+    surplus is dropped and logged. An agent that names ``elevenlabs`` itself
+    is refused earlier, when its config is built.
+    """
+    fitting = [term for term in keyterms if len(term) <= SCRIBE_REALTIME_KEYTERM_MAX_CHARS]
+    kept = fitting[:SCRIBE_REALTIME_KEYTERMS_MAX]
+    if len(kept) != len(keyterms):
+        logger.warning(
+            "el_stt_keyterms_trimmed",
+            sent=len(kept),
+            dropped_too_long=len(keyterms) - len(fitting),
+            dropped_over_limit=len(fitting) - len(kept),
+        )
+    return kept
+
+
+def _speaker_segments(words: Any) -> list[SpeakerSegment]:
+    """Group a diarized word list into one segment per run of the same speaker."""
+    segments: list[SpeakerSegment] = []
+    if not isinstance(words, list):
+        return segments
+    for word in words:
+        if not isinstance(word, dict):
+            continue
+        text = word.get("text")
+        if not isinstance(text, str) or not text:
+            continue
+        speaker = word.get("speaker_id")
+        speaker = speaker if isinstance(speaker, str) and speaker else None
+        spacing = word.get("type") == "spacing"
+        last = segments[-1] if segments else None
+        # Spacing joins whichever run is open and never opens one: the gap
+        # between two speakers is labelled with either of them.
+        if last is not None and (spacing or speaker == last.speaker_id):
+            last.text += text
+            if not spacing and isinstance(word.get("end"), (int, float)):
+                last.end = float(word["end"])
+            continue
+        if spacing:
+            continue
+        start, end = word.get("start"), word.get("end")
+        segments.append(
+            SpeakerSegment(
+                speaker_id=speaker,
+                text=text,
+                start=float(start) if isinstance(start, (int, float)) else None,
+                end=float(end) if isinstance(end, (int, float)) else None,
+            )
+        )
+    for segment in segments:
+        segment.text = segment.text.strip()
+    return [segment for segment in segments if segment.text]
 
 
 def _resolve_api_key(explicit: str | SecretStr | None) -> str:
@@ -123,7 +206,26 @@ def effective_tts_model(config: AudioOutputConfig) -> str:
 
 
 class ElevenLabsRealtimeSTT(SpeechToText):
-    """ElevenLabs Scribe v2 realtime WebSocket (VAD commits by default)."""
+    """ElevenLabs Scribe realtime WebSocket (VAD commits by default).
+
+    ``scribe_v3_live`` unless ``AudioInputConfig.model`` names another Scribe
+    model (``scribe_v2_realtime``). Provider knobs ride in ``extra`` and go on
+    the query string as given:
+
+    * ``commit_strategy``: ``"vad"`` (the default here), ``"manual"``, or
+      ``"turn_prediction"`` (v3 Live only). The server's own default is
+      ``manual``, which never commits by itself, so one is always sent.
+    * ``diarize=True`` (v3 Live only): each commit is followed by a
+      ``diarized`` :class:`TranscriptEvent` carrying ``speakers``.
+    * ``secondary_languages``, ``include_timestamps``, ``no_verbatim``, ...
+
+    v3 Live partials carry the provider's end-of-turn probability, passed on
+    as ``TranscriptEvent.confidence``. Under ``vad`` the adapter also commits
+    when that score reaches ``turn_commit_threshold`` (0.75 by default, ``None``
+    or 0 for off), without waiting out the silence. Realtime Scribe takes at
+    most 50 ``keyterms`` of 20 characters each. The surplus is dropped with a
+    warning.
+    """
 
     def __init__(self, api_key: str | SecretStr | None = None) -> None:
         self._api_key_explicit = api_key
@@ -136,6 +238,21 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         self._receiver: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[TranscriptEvent | None] = asyncio.Queue()
         self._input_config: AudioInputConfig | None = None
+        # Text of a ``committed_transcript`` whose timestamped twin has not
+        # arrived yet. See ``_receive_loop``.
+        self._untimed_commit: str | None = None
+        # Text of a timestamped commit passed on before its plain twin. Same reason, other order.
+        self._timed_commit: str | None = None
+        # ``turn_commit_threshold``: see ``_maybe_commit_on_turn_probability``.
+        self._turn_commit_threshold: float | None = None
+        self._turn_commit_partials = 1
+        self._turn_commit_hits = 0
+        self._turn_commit_text = ""
+        self._turn_commit_sent = False
+        self._commit_requested_at = 0.0
+        self._committed_at = 0.0
+        self._partial_text, self._partial_text_since = "", 0.0
+        self._silence_ceiling = 1.5
 
     async def connect(self, config: AudioInputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
@@ -143,14 +260,52 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         extra = dict(config.extra)
         host = str(extra.pop("stt_host", "api.elevenlabs.io"))
         commit_strategy = str(extra.pop("commit_strategy", "vad"))
+        model = config.model or _DEFAULT_STT_MODEL
+        # Ours, not Scribe's: never sent on the wire. Unset means the default,
+        # which is on for Scribe v3 Live under ``vad`` (v2 sends no score, and
+        # a ``manual`` caller asked to own every commit). ``None`` or 0 is off.
+        threshold = extra.pop("turn_commit_threshold", _UNSET)
+        explicit = threshold is not _UNSET
+        if not explicit:
+            on_by_default = model.startswith("scribe_v3") and commit_strategy == "vad"
+            threshold = DEFAULT_TURN_COMMIT_THRESHOLD if on_by_default else None
+        self._turn_commit_threshold = float(threshold) if threshold else None
+        self._turn_commit_partials = max(1, int(extra.pop("turn_commit_partials", 1)))
+        self._turn_commit_hits, self._turn_commit_text, self._turn_commit_sent = 0, "", False
+        self._partial_text, self._partial_text_since = "", 0.0
+        self._silence_ceiling = float(extra.get("vad_silence_threshold_secs") or 1.5)
+        if self._turn_commit_threshold is not None and commit_strategy == "turn_prediction":
+            # Scribe commits by itself at a score of about 0.9. A commit of
+            # ours landing next to it finds no uncommitted audio, and Scribe
+            # answers ``commit_throttled`` and closes the session. An agent
+            # that sets both fails to load (``VoiceConfig``). A caller hello
+            # can still switch the strategy, and that must not end the call.
+            logger.warning("el_stt_turn_commit_threshold_ignored", reason="commit_strategy is turn_prediction")
+            self._turn_commit_threshold = None
 
         params: dict[str, Any] = {
-            "model_id": config.model or _DEFAULT_STT_MODEL,
+            "model_id": model,
             "audio_format": extra.pop("audio_format", None) or _stt_audio_format(config),
             "commit_strategy": commit_strategy,
         }
         if config.language:
             params["language_code"] = config.language
+        if config.languages and "secondary_languages" not in extra:
+            # ``VoiceConfig`` refuses ``stt_languages`` on ElevenLabs, so a list
+            # here belongs to a Flux agent that fell back to Scribe for want of
+            # ``DEEPGRAM_API_KEY``. Raising would fail every such call. Scribe
+            # spells the same hint ``secondary_languages``, primary excluded.
+            primary = (config.language or "").split("-")[0].lower()
+            others = list(dict.fromkeys(tag.split("-")[0].lower() for tag in config.languages))
+            secondary = [tag for tag in others if tag and tag != primary]
+            if secondary:
+                params["secondary_languages"] = secondary
+        if config.keyterms:
+            extra.pop("keyterms", None)
+            extra.pop("keyterm", None)
+            params["keyterms"] = _fit_scribe_keyterms(list(config.keyterms))
+        elif isinstance(extra.get("keyterms"), list):
+            extra["keyterms"] = _fit_scribe_keyterms([str(term) for term in extra["keyterms"]])
         for k, v in extra.items():
             if v is None or k.startswith("_"):
                 continue
@@ -186,6 +341,19 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         async with self._buf_lock:
             raw = bytes(self._buf)
             self._buf.clear()
+        if commit:
+            # Scribe wants 0.3s of uncommitted audio before a commit. With less
+            # it answers ``commit_throttled`` and closes the session, which
+            # ends the call. So a commit that follows another one too closely
+            # is not sent: ours (the session's endpointer and the probability
+            # rule can ask for the same one) or Scribe's own, just reported.
+            now = time.monotonic()
+            gap = 1.0 if self._turn_commit_threshold is not None else _MIN_COMMIT_GAP_SECS
+            if now - max(self._commit_requested_at, self._committed_at) < gap:
+                logger.info("el_stt_commit_skipped", reason="too close to the previous commit")
+                commit = False
+            else:
+                self._commit_requested_at = now
         if not raw and not commit:
             return
         msg: dict[str, Any] = {
@@ -211,6 +379,42 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         except asyncio.CancelledError:
             raise
 
+    async def _maybe_commit_on_turn_probability(self, text: str, probability: float) -> None:
+        """Force the commit once Scribe's own end-of-turn score is high enough.
+
+        ``turn_prediction`` commits at a fixed score of about 0.9, which a
+        short answer ("No.", "Okay.") takes two to three seconds of silence to
+        reach. ``turn_commit_threshold`` (``stt_extra``, 0.75 on v3 Live)
+        commits at a lower score, and ``turn_commit_partials`` asks for that
+        many consecutive partials at or above it with the same words, so one
+        spike at a sentence boundary mid-speech does not cut the caller off.
+        Scribe's commit and the silence ceiling still apply after it.
+        """
+        threshold = self._turn_commit_threshold
+        if threshold is None:
+            return
+        now = time.monotonic()
+        if text != self._partial_text:
+            self._partial_text, self._partial_text_since = text, now
+        if self._turn_commit_sent or now - self._commit_requested_at < 1.0:
+            return
+        if now - self._partial_text_since > self._silence_ceiling - 0.5:
+            # The words have not changed for almost the silence ceiling, so
+            # Scribe's own VAD commit is due. Leave it alone: two commits
+            # within 0.3s of audio close the session (``commit_throttled``).
+            return
+        if probability < threshold:
+            self._turn_commit_hits, self._turn_commit_text = 0, ""
+            return
+        if text != self._turn_commit_text:
+            self._turn_commit_hits, self._turn_commit_text = 0, text
+        self._turn_commit_hits += 1
+        if self._turn_commit_hits < self._turn_commit_partials:
+            return
+        self._turn_commit_sent = True
+        logger.info("el_stt_turn_commit", turn_probability=probability, threshold=threshold, text_preview=text[:80])
+        await self._flush_audio(commit=True)
+
     async def _receive_loop(self) -> None:
         assert self._ws is not None
         try:
@@ -224,12 +428,57 @@ class ElevenLabsRealtimeSTT(SpeechToText):
                 elif mt == "partial_transcript":
                     text = msg.get("text", "")
                     if text:
-                        await self._queue.put(TranscriptEvent(type="partial", text=text))
+                        # New speech: a plain commit after it is not the twin of an earlier one.
+                        self._timed_commit = None
+                        # Scribe v3 Live scores every partial. v2 sends no score.
+                        probability = msg.get("turn_probability")
+                        await self._queue.put(
+                            TranscriptEvent(
+                                type="partial",
+                                text=text,
+                                confidence=float(probability) if isinstance(probability, (int, float)) else None,
+                            )
+                        )
+                        if isinstance(probability, (int, float)):
+                            await self._maybe_commit_on_turn_probability(text, float(probability))
 
-                elif mt in ("committed_transcript", "committed_transcript_with_timestamps"):
+                elif mt == "committed_transcript":
                     text = (msg.get("text") or "").strip()
-                    if text:
+                    already_committed, self._timed_commit = self._timed_commit, None
+                    is_twin = bool(text) and text == already_committed
+                    self._untimed_commit = None if is_twin else (text or None)
+                    self._committed_at = time.monotonic()
+                    self._turn_commit_hits, self._turn_commit_text, self._turn_commit_sent = 0, "", False
+                    if text and not is_twin:
                         await self._queue.put(TranscriptEvent(type="committed", text=text))
+
+                elif mt == "committed_transcript_with_timestamps":
+                    # With ``include_timestamps`` the server sends the plain
+                    # commit first and this one right after, same words.
+                    # Passing both on committed every utterance twice. With
+                    # ``include_language_detection`` alone the order is the
+                    # other one (measured on scribe_v2_realtime): this message
+                    # first, with ``language_code``, then the plain commit.
+                    text = (msg.get("text") or "").strip()
+                    language = reported_language(msg.get("language_code"))
+                    already_committed, self._untimed_commit = self._untimed_commit, None
+                    if text and text != already_committed:
+                        self._timed_commit = text
+                        await self._queue.put(TranscriptEvent(type="committed", text=text, language=language))
+                    elif text and language:
+                        # Both options on: the language is named after the commit went out.
+                        await self._queue.put(TranscriptEvent(type="language", text=text, language=language))
+
+                elif mt == "diarized_transcript":
+                    # Follows the commit it labels (``diarize=true``, v3 Live).
+                    # Its own event type, so it never reads as a second commit.
+                    text = (msg.get("text") or "").strip()
+                    speakers = _speaker_segments(msg.get("words"))
+                    if text and speakers:
+                        await self._queue.put(TranscriptEvent(type="diarized", text=text, speakers=speakers))
+
+                elif mt == "warning":
+                    logger.warning("el_stt_warning", warning=msg.get("warning"))
 
                 elif mt == "error":
                     err = msg.get("error", "Unknown STT error")
@@ -285,6 +534,12 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         self._receiver = None
 
 
+# ``voice_settings`` travel in a context's first message; ElevenLabs ignores
+# them on the WebSocket query string. Eleven v4 ignores ``speed`` entirely —
+# use ``VoiceConfig.tts_tempo`` there.
+_VOICE_SETTING_KEYS = ("stability", "similarity_boost", "style", "speed", "use_speaker_boost")
+
+
 class ElevenLabsStreamTTS(TextToSpeech):
     """ElevenLabs TTS via the **multi-context** WebSocket.
 
@@ -320,16 +575,26 @@ class ElevenLabsStreamTTS(TextToSpeech):
         self._preconnect_task: asyncio.Task[None] | None = None
         self._dialogue = False
         self._dialogue_contexts: set[str] = set()
+        self._settings_sent: set[str] = set()
         # Registration, keep-alive, and close must be ordered: messaging a
         # closing dialogue context can make the server close the whole socket.
         self._context_send_lock = asyncio.Lock()
+
+    def performs_audio_tags(self, config: AudioOutputConfig) -> bool:
+        """The dialogue models perform ``[laughs]``; Flash and Multilingual read it aloud.
+
+        Measured: ``benchmarks/voice/tts_audio_tags.py``.
+        """
+        return effective_tts_model(config).startswith(_DIALOGUE_MODEL_PREFIXES)
 
     async def connect(self, config: AudioOutputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
         if not config.voice:
             raise ValueError("AudioOutputConfig.voice (ElevenLabs voice_id) is required.")
         self._out = config
-        self._dialogue = effective_tts_model(config).startswith("eleven_v4")
+        # v4 and v3 are served only by the text-to-dialogue socket: the
+        # per-voice multi-stream-input endpoint answers them with HTTP 400.
+        self._dialogue = effective_tts_model(config).startswith(_DIALOGUE_MODEL_PREFIXES)
         # Pre-open the multi-context WS in the background so the first
         # synthesize of the session doesn't pay the TCP+TLS+WS handshake
         # (~0.5-1s of the first reply's audio latency). Failures are logged
@@ -382,9 +647,8 @@ class ElevenLabsStreamTTS(TextToSpeech):
             keepalive_interval = min(keepalive_interval, _DIALOGUE_KEEPALIVE_INTERVAL_SEC)
         elif auto_mode:
             params["auto_mode"] = "true"
-        if self._dialogue:
-            extra.pop("stability", None)
-            extra.pop("similarity_boost", None)
+        for key in _VOICE_SETTING_KEYS:
+            extra.pop(key, None)
         for k, v in extra.items():
             if v is not None and not str(k).startswith("_"):
                 params[k] = v
@@ -431,6 +695,7 @@ class ElevenLabsStreamTTS(TextToSpeech):
         self._audio_queues.clear()
         self._active_contexts.clear()
         self._dialogue_contexts.clear()
+        self._settings_sent.clear()
 
     async def _send_text(self, context_id: str, text: str, *, flush: bool = False) -> None:
         async with self._context_send_lock:
@@ -460,6 +725,13 @@ class ElevenLabsStreamTTS(TextToSpeech):
                     msg["inputs"] = [{"text": text, "voice_id": self._out.voice}]
             else:
                 msg["text"] = text
+                if context_id not in self._settings_sent:
+                    settings = {
+                        key: self._out.extra[key] for key in _VOICE_SETTING_KEYS if self._out.extra.get(key) is not None
+                    }
+                    if settings:
+                        msg["voice_settings"] = settings
+                    self._settings_sent.add(context_id)
             if flush:
                 msg["flush"] = True
             await self._ws.send(json.dumps(msg))
@@ -467,6 +739,7 @@ class ElevenLabsStreamTTS(TextToSpeech):
     async def _close_context(self, context_id: str) -> None:
         async with self._context_send_lock:
             self._active_contexts.discard(context_id)
+            self._settings_sent.discard(context_id)
             if self._dialogue:
                 if context_id not in self._dialogue_contexts:
                     return

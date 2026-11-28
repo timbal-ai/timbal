@@ -216,6 +216,8 @@ class MunsitStreamSTT(SpeechToText):
         self._flush_bytes = int(16_000 * _STT_AUDIO_FLUSH_INTERVAL * 2)
 
     def _build_uri(self, config: AudioInputConfig) -> str:
+        if config.keyterms or config.languages:
+            raise ValueError("Munsit streaming STT does not accept keyterms or stt_languages.")
         extra = dict(config.extra)
         host = str(extra.pop("stt_host", _DEFAULT_HOST))
         encoding = "linear16" if config.encoding in _PCM16_ENCODINGS else config.encoding

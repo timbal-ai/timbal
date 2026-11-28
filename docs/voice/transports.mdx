@@ -45,7 +45,7 @@ The server sends speech as `{"type": "audio", "data": "..."}` in the same PCM fo
 
 Count playback, not bytes received or merely scheduled. On `interrupted`, stop playback and discard queued audio. The session uses playback acknowledgements to align the caller's heard reply with conversation memory; without them it estimates the position from the buffered playback schedule. Closing the socket closes the session.
 
-Other JSON messages include `session_started`, `transcript_partial`, `transcript_committed`, `agent_status`, `agent_text_delta`, `agent_text_done`, `agent_approval`, `agent_interaction`, `filler`, `metrics`, `voice_usage`, `interrupted`, `error`, `event_turn_started`, `notify_ack`, `session_transcript`, and `session_ended`. `agent_status` reports tool activity. A committed transcript with `replace=true` replaces the previous user transcript bubble rather than appending another. An empty `text` with `replace=true` retracts that bubble (a cancelled early turn).
+Other JSON messages include `session_started`, `transcript_partial`, `transcript_committed`, `agent_status`, `agent_text_delta`, `agent_text_done`, `agent_approval`, `agent_interaction`, `filler`, `backchannel`, `metrics`, `voice_usage`, `interrupted`, `error`, `event_turn_started`, `notify_ack`, `session_transcript`, and `session_ended`. `agent_status` reports tool activity. `backchannel` is a [listening sound](/voice/configuration#listening-sounds) the agent made while the caller was talking: it is not a reply and not part of the transcript. A committed transcript with `replace=true` replaces the previous user transcript bubble rather than appending another. An empty `text` with `replace=true` retracts that bubble (a cancelled early turn).
 
 `session_started` includes `session_id`, `stt_provider`, `stt_model`, `tts_provider`, `model` (the text model), `turn_detector` (the resolved class name, such as `LocalAudioTurnDetector`), `direction`, `ambient`, and `parent_run_id` when the call continues a text run. The transport adds `transport` and `playback_acks`. A hello may also send `parent_id` to continue a text run in this call. The server waits up to two seconds for that hello on the WebSocket (`hello_wait_secs`).
 
@@ -106,6 +106,13 @@ Expose the server through HTTPS with WebSocket upgrades and configure the carrie
 The webhook returns TwiML or TeXML connecting a bidirectional media stream to `/voice/twilio/stream` or `/voice/telnyx/stream`. The bridge decodes carrier 8 kHz G.711 μ-law audio into the session format and converts speech back to the carrier format. Interruption clears carrier playback; mark echoes track playback position.
 
 Set `TWILIO_AUTH_TOKEN` or `TELNYX_PUBLIC_KEY` to enable incoming-webhook signature verification. Without these variables, the webhook accepts requests with a development-mode warning. Configure your reverse proxy so the externally visible URL used by the carrier is the URL validated by the webhook.
+
+To let the agent transfer a call ([`session.transfer_call`](/voice/tools#transfer-the-call-to-a-person)), give the server the carrier's API credentials:
+
+- Twilio: `TWILIO_AUTH_TOKEN`. The account is the one the call arrived on (`TWILIO_ACCOUNT_SID` is read only when the stream does not name it).
+- Telnyx: `TELNYX_API_KEY`. The account is the one the webhook named (`TELNYX_ACCOUNT_SID` is read only for a stream started without the webhook above).
+
+Both carriers transfer the same way: the call's instructions are replaced with a `<Dial>` through the carrier's REST API, which ends the media stream. On Telnyx that is the TeXML API, not Call Control's `actions/transfer`: Telnyx advises against Call Control commands on a call that TeXML is running. A host that embeds the bridge with `serve_media_ws` and has its own credentials sets `session.call_transferer` in `on_session_built`.
 
 The routes answer and bridge calls. Placing an outbound call requires your carrier integration to originate it and connect the media stream. A host that knows the call direction can select `outbound_greeting`; setting the greeting alone does not originate a call.
 

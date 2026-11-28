@@ -206,6 +206,22 @@ def entity_capture(text: str) -> str | None:
     return None
 
 
+# A partial ending in one letter right after a space or comma, with nothing
+# after it: the provider's caption of a word still being said ("order t",
+# "Vámonos, v"), not a letter the caller spelled.
+_GROWING_LETTER = re.compile(r"(?<=[\s,])[^\W\d_]\Z")
+
+
+def entity_capture_partial(text: str) -> str | None:
+    """:func:`entity_capture` for a caption that is still growing.
+
+    The trailing letter of an unfinished word is ignored. A spelled sequence
+    ("R U I") still counts from its earlier letters, and the committed text
+    keeps the full rule, so "apellido J." still waits for the rest.
+    """
+    return entity_capture(_GROWING_LETTER.sub("", (text or "").rstrip()))
+
+
 def apply_entity_patience(
     decision: CommitDecision,
     text: str,
@@ -214,6 +230,7 @@ def apply_entity_patience(
     enabled: bool,
     hold_secs: float,
     provider_patience_live: bool = False,
+    waited_secs: float = 0.0,
 ) -> CommitDecision:
     """Raise a hold while ``decision`` still ends inside an entity.
 
@@ -222,6 +239,12 @@ def apply_entity_patience(
     EndOfTurn of an open entity *is* the timeout and must start the turn
     instead of waiting again. A hold the detector asked for on its own
     (unfinished phrase, audio incomplete) is never released here.
+
+    ``waited_secs`` is the silence already heard since the caller's last
+    speech. The budget counts it: a commit that lands after the local
+    endpointer's patience floor or the stale-partial rescue does not wait the
+    whole window again (that doubled the pause after a dictated ID, ~5 s live
+    on Nova). A detector's own hold keeps at least its own timeout.
     """
     if not enabled or decision.action is CommitAction.IGNORE:
         return decision
@@ -251,9 +274,10 @@ def apply_entity_patience(
             return decision
         return CommitDecision(action=CommitAction.CONTINUE_TURN, text=piece, reason=decision.reason)
 
-    timeout = hold_secs
-    if decision.action is CommitAction.HOLD and decision.hold_timeout_secs is not None:
-        timeout = max(decision.hold_timeout_secs, hold_secs)
+    timeout = max(0.0, hold_secs - waited_secs)
+    if decision.action is CommitAction.HOLD:
+        own = decision.hold_timeout_secs
+        timeout = hold_secs if own is None else max(own, timeout)
     reason = decision.reason if decision.action is CommitAction.HOLD else "entity_patience"
     return CommitDecision(
         action=CommitAction.HOLD,
@@ -279,18 +303,20 @@ def _release(decision: CommitDecision, original: str, piece: str, held: str) -> 
     return CommitDecision(action=CommitAction.NEW_TURN, text=piece, reason=reason)
 
 
-def entity_capture_with_held(held: str | None, text: str) -> str | None:
+def entity_capture_with_held(held: str | None, text: str, *, partial: bool = False) -> str | None:
     """:func:`entity_capture` of ``text`` read after a parked fragment ``held``.
 
     During a hold, Flux sends each new group as a turn of its own (``"seis"``, ``"Z"``): alone it is too
     short to be an entity, but it continues the number or spelling the hold is keeping open.
+    ``partial`` reads ``text`` as a caption that is still growing (:func:`entity_capture_partial`).
     """
+    capture = entity_capture_partial if partial else entity_capture
     held = (held or "").strip()
     # Only a held entity is continued: after "my number is" (an unfinished-phrase hold) a lone "y" or "a" is
     # the start of a sentence, not a spelled letter.
     if not held or not text or _contains_held(held, text) or entity_capture(held) is None:
-        return entity_capture(text) if text else None
-    return entity_capture(_join_held(held, text.strip()))
+        return capture(text) if text else None
+    return capture(_join_held(held, text.strip()))
 
 
 def repeats_held(held: str, partial: str) -> bool:

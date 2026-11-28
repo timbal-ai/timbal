@@ -55,6 +55,24 @@ def _gap_phrase() -> bytes:
     return speech + gap + speech
 
 
+def _word_gap_phrase(gap_secs: float = 0.16) -> bytes:
+    """Two words with the short gap a TTS leaves between them."""
+    speech = _const(int(0.12 * SR), 12_000)
+    return speech + _const(int(gap_secs * SR), 0) + speech
+
+
+def _five_words() -> bytes:
+    """Five words with a 0.19 s gap after each: over half of it is air."""
+    speech = _const(int(0.12 * SR), 12_000)
+    return speech + (_const(int(0.19 * SR), 0) + speech) * 4
+
+
+def _pause_secs(audio: bytes) -> float:
+    """Length of the one silence inside a two-word phrase."""
+    quiet = np.frombuffer(audio, dtype="<i2") == 0
+    return float(quiet.sum()) / SR
+
+
 class _SilentSTT(SpeechToText):
     async def connect(self, _config: AudioInputConfig) -> None:
         return None
@@ -218,6 +236,131 @@ class TestByteAccounting:
             _assert_one_ledger(session, recorder, _emitted(session), raw)
         finally:
             recorder.close()
+
+    async def test_rhythm_accounts_the_shaped_audio(self, tmp_path: Path) -> None:
+        raw = _five_words()
+        session, recorder = _session(_PcmTTS(raw), tmp_path, tts_rhythm={"join_gaps": 1.0, "seed": 1})
+        try:
+            await session._speak(TEXT)
+            _assert_one_ledger(session, recorder, _emitted(session), raw)
+        finally:
+            recorder.close()
+
+    async def test_rhythm_pause_and_tempo_share_one_ledger(self, tmp_path: Path) -> None:
+        raw = _word_gap_phrase() + _gap_phrase()
+        session, recorder = _session(
+            _PcmTTS(raw),
+            tmp_path,
+            tts_rhythm={"join_gaps": 1.0, "seed": 1},
+            max_tts_pause_secs=0.30,
+            tts_tempo=1.2,
+        )
+        try:
+            await session._speak(TEXT)
+            _assert_one_ledger(session, recorder, _emitted(session), raw)
+        finally:
+            recorder.close()
+
+    async def test_rhythm_sorts_pauses_before_the_cap_shortens_them(self, tmp_path: Path) -> None:
+        """Capped first, a 0.45 s sentence pause would be 0.15 s: a word gap, and joined."""
+        raw = _word_gap_phrase(0.45)
+        session, recorder = _session(
+            _PcmTTS(raw), tmp_path, tts_rhythm={"join_gaps": 1.0, "seed": 1}, max_tts_pause_secs=0.15
+        )
+        try:
+            await session._speak(TEXT)
+            assert _pause_secs(_emitted(session)) == pytest.approx(0.15, abs=0.03)
+        finally:
+            recorder.close()
+
+    async def test_the_cap_bounds_a_lengthened_pause(self, tmp_path: Path) -> None:
+        raw = _word_gap_phrase(0.30)
+        session, recorder = _session(
+            _PcmTTS(raw), tmp_path, tts_rhythm={"stretch_pauses": 1.0, "seed": 1}, max_tts_pause_secs=0.35
+        )
+        try:
+            await session._speak(TEXT)
+            assert _pause_secs(_emitted(session)) == pytest.approx(0.35, abs=0.03)
+        finally:
+            recorder.close()
+
+    async def test_rhythm_without_a_cap_still_bounds_a_lengthened_pause(self, tmp_path: Path) -> None:
+        """No cap configured: 0.45 s times 2.3 would be over a second of silence in the middle of a reply."""
+        raw = _word_gap_phrase(0.45)
+        session, recorder = _session(_PcmTTS(raw), tmp_path, tts_rhythm={"stretch_pauses": 1.0, "seed": 1})
+        try:
+            await session._speak(TEXT)
+            assert _pause_secs(_emitted(session)) == pytest.approx(0.55, abs=0.001)
+        finally:
+            recorder.close()
+
+    @pytest.mark.parametrize(
+        ("cap", "tempo", "longest", "rate"),
+        [(None, None, 0.55, 1.0), (0.35, 1.2, 0.35, 1.2), (0.80, 1.0, 0.55, 1.0)],
+    )
+    async def test_rhythm_is_told_the_cap_and_the_tempo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cap, tempo, longest: float, rate: float
+    ) -> None:
+        """The cap, so that no pause is lengthened past it. The tempo, so that a held
+        silence is given up when the caller has heard the audio before it."""
+        seen: dict = {}
+
+        def spy(chunks, **kwargs):
+            seen.update(kwargs)
+            return chunks
+
+        monkeypatch.setattr("timbal.voice.rhythm.shape_pauses", spy)
+        session, recorder = _session(
+            _PcmTTS(_word_gap_phrase()), tmp_path, tts_rhythm=True, max_tts_pause_secs=cap, tts_tempo=tempo
+        )
+        try:
+            await session._speak(TEXT)
+            assert seen["max_pause_secs"] == longest
+            assert seen["playback_rate"] == rate
+        finally:
+            recorder.close()
+
+    async def test_sentences_spoken_one_by_one_keep_the_pause_between_them(self, tmp_path: Path) -> None:
+        """A provider without a text stream synthesizes each sentence on its own. The air that
+        closes one and opens the next is the pause between them: rhythm leaves it alone."""
+        speech = _const(int(0.12 * SR), 12_000)
+        raw = _const(int(0.25 * SR), 0) + speech + _const(int(0.20 * SR), 0)
+        session, recorder = _session(_PcmTTS(raw), tmp_path, tts_rhythm=True)
+        try:
+            await session._speak("alpha beta.")
+            await session._speak("gamma delta.")
+            assert _emitted(session) == raw + raw
+        finally:
+            recorder.close()
+
+    async def test_rhythm_alone_skips_non_pcm_audio(self, tmp_path: Path) -> None:
+        raw = _word_gap_phrase()
+        session, recorder = _session(_PcmTTS(raw), tmp_path, tts_rhythm=True)
+        session.audio_output.encoding = "mulaw"
+        try:
+            await session._speak(TEXT)
+            assert _emitted(session) == raw
+            assert session._tts_pace_encoding_warned is True
+        finally:
+            recorder.close()
+
+    async def test_first_audio_is_not_held_by_rhythm(self, tmp_path: Path) -> None:
+        speech = _const(int(0.05 * SR), 10_000)
+        tts = _GatedTTS(speech, _const(int(0.16 * SR), 0) + speech)
+        session, recorder = _session(tts, tmp_path, tts_rhythm=True)
+        task = asyncio.create_task(session._speak("hello there"))
+        try:
+            await asyncio.wait_for(tts.entered_second.wait(), timeout=1.0)
+            assert session._turn_first_audio_at is not None
+            assert _emitted(session) == speech
+            tts.release.set()
+            await asyncio.wait_for(task, timeout=2.0)
+        finally:
+            tts.release.set()
+            recorder.close()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     async def test_streaming_pump_counts_postprocessed_bytes(self, tmp_path: Path) -> None:
         raw = _gap_phrase()

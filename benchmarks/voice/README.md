@@ -29,6 +29,36 @@ production live in that gap.
 | `cli.py` | runner, reporting, regression gate |
 | `bench_cpu.py` | concurrency ceiling: sessions per event loop / per CPU (no API keys) |
 | `bench_ttft.py` | model first-token p50/p95 for a fixed ~7k-token voice prompt (needs provider keys) |
+| `accept_duplex.py` | opt-in Flux + `openai/gpt-5.4-mini` + ElevenLabs duplex gate (real LLM, not `TestModel`) |
+| `simulate_support.py` | Spanish caller calls against `examples/voice_support_demo.py::agent` built by `build_voice_session`; optional room noise and speaker echo; stereo `call.wav` per scenario (needs provider keys) |
+
+## Duplex acceptance
+
+`accept_duplex.py` is a release gate, not a benchmark row. It paces cached caller
+PCM into a live `VoiceSession` (Deepgram Flux, `openai/gpt-5.4-mini`, ElevenLabs)
+and checks the agent events. `harness.py` still uses `TestModel`. No
+microphone. PCM energy is recorded and is not a transcript. The script does not listen.
+
+Off unless `TIMBAL_VOICE_ACCEPTANCE=1`. A set flag with a missing
+`OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, or `ELEVENLABS_API_KEY` fails and names
+the key. The default pytest run skips it (`-m not integration`).
+
+```bash
+TIMBAL_VOICE_ACCEPTANCE=1 uv run python benchmarks/voice/accept_duplex.py
+```
+
+## Dictation end-of-turn
+
+`dictation_eot.py` times speech-end → Flux boundary → first token → first audio
+for a short question, a hesitated phone number, and a spelled name. It repeats
+a small bounded batch and prints min, median, and max. It does not report p90
+or p99 below 20 samples. `entity_patience` off and on are the matched pair.
+A separate call turns speculation on so Flux can emit `EagerEndOfTurn` and
+`TurnResumed`. PCM energy is not a transcript.
+
+```bash
+TIMBAL_VOICE_DICTATION=1 uv run python benchmarks/voice/dictation_eot.py
+```
 
 ## First-token benchmark
 
@@ -1414,6 +1444,81 @@ earned its marker table only after a first run showed which failures recurred, a
 inventing one here before knowing whether a scenario fails at 15 dB, at 5 dB, or
 only in parallel would be bookkeeping ahead of evidence.
 
+### Scribe v3 Live scores the turn, and its own use of the score is the wrong one
+
+Scribe v3 Live (`--stt-param model=scribe_v3_live`; the ElevenLabs cells stay on
+`scribe_v2_realtime`, the model every baseline was measured on) puts a
+`turn_probability` on each partial and offers `commit_strategy=turn_prediction`.
+Measured on the raw socket, 16 synthetic clips:
+
+- Scribe commits when the score reaches about 0.9. The value is fixed: a dozen
+  plausible parameter names changed nothing.
+- `vad_silence_threshold_secs` (0.192 to 3.0) still commits at that much silence,
+  so it is a ceiling, not an alternative.
+- The score climbs slowly after a short answer. "No." needs 2.2 to 2.6 seconds of
+  silence to reach 0.9, "Okay." 3.1, a bare number never gets there.
+
+So at the shipped 1.2 second ceiling `turn_prediction` is `vad` with questions
+committing half a second sooner, and at a higher ceiling it holds mid-sentence
+pauses and makes every short answer slow. It also collides with our endpointer:
+Scribe closes the session on a commit with under 0.3 seconds of uncommitted audio
+(`commit_throttled`), and with both sides committing at the same boundary that
+ended 5 of 156 calls at a 3 second ceiling and 1 of 78 at 2 seconds.
+
+`turn_commit_threshold` (adapter-side, `stt_extra`) reads the same score and
+commits at a lower value, leaving Scribe on `vad`. All rows are Scribe v3 Live,
+78 or 74 runs per batch (`--repeat 2 --jobs 3`), dead air is speech end to turn
+accepted:
+
+| detector | Scribe setting | batches | passed | throttled | dead air p50 / mean / p95 |
+|---|---|---|---|---|---|
+| `local` | `vad`, ceiling 1.2, no threshold | 2 | 149/156 | 0 | 1.36 / 1.49 / 2.88 s |
+| `local` | `turn_prediction`, ceiling 1.2 | 1 | 75/78 | 0 | 1.30 / 1.49 / 2.81 s |
+| `local` | `turn_prediction`, ceiling 3.0 | 2 | 132/156 | 5 | 1.52 / 1.76 / 4.16 s |
+| `local` | `vad`, ceiling 3.0 | 1 | 67/78 | 0 | 1.60 / 1.86 / 4.21 s |
+| `local` | threshold 0.75, ceiling 1.2 | 2 | **156/156** | 0 | **1.02 / 1.31 / 2.73 s** |
+| `local` | threshold 0.75, ceiling 2.0 | 2 | 152/156 | 1 | 1.10 / 1.46 / 3.44 s |
+| `local` | threshold 0.75, ceiling 3.0 | 2 | 154/156 | 0 | 1.02 / 1.47 / 3.55 s |
+| `provider` | `vad`, ceiling 1.2 | 1 | 48/74 | 0 | 1.46 / 1.49 / 1.72 s |
+| `provider` | `turn_prediction`, ceiling 3.0 | 1 | 72/74 | 0 | 3.00 / 2.63 / 3.30 s |
+| `provider` | threshold 0.75, ceiling 2.0 | 1 | 73/74 | 0 | 1.17 / 1.37 / 2.36 s |
+| `provider` | threshold 0.75, ceiling 3.0 | 1 | 74/74 | 0 | 1.17 / 1.47 / 3.13 s |
+
+With the `local` detector the threshold belongs at the 1.2 second ceiling: a
+third of a second less median dead air, a better tail, and the seven runs lost
+without it all pass. The `vad`, ceiling 3.0 row is the control that says the
+gain is the score and not the longer ceiling. Under `provider`, where nothing of
+ours can merge a pause, the threshold with a 3 second ceiling passes every
+scenario, including the pause splits that are known failures for that detector,
+and pays for it at p95.
+
+The adapter-only numbers are less flattering and worth keeping in view: forcing a
+commit costs about 0.35 seconds of round trip, and on finished utterances alone a
+threshold of 0.75 with a 3 second ceiling has a median of 1.41 seconds against
+1.62 for `vad` at 1.2, with a worst case of 3.4. At 0.6 the commit landed while
+the caller was still talking in 7 of 32 runs, against 2 at 0.75.
+
+Not settled: two batches is not a baseline, `--jobs 3` shares the Smart Turn
+model across sessions, and the audio is studio-clean TTS. The collision is
+narrowed, not closed: the adapter now refuses a commit within 0.4 seconds of the
+previous one, which took plain `turn_prediction` at a 3 second ceiling from 4
+throttled calls in a batch to 1. A commit that crosses Scribe's on the wire is
+still throttled.
+
+The adapter now ships the best row: 0.75 is the default for Scribe v3 Live under
+`vad`, at the 1.2 second ceiling. That is a default set on two batches, so the
+first thing to do with real call audio is to run both rows again. A cell on
+`scribe_v3_live` therefore has the threshold unless it says otherwise:
+
+```bash
+# the default
+uv run python benchmarks/voice/cli.py --stt elevenlabs --detector local --repeat 2 \
+    --stt-param model=scribe_v3_live
+# the "no threshold" row
+uv run python benchmarks/voice/cli.py --stt elevenlabs --detector local --repeat 2 \
+    --stt-param model=scribe_v3_live --stt-param turn_commit_threshold=0
+```
+
 ## Running
 
 ```bash
@@ -1665,6 +1770,294 @@ Real-time pacing is mandatory, so a run takes as long as the conversation.
 `acks True` confirms the harness is exercising the client-truth playback path
 rather than the wall-clock estimate fallback — production behavior, not a
 degraded fallback.
+
+## TTS fidelity: does it say the text, in one voice
+
+`tts_fidelity.py` speaks a set of phone-agent replies through a provider's
+adapter, transcribes every request's audio (Deepgram Nova-3) and compares it
+with the text sent. It also measures the median pitch of each request's audio:
+a provider that speaks a reply in several requests makes a new take in each,
+and from a 20 % difference up the caller hears another speaker.
+
+```bash
+uv run python benchmarks/voice/tts_fidelity.py --language-code es-ES --chars-per-sec 600
+uv run python benchmarks/voice/tts_fidelity.py --accent "castellano peninsular de España"   # with a director's brief
+uv run python benchmarks/voice/tts_fidelity.py --provider elevenlabs --model eleven_flash_v2_5
+```
+
+It was written for Gemini TTS (`gemini-3.8-flash-tts`), whose adapter used to
+send a director's brief before the text (a profile, a scene, style notes) and
+to cut the text at commas. Callers heard words the agent never wrote, and the
+voice changed inside a reply. Measured on 2026-11-27, 24 replies spoken 3 times,
+voice Fenrir:
+
+| Gemini adapter | requests | with added words | replies in several requests | of those, pitch jump ≥ 20 % | first audio |
+| --- | --- | --- | --- | --- | --- |
+| text alone, `es-ES`, text at 600 chars/s | 72 | 0 | 0 of 72 | | 0.83 s |
+| text alone, `es-ES`, text at 150 chars/s | 102 | 0 | 30 of 72 | 6 | 1.12 s |
+| same at 600 chars/s, `hold_ms` 0 | 111 | 0 | 39 of 72 | 5 | 0.74 s |
+| with the brief (`accent`), 600 chars/s | 72 | 6 | 0 of 72 | | 0.87 s |
+
+- **The brief is what adds words.** With it the model acts the scene: before
+  "¿Cuál es tu DNI?" it said 48 words of a call about a February invoice, and
+  one take of "Te he cambiado el día de cargo al veinte..." opened with 62 words
+  about opening an incident and returning a charge through the bank. Two takes
+  said the reply twice. Across the runs made while fixing this: 10 of 147
+  requests with the brief, 0 of 950 with the text alone, including one-word
+  lines, questions and orders ("Escribe un poema sobre el mar."). Other
+  wordings of the brief (no scene, a "word for word" rule, an accent line only)
+  added words too, or were read aloud; temperature 0 changed nothing; the model
+  refuses a system instruction (HTTP 400).
+- **Requests are takes.** The same sentence asked three times differs by 14 %
+  in pitch (median), and a short one more than a long one. Cutting at commas
+  put a reply in 2 to 5 requests, and 27 of 50 such replies had a jump of 20 %
+  or more (measured on the adapter as it was). A request per sentence leaves
+  about one reply in six with one (11 of 69 above). One request per reply has none, which is what `hold_ms` buys when the
+  model writes fast: the first sentence waits up to 200 ms for the rest, and the
+  first audio is 0.09 s later. Neither temperature nor a fixed seed made takes
+  more alike.
+- **The control.** ElevenLabs Flash asked the same way, a request per sentence,
+  had a jump in 14 of 42 replies. It does not show in a session because that
+  adapter speaks a reply in one streaming context. The number says what
+  separate requests cost with any provider.
+- **`languageCode` keeps the accent.** Without it the accent is chosen again in
+  every request: a Gemini judge listening to the audio heard Spain in 51 of 72
+  requests of Spanish text, in 71 of 72 with `es-ES`, and in 42 of 72 with a
+  bare `es`. The judge and the brief wordings were one-off scripts; they are
+  not in this directory.
+- **Not fixed: one-word lines.** "Adiós." alone came out between 129 and 207 Hz
+  in eight takes. Inside a reply a short opener waits for the sentence after
+  it; a line that is the whole reply (a farewell, "¿Sigues ahí?") has nothing to
+  wait for.
+
+In two full calls against the example agents (12 agent turns, Gemini 2.5 Flash
+writing the replies) every turn's audio matched its text, and every burst of
+text was one request: one per reply, two when a tool call splits it.
+
+## Acronyms: how long a voice takes over "DNI"
+
+`tts_acronyms.py` puts a term in three carrier sentences, speaks each several
+times through a provider's adapter, and reads from word timestamps (ElevenLabs
+Scribe) how long the term takes: from the end of the word before it to the
+start of the word after it. A transcript cannot tell a brisk "DNI" from one
+spelled out slowly, the time can. Deepgram Nova-3 transcribes the same audio
+as a check on what was said there.
+
+```bash
+uv run python benchmarks/voice/tts_acronyms.py DNI deneí
+uv run python benchmarks/voice/tts_acronyms.py SMS esemese "ese eme ese" --model eleven_multilingual_v2
+```
+
+It is where `VoiceConfig.pronunciations` comes from. Measured on 2026-11-27,
+18 takes of each form, Spanish:
+
+| Model | Written | Time, median (range) | 0.84 s or more | Heard as the term |
+| --- | --- | --- | --- | --- |
+| `eleven_v3_conversational` | `DNI` | 0.95 s (0.54–1.90) | 13 of 16 | 18 of 18 |
+| | `deneí` | 0.48 s (0.34–0.88) | 1 of 18 | 18 of 18 |
+| | `NIE` | 1.32 s (0.56–2.24) | 14 of 17 | 18 of 18 |
+| | `níe` | 0.43 s (0.26–0.72) | 0 of 18 | 16 of 18 |
+| | `nie` | 0.54 s (0.24–1.92) | 6 of 15 | 9 of 18 |
+| | `CIF` | 1.20 s (0.90–1.84) | 17 of 17 | 17 of 18 |
+| | `cif` | 0.46 s (0.38–0.74) | 0 of 18 | 16 of 18 |
+| | `SMS` | 1.16 s (0.54–1.64) | 13 of 17 | 16 of 18 |
+| | `esemese` | 0.54 s (0.44–0.96) | 1 of 18 | 14 of 18 |
+| | `ese eme ese` | 1.67 s (1.14–1.96) | 18 of 18 | 17 of 18 |
+| | `NIF` | 0.40 s (0.24–0.70) | 0 of 17 | 15 of 18 |
+| | `IBAN` | 0.50 s (0.38–0.78) | 0 of 17 | see below |
+| `eleven_v4_turbo` | `DNI` | 0.70 s (0.60–0.82) | 0 of 18 | 16 of 18 |
+| | `deneí` | 0.46 s (0.40–0.48) | 0 of 18 | 18 of 18 |
+| `eleven_multilingual_v2` | `DNI` | 0.45 s (0.36–0.60) | 0 of 18 | 18 of 18 |
+| | `NIE` | 0.52 s (0.18–0.86) | 1 of 17 | 11 of 18 |
+| | `níe` | 0.22 s (0.14–0.24) | 0 of 15 | 12 of 18 |
+| | `CIF` | 0.60 s (0.48–0.66) | 0 of 17 | 16 of 18 |
+| | `cif` | 0.26 s (0.22–0.32) | 0 of 17 | 8 of 18 |
+| | `SMS` | 0.60 s (0.50–0.72) | 0 of 18 | 18 of 18 |
+| | `esemese` | 0.46 s (0.40–0.54) | 0 of 18 | 17 of 18 |
+
+A take is left out of the time columns when the transcriber gave no time for
+one of the neighbouring words.
+
+- **`eleven_v3_conversational` spells acronyms out, and slowly, most of the
+  time.** "DNI" took anything from half a second to two. Written the way it is
+  said, each term took about half a second in nearly every take.
+- **The spelling of the spoken form matters.** "nie" without the accent was
+  still slow in 6 of 15 takes, and "ese eme ese" was slower than "SMS".
+- **Other models need nothing.** `eleven_multilingual_v2` reads the four
+  acronyms in 0.45 to 0.60 s as written, and on it "cif" was heard as CIF in
+  fewer takes than "CIF" (8 against 16 of 18). `pronunciations` is a setting
+  for one voice, not a list to copy.
+- **"Heard as the term" is a weak check.** It is one transcriber's spelling of
+  a rare word: "IBAN" came back as the name "Iván", which sounds the same, in
+  most takes, as written or in lower case. The time is the measurement; the
+  rest is for a person to listen to (`--out DIR`).
+
+## Laughs and sighs: performed or read aloud
+
+`tts_audio_tags.py` speaks short sentences with one mark in each (`[laughs]`,
+`[sighs]`...) and transcribes them with ElevenLabs Scribe, audio events on,
+which labels a sound apart from the words. A take is a **sound** (a labelled
+sound in the transcript), **words** (words the sentence does not have: the
+mark read aloud) or **neither** (the mark dropped). The same sentences without
+a mark are the control.
+
+```bash
+uv run python benchmarks/voice/tts_audio_tags.py
+uv run python benchmarks/voice/tts_audio_tags.py --models eleven_flash_v2_5,eleven_multilingual_v2
+```
+
+Measured on 2026-11-27, 18 takes with a mark and 6 without per model, Spanish:
+
+| Model | Sound | Words | Neither |
+| --- | --- | --- | --- |
+| `eleven_v3_conversational` | 17 | 0 | 1 |
+| `eleven_v3` | 18 | 0 | 0 |
+| `eleven_v4_turbo` | 18 | 0 | 0 |
+| `eleven_flash_v2_5` | 9 | 9 | 0 |
+| `eleven_multilingual_v2` | 2 | 16 | 0 |
+
+No control take had a labelled sound or an added word. This is why
+`VoiceConfig.audio_tags` tells the model about the marks only on the v3 and v4
+models, and takes a mark out of the text for every other voice: Multilingual
+v2 says "Chuckles. Claro que sí...". What is not measured: whether the laugh
+sounds right in a call, and how often a model writes one. Both are for a
+person on a call.
+
+## Caller pace: what `adaptive_tempo` measures
+
+`caller_pace.py` has a voice say a set of caller lines, slows each take down
+and speeds it up without changing its pitch, adds line noise, and feeds it to
+the level meter the session uses (`MicActivity`) in 20 ms pieces. It prints,
+per speed, the rate the session would measure (syllables counted from the
+text over seconds of speech from the meter) and the tempo factor it would
+apply. Scribe's word times on the same audio check the meter.
+
+```bash
+uv run python benchmarks/voice/caller_pace.py
+uv run python benchmarks/voice/caller_pace.py --language en --noise-dbfs -40
+```
+
+Measured on 2026-11-27. Rates are medians, in syllables per second:
+
+| Speaker | Noise | Speed 0.7 | 0.8 | 0.9 | 1.0 | 1.1 |
+| --- | --- | --- | --- | --- | --- | --- |
+| es, `eleven_v4_turbo` | −55 dBFS | 4.2 → ×0.90 | 4.8 → ×0.93 | 5.3 → ×0.95 | 5.7 → ×0.98 | 6.3 → ×1.00 |
+| es, `eleven_v4_turbo` | −40 dBFS | 4.6 → ×0.91 | | | 6.5 → ×1.00 | |
+| en, `eleven_v4_turbo` | −55 dBFS | 3.8 → ×0.92 | | | 5.3 → ×1.00 | |
+| es, `eleven_multilingual_v2` | −55 dBFS | 5.3 → ×0.95 | | | 7.6 → ×1.00 | |
+| en, `eleven_flash_v2_5` | −55 dBFS | 5.4 → ×1.00 | | | 7.4 → ×1.00 | |
+
+- **The meter is close to the transcriber's clock**: its speech time was 1.08
+  to 1.12 times the time between Scribe's first and last word, pauses left out.
+- **The default rates** (Spanish 4.4 slow and 6.0 normal, English 3.6 and 5.0)
+  put a neutral reading at or near ×1.00 and the same reading at 0.7 speed at
+  about ×0.90.
+- **The rate is absolute.** A fast voice slowed by 30 % (Multilingual v2, Flash
+  v2.5) still measures as a normal talker and gets little or no change: the
+  session does not know how this caller usually speaks. Louder noise raises the
+  measured rate (6.5 against 5.7 for the same reading at −40 dBFS), so a noisy
+  line reads as a slightly faster talker.
+- **A synthetic speaker is not a person.** The table is about the instrument.
+  Whether a slow caller is better served by a slower agent is not measured
+  here.
+
+## Listening sounds: the clips, and where they fall in a call
+
+Two scripts for `VoiceConfig.backchannel`.
+
+`tts_backchannels.py` synthesizes each built-in sound through the adapter a
+session uses and checks what a session cannot: that the voice said "Mm-hm."
+and not a question, another word or a laugh (Scribe's transcript, letters
+only), and how long it is once trimmed.
+
+```bash
+uv run python benchmarks/voice/tts_backchannels.py
+uv run python benchmarks/voice/tts_backchannels.py --candidates   # also the phrases left out of the defaults
+uv run python benchmarks/voice/tts_backchannels.py --provider gemini --models gemini-3.8-flash-tts --voice Fenrir
+```
+
+Measured on 2026-11-27, the nine built-in sounds (es, ca, en), 12 takes each
+on the ElevenLabs models and 6 on Gemini:
+
+| Model | Heard as written | Length, medians | Longest take |
+| --- | --- | --- | --- |
+| `eleven_v3_conversational` | every take | 0.28–0.39 s | 0.53 s |
+| `eleven_v4_turbo` | every take | 0.49–0.78 s | 0.86 s |
+| `eleven_flash_v2_5` | 10 to 12 of 12 | 0.33–0.52 s | 0.61 s |
+| `eleven_multilingual_v2` | 10 to 12 of 12 | 0.35–0.49 s | 0.68 s |
+| `gemini-3.8-flash-tts` | every take | 0.29–0.47 s | 0.70 s |
+
+The misses: on Flash, "Vale." came back as "Val." or "Vel." twice, "Ajá." as
+"Ah, ya." once and Catalan "Ahà." as "Uh-huh." once; on Multilingual v2,
+"Ajá." was once a laugh, "Ahà." once a laugh and once "Ah.", and English
+"Mm-hm." and "Right." were once each a question. Every take was one a session
+would keep (not silent, under 1.2 s), so a session cannot tell these apart:
+on those two models 9 of 216 takes were not the sound written. Left
+out of the defaults (6 takes per model): "Ya." (Multilingual v2 said it as
+"yeah" or as a question in 5 of 6 takes), Catalan "D'acord." (heard as that
+in 10 of 24) and "Sí, sí." (over a second on v4 Turbo, and an answer to a
+caller who asked something). "Claro." and "I see." were said right in every
+take and are left out only to keep the set small: `phrases` adds them.
+
+`backchannel_call.py` runs real calls, with the setting off and on. A
+synthetic caller, rendered as one sentence and cut at its pauses, talks over
+line noise to an agent on Deepgram Flux, Gemini 2.5 Flash and ElevenLabs
+`eleven_v3_conversational`, with `entity_patience` on and `rate` 1 (every
+pause that qualifies gets a sound; the default is 0.7).
+
+```bash
+uv run python benchmarks/voice/backchannel_call.py
+uv run python benchmarks/voice/backchannel_call.py --scripts dni --runs 5 --wav /tmp/calls
+```
+
+Measured on 2026-11-27, 3 calls per row. "Reply" is the time from the
+caller's last word to the reply's first audio, median:
+
+| Script | Setting | Sounds per call | Where | Interruptions | Turns | Reply |
+| --- | --- | --- | --- | --- | --- | --- |
+| `dni`: an ID number in groups, 1 s pauses | off | 0 | | 0 | 1 | 3.9 s |
+| | on | 2 | pauses 1 and 3 | 0 | 1 | 3.7 s |
+| `long`: two pauses mid-sentence | off | 0 | | 0 | 1 | 2.1 s |
+| | on | 2 | pauses 1 and 2 | 0 | 1 | 2.1 s |
+| `fluent`: the ID number with no pauses | off | 0 | | 0 | 1 | 5.0 s |
+| | on | 1 | after the last word | 0 | 1 | 4.8 s |
+| `question`: a short question | off | 0 | | 0 | 1 | 1.7 s |
+| | on | 0 | | 0 | 1 | 1.1 s |
+| `sentences`: three whole clauses, 0.9 s pauses | off | 0 | | 2 | 3 | 2.0 s |
+| | on | 0 | | 2 | 3 | 1.4 s |
+| `dni1`: a pause after the first group too | off | 0 | | 1 | 2 | 4.0 s |
+| | on | 2 | pause 3, after the last word | 1 | 2 | 4.4 s |
+
+- **In the pauses, not over the caller.** The 15 sounds that fell in a pause
+  started 0.38 to 0.50 s after the caller went quiet, and none while they were
+  speaking. The caller going on over the sound was never an interruption.
+- **Nothing else changed.** Same number of turns, the ID number committed
+  whole in the same calls (3 of 3 in `dni` and `fluent`), and reply times
+  inside the spread between calls. Each sound was counted in
+  `TurnMetrics.backchannels` of the turn it preceded.
+- **The pause must be one the session waits in.** In `sentences` and `dni1`
+  Flux ended the turn at the pause (a clause that could be a sentence; "es el
+  doce", which is one number word and not yet a dictation for
+  `entity_patience`), the agent started to answer and the caller talked over
+  it. That happens with the setting off as well, and a listening sound has no
+  part in it.
+- **After a dictation there may be one more.** In `fluent` and `dni1` a sound
+  followed the caller's last word, half a second in, while `entity_patience`
+  was still waiting for more digits (the reply came 3 to 8 s after the last
+  word, with or without the setting). In `dni` the gap between sounds
+  (`min_gap_secs`) left none for the end.
+- **A fix from these calls.** The `long` reason first applied to any pause
+  after six seconds of speech. In all three `long` calls that put a third
+  sound right after the caller's last word, half a second before Flux ended
+  the turn, so the caller heard "mm-hm" and then the reply. A caption that
+  ends a sentence now gets no sound for length alone; the table is from after
+  the change.
+- One `sentences` call with the setting on had a third interruption: the model
+  wrote its reasoning as the reply and the script hung up on it. No sound had
+  been said in that call.
+
+Not measured: how the sounds come across to a person, echo on a speakerphone,
+and any transcriber other than Flux.
 
 ## OpenAI provider audit
 

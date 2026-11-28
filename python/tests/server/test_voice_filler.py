@@ -588,10 +588,12 @@ class TestReadyMadePhrases:
         cfg = FillerConfig(phrases={"es": ["Un segundo."], "es-MX": ["Ahorita."], "*": ["One second."]})
         assert cfg.phrases == {"es": ["Un segundo.", "Ahorita."], "*": ["One second."]}
 
-    def test_auto_detect_uses_only_the_wildcard(self) -> None:
+    def test_auto_detect_uses_the_wildcard_until_a_language_is_known(self) -> None:
         session = _make_session(filler={"phrases": {"es": ["Un segundo."], "*": ["One second."]}})
         assert session.audio_input.language is None
         assert session._instant_filler_phrase() == "One second."
+        session._note_heard_language("es", "Hola, tengo una rueda pinchada.")
+        assert session._instant_filler_phrase() == "Un segundo."
 
     def test_language_without_entry_falls_back_to_generation(self) -> None:
         session = _make_session(filler={"phrases": {"es": ["Mmm, déjame ver."]}})
@@ -642,6 +644,168 @@ class TestReadyMadePhrases:
     def test_blank_phrases_dropped(self) -> None:
         assert FillerConfig(phrases=["  ", ""]).phrases is None
         assert FillerConfig(phrases={"ES": [" Un segundo. ", ""], "en": [" "]}).phrases == {"es": ["Un segundo."]}
+
+
+_BY_LANGUAGE = {"es": ["Un momento."], "ca": ["Un moment."], "en": ["One moment."], "*": ["Mm."]}
+
+
+class TestFillerFollowsTheSpokenLanguage:
+    """``phrases`` when the reply is not pinned to one language: the caller's language chooses."""
+
+    def _session(self, *, language: str | None = None, reply_language: str | None = "follow", **kw) -> VoiceSession:
+        session = _make_session(filler={"phrases": _BY_LANGUAGE, "delay_secs": 0.0}, **kw)
+        session.audio_input.language = language
+        session.reply_language = reply_language
+        return session
+
+    def test_the_application_says_the_language(self) -> None:
+        session = self._session(language="ca")
+        assert session.spoken_language is None
+        assert session._instant_filler_phrase() == "Un moment."
+        session.set_spoken_language("es-ES")
+        assert session.spoken_language == "es-ES"
+        assert session._instant_filler_phrase() == "Un momento."
+        # Neither the transcriber's hint nor the reply instruction moved.
+        assert session.audio_input.language == "ca"
+        assert session.effective_reply_language() is None
+        session.set_spoken_language(None)
+        assert session._instant_filler_phrase() == "Un moment."
+
+    def test_not_a_language_tag_is_refused(self) -> None:
+        session = self._session()
+        session.set_spoken_language("es")
+        with pytest.raises(ValueError, match="BCP-47"):
+            session.set_spoken_language("castellano de España")
+        assert session.spoken_language == "es"
+
+    def test_the_transcriber_reports_the_language(self) -> None:
+        session = self._session()
+        assert session._instant_filler_phrase() == "Mm."
+        session._note_heard_language("es", "Hola, tengo una rueda pinchada.")
+        assert session.spoken_language == "es"
+        assert session._instant_filler_phrase() == "Un momento."
+        session._note_heard_language("en", "Sorry, could we do this in English?")
+        assert session._instant_filler_phrase() == "One moment."
+
+    @pytest.mark.parametrize(("heard", "text"), [("te", "Okey."), ("tr", "Sí."), ("en", "No, no."), ("pl", "Yes, ok.")])
+    def test_a_short_utterance_keeps_the_language_of_the_call(self, heard: str, text: str) -> None:
+        """What Nova-3 ``multi`` and Scribe reported for these on 2026-11-28."""
+        session = self._session()
+        session._note_heard_language("es", "Hola, tengo una rueda pinchada.")
+        session._note_heard_language(heard, text)
+        assert session.spoken_language == "es"
+
+    def test_a_language_outside_stt_languages_is_not_believed(self) -> None:
+        session = self._session()
+        session.audio_input.languages = ["es-ES", "en"]
+        session._note_heard_language("pt", "Olá, tenho um pneu furado hoje.")
+        assert session.spoken_language is None
+        session._note_heard_language("es", "Hola, tengo una rueda pinchada.")
+        assert session.spoken_language == "es"
+
+    def test_what_the_application_said_wins_over_the_transcriber(self) -> None:
+        session = self._session()
+        session.set_spoken_language("ca")
+        session._note_heard_language("es", "Hola, tinc una roda punxada.")
+        assert session.spoken_language == "ca"
+        assert session._instant_filler_phrase() == "Un moment."
+
+    def test_a_pinned_reply_language_wins(self) -> None:
+        # Pinned by ``reply_language`` with the transcriber on auto-detect: only "*" was ever used before.
+        session = self._session(reply_language="ca")
+        session.set_spoken_language("es")
+        assert session._instant_filler_phrase() == "Un moment."
+        # Pinned by ``language``, as always.
+        session = self._session(language="en", reply_language=None)
+        session._note_heard_language("es", "Hola, tengo una rueda pinchada.")
+        assert session._instant_filler_phrase() == "One moment."
+
+    async def test_committed_and_language_events_reach_the_session(self) -> None:
+        from timbal.voice.providers import TranscriptEvent
+
+        session = self._session()
+        script = [
+            TranscriptEvent(type="committed", text="Hola, tengo una rueda pinchada.", language="es"),
+            # Named after its commit (Scribe with timestamps too).
+            TranscriptEvent(type="committed", text="Sorry, could we do this in English?"),
+            TranscriptEvent(type="language", text="Sorry, could we do this in English?", language="en"),
+        ]
+        heard: list[str | None] = []
+
+        async def commit(text: str) -> None:
+            heard.append(session.spoken_language)
+
+        async def events():
+            for event in script:
+                yield event
+                await asyncio.sleep(0)
+
+        session._handle_provider_commit = commit
+        session.stt.events = events
+        await session._process_stt_events()
+        assert heard == ["es", "es"]
+        assert session.spoken_language == "en"
+
+    async def test_the_phrase_is_chosen_when_it_is_due(self) -> None:
+        """An application tells the language with the turn (its system prompt, a tool), after the filler began to
+        wait: the line spoken is in the language known when it is due."""
+        session = self._session(language="ca", tool_sleep=0.4)
+        session.filler.delay_secs = 0.15
+        flow_started = asyncio.Event()
+        original = session._until_first_filler_due
+
+        async def due() -> None:
+            flow_started.set()
+            await original()
+
+        session._until_first_filler_due = due
+
+        async def tell() -> None:
+            await flow_started.wait()
+            session.set_spoken_language("es")
+
+        teller = asyncio.create_task(tell())
+        await session._run_turn("tengo una rueda pinchada")
+        await teller
+        assert [e.text for e in session.transcript if e.filler] == ["Un momento."]
+        assert session._filler_phrases_said == ["Un momento."]
+
+    async def test_no_line_for_the_language_known_when_due_is_generated(self) -> None:
+        session = _make_session(
+            tool_sleep=0.4,
+            filler={"phrases": {"ca": ["Un moment."]}, "delay_secs": 0.15, "model": TestModel(responses=["Un momento."])},
+        )
+        session.audio_input.language = "ca"
+        session.reply_language = "follow"
+        original = session._until_first_filler_due
+
+        async def due() -> None:
+            session.set_spoken_language("es")
+            await original()
+
+        session._until_first_filler_due = due
+        await session._run_turn("tengo una rueda pinchada")
+        assert [e.text for e in session.transcript if e.filler] == ["Un momento."]
+        # Generated, so not one of the ready-made lines said.
+        assert session._filler_phrases_said == []
+
+    async def test_a_generated_filler_is_asked_for_the_spoken_language(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        session = _make_session(filler={"model": TestModel(responses=["Un momento."])})
+        session.reply_language = "follow"
+        prompts: list[str] = []
+        real_call = Agent.__call__
+
+        def spy(agent, **kwargs):
+            if agent.name == "voice_filler":
+                prompts.append(kwargs["system_prompt"])
+            return real_call(agent, **kwargs)
+
+        monkeypatch.setattr(Agent, "__call__", spy)
+        await session._generate_filler("lookup")
+        session.set_spoken_language("es")
+        await session._generate_filler("lookup")
+        assert "Reply in Spanish (es)." not in prompts[0]
+        assert "Reply in Spanish (es)." in prompts[1]
 
 
 class TestFillerInternals:
@@ -1114,6 +1278,18 @@ class TestSoftTimeout:
         assert not any(e.filler for e in session.transcript)
         assert session.metrics[-1].filler_spoken is False
         assert session._filler_agent is None
+
+    async def test_fast_tool_then_slow_answer_stays_silent(self) -> None:
+        """The window is the tool's run. The model writing its answer after the tool is not a tool wait."""
+        session = _thinking_session(
+            think_secs=0.25,
+            tool_sleep=0.02,
+            responses=[_tool_call_message(), "The answer is 42."],
+            filler={"message": PHRASE, "soft_timeout_secs": 0.1, "delay_secs": 30.0},
+        )
+        await session._run_turn("what is the answer?")
+        assert not any(e.filler for e in session.transcript)
+        assert [e.text for e in session.transcript if e.role == "assistant"] == ["The answer is 42."]
 
     async def test_message_without_soft_timeout_does_not_speak(self) -> None:
         session = _make_session(tool_sleep=0.15, filler={"message": PHRASE, "delay_secs": 30.0})

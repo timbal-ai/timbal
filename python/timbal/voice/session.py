@@ -36,11 +36,11 @@ import re
 import time
 import unicodedata
 from collections import deque
-from collections.abc import AsyncIterable, AsyncIterator, Collection, Coroutine
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Collection, Coroutine
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 import structlog
@@ -75,17 +75,31 @@ from ..types.events import ApprovalEvent, GuardrailEvent, InteractionEvent, Outp
 from ..types.events.delta import DeltaEvent, Text, TextDelta, ToolUse
 from ..types.message import Message
 from ..utils import dump
+from .adaptive_tempo import CallerPace
+from .audio_tags import AudioTagPolicy, audio_tags_note
+from .backchannel import Backchanneler, prepare_clip
 from .config import (
     DEFAULT_GREETING_SYSTEM_PROMPT,
     DEFAULT_USER_IDLE_SYSTEM_PROMPT,
+    AdaptiveTempoConfig,
+    AudioTagsConfig,
+    BackchannelConfig,
     FillerConfig,
     GreetingConfig,
+    HesitationConfig,
     SpeculativeGeneration,
+    SpeechRhythm,
     UserIdleConfig,
+    coerce_adaptive_tempo,
+    coerce_audio_tags,
+    coerce_backchannel,
     coerce_greeting,
+    coerce_hesitation,
+    coerce_speech_rhythm,
     language_key,
     normalize_hangup_grace_secs,
     omit_empty_voice_blocks,
+    validate_pronunciations,
 )
 from .entity_patience import (
     FLUX_PATIENCE_EOT_THRESHOLD,
@@ -101,6 +115,7 @@ from .events import (
     AgentTextDelta,
     AgentTextDone,
     AudioOutput,
+    BackchannelSpoken,
     EventTurnStarted,
     FillerSpoken,
     SessionEnded,
@@ -113,9 +128,18 @@ from .events import (
     VoiceSessionEvent,
     VoiceUsageEvent,
 )
-from .language import normalize_language_tag, reply_language_instruction, with_reply_language
+from .hesitation import SOUND_AUDIO_WEIGHT, Hesitated, Hesitator
+from .language import (
+    normalize_language_tag,
+    parse_reply_language,
+    reply_language_instruction,
+    resolve_reply_language,
+    with_reply_language,
+)
 from .metrics import TurnMetrics, TurnMetricsEvent
+from .mic_activity import MicActivity
 from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
+from .pronunciation import Pronouncer
 from .providers import (
     AudioInputConfig,
     AudioOutputConfig,
@@ -134,15 +158,22 @@ from .speculative import (
     transcripts_equivalent,
 )
 from .turn_detection import (
+    _BACKCHANNEL_GRACE_SECS,
+    _BACKCHANNEL_PHRASES,
+    _BACKCHANNEL_WORDS,
     _ECHO_GRACE_SECS,
+    _INTERRUPT_COMMANDS,
     CommitAction,
     CommitDecision,
     PartialDecision,
     ProviderTurnDetector,
     TurnDetector,
     TurnState,
+    _ends_unfinished,
+    _is_pure_backchannel,
     _is_same_user_utterance_refinement,
     _likely_stt_echo,
+    _normalize_spoken,
     ends_with_question,
     is_contentless_utterance,
     resolve_turn_detector,
@@ -437,6 +468,10 @@ def _extra_float(extra: dict, key: str, default: float | None) -> float | None:
     return value
 
 
+#: How a :meth:`VoiceSession.transfer_call` went.
+CallTransferOutcome = Literal["transferred", "failed", "cancelled", "closed"]
+
+
 def current_voice_session() -> VoiceSession | None:
     """The :class:`VoiceSession` running the calling code, or ``None`` outside a call.
 
@@ -537,6 +572,8 @@ MAX_TTS_BUFFER_CHARS = 200
 # Clause-ending chars for flush heuristics (ASCII + common Spanish + fullwidth variants +
 # Arabic ؟/؛ — Arabic uses the Latin period for full stops, so "." already covers those).
 _CLAUSE_END_CHARS = frozenset(".!?;\n:\uff1f\uff01\u061f\u061b")
+# What a caption that reads as a finished sentence ends in (a listening sound is not due after one).
+_SENTENCE_CLOSED = (".", "!", "?", "\u3002", "\uff1f", "\uff01", "\u061f")
 
 
 def _nfc(s: str) -> str:
@@ -578,6 +615,488 @@ def _finite_secs(name: str, value: float | None, *, upper: float) -> float | Non
     if value < 0 or value > upper:
         raise ValueError(f"{name} must be a finite number between 0 and {upper}")
     return value
+
+
+# Tools whose only job is to hang up. A soft-timeout line on these ("One moment.")
+# is what the caller answers, and that answer used to cancel the goodbye.
+_HANGUP_TOOL_NAMES = frozenset({"end_call", "commit_hangup", "hangup", "hang_up", "endcall"})
+
+# Whole-utterance goodbyes, after punctuation and accents are folded.
+_HANGUP_GOODBYE_EXACT = frozenset(
+    {
+        "bye",
+        "goodbye",
+        "good bye",
+        "bye bye",
+        "byebye",
+        "adios",
+        "hasta luego",
+        "hasta pronto",
+        "hasta la vista",
+        "chao",
+        "chau",
+        "nos vemos",
+        "see you",
+        "see ya",
+        "talk later",
+        "thats all",
+        "that is all",
+        "nothing else",
+        "hang up",
+        "please hang up",
+        "hang up the call",
+        "cuelga",
+        "cuelga ya",
+        "cuelgame",
+        "cuelga la llamada",
+        "never mind bye",
+        "ok bye",
+        "okay bye",
+        "alright bye",
+        "vale adios",
+        "adeu",
+    }
+)
+# Longest first so "good bye" wins over "bye".
+_HANGUP_GOODBYE_TAILS = (
+    "goodbye",
+    "good bye",
+    "bye bye",
+    "hasta luego",
+    "hasta pronto",
+    "see you",
+    "see ya",
+    "adios",
+    "adeu",
+    "chao",
+    "chau",
+    "bye",
+)
+_HANGUP_ACKS = frozenset(
+    {
+        "ok",
+        "okay",
+        "k",
+        "alright",
+        "all right",
+        "right",
+        "sure",
+        "yeah",
+        "yep",
+        "yup",
+        "yes",
+        "fine",
+        "cool",
+        "got it",
+        "thanks",
+        "thank you",
+        "gracias",
+        "de acuerdo",
+        "vale",
+        "claro",
+        "si",
+        "d'acord",
+        "dacord",
+        "entesos",
+        "molt be",
+        "aja",
+        "mm",
+        "mhm",
+        "uh huh",
+    }
+)
+_HANGUP_GOODBYE_PREFIXES = _HANGUP_ACKS | {"never mind", "please", "ok then", "alright then"}
+# A follow-up that keeps the call up. Matched on word boundaries so "para" does
+# not fire inside an unrelated word, and checked before goodbye tails so
+# "bye, wait" stays a retract.
+_HANGUP_RETRACT_MARKERS = (
+    "wait",
+    "hold on",
+    "one more",
+    "another thing",
+    "espera",
+    "esperate",
+    "para",
+    "stop",
+    "actually",
+    "not yet",
+    "dont hang",
+    "do not hang",
+    "no cuelgues",
+    "todavia",
+    "still need",
+    "una cosa",
+    "otra cosa",
+    "un momento",
+)
+_HANGUP_FAREWELL_BY_LANGUAGE = {
+    "es": "Adiós.",
+    "ca": "Adéu.",
+    "fr": "Au revoir.",
+    "pt": "Adeus.",
+    "de": "Auf Wiederhören.",
+    "it": "Arrivederci.",
+    "en": "Goodbye.",
+}
+# Phrases a hangup partial may still be growing into. Flux emits "Al" / "All" /
+# "Alri" before "Alright."; those are not retracts. A finished "wait" or "no" is.
+_HANGUP_NON_RETRACT = frozenset(
+    _HANGUP_ACKS
+    | _HANGUP_GOODBYE_EXACT
+    | set(_HANGUP_GOODBYE_TAILS)
+    | _BACKCHANNEL_WORDS
+    | _BACKCHANNEL_PHRASES
+    | {f"{prefix} {tail}" for prefix in _HANGUP_GOODBYE_PREFIXES for tail in _HANGUP_GOODBYE_TAILS}
+)
+
+
+def _repeats_consumed(consumed: str, text: str) -> bool:
+    """``text`` is the handled utterance again, or a revision of it, with no words past it."""
+    if len(_normalize_spoken(text).split()) > len(_normalize_spoken(consumed).split()):
+        return False
+    return _is_same_user_utterance_refinement(consumed, text) or _is_same_user_utterance_refinement(text, consumed)
+
+
+def _hangup_marker_in(norm: str, marker: str) -> bool:
+    return f" {marker} " in f" {norm} "
+
+
+def _goodbye_prefix(prefix: str) -> bool:
+    """What may come before a goodbye tail: one known prefix, or only acknowledgements ("vale, gracias")."""
+    return not prefix or prefix in _HANGUP_GOODBYE_PREFIXES or _is_ack_only(prefix)
+
+
+def _is_hangup_goodbye(norm: str) -> bool:
+    if norm in _HANGUP_GOODBYE_EXACT:
+        return True
+    for tail in _HANGUP_GOODBYE_TAILS:
+        if norm == tail:
+            return True
+        prefix, sep, rest = norm.rpartition(" ")
+        if sep and rest == tail and _goodbye_prefix(prefix):
+            return True
+        # "good bye" / "hasta luego" are two words; the partition above only
+        # strips one. Match the tail as a suffix of the whole line.
+        if norm.endswith(" " + tail) and _goodbye_prefix(norm[: -(len(tail) + 1)].strip()):
+            return True
+    return False
+
+
+# Where a transcript breaks a turn into clauses. "?" is left out: a question is never a goodbye.
+_CLAUSE_BREAK_RE = re.compile(r"[.,;:!¡…\n]+")
+# The word before a closing goodbye that makes it a mention of one, not a goodbye:
+# "me dijo adiós", "don't say goodbye", "it was a goodbye".
+_GOODBYE_MENTION_LEADS = frozenset(
+    {"say", "says", "said", "saying", "a", "the", "my", "your", "his", "her", "not", "is", "was", "of", "without"}
+    | {"decir", "digo", "dice", "dices", "dijo", "dije", "dijiste", "dijeron", "diga", "digas", "di", "dicho"}
+    | {"diciendo", "un", "el", "mi", "tu", "su", "es", "era", "fue", "de", "del", "sin"}
+)
+
+
+def _closes_with_goodbye(text: str) -> bool:
+    """The caller's turn ends on a goodbye, whatever they said before it.
+
+    Callers close in their own words: "Eso era todo, gracias. Hasta luego.", "Perfecto, muchas
+    gracias. Adiós.", "Great, thanks a lot. Bye." A list of what may come before the goodbye
+    cannot keep up with that, and each miss refuses a hangup the agent has already said goodbye
+    for. The last clause ending on a goodbye word is enough, with acknowledgements allowed after
+    it ("Hasta luego, gracias."). The word before it must not make it a mention ("me dijo adiós").
+    Only goodbye words count: "that's all" closing a request is not one.
+    """
+    clauses = [clause for clause in (_normalize_spoken(part) for part in _CLAUSE_BREAK_RE.split(text)) if clause]
+    while len(clauses) > 1 and _is_ack_only(clauses[-1]):
+        clauses.pop()
+    if not clauses:
+        return False
+    last = clauses[-1]
+    for tail in _HANGUP_GOODBYE_TAILS:
+        if last == tail:
+            return True
+        if last.endswith(" " + tail):
+            return last[: -(len(tail) + 1)].split()[-1] not in _GOODBYE_MENTION_LEADS
+    return False
+
+
+def _grows_into_non_retract(norm: str) -> bool:
+    """True when ``norm`` is an unfinished ack or goodbye, not a new request.
+
+    "alri" is still "alright". "all" is still "all right". "no" is not still
+    "nos vemos": a finished interrupt word does not hide inside a longer goodbye.
+    """
+    if not norm:
+        return False
+    for phrase in _HANGUP_NON_RETRACT:
+        if phrase.startswith(norm + " "):
+            return True
+        if not phrase.startswith(norm) or phrase == norm:
+            continue
+        if " " in norm:
+            return True
+        first = phrase.split(" ", 1)[0]
+        if not first.startswith(norm) or first == norm:
+            continue
+        if norm in _HANGUP_ACKS or norm in _INTERRUPT_COMMANDS or norm in _HANGUP_GOODBYE_EXACT:
+            return False
+        return True
+    return False
+
+
+def _is_ack_only(norm: str) -> bool:
+    """True when every word is an acknowledgement, including a repeat.
+
+    "Alright. Alright." is still the caller accepting the goodbye. One extra
+    word ("Alright, wait", "thank you so much") is not.
+    """
+    words = norm.split()
+    if not words:
+        return False
+    phrases = tuple(
+        phrase.split()
+        for phrase in sorted(
+            (item for item in (_HANGUP_ACKS | _BACKCHANNEL_WORDS) if " " in item),
+            key=lambda item: len(item.split()),
+            reverse=True,
+        )
+    )
+    index = 0
+    while index < len(words):
+        matched = False
+        for phrase in phrases:
+            size = len(phrase)
+            if words[index : index + size] == phrase:
+                index += size
+                matched = True
+                break
+        if matched:
+            continue
+        if words[index] in _HANGUP_ACKS or words[index] in _BACKCHANNEL_WORDS:
+            index += 1
+            continue
+        return False
+    return True
+
+
+def _hangup_utterance_kind(text: str) -> str:
+    """``goodbye``, ``ack``, ``pending``, or ``retract``.
+
+    A short acknowledgement of the goodbye ("Alright.") and another goodbye
+    are not a retract. "Wait", "one more thing", and any other request are.
+    ``pending`` is an unfinished partial that can still become an ack or a
+    goodbye ("Al", "All", "Alri", "Oka"). It must not cancel the hangup.
+    Empty text is a retract: a commit with no words we can read still counts.
+    """
+    if "?" in text or "？" in text:
+        return "retract"
+    norm = _normalize_spoken(text)
+    if not norm:
+        return "retract"
+    if any(_hangup_marker_in(norm, marker) for marker in _HANGUP_RETRACT_MARKERS):
+        return "retract"
+    if norm in _INTERRUPT_COMMANDS:
+        return "retract"
+    if _is_hangup_goodbye(norm) or _closes_with_goodbye(text):
+        return "goodbye"
+    if _is_ack_only(norm) or _is_pure_backchannel(text):
+        return "ack"
+    if _grows_into_non_retract(norm) or _acks_then_growing(norm):
+        return "pending"
+    return "retract"
+
+
+def _acks_then_growing(norm: str) -> bool:
+    """Acknowledgements, then a partial still growing into one ("vale gracias ad")."""
+    words = norm.split()
+    for cut in range(len(words) - 1, 0, -1):
+        if _is_ack_only(" ".join(words[:cut])) and _grows_into_non_retract(" ".join(words[cut:])):
+            return True
+    return False
+
+
+# A caller hangup request is the whole turn: optional acknowledgements and
+# politeness, one of these forms, then politeness or "the call". A phrase
+# that only mentions hanging up ("I don't want to hang up", "Did you hang up
+# on me?", "no me cuelgues") is not one.
+_HANGUP_REQUEST_FORMS = (
+    frozenset(
+        f"{lead}{verb}"
+        for lead in ("", "can you ", "could you ", "would you ", "will you ", "you can ", "you may ", "go ahead and ")
+        for verb in ("hang up", "end the call", "end this call")
+    )
+    | frozenset(
+        f"{lead}{verb}"
+        for lead in ("", "ya ", "puedes ", "puede ", "podrias ", "podria ", "ya puedes ", "ya puede ", "me puedes ")
+        for verb in (
+            "cuelga",
+            "cuelgue",
+            "cuelgame",
+            "colgar",
+            "corta la llamada",
+            "termina la llamada",
+            "cortar la llamada",
+            "terminar la llamada",
+        )
+    )
+    | frozenset({"penja", "pots penjar", "ja pots penjar"})
+)
+_HANGUP_REQUEST_LEAD = frozenset({"please", "so", "then", "just", "now", "por", "favor"})
+_HANGUP_REQUEST_TRAIL = frozenset(
+    {
+        "please",
+        "now",
+        "then",
+        "thanks",
+        "thank",
+        "you",
+        "the",
+        "phone",
+        "call",
+        "for",
+        "me",
+        "por",
+        "favor",
+        "ya",
+        "gracias",
+        "si",
+        "us",
+        "plau",
+    }
+)
+# Politeness that may sit anywhere in a request ("can you please hang up").
+_HANGUP_REQUEST_POLITE = (" please ", " por favor ", " si us plau ")
+# Words in the agent's question that make a "yes" mean something else: a
+# negation, a condition ("if you're done"), or an alternative ("or").
+_HANGUP_NEGATIONS = frozenset(
+    {"don't", "dont", "not", "no", "never", "nunca", "won't", "wont", "can't", "cant", "cannot"}
+    | {"if", "si", "when", "cuando", "once", "unless", "until", "hasta", "after", "before", "antes", "después"}
+    | {"or", "o"}
+)
+_HANGUP_ASK_MARKERS = (
+    "hang up",
+    "end the call",
+    "end this call",
+    "cuelgue",
+    "cuelgo",
+    "colgar",
+    "termine la llamada",
+    "penjo",
+    "pengi",
+)
+_HANGUP_AFFIRMATIVES = frozenset(
+    {
+        "yes",
+        "yeah",
+        "yep",
+        "yup",
+        "sure",
+        "ok",
+        "okay",
+        "alright",
+        "please",
+        "si",
+        "vale",
+        "claro",
+        "dale",
+        "venga",
+        "perfecto",
+        "d'acord",
+        "dacord",
+    }
+)
+
+
+def _asks_for_hangup(norm: str) -> bool:
+    """The caller's whole turn is a request to end the call ("Yes, please hang up.")."""
+    words = _drop_hangup_politeness(norm).split()
+    while words and (words[0] in _HANGUP_REQUEST_LEAD or _is_ack_only(words[0])):
+        words = words[1:]
+    for form in _HANGUP_REQUEST_FORMS:
+        size = len(form.split())
+        if " ".join(words[:size]) == form and all(word in _HANGUP_REQUEST_TRAIL for word in words[size:]):
+            return True
+    return False
+
+
+def _asked_whether_to_hang_up(assistant: str) -> bool:
+    """The agent's last sentence is a plain question about ending the call ("Shall I hang up?")."""
+    text = (assistant or "").strip()
+    if not text.endswith("?"):
+        return False
+    last = re.split(r"(?<=[.!?])\s+", text)[-1]
+    # Accents kept: "¿Cuelgo, sí?" is not the conditional "si".
+    words = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", unicodedata.normalize("NFC", last.lower().replace("’", "'")))
+    plain = _drop_hangup_politeness(" ".join(words)).split()
+    if any(word in _HANGUP_NEGATIONS for word in plain):
+        return False
+    norm = _normalize_spoken(last)
+    return any(_hangup_marker_in(norm, marker) for marker in _HANGUP_ASK_MARKERS)
+
+
+def _drop_hangup_politeness(text: str) -> str:
+    padded = f" {text} "
+    for polite in _HANGUP_REQUEST_POLITE:
+        while polite in padded:
+            padded = padded.replace(polite, " ")
+    return " ".join(padded.split())
+
+
+def _caller_ends_call(text: str, last_assistant: str = "") -> bool:
+    """Whether this caller turn ends the call, so a model's hangup may proceed.
+
+    A turn that closes on a goodbye ("Eso era todo, gracias. Hasta luego."), an
+    explicit hangup request ("Can you hang up?"), a goodbye with only
+    acknowledgements around it ("Bye, thank you."), or a yes to the agent
+    asking whether to end the call. Thanks alone, "vámonos", a goodbye that is
+    only mentioned ("me dijo adiós"), and any retract ("wait", "don't hang up")
+    are not.
+    """
+    if _hangup_utterance_kind(text) == "goodbye":
+        return True
+    norm = _normalize_spoken(text)
+    if not norm or any(_hangup_marker_in(norm, marker) for marker in _HANGUP_RETRACT_MARKERS):
+        return False
+    if _asks_for_hangup(norm):
+        return True
+    for tail in _HANGUP_GOODBYE_TAILS:
+        if _hangup_marker_in(norm, tail):
+            rest = " ".join(f" {norm} ".replace(f" {tail} ", " ", 1).split())
+            if not rest or _is_ack_only(rest):
+                return True
+    words = _drop_hangup_politeness(norm).split() or norm.split()
+    return (
+        bool(words)
+        and all(word in _HANGUP_AFFIRMATIVES for word in words)
+        and _asked_whether_to_hang_up(last_assistant)
+    )
+
+
+def _is_hangup_tool_name(name: str) -> bool:
+    key = re.sub(r"[\s\-]+", "_", name.strip().lower())
+    return key in _HANGUP_TOOL_NAMES
+
+
+def _hangup_farewell_phrase(language: str | None) -> str:
+    return _HANGUP_FAREWELL_BY_LANGUAGE.get(language_key(language), "Goodbye.")
+
+
+def _unheard_suffix(full: str, heard: str) -> str:
+    """The generated reply the playhead did not reach. Empty when nothing remains."""
+    full_text = (full or "").strip()
+    heard_text = (heard or "").strip()
+    if not full_text:
+        return ""
+    if not heard_text:
+        return full_text
+    if full_text.startswith(heard_text):
+        return full_text[len(heard_text) :].strip()
+    return ""
+
+
+def false_interrupt_followup(text: str) -> bool:
+    """An empty commit or a pure acknowledgement is not a new request."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    return _is_pure_backchannel(stripped)
 
 
 def _pending_tts_after_scheduled(scheduled: str, final_assistant: str) -> str:
@@ -659,6 +1178,7 @@ class VoiceSession:
         max_tts_pause_secs: float | None = None,
         tts_quiet_dbfs: float = -45.0,
         tts_tempo: float | None = None,
+        tts_rhythm: SpeechRhythm | dict[str, Any] | bool | None = None,
         hangup_grace_secs: float | None = None,
         turn_timeout_secs: float = DEFAULT_TURN_TIMEOUT_SECS,
         turn_timeout_fallback: str | None = DEFAULT_TURN_TIMEOUT_FALLBACK,
@@ -670,6 +1190,11 @@ class VoiceSession:
         eager_eot_threshold: float | None = None,
         model: str | None = None,
         filler: FillerConfig | dict[str, Any] | None = None,
+        hesitation: HesitationConfig | dict[str, Any] | bool | None = None,
+        adaptive_tempo: AdaptiveTempoConfig | dict[str, Any] | bool | None = None,
+        backchannel: BackchannelConfig | dict[str, Any] | bool | None = None,
+        audio_tags: AudioTagsConfig | dict[str, Any] | list[str] | bool | None = None,
+        pronunciations: dict[str, str] | dict[str, dict[str, str]] | None = None,
         greeting: GreetingConfig | dict[str, Any] | str | None = None,
         user_idle: UserIdleConfig | dict[str, Any] | None = None,
         call_context: dict[str, str] | None = None,
@@ -679,6 +1204,7 @@ class VoiceSession:
         client_events: bool = False,
         on_busy: OnBusy = "reject",
         speculative_generation: SpeculativeGeneration | bool | None = None,
+        reply_language: str | None = None,
     ):
         self.agent = agent
         self.stt = stt
@@ -752,6 +1278,14 @@ class VoiceSession:
         ):
             raise ValueError("tts_tempo must be finite and positive")
         self.tts_tempo = None if tts_tempo is None else float(tts_tempo)
+        # Off unless a share is set. ``True`` is the measured preset, and an
+        # empty block is unset, as in VoiceConfig.
+        tts_rhythm = coerce_speech_rhythm(tts_rhythm)
+        if isinstance(tts_rhythm, dict):
+            tts_rhythm = SpeechRhythm.model_validate(tts_rhythm) if tts_rhythm else None
+        if tts_rhythm is not None and not isinstance(tts_rhythm, SpeechRhythm):
+            raise ValueError("tts_rhythm must be a SpeechRhythm, a dict of its fields, or a boolean")
+        self.tts_rhythm: SpeechRhythm | None = tts_rhythm if tts_rhythm is not None and tts_rhythm.enabled else None
         # Logged once when pace is configured but the session audio is not PCM16.
         self._tts_pace_encoding_warned = False
         # Confirmation window after end_call's goodbye. 0 hangs up as soon as
@@ -815,6 +1349,19 @@ class VoiceSession:
         # Flux EagerEndOfTurn confidence required to start a turn early.
         # None → :data:`timbal.voice.predictive_eou.FLUX_COMPLETE` (0.5).
         self.eager_eot_threshold = eager_eot_threshold
+        # Unset keeps the reply pin on ``audio_input.language``. ``"follow"``
+        # or a tag is explicit and does not move the STT hint.
+        self.reply_language = parse_reply_language(reply_language)
+        # The language the caller speaks: what the application said (``set_spoken_language``), and what the
+        # transcriber reported for an utterance long enough to tell. See ``spoken_language``.
+        self._spoken_language_set: str | None = None
+        self._spoken_language_heard: str | None = None
+        self._unheard_tail = ""
+        # True only when the tail is the unplayed end of a reply the model
+        # finished. A cancel mid-generation is a fragment, not a script.
+        self._unheard_tail_resumable = False
+        self._continuation_note = ""
+        self._arm_flux_eager_query()
         self._eou_predictor: SpeechEouPredictor | None = None
         # Text of an EagerEndOfTurn turn that EndOfTurn has not confirmed.
         self._eager_unconfirmed: str | None = None
@@ -889,6 +1436,105 @@ class VoiceSession:
         # Segments/bytes as of the last filler — "spoken since then" checks.
         self._turn_filler_segments_baseline = 0
         self._turn_filler_audio_baseline = 0
+        # A hesitation sound at the opening of some replies (see
+        # HesitationConfig). Off unless a rate is set: ``True`` is the default
+        # rate and an empty block is unset, as in VoiceConfig.
+        hesitation = omit_empty_voice_blocks({"hesitation": coerce_hesitation(hesitation)}).get("hesitation")
+        if isinstance(hesitation, dict):
+            hesitation = HesitationConfig.model_validate(hesitation)
+        if hesitation is not None and not isinstance(hesitation, HesitationConfig):
+            raise ValueError("hesitation must be a HesitationConfig, a dict of its fields, or a boolean")
+        self.hesitation: HesitationConfig | None = hesitation if hesitation is not None and hesitation.enabled else None
+        self._hesitator: Hesitator | None = None
+        if self.hesitation is not None:
+            self._hesitator = Hesitator(self.hesitation.rate, self.hesitation.openers, seed=self.hesitation.seed)
+        # True until the first segment of a model step has been spoken: from
+        # the start of the turn, and again once a tool boundary has gone by.
+        self._turn_hesitation_due = False
+        self._turn_hesitations = 0
+        # ``id(record) -> (offset, chars)``: a sound that is in a segment
+        # record's audio and not in its text.
+        self._turn_tts_added: dict[int, tuple[int, int]] = {}
+        self._hesitation_rewind: tuple[bool, str] | None = None
+        # Reply languages already reported as having no openers.
+        self._hesitation_unavailable: set[str | None] = set()
+        # The caller's pace and mood slow the reply down (see ``timbal.voice.adaptive_tempo``).
+        # ``_tempo_factor`` multiplies ``tts_tempo`` and is fixed when a turn starts.
+        adaptive_tempo = coerce_adaptive_tempo(adaptive_tempo)
+        if isinstance(adaptive_tempo, dict):
+            adaptive_tempo = AdaptiveTempoConfig(**adaptive_tempo)
+        self.adaptive_tempo: AdaptiveTempoConfig | None = (
+            adaptive_tempo if adaptive_tempo is not None and adaptive_tempo.enabled else None
+        )
+        self._caller_pace: CallerPace | None = None
+        if self.adaptive_tempo is not None:
+            self._caller_pace = CallerPace(
+                slowest=self.adaptive_tempo.slowest,
+                slow_rate=self.adaptive_tempo.slow_rate,
+                normal_rate=self.adaptive_tempo.normal_rate,
+                upset_tempo=self.adaptive_tempo.upset_tempo,
+                upset_turns=self.adaptive_tempo.upset_turns,
+                upset_words=self.adaptive_tempo.upset_words,
+            )
+        self._tempo_factor = 1.0
+        # ``MicActivity.speech_secs`` when the caller's last utterance was heard.
+        self._utterance_speech_mark = 0.0
+        self._turn_caller_rate: float | None = None
+        # Listening sounds while the caller talks (see ``timbal.voice.backchannel``).
+        backchannel = coerce_backchannel(backchannel)
+        if isinstance(backchannel, dict):
+            backchannel = BackchannelConfig(**backchannel)
+        self.backchannel: BackchannelConfig | None = (
+            backchannel if backchannel is not None and backchannel.enabled else None
+        )
+        self._backchanneler: Backchanneler | None = None
+        if self.backchannel is not None:
+            self._backchanneler = Backchanneler(
+                self.backchannel.phrases,
+                pause_secs=self.backchannel.pause_secs,
+                min_speech_secs=self.backchannel.min_speech_secs,
+                min_gap_secs=self.backchannel.min_gap_secs,
+                max_per_turn=self.backchannel.max_per_turn,
+                rate=self.backchannel.rate,
+                long_speech_secs=self.backchannel.long_speech_secs,
+                seed=self.backchannel.seed,
+            )
+        # The clips, by language key and phrase, and the task preparing each language's.
+        self._backchannel_clips: dict[str, dict[str, bytes]] = {}
+        self._backchannel_clip_tasks: dict[str, asyncio.Task[None]] = {}
+        self._backchannel_task: asyncio.Task[None] | None = None
+        # True while a listening sound is the only audio queued at the client:
+        # that is not the assistant speaking (see ``_assistant_audio_playing``).
+        self._backchannel_only = False
+        self._backchannel_ends_at = 0.0
+        # ``MicActivity.speech_secs`` at the last sound.
+        self._backchannel_speech_mark = 0.0
+        # Sounds said while the caller said what the current turn answers.
+        self._turn_backchannels = 0
+        # Counts ``interrupt()`` calls: a clip synthesized across one may be cut short.
+        self._interrupt_serial = 0
+        # The caller's talking and pausing from the mic level. Only built for
+        # the behaviours that read it, and only for PCM16 mic audio.
+        self._mic_activity: MicActivity | None = None
+        # Laughs and sighs the model writes as ``[laughs]`` (see ``timbal.voice.audio_tags``):
+        # performed by voices that can, taken out of the spoken text for the rest.
+        audio_tags = coerce_audio_tags(audio_tags)
+        if isinstance(audio_tags, dict):
+            audio_tags = AudioTagsConfig(**audio_tags)
+        self.audio_tags: AudioTagsConfig | None = audio_tags if audio_tags is not None and audio_tags.enabled else None
+        self._audio_tag_policy: AudioTagPolicy | None = None
+        if self.audio_tags is not None:
+            self._audio_tag_policy = AudioTagPolicy(
+                self.audio_tags.tags,
+                max_per_reply=self.audio_tags.max_per_reply,
+                rest_replies=self.audio_tags.rest_replies,
+            )
+        self._turn_audio_tags = 0
+        self._audio_tags_rewind: tuple[int, int] | None = None
+        # Spoken forms for terms the voice reads badly (see ``timbal.voice.pronunciation``):
+        # in the text sent to the voice, never in the reply's own text.
+        self.pronunciations = validate_pronunciations(pronunciations)
+        self._pronouncer: Pronouncer | None = Pronouncer(self.pronunciations) if self.pronunciations else None
         # Audio counters when the current soft-timeout quiet window opened.
         self._soft_audio_baseline = 0
         self._soft_segments_baseline = 0
@@ -984,6 +1630,33 @@ class VoiceSession:
         self._end_call_task: asyncio.Task[None] | None = None
         self._end_call_commit_at: float = 0.0
         self._end_call_grace_secs: float = 0.0
+        #: Hands this call to another number: ``await call_transferer(to)``, raising when the provider refuses.
+        #: Set by the transport that can (the telephony bridge, with the provider's credentials in the
+        #: environment); a host with its own credentials sets its own. ``None``: the call cannot be transferred.
+        self.call_transferer: Callable[[str], Awaitable[None]] | None = None
+        # ``transfer_call()``: where to, and the future that says how it went. The wait is ``end_call``'s.
+        self._transfer_to: str | None = None
+        self._transfer_outcome: asyncio.Future[CallTransferOutcome] | None = None
+        # ``on_close()``: each callback with the context it was registered in.
+        self._close_callbacks: list[tuple[Callable[[], Any], contextvars.Context]] = []
+        self._close_callbacks_due = False
+        self._close_callbacks_runner: asyncio.Task[None] | None = None
+        self._close_callback_tasks: set[asyncio.Task[None]] = set()
+        # commit_hangup is in flight (or teardown was requested and not retracted).
+        # An acknowledgement during that window is not a new request.
+        self._hangup_open = False
+        # True once commit_hangup has requested teardown. Later assistant text
+        # in this turn is not spoken: the farewell already went out.
+        self._hangup_committed = False
+        # commit_hangup ran at least once. A later clear goodbye may re-arm
+        # even if that attempt was cancelled. A call that never tried does not.
+        self._hangup_attempted = False
+        # This turn's commit_hangup returned false on a real retract. The
+        # caller's original "bye" must not hang up again at the end of the turn.
+        self._hangup_retracted = False
+        self._hangup_filler_blocked = False
+        self._hangup_farewell_text = ""
+        self._hangup_ignored_text = ""
         #: STT/TTS connections opened (``prepare()``), so ``run()`` skips them.
         self._prepared = False
         self._held_user_text: str | None = None
@@ -1051,6 +1724,11 @@ class VoiceSession:
         self._active_turn_user_text: str = ""
         self._turn_started_at: float = 0.0
         self._last_commit_at: float = 0.0
+        # The last commit the session took as caller speech (a turn, a hold). ``_last_commit_at`` also moves
+        # for one it dropped (an acknowledgement over the reply, an echo, a late twin), whose words are kept
+        # in ``_dropped_commit_text``: they are in no transcript row.
+        self._taken_commit_at: float = 0.0
+        self._dropped_commit_text = ""
         self._partials_since_last_commit: int = 0
         self._last_partial_at: float = 0.0
         # Latest non-empty STT partial text — fed to the VAD endpointer's
@@ -1081,6 +1759,11 @@ class VoiceSession:
         self._stale_commit_sent_at = 0.0
         # Last value ``_event_stamp`` handed out (caller events are ordered by their stamps).
         self._last_event_stamp = 0.0
+        # Words of a commit we already handled (ignored ack, noise). The
+        # stranded-partial watchdog must not turn that same caption into a
+        # later turn. Cleared when a different utterance arrives.
+        self._consumed_utterance = ""
+        self._consumed_utterance_at = 0.0
 
         # Serial TTS runs off the agent ``async for`` critical path so we keep pulling
         # LLM/Agent events (and emit trace OUTPUT) while audio still synthesizes.
@@ -1202,8 +1885,13 @@ class VoiceSession:
 
     @property
     def _assistant_audio_playing(self) -> bool:
-        """True if the client likely still has queued audio to play."""
-        return self.playback.is_playing
+        """True if the client likely still has queued audio of the assistant's to play.
+
+        A listening sound ("ajá") is not the assistant speaking: the caller who
+        goes on talking over it interrupts nothing, and what they say is not
+        an answer to it.
+        """
+        return self.playback.is_playing and not self._backchannel_only
 
     @property
     def _assistant_active(self) -> bool:
@@ -1344,8 +2032,10 @@ class VoiceSession:
         if (
             self._end_call_task is not None
             and not self._end_call_task.done()
-            and self._last_commit_at <= self._end_call_commit_at
+            and (self._last_commit_at <= self._end_call_commit_at or self._transfer_to is not None)
         ):
+            # Also while a transfer waits: the caller was told they are being put through, and a model
+            # that answers their "thanks, bye" with a hangup tool must not drop them instead.
             return
         # Resolve before touching the in-flight task so a bad override leaves it alone.
         grace = self.hangup_grace_secs if grace_secs is None else normalize_hangup_grace_secs(grace_secs)
@@ -1355,9 +2045,132 @@ class VoiceSession:
         baseline = max(self._last_commit_at, self._last_partial_at if self._turn_is_event else 0.0)
         logger.info("end_call_requested", grace_secs=grace)
         self._end_call_task = self._spawn_session_task(
-            self._end_call_when_heard(baseline),
+            self._end_call_when_heard(baseline, committed=self._hangup_committed),
             name="voice-end-call",
         )
+
+    @property
+    def can_transfer(self) -> bool:
+        """Whether :meth:`transfer_call` can hand this call to another number.
+
+        True on a phone call whose transport knows how (``call_transferer``):
+        the telephony bridge sets it when the provider's API credentials are
+        in the environment. False on a web call.
+        """
+        return self.call_transferer is not None and not self._closed
+
+    def transfer_call(self, to: str) -> asyncio.Future[CallTransferOutcome]:
+        """Hand the call to another number once what the agent is saying has been heard.
+
+        For an agent that passes the caller on to a person, from the tool it
+        calls with its "I'll put you through". As with :meth:`end_call`, the
+        turn that asked finishes and its audio plays out. Then the call's
+        transport transfers it and the session closes. A new request from the
+        caller before that ("wait, one more thing") keeps the call with the
+        agent. A short acknowledgement or a goodbye does not, and neither does
+        :meth:`end_call`: the caller was told they are being put through.
+
+        ``to`` is what the provider dials: a phone number in E.164
+        (``"+34931234567"``) or a ``sip:`` address.
+
+        Returns at once. The future says how it went: ``"transferred"``;
+        ``"failed"``, the provider refused (logged as ``call_transfer_failed``)
+        and the call stays with the agent, who has said it would be put
+        through, so say otherwise or hang up; ``"cancelled"``, the caller asked
+        for something else first; ``"closed"``, the call ended first. Calling
+        it again while one waits changes the number and returns the same future.
+
+        Raises ``RuntimeError`` on a call that cannot be transferred
+        (:attr:`can_transfer`), and ``ValueError`` for an empty ``to``.
+        """
+        target = to.strip() if isinstance(to, str) else ""
+        if not target:
+            raise ValueError("transfer_call needs the number or SIP address to transfer to")
+        if self._closed:
+            done: asyncio.Future[CallTransferOutcome] = asyncio.get_running_loop().create_future()
+            done.set_result("closed")
+            return done
+        if self.call_transferer is None:
+            raise RuntimeError(
+                "This call cannot be transferred: its transport set no call_transferer. The telephony bridge "
+                "sets one when the provider's API credentials are in the environment (TELNYX_API_KEY; "
+                "TWILIO_AUTH_TOKEN with the account SID)."
+            )
+        if self._transfer_outcome is not None and self._end_call_task is not None and not self._end_call_task.done():
+            self._transfer_to = target
+            return self._transfer_outcome
+        self._stop_end_call()
+        outcome: asyncio.Future[CallTransferOutcome] = asyncio.get_running_loop().create_future()
+        self._transfer_to, self._transfer_outcome = target, outcome
+        self._end_call_commit_at = self._last_commit_at
+        # No quiet window of its own: a hangup's is there to catch "wait" after a goodbye, and that retraction
+        # is read from the caller's words here (``committed``), not from any sound in a window.
+        self._end_call_grace_secs = 0.0
+        baseline = max(self._last_commit_at, self._last_partial_at if self._turn_is_event else 0.0)
+        logger.info("call_transfer_requested", to=target)
+        self._end_call_task = self._spawn_session_task(
+            self._end_call_when_heard(baseline, committed=True),
+            name="voice-transfer-call",
+        )
+        return outcome
+
+    def _settle_transfer(self, outcome: CallTransferOutcome) -> None:
+        """Answer the pending transfer's future, once, and forget the transfer."""
+        future, self._transfer_to, self._transfer_outcome = self._transfer_outcome, None, None
+        if future is not None and not future.done():
+            future.set_result(outcome)
+
+    async def _hang_up_or_transfer(self) -> None:
+        """What ``end_call`` / ``transfer_call`` asked for, now that it has been heard."""
+        to, transferer = self._transfer_to, self.call_transferer
+        if to is None:
+            await self.close()
+            return
+        try:
+            if transferer is None:
+                raise RuntimeError("the transport no longer has a call_transferer")
+            await transferer(to)
+        except Exception as e:  # noqa: BLE001 - a refused transfer must not end the call
+            logger.warning("call_transfer_failed", to=to, error=str(e), error_type=type(e).__name__)
+            self._settle_transfer("failed")
+            return
+        logger.info("call_transferred", to=to)
+        self._settle_transfer("transferred")
+        # The agent's part is over. A provider that keeps the stream open after the transfer would
+        # otherwise have it listening to, and answering, the caller and the person who took the call.
+        await self.close()
+
+    async def wait_until_heard(self) -> bool:
+        """Wait until what the agent is saying has been heard.
+
+        The turn in flight finishes and its audio plays out; an opener or an
+        idle prompt counts as well. True then. False when the caller spoke
+        or cut it off first, when the call closed, or when the audio had not
+        drained after ``END_CALL_MAX_WAIT_SECS``.
+
+        Await it from a task of your own. A tool is part of the turn this
+        waits for: awaited inside one it can only return False, at the cap.
+        To hang up or transfer afterwards use :meth:`end_call` and
+        :meth:`transfer_call`, which wait the same way.
+        """
+        # Commits the session takes. One it drops (a «vale» over the reply) is not the caller taking the floor.
+        commit_at, interrupts = self._taken_commit_at, self._interrupt_serial
+        give_up_at = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
+
+        def cut() -> bool:
+            return self._closed or self._taken_commit_at > commit_at or self._interrupt_serial != interrupts
+
+        while not cut():
+            if self._end_call_output_busy():
+                if time.monotonic() >= give_up_at:
+                    return False
+                await asyncio.sleep(0.05)
+                continue
+            # The tracker estimates playback; the last words may still be on the wire.
+            await asyncio.sleep(self.END_CALL_TAIL_SECS)
+            if not self._end_call_output_busy():
+                return not cut()
+        return False
 
     def _hangup_audio_pending(self) -> bool:
         """Goodbye audio still going out. Ignores the turn task.
@@ -1378,18 +2191,105 @@ class VoiceSession:
             return True
         return self._greeting_task is not None and not self._greeting_task.done()
 
+    def _hangup_intrusion_text(self, baseline: float) -> str | None:
+        """Caller text newer than ``baseline``, or None when nothing new arrived.
+
+        ``""`` means a commit moved and we have no words for it. That still
+        retracts: a timestamp with no transcript is the old "any commit" case.
+        Echo of the goodbye does not count.
+        """
+        partial = (self._latest_partial_text or "").strip()
+        partial_new = bool(
+            partial
+            and self._last_partial_at > baseline
+            and not _likely_stt_echo(partial, self._hangup_echo_reference())
+        )
+        if partial_new and (self._last_commit_at <= baseline or self._last_partial_at >= self._last_commit_at):
+            return partial
+        if self._last_commit_at <= baseline:
+            return None
+        dropped = self._dropped_commit_text
+        if dropped and self._taken_commit_at <= baseline:
+            # Every commit since ``baseline`` is one the session dropped, so the last transcript row is from
+            # before it: the caller's «vale» over "I'll put you through" read as the request that had asked
+            # for the transfer, and took it back. The dropped words are what was said. A late twin of that
+            # last row is not something new.
+            last = next((e.text for e in reversed(self._transcript) if e.role == "user" and (e.text or "").strip()), "")
+            if _likely_stt_echo(dropped, self._hangup_echo_reference()):
+                return None
+            if last and _is_same_user_utterance_refinement(last, dropped):
+                return None
+            return dropped
+        held = (self._held_user_text or "").strip()
+        if held and not _likely_stt_echo(held, self._hangup_echo_reference()):
+            return held
+        for entry in reversed(self._transcript):
+            if entry.role == "user" and (entry.text or "").strip():
+                text = entry.text.strip()
+                if _likely_stt_echo(text, self._hangup_echo_reference()):
+                    return None
+                return text
+        return ""
+
     def _caller_retracted_since(self, commit_at: float) -> bool:
-        """New caller speech after ``commit_at``, in any language.
+        """New caller speech after ``commit_at`` that keeps the call up.
 
         A later commit, or a partial that is not an echo of the goodbye.
-        Not a list of phrases. Echo of the assistant's own line does not count.
+        A short acknowledgement ("Alright.") or another goodbye is not a
+        retract: it is the caller answering the farewell, not taking it back.
+        "Wait" and any other request still are.
         """
-        if self._last_commit_at > commit_at:
+        text = self._hangup_intrusion_text(commit_at)
+        if text is None:
+            return False
+        kind = _hangup_utterance_kind(text) if text.strip() else "retract"
+        # "Al" / "All" / "Alri" are Flux partials of "Alright.", not a retract.
+        # The next partial either finishes the ack or diverges ("wait", "what").
+        if kind == "pending":
+            return False
+        if kind == "retract":
             return True
-        text = (self._latest_partial_text or "").strip()
-        return bool(
-            text and self._last_partial_at > commit_at and not _likely_stt_echo(text, self._hangup_echo_reference())
-        )
+        if text != self._hangup_ignored_text:
+            self._hangup_ignored_text = text
+            logger.info("end_call_caller_ack", phase="commit_hangup", text_preview=text[:80])
+        return False
+
+    def _mark_hangup_retracted(self) -> None:
+        self._hangup_open = False
+        self._hangup_retracted = True
+
+    def _turn_reply_spoken(self) -> bool:
+        """The model already produced reply text this turn. Filler does not count."""
+        return bool((self._turn_assistant_text or "").strip() or (self._turn_tts_scheduled_text or "").strip())
+
+    async def _speak_hangup_farewell(self) -> None:
+        """One short goodbye when the model called hangup without speaking.
+
+        The two-phase wait is "play the goodbye, then the quiet window". A tool
+        call with no preceding text has nothing to play, so the session says it.
+        """
+        if self._closed or self._hangup_farewell_text:
+            return
+        phrase = _hangup_farewell_phrase(self.audio_input.language)
+        self._hangup_farewell_text = phrase
+        self._turn_assistant_text = f"{self._turn_assistant_text} {phrase}".strip()
+        logger.info("hangup_farewell", phrase=phrase)
+        await self._emit(AgentTextDelta(text=phrase))
+        await self._speak(phrase)
+        if not any(entry.role == "assistant" and entry.text == phrase for entry in self._transcript):
+            self._transcript.append(TranscriptEntry(role="assistant", text=phrase))
+
+    async def _ensure_hangup_farewell(self) -> None:
+        if self._turn_reply_spoken() or self._hangup_farewell_text:
+            return
+        await self._speak_hangup_farewell()
+
+    def _block_hangup_filler(self) -> None:
+        """Stop a waiting or in-flight filler. A hangup is not a slow lookup."""
+        self._hangup_filler_blocked = True
+        task = self._turn_filler_task
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
 
     async def commit_hangup(self) -> bool:
         """Perform the hangup only if the caller stays quiet through the grace window.
@@ -1397,29 +2297,55 @@ class VoiceSession:
         LiveKit's EndCallTool waits until the goodbye speech handle has played,
         then shuts down; speech during that wait keeps the call up. Pipecat
         does not commit an irreversible tool on an early turn. With
-        ``hangup_grace_secs`` unset or 0 this is :meth:`end_call` and returns
-        True. With a window, the goodbye (if any) plays out, then that many
-        quiet seconds pass, and only then is teardown requested. Any new
-        caller speech in that span returns False and does not call
-        :meth:`end_call`. When no goodbye had played by then, teardown is
-        requested with the same window, which opens after whatever the turn
-        says next.
+        ``hangup_grace_secs`` unset or 0 this still speaks a missing farewell,
+        then calls :meth:`end_call` and returns True. It is not the same as
+        calling :meth:`end_call` alone. With a window, the goodbye plays out,
+        then that many quiet seconds pass, and only then is teardown requested.
+        A new request in that span ("wait", "one more thing") returns False
+        and does not call :meth:`end_call`. A short acknowledgement, another
+        goodbye, or a partial that is still growing into one does not.
+
+        If this turn has not spoken yet, a short farewell is spoken first and
+        the wait applies to that audio. Soft-timeout filler is cancelled so it
+        cannot talk over the goodbye. When no goodbye had played by the end of
+        the window (the farewell could not be spoken), teardown is requested
+        with the same window, which opens after whatever the turn says next.
 
         Await this from the hangup tool *before* treating the hangup as done.
         The tool's own side effects belong after a True result.
         """
         if self._closed:
             return False
+        # The model decides to call this. Thanks, "vamos", and a new question
+        # are not a goodbye, even when the transcript is wrong. A clear goodbye
+        # still proceeds. An empty turn (tests, no caller text yet) is unchanged.
+        caller = (self._active_turn_user_text or "").strip()
+        asked = next((e.text for e in reversed(self._transcript) if e.role == "assistant" and e.text), "")
+        if caller and not _caller_ends_call(caller, asked):
+            logger.info("end_call_refused", reason="not_a_goodbye", text_preview=caller[:80])
+            return False
+        self._hangup_attempted = True
+        self._hangup_open = True
+        self._block_hangup_filler()
+        baseline = self._last_commit_at
+        await self._ensure_hangup_farewell()
+        if self._closed:
+            return False
         grace = self.hangup_grace_secs
         if grace <= 0:
+            if self._caller_retracted_since(baseline):
+                self._mark_hangup_retracted()
+                logger.info("end_call_cancelled", reason="caller_spoke", phase="before_commit")
+                return False
+            self._hangup_committed = True
             self.end_call()
             return True
-        baseline = self._last_commit_at
         give_up = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
         # Whether a goodbye has gone out before the window: audio this turn, or seen pending below.
         goodbye_heard = self._turn_first_audio_at is not None or self._hangup_audio_pending()
         while not self._closed and self._hangup_audio_pending():
             if self._caller_retracted_since(baseline):
+                self._mark_hangup_retracted()
                 logger.info("end_call_cancelled", reason="caller_spoke", phase="before_commit")
                 return False
             if time.monotonic() > give_up:
@@ -1428,6 +2354,7 @@ class VoiceSession:
         deadline = time.monotonic() + grace
         while not self._closed and time.monotonic() < deadline:
             if self._caller_retracted_since(baseline):
+                self._mark_hangup_retracted()
                 logger.info("end_call_cancelled", reason="caller_spoke", phase="grace")
                 return False
             if self._hangup_audio_pending():
@@ -1435,13 +2362,14 @@ class VoiceSession:
                 # counts from when it finishes, not from the tool call.
                 goodbye_heard = True
                 deadline = time.monotonic() + grace
-                if deadline > give_up:
-                    deadline = give_up
+                deadline = min(deadline, give_up)
             await asyncio.sleep(0.05)
         if self._closed or self._caller_retracted_since(baseline):
             if not self._closed:
+                self._mark_hangup_retracted()
                 logger.info("end_call_cancelled", reason="caller_spoke", phase="grace")
             return False
+        self._hangup_committed = True
         if goodbye_heard:
             # The quiet window already elapsed after the goodbye. Do not open a second one.
             self.end_call(grace_secs=0)
@@ -1451,6 +2379,29 @@ class VoiceSession:
             self.end_call(grace_secs=grace)
         return True
 
+    async def _finish_hangup_rearm(self, user_text: str, assistant_text: str) -> None:
+        """Hang up after a goodbye the tool did not commit.
+
+        A retract in this turn ("wait, one more thing") leaves the call up.
+        A later clear goodbye, or an acknowledgement of a hangup still open,
+        drops the line even when the model only says farewell and does not
+        call the tool again.
+        """
+        if self._closed or self._hangup_retracted or not self._hangup_attempted:
+            return
+        if self._end_call_task is not None and not self._end_call_task.done():
+            return
+        kind = _hangup_utterance_kind(user_text) if user_text.strip() else ""
+        if kind == "retract":
+            return
+        if kind != "goodbye" and not (kind == "ack" and self._hangup_open):
+            return
+        self._hangup_open = False
+        if not _is_hangup_goodbye(_normalize_spoken(assistant_text)) and not self._turn_reply_spoken():
+            await self._speak_hangup_farewell()
+        logger.info("hangup_rearm", kind=kind)
+        self.end_call()
+
     def _stop_end_call(self) -> None:
         if (
             self._end_call_task is not None
@@ -1458,7 +2409,13 @@ class VoiceSession:
             and self._end_call_task is not asyncio.current_task()
         ):
             self._end_call_task.cancel()
+            # Replaced or torn down before it ran its course. (Its own ``finally`` no longer owns the slot.)
+            self._settle_transfer("closed" if self._closed else "cancelled")
         self._end_call_task = None
+
+    def _stamp_taken_commit(self) -> None:
+        """Stamp a commit the session takes as caller speech: a turn, a hold, a confirmed speculative turn."""
+        self._last_commit_at = self._taken_commit_at = self._event_stamp()
 
     def _event_stamp(self) -> float:
         """``time.monotonic()`` for a caller event (commit, partial), strictly after the previous stamp.
@@ -1475,6 +2432,11 @@ class VoiceSession:
 
     def _end_call_output_busy(self) -> bool:
         """The goodbye, or another turn, is still going out. Not caller audio."""
+        # commit_hangup already played the farewell and returned. The model
+        # often says "Goodbye." again after "Ending the call." Waiting on this
+        # turn would play that second line and hold the disconnect for it.
+        if self._hangup_committed:
+            return self._hangup_audio_pending()
         turn = self._current_turn_task
         if (turn is not None and not turn.done()) or self._is_speaking or self._tts_tasks or self.playback.is_playing:
             return True
@@ -1488,12 +2450,18 @@ class VoiceSession:
         if self._end_call_output_busy():
             return True
         now = time.monotonic()
-        if (
-            self._last_partial_at > max(commit_at, self._commit_event_at)
+        partial = (self._latest_partial_text or "").strip()
+        partial_fresh = (
+            bool(partial)
+            and self._last_partial_at > max(commit_at, self._commit_event_at)
             and now - self._last_partial_at < self.EVENT_TURN_STRANDED_PARTIAL_SECS
-            and not _likely_stt_echo(self._latest_partial_text, self._hangup_echo_reference())
-        ):
-            return True
+            and not _likely_stt_echo(partial, self._hangup_echo_reference())
+        )
+        if partial_fresh:
+            # An ack still forming ("Al" → "Alright.") must not pin teardown
+            # for the stranded-partial window. A real retract still does.
+            if not (self._hangup_committed and _hangup_utterance_kind(partial) in ("ack", "goodbye", "pending")):
+                return True
         if self._endpointer is not None:
             speech_secs = self._endpointer.speech_secs_in_window(self.HOLD_VAD_SPEECH_WINDOW_SECS)
             if speech_secs is not None and speech_secs >= self.MIN_HOLD_VAD_SPEECH_SECS:
@@ -1593,15 +2561,24 @@ class VoiceSession:
         logger.info("end_call_cancelled", reason="caller_spoke")
         return True
 
-    async def _end_call_when_heard(self, commit_at: float) -> None:
+    async def _end_call_when_heard(self, commit_at: float, *, committed: bool = False) -> None:
         give_up_at = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
         # When playback first reported done. The tail after this is still
         # goodbye audio. VAD anchored here would treat that echo as the caller.
         heard_since: float | None = None
+
+        # ``committed``: commit_hangup already ran its quiet window. A late
+        # "Alright." or another goodbye answers the farewell; only a real
+        # follow-up keeps the call up. Bare end_call() cancels on any speech.
+        def caller_spoke() -> bool:
+            if committed:
+                return self._caller_retracted_since(commit_at)
+            return self._last_commit_at > commit_at
+
         try:
             while not self._closed:
                 await asyncio.sleep(0.1)
-                if self._last_commit_at > commit_at:
+                if caller_spoke():
                     logger.info("end_call_cancelled", reason="caller_spoke")
                     return
                 if self._end_call_output_busy():
@@ -1615,7 +2592,7 @@ class VoiceSession:
                     continue
                 # The tracker estimates playback; the last words may still be on the wire.
                 await asyncio.sleep(self.END_CALL_TAIL_SECS)
-                if self._last_commit_at > commit_at:
+                if caller_spoke():
                     logger.info("end_call_cancelled", reason="caller_spoke")
                     return
                 if self._end_call_output_busy():
@@ -1629,8 +2606,8 @@ class VoiceSession:
                     continue
                 if busy:
                     # Goodbye never drained. Do not open a confirmation window over audio still going out.
-                    logger.info("end_call_hangup", timed_out=True)
-                    await self.close()
+                    logger.info("end_call_hangup", timed_out=True, transfer=self._transfer_to is not None)
+                    await self._hang_up_or_transfer()
                     return
                 if await self._end_call_grace(commit_at):
                     return
@@ -1642,15 +2619,17 @@ class VoiceSession:
                     return
                 if self._end_call_busy(commit_at) and time.monotonic() < give_up_at:
                     continue
-                if self._last_commit_at > commit_at:
+                if caller_spoke():
                     logger.info("end_call_cancelled", reason="caller_spoke")
                     return
-                logger.info("end_call_hangup", timed_out=False)
-                await self.close()
+                logger.info("end_call_hangup", timed_out=False, transfer=self._transfer_to is not None)
+                await self._hang_up_or_transfer()
                 return
         finally:
             if self._end_call_task is asyncio.current_task():
                 self._end_call_task = None
+                # A transfer that did not happen: the caller asked for something else, or the call ended.
+                self._settle_transfer("closed" if self._closed else "cancelled")
 
     async def prepare(self) -> None:
         """Open the STT and TTS connections ahead of :meth:`run`.
@@ -1678,18 +2657,29 @@ class VoiceSession:
         self._prepared = True
 
     async def set_language(self, language: str | None) -> bool:
-        """Set the conversation language for later replies and the STT hint.
+        """Set the speech-to-text hint, and the reply pin when ``reply_language`` is unset.
 
-        The reply instruction changes on the next turn either way. The return
-        value is whether the open speech-to-text socket accepted it. Deepgram
+        The return value is whether the open speech-to-text socket took the
+        hint. On Flux that means the ``Configure`` was sent or queued, not
+        that Flux confirmed it: a rejection is only logged
+        (``dg_flux_configure_failed``). When ``reply_language`` is unset, the next turn's reply
+        instruction uses this tag too. When it is ``"follow"`` or its own
+        tag, this call changes only the hint. Deepgram
         Flux ``flux-general-multi`` does, via ``Configure`` ``language_hints``
         (``[]`` when ``language`` is ``None`` or ``""``, which clears a sticky
         hint). Scribe, Nova, Munsit, and OpenAI transcription keep the new
         value for their next ``connect`` and do not retarget the open socket.
 
-        ``None`` or blank clears a configured language: the model is told to
-        follow the user's latest substantive message, unless the agent's own
-        prompt already names one reply language.
+        ``None`` or blank clears the speech-to-text hint. When
+        ``reply_language`` is unset, the model is then told to follow the
+        user's latest substantive message, unless the agent's own prompt
+        already names one reply language.
+
+        On Flux multilingual, a tag outside ``en``, ``es``, ``fr``, ``de``,
+        ``hi``, ``ru``, ``pt``, ``ja``, ``it``, and ``nl`` raises
+        ``ValueError`` before the stored hint or the socket changes.
+        ``reply_language`` is left as it was. A closed Flux socket is checked
+        the same way, so the next connect cannot send the rejected hint.
         """
         raw = None if language is None else str(language)
         if raw is not None and raw.strip() and normalize_language_tag(raw) is None:
@@ -1697,6 +2687,15 @@ class VoiceSession:
         tag = normalize_language_tag(raw)
         if tag == normalize_language_tag(self.audio_input.language):
             return False
+        if self._flux_multi_live() and tag:
+            from .config import FLUX_MULTI_LANGUAGES, language_key
+
+            if language_key(tag) not in FLUX_MULTI_LANGUAGES:
+                raise ValueError(
+                    f"{tag} is not a Deepgram Flux transcription language. "
+                    "flux-general-multi accepts en, es, fr, de, hi, ru, pt, ja, it, and nl. "
+                    "The call is unchanged. Set reply_language if only the reply should change."
+                )
         self.audio_input.language = tag
         update = getattr(self.stt, "update_language", None)
         if update is None:
@@ -1711,8 +2710,204 @@ class VoiceSession:
         except Exception as e:  # noqa: BLE001 — a language change must not drop the call
             logger.warning("voice_stt_language_update_failed", language=tag, error=str(e))
             return False
-        logger.info("voice_language_set", language=tag, stt_live=applied)
+        if applied:
+            self.audio_input = self.audio_input.model_copy(update={"language": tag, "languages": [tag] if tag else []})
+        logger.info("voice_language_set", language=tag, stt_live=applied, reply_language=self.reply_language)
         return applied
+
+    async def set_keyterms(self, keyterms: list[str]) -> bool:
+        """Replace this call's vocabulary. Does not edit the agent's config.
+
+        Deepgram Flux replaces the whole list on the open socket. An empty
+        list clears it. Already committed transcripts stay as they are.
+        Providers that only accept terms at connect time raise ``ValueError``.
+        On Flux, True means the ``Configure`` was sent or queued, not that
+        Flux confirmed it. There is no voice-agent handoff: the next call builds a new session
+        from that agent's own ``keyterms``.
+        """
+        from .config import validate_keyterms
+
+        terms = validate_keyterms(keyterms)
+        update = getattr(self.stt, "update_keyterms", None)
+        if update is None:
+            raise ValueError("This speech provider cannot replace vocabulary on an open connection.")
+        result = update(terms)
+        if not inspect.isawaitable(result):
+            raise ValueError("This speech provider cannot replace vocabulary on an open connection.")
+        applied = bool(await result)
+        if not applied:
+            raise ValueError(
+                "This speech connection cannot replace vocabulary. "
+                "Deepgram Flux can. Nova and Scribe take keyterms only when the socket connects."
+            )
+        self.audio_input = self.audio_input.model_copy(update={"keyterms": list(terms)})
+        logger.info("voice_keyterms_set", count=len(terms))
+        return True
+
+    def _flux_multi_live(self) -> bool:
+        """True when this session's transcriber is Flux multilingual.
+
+        An unopened socket still counts: the next ``connect`` would send the hint.
+        """
+        from .deepgram import DEFAULT_FLUX_MODEL, DeepgramFluxSTT, is_flux_model
+
+        if not isinstance(self.stt, DeepgramFluxSTT):
+            return False
+        model = self.audio_input.model
+        chosen = model if is_flux_model(model) else DEFAULT_FLUX_MODEL
+        return str(chosen).endswith("-multi")
+
+    async def _on_empty_commit(self) -> None:
+        """An empty STT commit is not a new request.
+
+        Speak the unplayed end only when the model had finished that reply.
+        A fragment from a cancelled generation is dropped, so the next real
+        turn cannot recite it.
+        """
+        tail = (self._unheard_tail or "").strip()
+        resumable = bool(tail) and self._unheard_tail_resumable
+        self._unheard_tail = ""
+        self._unheard_tail_resumable = False
+        self._continuation_note = ""
+        if resumable:
+            await self._resume_unheard_tail(tail)
+
+    async def _resume_unheard_tail(self, tail: str) -> None:
+        """Speak the cut-off remainder. Does not call the model and does not repeat the heard start."""
+        text = (tail or "").strip()
+        self._unheard_tail = ""
+        self._unheard_tail_resumable = False
+        self._continuation_note = ""
+        if not text or self._closed:
+            return
+        logger.info("unheard_tail_resumed", chars=len(text))
+        await self._emit(AgentTextDelta(text=text))
+        await self._speak(text)
+        self._transcript.append(TranscriptEntry(role="assistant", text=text))
+        await self._emit(AgentTextDone(text=text))
+
+    def _pure_ack_keeps_the_reply(self, text: str) -> bool:
+        """A pure acknowledgement should not cut audio or start a model turn.
+
+        A resumable tail is left for :meth:`_begin_user_turn`, which speaks it.
+        While audio is playing, or within the backchannel window after it, the
+        ack is dropped. Idle "okay" later is still a turn, and so is one that
+        answers a question the caller has just heard: people say "sí" to "¿Es
+        correcto?" well inside that window.
+        """
+        if not false_interrupt_followup(text):
+            return False
+        if (self._unheard_tail or "").strip() and self._unheard_tail_resumable:
+            return False
+        if self._assistant_active:
+            return True
+        if not self._last_assistant_active_at:
+            return False
+        if self._assistant_asked():
+            return False
+        return time.monotonic() - self._last_assistant_active_at <= _BACKCHANNEL_GRACE_SECS
+
+    def _assistant_asked(self) -> bool:
+        """The assistant's last line is a question the caller has heard to its end.
+
+        The reply is done and its audio has played out. While it is still
+        generating or playing, its text runs ahead of what the caller heard.
+        """
+        if self._assistant_audio_playing or (self._is_speaking and not self._speculative_unconfirmed()):
+            return False
+        return ends_with_question(self._last_assistant_line())
+
+    def effective_reply_language(self) -> str | None:
+        """Tag the reply instruction uses. ``set_language`` does not move this when ``reply_language`` is set."""
+        return resolve_reply_language(self.reply_language, self.audio_input.language)
+
+    #: Fewest words an utterance needs for the language its transcriber reported to count. Measured on one or two
+    #: words: Nova-3 ``multi`` heard Telugu in «Okey.», Scribe Turkish in «Sí.» and English in «No, no.»; Nova-3,
+    #: Flux and Scribe all named the language of a full Spanish or English sentence.
+    SPOKEN_LANGUAGE_MIN_WORDS = 4
+
+    @property
+    def spoken_language(self) -> str | None:
+        """The language the caller is speaking, or ``None`` when nothing says.
+
+        What the application set with :meth:`set_spoken_language`. Without
+        that, what the transcriber reported for the caller's latest utterance
+        of ``SPOKEN_LANGUAGE_MIN_WORDS`` words or more (a shorter one keeps the
+        language the call had), and only a language among ``stt_languages``
+        when that list is set. A filler is said in it when the reply is not
+        pinned to one language: it picks among ``FillerConfig.phrases`` and
+        is the language a generated one is asked for.
+        """
+        return self._spoken_language_set or self._spoken_language_heard
+
+    def set_spoken_language(self, language: str | None) -> None:
+        """Say which language the caller is speaking.
+
+        For an application that tells the language itself from what the
+        caller says: its transcriber reports none (one set to a single
+        language never does), or it knows better. It stays until it is set
+        again. ``None`` goes back to what the transcriber reports. Neither the
+        transcriber's hint (:meth:`set_language`) nor the reply instruction
+        changes: with ``reply_language="follow"`` the model still answers in
+        the language of the caller's latest message.
+        """
+        raw = None if language is None else str(language)
+        if raw is not None and raw.strip() and normalize_language_tag(raw) is None:
+            raise ValueError(f"language must be a BCP-47 tag, got {language!r}")
+        tag = normalize_language_tag(raw)
+        if tag != self._spoken_language_set:
+            logger.info("spoken_language_set", language=tag)
+        self._spoken_language_set = tag
+
+    def _note_heard_language(self, language: str | None, text: str) -> None:
+        """Take the language a transcriber reported for a caller utterance, when it can be believed."""
+        tag = normalize_language_tag(language)
+        if tag is None or len(text.split()) < self.SPOKEN_LANGUAGE_MIN_WORDS:
+            return
+        expected = {language_key(item) for item in self.audio_input.languages or ()}
+        if expected and language_key(tag) not in expected:
+            return
+        if language_key(tag) != language_key(self._spoken_language_heard):
+            logger.info("spoken_language_heard", language=tag, previous=self._spoken_language_heard)
+        self._spoken_language_heard = tag
+
+    def _filler_language(self) -> str | None:
+        """The language a filler is said in: the reply's when it is pinned, else the caller's, else the hint's."""
+        return self.effective_reply_language() or self.spoken_language or self.audio_input.language
+
+    def _pronunciation_language(self) -> str | None:
+        """The language whose ``pronunciations`` a line gets: as for a filler.
+
+        A reply that follows the caller (``reply_language="follow"``) is pinned to no language, and by the
+        reply's language alone a map keyed by language never applied on such a call.
+        """
+        return self._filler_language()
+
+    def _arm_flux_eager_query(self) -> None:
+        """Put ``eager_eot_threshold`` on a Flux socket when speculation or prediction needs it.
+
+        The voice server already does this before constructing the session.
+        A ``VoiceSession`` built directly was leaving speculation enabled and
+        the query param unset, so Flux never emitted ``EagerEndOfTurn``.
+        An explicit ``stt_extra`` value is left alone.
+        """
+        if not self.speculative_generation.enabled and not self._predict_during_speech:
+            return
+        from .deepgram import DeepgramFluxSTT
+
+        if not isinstance(self.stt, DeepgramFluxSTT):
+            return
+        extra = dict(self.audio_input.extra or {})
+        if extra.get("eager_eot_threshold") not in (None, ""):
+            return
+        from .predictive_eou import flux_eager_threshold
+
+        threshold = flux_eager_threshold(extra)
+        extra["eager_eot_threshold"] = str(threshold)
+        self.audio_input = self.audio_input.model_copy(update={"extra": extra})
+        self._flux_eager_eot_threshold = threshold
+        if self.eager_eot_threshold is None:
+            self.eager_eot_threshold = threshold
 
     @property
     def closed(self) -> bool:
@@ -1721,6 +2916,65 @@ class VoiceSession:
         its own setup (SIP: the 200 OK follows our published track) checks this
         before answering; a closed session must never be put on the air."""
         return self._closed
+
+    #: Longest one :meth:`on_close` callback may take. Past it the callback is cancelled and the close goes on.
+    ON_CLOSE_TIMEOUT_SECS = 10.0
+
+    def on_close(self, callback: Callable[[], Any]) -> None:
+        """Call ``callback`` when the call is over, once.
+
+        However it ends: the caller hung up, the agent did (:meth:`end_call`),
+        the call was transferred, or the session failed or was torn down.
+        ``callback`` takes no arguments and may be async. It runs after the
+        session has stopped speaking, in the context it was registered in
+        (from a tool, that tool's run context). :meth:`close` waits for it, up
+        to ``ON_CLOSE_TIMEOUT_SECS``. An exception in one is logged
+        (``voice_on_close_failed``) and the others still run. Registered on
+        a call that is already over, it runs straight away.
+        """
+        if not callable(callback):
+            raise TypeError("on_close needs a callable")
+        self._close_callbacks.append((callback, contextvars.copy_context()))
+        if self._close_callbacks_due:
+            task = asyncio.get_running_loop().create_task(self._run_close_callbacks())
+            self._close_callback_tasks.add(task)
+            task.add_done_callback(self._close_callback_tasks.discard)
+
+    async def _run_close_callbacks(self) -> None:
+        """Run the ``on_close`` callbacks not run yet, and wait for the ones another caller is running.
+
+        ``close()`` and ``run()``'s end both come here, often on two tasks at once: the agent hangs up from the
+        ``end_call`` task while the transport is reading ``run()`` to its end. The callbacks run on a task of
+        their own, so whichever asks second waits for the same ones (``run()`` does not end, and a host tear the
+        call down, in the middle of one), and a caller that is cancelled while it waits does not take them with it.
+        """
+        self._close_callbacks_due = True
+        while self._close_callbacks or self._close_callbacks_runner is not None:
+            if self._close_callbacks_runner is None:
+                self._close_callbacks_runner = asyncio.get_running_loop().create_task(self._call_close_callbacks())
+            await asyncio.shield(self._close_callbacks_runner)
+
+    async def _call_close_callbacks(self) -> None:
+        try:
+            await self._call_each_close_callback()
+        finally:
+            self._close_callbacks_runner = None
+
+    async def _call_each_close_callback(self) -> None:
+        while self._close_callbacks:
+            callback, context = self._close_callbacks.pop(0)
+            name = getattr(callback, "__qualname__", None) or type(callback).__name__
+            try:
+                result = context.run(callback)
+                if inspect.iscoroutine(result):
+                    # A task, so the coroutine's own awaits see the registration context too.
+                    result = asyncio.get_running_loop().create_task(result, context=context)
+                if inspect.isawaitable(result):
+                    await asyncio.wait_for(result, timeout=self.ON_CLOSE_TIMEOUT_SECS)
+            except TimeoutError:
+                logger.warning("voice_on_close_timeout", callback=name, timeout_secs=self.ON_CLOSE_TIMEOUT_SECS)
+            except Exception as e:  # noqa: BLE001 - an observer must not break the teardown
+                logger.warning("voice_on_close_failed", callback=name, error=str(e), exc_info=True)
 
     async def _close_prepared_adapters(self) -> None:
         for closer in (self.stt.close, self.tts.close):
@@ -1737,6 +2991,7 @@ class VoiceSession:
 
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         """Main loop.  Yields events until the session is closed or errors out."""
+        abandoned = False
         try:
             self.started_at = time.time()
             self._current_session_token = _current_voice_session.set(self)
@@ -1747,6 +3002,8 @@ class VoiceSession:
             await self.prepare()
             await self.turn_detector.start(self.audio_input)
             await self._maybe_start_endpointer()
+            self._start_mic_activity()
+            self._start_backchannel()
             await self._emit(SessionStarted())
             # Seed before the greeting task so turn 1 (and a callable
             # system_prompt resolved for the opener) sees identity and the
@@ -1772,7 +3029,9 @@ class VoiceSession:
             self._last_user_activity_at = time.monotonic()
             if self.user_idle is not None:
                 self._idle_task = asyncio.create_task(self._user_idle_watch())
-            background = [t for t in (audio_task, stt_task, sweep_task, self._idle_task) if t is not None]
+            background = [
+                t for t in (audio_task, stt_task, sweep_task, self._idle_task, self._backchannel_task) if t is not None
+            ]
 
             try:
                 while True:
@@ -1786,6 +3045,12 @@ class VoiceSession:
                         task.cancel()
                 await asyncio.gather(*background, return_exceptions=True)
 
+        except GeneratorExit:
+            # The consumer stopped reading (it left its loop, or failed in it). Clean up below, but there
+            # is nobody to yield the last events to: a yield here is "async generator ignored GeneratorExit",
+            # raised in the consumer over whatever made it stop.
+            abandoned = True
+            raise
         except Exception as e:
             logger.error("voice_session_error", error=str(e), exc_info=True)
             yield SessionError(message=str(e))
@@ -1793,6 +3058,8 @@ class VoiceSession:
             try:
                 await self._cleanup()
             finally:
+                # A run that ended without ``close()`` (it failed, or its consumer stopped reading) is over too.
+                await self._run_close_callbacks()
                 self._remove_usage_listeners()
                 if self._current_session_token is not None:
                     # A generator finalized outside its consumer runs in another
@@ -1807,11 +3074,12 @@ class VoiceSession:
                     self._prompt_cache_token = None
             # Closing adapters can report incomplete operations after the stop
             # sentinel. Deliver their accounting before the terminal event.
-            while not self._event_queue.empty():
+            while not abandoned and not self._event_queue.empty():
                 event = self._event_queue.get_nowait()
                 if isinstance(event, VoiceUsageEvent):
                     yield event
-            yield SessionEnded()
+            if not abandoned:
+                yield SessionEnded()
 
     async def interrupt(self, *, truncate_completed: bool = True) -> None:
         """Cancel TTS playback and the current agent turn.
@@ -1825,6 +3093,7 @@ class VoiceSession:
         ``_is_speaking`` flips true — HOLD expiry / commit races can leave an
         orphan task that must not double-run with the next turn.
         """
+        self._interrupt_serial += 1
         # A speculative attempt cancelled from here (hold expiry on a different
         # transcript, submit_user_text) must drop its hold. Otherwise the next
         # turn still sees an unreleased buffer and never speaks.
@@ -1882,6 +3151,8 @@ class VoiceSession:
         self._is_speaking = False
         if was_active:
             self.playback.on_interrupted()
+            # The queued audio is dropped, so it does not play until its estimate.
+            self._last_assistant_active_at = min(self._last_assistant_active_at, time.monotonic())
             self._audio_plays_until = min(self._audio_plays_until, time.monotonic())
         self._cancel_turn.set()
         for t in list(self._tts_tasks):
@@ -1983,12 +3254,15 @@ class VoiceSession:
         # (cancelling the flow propagates to its speak task).
         if self._greeting_task is not None and not self._greeting_task.done():
             self._greeting_task.cancel()
-        await self.interrupt(truncate_completed=False)
-        await self._emit(None)  # sentinel stops the run() iterator
-        if self._prepared and self.started_at is None:
-            # ``prepare()`` opened the provider sockets but ``run()`` never
-            # started, so its ``finally`` (``_cleanup``) will never close them.
-            await self._close_prepared_adapters()
+        try:
+            await self.interrupt(truncate_completed=False)
+            await self._emit(None)  # sentinel stops the run() iterator
+            if self._prepared and self.started_at is None:
+                # ``prepare()`` opened the provider sockets but ``run()`` never
+                # started, so its ``finally`` (``_cleanup``) will never close them.
+                await self._close_prepared_adapters()
+        finally:
+            await self._run_close_callbacks()
 
     # -- Internal: first-reply warmup -----------------------------------------
 
@@ -2375,6 +3649,10 @@ class VoiceSession:
                 if self._recorder is not None:
                     self._recorder.add_mic(chunk)
                 self.turn_detector.push_audio(chunk)
+                if self._mic_activity is not None:
+                    # Mic audio under the agent's own voice is not timed: without
+                    # echo cancellation it is the agent, not the caller.
+                    self._mic_activity.push(chunk, count=not self.playback.is_playing)
                 self._push_predict_pcm(chunk)
                 if self._endpointer is not None:
                     self._endpointer.push(chunk)
@@ -2384,6 +3662,48 @@ class VoiceSession:
         except Exception as e:
             logger.error("audio_forward_error", error=str(e), exc_info=True)
             await self._emit(SessionError(message=f"Audio input error: {e}"))
+
+    def _settle_consumed_commit(self, text: str) -> None:
+        """This commit was handled. Do not synthesize it again later.
+
+        The stranded-partial watchdog treats a caption newer than the last
+        commit as speech the provider forgot. An ignored acknowledgement is
+        such a caption: Flux already committed it, and a few seconds later the
+        watchdog would commit it again, after the backchannel window closed.
+
+        The words are not remembered past the stale window. A later partial
+        that is not this utterance, or a later provider commit of the same
+        words, is a new turn.
+        """
+        now = time.monotonic()
+        self._consumed_utterance = (text or "").strip()
+        self._consumed_utterance_at = now
+        self._stale_commit_sent_at = max(self._stale_commit_sent_at, now)
+        self._last_commit_at = max(self._last_commit_at, now)
+        self._dropped_commit_text = self._consumed_utterance
+
+    def _is_replay_of_consumed(self, text: str) -> bool:
+        """Same utterance as a commit we already handled, still inside its window.
+
+        A provider commit of those words after the window, or after a different
+        partial, is a new turn. So is one that carries words past them
+        ("Okay." then "Okay. What about 1002?"). The match is not permanent.
+        """
+        consumed = self._consumed_utterance
+        if not consumed or not (text or "").strip():
+            return False
+        if time.monotonic() - self._consumed_utterance_at > 3.0:
+            return False
+        return _repeats_consumed(consumed, text)
+
+    def _partial_extends_consumed(self, text: str) -> bool:
+        """A trailing caption of a commit we already handled, not new speech."""
+        consumed = self._consumed_utterance
+        if not consumed or not text.strip():
+            return False
+        if time.monotonic() - self._consumed_utterance_at > self._stale_partial_commit_secs:
+            return False
+        return _repeats_consumed(consumed, text)
 
     async def _sweep_stale_partials(self) -> None:
         """Watchdog: force-commit transcripts the provider never commits.
@@ -2777,8 +4097,15 @@ class VoiceSession:
                             stranded_preview=self._latest_partial_text[:80],
                         )
                     elif text:
-                        self._last_partial_at = self._event_stamp()
-                        self._latest_partial_text = text
+                        if self._partial_extends_consumed(text):
+                            # Keep the caption, but do not re-arm the watchdog.
+                            # That is how an ignored "Yeah. Okay." came back
+                            # as its own turn two seconds later.
+                            self._latest_partial_text = text
+                        else:
+                            self._consumed_utterance = ""
+                            self._last_partial_at = self._event_stamp()
+                            self._latest_partial_text = text
                         if self._eou_predictor is not None:
                             self._eou_predictor.note_partial(text)
                         if self._partials_since_last_commit == 1:
@@ -2790,7 +4117,7 @@ class VoiceSession:
                             # the same fact; this covers Smart Turn, where the
                             # next partial is the only signal.
                             await self._discard_speculative(reason="speech_resumed")
-                        await self._sync_entity_patience(text)
+                        await self._sync_entity_patience(text, partial=True)
                     decision = await self.turn_detector.on_partial(text, self._turn_state())
                     if decision is PartialDecision.BARGE_IN and self._vad_vetoes_barge_in(text):
                         # Hallucinated multi-word partials during TTS (no mic
@@ -2835,7 +4162,12 @@ class VoiceSession:
                     elif self._predict_during_speech:
                         await self._handle_provider_prediction(event)
                 elif event.type == "committed" and event.text.strip():
+                    self._note_heard_language(event.language, event.text)
                     await self._handle_provider_commit(event.text.strip())
+                elif event.type == "committed":
+                    await self._on_empty_commit()
+                elif event.type == "language":
+                    self._note_heard_language(event.language, event.text)
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -2873,7 +4205,7 @@ class VoiceSession:
         # unfinished phrase is held as it would be without speculation.
         assistant_active = self._assistant_audio_playing or (self._is_speaking and not self._speculative_unconfirmed())
         if assistant_active:
-            self._last_assistant_active_at = now
+            self._last_assistant_active_at = max(self._last_assistant_active_at, now)
         # The last moment the caller could hear the assistant: a snapshot taken while it was active, or when
         # the audio sent so far finished playing (gapless real time), whichever is later.
         last_audible = max(self._last_assistant_active_at, min(now, self._audio_plays_until))
@@ -2884,17 +4216,13 @@ class VoiceSession:
             active_user_text=active,
             seconds_since_turn_start=now - self._turn_started_at,
             seconds_since_last_commit=now - self._last_commit_at,
-            seconds_since_assistant_active=(None if assistant_active or not last_audible else now - last_audible),
+            seconds_since_assistant_active=(
+                None if assistant_active or not last_audible else max(0.0, now - last_audible)
+            ),
             mic_speech_since_last_commit=self._mic_speech_since_last_commit(),
             partials_since_last_commit=self._partials_since_last_commit,
             holding=holding,
-            # Only a question the caller has heard: the reply is done and its audio has played out. While it
-            # is still generating or playing, its text runs ahead of what the caller heard.
-            assistant_asked=(
-                not assistant_active
-                and not self._assistant_audio_playing
-                and ends_with_question(self._last_assistant_line())
-            ),
+            assistant_asked=self._assistant_asked(),
         )
 
     def _last_assistant_line(self) -> str:
@@ -2952,7 +4280,7 @@ class VoiceSession:
         if eager_eot_threshold is not None:
             self._flux_eager_dirty = False
 
-    async def _sync_entity_patience(self, text: str) -> None:
+    async def _sync_entity_patience(self, text: str, *, partial: bool = False) -> None:
         """Track an open entity and match Flux / the VAD floor to it.
 
         No-op when ``entity_patience`` is off, so partials and commits are
@@ -2961,8 +4289,9 @@ class VoiceSession:
         if not self.entity_patience:
             return
         # During a hold, a new group ("seis", "Z") is read after the parked fragment: alone it is too short
-        # to count, and patience would flap off and on in the middle of the number.
-        kind = entity_capture_with_held(self._held_user_text, text) if text else None
+        # to count, and patience would flap off and on in the middle of the number. A caption that is
+        # still growing ignores the trailing letter of an unfinished word.
+        kind = entity_capture_with_held(self._held_user_text, text, partial=partial) if text else None
         self._entity_kind = kind
         if self._endpointer is not None:
             self._endpointer.patience_floor_secs = self.entity_patience_secs if kind else None
@@ -3023,7 +4352,7 @@ class VoiceSession:
         if eot_threshold is None and eot_timeout_ms is None and eager_eot_threshold is None:
             return True
         try:
-            await configure(
+            sent = await configure(
                 eot_threshold=eot_threshold,
                 eot_timeout_ms=eot_timeout_ms,
                 eager_eot_threshold=eager_eot_threshold,
@@ -3032,19 +4361,26 @@ class VoiceSession:
         except Exception as e:
             logger.warning("entity_patience_configure_failed", error=str(e))
             return False
-        return True
+        # False: never reached the socket, so the next sync tries again.
+        return sent is not False
 
     def _cancel_hold(self) -> None:
         if self._hold_task is not None and not self._hold_task.done():
             self._hold_task.cancel()
         self._hold_task = None
 
+    def _silence_since_speech(self) -> float:
+        """Seconds since the local VAD last heard the caller; 0 without VAD evidence."""
+        last_speech_at = getattr(self._endpointer, "last_speech_at", None)
+        last_speech = last_speech_at() if callable(last_speech_at) else None
+        return 0.0 if last_speech is None else max(0.0, time.monotonic() - last_speech)
+
     async def _arm_hold(self, text: str, timeout_secs: float) -> None:
         """Defer starting a turn until more speech arrives or ``timeout_secs`` elapses."""
         self._cancel_hold()
         self._held_user_text = text
         self._hold_armed_timeout_secs = timeout_secs
-        self._last_commit_at = self._event_stamp()
+        self._stamp_taken_commit()
 
         # Anchor for "user resumed speaking": partials older than the commit
         # event are the held fragment's own trailing refinements and must not
@@ -3208,12 +4544,24 @@ class VoiceSession:
             # _closed checks and here; never start an agent turn after close().
             logger.debug("stt_turn_dropped_session_closed", text_preview=final_text[:80])
             return
+        self._continuation_note = ""
+        tail = (self._unheard_tail or "").strip()
+        resumable = bool(tail) and self._unheard_tail_resumable
+        self._unheard_tail = ""
+        self._unheard_tail_resumable = False
+        # A pure acknowledgement did not ask for anything new, so the unplayed
+        # end of a finished reply is spoken as audio. Any other commit is the
+        # request: the heard prefix is already the history entry, and the
+        # leftover text is not put in the prompt.
+        if resumable and false_interrupt_followup(final_text):
+            await self._resume_unheard_tail(tail)
+            return
         await self._sync_entity_patience("")
         self._turn_vad_endpointed = vad_endpointed
         self._turn_predictive_endpoint = predictive_endpoint
         self._turn_stt_latency = self._pending_stt_latency
         self._pending_stt_latency = None
-        self._last_commit_at = self._event_stamp()
+        self._stamp_taken_commit()
         # A confirmed real turn closes the speculative budget for this utterance.
         self._speculative_attempts = 0
         self._caller_speech_started_at = None
@@ -3222,6 +4570,7 @@ class VoiceSession:
         else:
             self._transcript.append(TranscriptEntry(role="user", text=final_text))
             replace_user_entry = False
+        self._note_caller_utterance(final_text, grown=replace_user_entry)
         await self._emit(TranscriptCommitted(text=final_text, replace=replace_user_entry))
         self._active_turn_user_text = final_text
         self._turn_eou_at = time.monotonic()
@@ -3662,6 +5011,11 @@ class VoiceSession:
         if self._speech_too_long_to_speculate():
             logger.info("speculative_skipped", reason="max_speech_duration", text_preview=text[:80])
             return
+        if self._hangup_open and _hangup_utterance_kind(text) in ("ack", "goodbye"):
+            # The commit path drops this as an answer to the farewell. A confirmed
+            # attempt would skip that check and start a turn on it.
+            logger.info("speculative_skipped", reason="hangup_ack", text_preview=text[:80])
+            return
         if self._caller_speech_started_at is None:
             self._caller_speech_started_at = time.monotonic()
         if self._speculative_attempt is not None:
@@ -3696,6 +5050,10 @@ class VoiceSession:
         self.speculative_generations_started += 1
         self._active_turn_user_text = text
         self._cancel_turn.clear()
+        # Confirmation stamps this, sometimes before the turn task's first step.
+        # Until then the eou clocks stay unset so a discarded attempt does not
+        # inherit the previous turn's.
+        self._turn_eou_at = 0.0
         logger.info(
             "speculative_started",
             source=source,
@@ -3754,6 +5112,12 @@ class VoiceSession:
         if attempt.task is None or attempt.task.done():
             # Its turn already ended (an LLM error before confirmation): no finally will settle the hold now.
             self._drop_discarded_hold(attempt.hold)
+        if self._hesitator is not None and self._hesitation_rewind is not None:
+            self._hesitator.restore(self._hesitation_rewind)
+            self._hesitation_rewind = None
+        if self._audio_tag_policy is not None and self._audio_tags_rewind is not None:
+            self._audio_tag_policy.restore(self._audio_tags_rewind)
+            self._audio_tags_rewind = None
         self._speculative_tts_stash.clear()
         self._speculative_text_deltas.clear()
         self._speculative_final_text = None
@@ -3826,7 +5190,7 @@ class VoiceSession:
         self._turn_vad_endpointed = vad_endpointed
         self._turn_stt_latency = self._pending_stt_latency
         self._pending_stt_latency = None
-        self._last_commit_at = self._event_stamp()
+        self._stamp_taken_commit()
         # The headline clocks start at confirmation, not at the eager start.
         self._turn_eou_at = time.monotonic()
         self._active_turn_user_text = final_text
@@ -3836,6 +5200,7 @@ class VoiceSession:
         self._held_user_text = None
         self._hold_armed_timeout_secs = None
         self._transcript.append(TranscriptEntry(role="user", text=final_text))
+        self._note_caller_utterance(final_text)
         await self._emit(TranscriptCommitted(text=final_text, replace=False))
         attempt.gate.confirm()
         attempt.hold.release()
@@ -3924,6 +5289,7 @@ class VoiceSession:
         await self._emit_pcm(chunk, record, turnless=turnless)
 
     async def _emit_pcm(self, chunk: bytes, record: list, *, turnless: bool) -> None:
+        self._backchannel_only = False
         if not turnless:
             self._latest_turn_unheard = False
             if self._turn_first_audio_at is None:
@@ -4033,6 +5399,11 @@ class VoiceSession:
                 text_preview=text[:160],
             )
             self._partials_since_last_commit = 0
+            self._settle_consumed_commit(text)
+            return
+        if self._is_replay_of_consumed(text):
+            logger.info("stt_commit_ignored", reason="consumed_replay", text_preview=text[:160])
+            self._partials_since_last_commit = 0
             return
         state = self._turn_state()
         # Captured before the detector await. A resume can discard the attempt
@@ -4072,6 +5443,7 @@ class VoiceSession:
             enabled=self.entity_patience,
             hold_secs=self.entity_patience_secs,
             provider_patience_live=bool(getattr(self.stt, "patient_thresholds_live", False)),
+            waited_secs=self._silence_since_speech(),
         )
         # The detector await yields to the event loop (local audio EOU runs on
         # the executor; a cold model load can take seconds) and close() may land
@@ -4180,6 +5552,8 @@ class VoiceSession:
                     if self._hold_armed_timeout_secs is not None
                     else self.hold_timeout_secs,
                 )
+            else:
+                self._settle_consumed_commit(text)
             return
 
         final_text = decision.text or text
@@ -4251,6 +5625,29 @@ class VoiceSession:
             self._held_user_text = None
             self._hold_armed_timeout_secs = None
             self._defer_user_speech(self._carried_commit_text(text, final_text))
+            return
+
+        # "Alright." / "bye" while a hangup is open answers the farewell. Starting
+        # a turn here is how the model used to say "Goodbye." and never call the
+        # tool again. A retract ("wait") still falls through and cancels it.
+        if self._hangup_open and _hangup_utterance_kind(final_text) in ("ack", "goodbye"):
+            logger.info(
+                "end_call_caller_ack",
+                action=decision.action.value,
+                text_preview=final_text[:160],
+            )
+            self._settle_consumed_commit(final_text)
+            return
+
+        # A pure "Yeah." / "Yeah. Okay." while the reply or its resumed tail is
+        # still in the ear does not start a new model call. A real request still
+        # does. The first ack after playback has already stopped resumes a
+        # finished tail below. Settling the commit stops the stale-partial
+        # watchdog from speaking that acknowledgement again once the window
+        # has closed.
+        if false_interrupt_followup(final_text) and self._pure_ack_keeps_the_reply(final_text):
+            logger.info("stt_backchannel_ignored", text_preview=final_text[:80])
+            self._settle_consumed_commit(final_text)
             return
 
         # A real accept cancels any pending HOLD, then interrupts so truncation
@@ -4672,10 +6069,6 @@ class VoiceSession:
         self._turn_memory_reconciled = False
         if not speculative:
             self._latest_turn_unheard = False
-        if speculative:
-            # Confirmation stamps this. Until then the eou clocks stay unset
-            # so a discarded attempt does not inherit the previous turn's.
-            self._turn_eou_at = 0.0
         if self._scheduler.other_turn_active:
             # Another channel's turn on this conversation runs: the call's goes after it.
             await self._scheduler.until_no_other_turn(include_queued=False)
@@ -4702,6 +6095,21 @@ class VoiceSession:
         self._turn_audio_playing_until = 0.0
         self._turn_played_baseline = self.playback.played_bytes
         self._turn_tts_segment_records = []
+        self._turn_tts_added = {}
+        # The reply to a goodbye is a goodbye: said clean.
+        self._turn_hesitation_due = not (user_text.strip() and _hangup_utterance_kind(user_text) == "goodbye")
+        self._turn_hesitations = 0
+        # A speculative reply that is dropped was never heard: its hesitation
+        # must not make the confirmed reply open clean.
+        self._hesitation_rewind = self._hesitator.state() if speculative and self._hesitator is not None else None
+        if self._caller_pace is not None and followup is None:
+            self._set_turn_tempo(user_text, speculative=speculative)
+        self._turn_audio_tags = 0
+        self._audio_tags_rewind = None
+        if self._audio_tag_policy is not None:
+            # Same for a laugh: one nobody heard does not start the rest between two.
+            self._audio_tags_rewind = self._audio_tag_policy.state() if speculative else None
+            self._audio_tag_policy.start_reply()
         # A greeting still draining when this turn starts (deferred barge-in)
         # sits ahead of the reply on the played axis. Seed a text-less segment
         # for it so interruption truncation walks past those bytes instead of
@@ -4709,6 +6117,10 @@ class VoiceSession:
         greeting_pending = self._greeting_pending_bytes()
         if greeting_pending:
             self._turn_tts_segment_records.append(["", greeting_pending])
+        # The same for a listening sound still playing.
+        backchannel_pending = self._backchannel_pending_bytes()
+        if backchannel_pending:
+            self._turn_tts_segment_records.append(["", backchannel_pending])
         self._turn_heard_bytes = None
         self._turn_finalized_ok = False
         self._turn_tts_stream = None
@@ -4723,6 +6135,15 @@ class VoiceSession:
         self._turn_filler_audio_baseline = 0
         self._soft_audio_baseline = 0
         self._soft_segments_baseline = 0
+        self._hangup_filler_blocked = False
+        self._hangup_farewell_text = ""
+        self._hangup_ignored_text = ""
+        self._hangup_committed = False
+        # A retract on the previous turn must not block a later goodbye.
+        # A speculative attempt can be discarded; it must not clear an open hangup.
+        self._hangup_retracted = False
+        if not speculative and user_text.strip() and _hangup_utterance_kind(user_text) == "retract":
+            self._hangup_open = False
         self._turn_tool_seen = asyncio.Event()
         self._turn_tool_seen_at = None
         self._turn_tool_name = None
@@ -4739,6 +6160,10 @@ class VoiceSession:
         empty_retried = False
         first_llm_memory: list[Message] | None = None
         llm_steps = 0
+        # Names of this LLM step's calls already counted from their ToolUse delta.
+        # Providers stream a call under their item id (``fc_…``, a block index)
+        # and finish it under the call id, so the id cannot dedupe the two.
+        streamed_tool_names: list[str] = []
         empty_llm_reply = False
         retry_blocked = False
         # This task's run, not ``_turn_run_context`` (a newer turn can replace that).
@@ -4910,6 +6335,7 @@ class VoiceSession:
                     self._note_tool_start(event.path, event.call_id)
                     if event.path == own_llm_path:
                         llm_steps += 1
+                        streamed_tool_names = []
                         if llm_steps == 1:
                             ctx = get_run_context()
                             root = ctx.root_span() if ctx is not None else None
@@ -4951,12 +6377,15 @@ class VoiceSession:
                     # Arm before the emit await so a barge-in cannot land in the
                     # gap between "the model called the tool" and the tool starting.
                     if (own_llm_path is None or event.path == own_llm_path) and not event.item.is_server_tool_use:
+                        counted = event.item.id in self._turn_tool_call_ids
                         self._note_tool_call(
                             event.item.name,
                             event.item.id,
                             getattr(event.item, "input", None),
                             step_tools=self._model_call_tools(event.call_id),
                         )
+                        if not counted and event.item.id in self._turn_tool_call_ids:
+                            streamed_tool_names.append(event.item.name)
                     # Dead air while a tool runs — surface it so the playground
                     # doesn't look hung (live: get_datetime slept 3–5s with no UI).
                     await self._emit(AgentStatus(text=f"Calling {event.item.name}…"))
@@ -5025,6 +6454,10 @@ class VoiceSession:
                     continue
 
                 if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta | Text):
+                    # The farewell already played and teardown is requested.
+                    # Another "Goodbye." after the tool result is not spoken.
+                    if self._hangup_committed:
+                        continue
                     # Google (and others) often emit a full ``Text`` block first, then ``TextDelta`` tails.
                     chunk = event.item.text if isinstance(event.item, Text) else event.item.text_delta
                     if not chunk:
@@ -5083,6 +6516,18 @@ class VoiceSession:
                 elif isinstance(event, OutputEvent):
                     paused = event.status.code == "cancelled" and event.status.reason in _PAUSE_OUTPUT_REASONS
                     self._note_tool_output(event.path, paused=paused)
+                    if (
+                        self._hangup_committed
+                        and self._turn_tool_batch_inflight == 0
+                        and self._direct_tool_name(event.path) is not None
+                    ):
+                        # The farewell played and teardown is requested. The next
+                        # pull would start an LLM call whose text is never spoken.
+                        # The tool result is already in memory, so a hangup the
+                        # caller still cancels continues from a complete history.
+                        turn_phase = "hangup_committed"
+                        logger.info("turn_agent_loop_break", reason="hangup_committed", **_trace_debug_fields())
+                        break
                     # Outer Agent OUTPUT mirrors the LLM message; handling both would
                     # double-run reconcile / optional suffix TTS. A nested agent's
                     # LLM output is skipped for the reason its deltas are.
@@ -5113,6 +6558,11 @@ class VoiceSession:
                                 and out.stop_reason in (None, "end_turn", "stop", "completed")
                                 and not any(isinstance(c, ToolUseContent) for c in out.content)
                             )
+                            # Already said goodbye. Do not fold this line into the
+                            # spoken reply; _schedule_tts drops it too.
+                            if self._hangup_committed:
+                                msg_text = ""
+                                text_buffer = ""
                             # Models that skip streaming deliver all text here — this is
                             # the first moment LLM text exists, so stamp first-token now.
                             if msg_text and self._turn_first_token_at is None:
@@ -5159,7 +6609,10 @@ class VoiceSession:
                             step_tools = self._model_call_tools(event.call_id)
                             for block in out.content:
                                 if isinstance(block, ToolUseContent) and block.name and not block.is_server_tool_use:
-                                    self._note_tool_call(block.name, block.id, block.input, step_tools=step_tools)
+                                    if block.name in streamed_tool_names:
+                                        streamed_tool_names.remove(block.name)
+                                    else:
+                                        self._note_tool_call(block.name, block.id, block.input, step_tools=step_tools)
                             for block in out.content:
                                 if isinstance(block, ToolUseContent) and block.name:
                                     await self._emit(AgentStatus(text=f"Calling {block.name}…"))
@@ -5234,12 +6687,19 @@ class VoiceSession:
             if not self._cancel_turn.is_set():
                 turn_phase = "await_tts_before_done"
                 await self._await_turn_deadline(self._await_tts_chain())
+                if not self._speculative_unconfirmed():
+                    await self._finish_hangup_rearm(user_text, full_response)
                 turn_phase = "emit_agent_text_done"
+                done_text = full_response
                 if full_response.strip():
                     self._transcript.append(TranscriptEntry(role="assistant", text=full_response))
+                elif self._hangup_farewell_text:
+                    # The model never produced a reply. The farewell already
+                    # went to the transcript inside the hangup wait.
+                    done_text = self._hangup_farewell_text
                 # run_id makes this a current pointer to the conversation: pass
                 # it as parent_id over HTTP to continue on another transport.
-                await self._emit(AgentTextDone(text=full_response, run_id=self._turn_run_id()))
+                await self._emit(AgentTextDone(text=done_text, run_id=self._turn_run_id()))
                 self._turn_finalized_ok = True
                 logger.debug(
                     "turn_agent_text_done_emitted",
@@ -5534,6 +6994,14 @@ class VoiceSession:
         if self._turn_tool_seen_at is None:
             self._turn_tool_seen_at = time.monotonic()
             self._turn_tool_seen.set()
+        listed = self.filler is None or self.filler.tools is None or tool_name in self.filler.tools
+        if _is_hangup_tool_name(tool_name) or not listed or self._hangup_filler_blocked:
+            # Named hangup tools block before the handler runs, so a zero
+            # soft-timeout cannot speak "One moment." ahead of commit_hangup.
+            # A tool left out of ``filler.tools`` is blocked the same way: it
+            # says its own line (a transfer, a goodbye under another name).
+            self._block_hangup_filler()
+            return
         if self.filler is None or not self.filler.enabled or self._turn_filler_task is not None or self._turn_is_event:
             return
         self._turn_filler_task = asyncio.create_task(self._filler_flow())
@@ -5564,7 +7032,7 @@ class VoiceSession:
     def _filler_phrase_options(self) -> list[str]:
         phrases = self.filler.phrases if self.filler is not None else None
         if isinstance(phrases, dict):
-            return phrases.get(language_key(self.audio_input.language)) or phrases.get("*") or []
+            return phrases.get(language_key(self._filler_language())) or phrases.get("*") or []
         return phrases or []
 
     def _instant_filler_phrase(self) -> str | None:
@@ -5597,7 +7065,8 @@ class VoiceSession:
         spoken preamble is coming — a filler on top of it would double-talk.
         """
         return (
-            not self._cancel_turn.is_set()
+            not self._hangup_filler_blocked
+            and not self._cancel_turn.is_set()
             and not self._turn_finalized_ok
             and not self._speculative_unconfirmed()
             and not self._turn_assistant_text.strip()
@@ -5630,7 +7099,6 @@ class VoiceSession:
                 await self._followup_fillers(spoken, covered_tool=False)
                 return
             phrase = self._instant_filler_phrase()
-            ready_made = phrase is not None
             gen: asyncio.Task[str | None] | None = None
             if phrase is None and self._turn_tool_seen_at is None and self.filler.think_delay_secs is not None:
                 # A tool arriving during the thinking wait should start
@@ -5649,6 +7117,10 @@ class VoiceSession:
                 await self._until_first_filler_due()
                 if not self._filler_ok_to_speak():
                     return
+                # Chosen again now that it is due: an application that tells the caller's language itself
+                # (``set_spoken_language``) does so with the turn, which started while this waited.
+                phrase = self._instant_filler_phrase()
+                ready_made = phrase is not None
                 if phrase is None:
                     if gen is None:
                         gen = asyncio.create_task(self._generate_filler(self._turn_tool_name, spoken))
@@ -5744,8 +7216,12 @@ class VoiceSession:
         return bool(text.strip()) and len(scheduled) < len(text) and bool(text[len(scheduled) :].strip())
 
     def _soft_timeout_still_quiet(self) -> bool:
+        # Only a running tool is a wait. Once the batch has returned, the model
+        # is writing the answer, and a line then lands just ahead of it.
         return (
-            self._turn_still_open()
+            not self._hangup_filler_blocked
+            and self._turn_still_open()
+            and self._turn_tool_batch_inflight > 0
             and not self._progress_audio_busy()
             and self._turn_audio_bytes == self._soft_audio_baseline
             and self._turn_tts_segments == self._soft_segments_baseline
@@ -5761,7 +7237,9 @@ class VoiceSession:
         quiet window.
         """
         while self._turn_still_open():
-            while self._turn_still_open() and self._progress_audio_busy():
+            if self._hangup_filler_blocked:
+                return False
+            while self._turn_still_open() and (self._progress_audio_busy() or self._turn_tool_batch_inflight == 0):
                 await asyncio.sleep(0.01)
             if not self._turn_still_open():
                 return False
@@ -5872,8 +7350,11 @@ class VoiceSession:
         try:
             if not await self._await_continuous_quiet(window):
                 return False
+            # Chosen again after the wait, as in ``_filler_flow``.
+            phrase, ready_made = self._static_progress_phrase(spoken)
             if phrase is None:
-                assert gen is not None
+                if gen is None:
+                    gen = asyncio.create_task(self._generate_filler(self._turn_tool_name, spoken))
                 try:
                     async with asyncio.timeout(self.filler.timeout_secs):
                         phrase = await asyncio.shield(gen)
@@ -5902,11 +7383,15 @@ class VoiceSession:
         wrap ``filler=True`` — the caller is waiting on a tool and the line
         is the thing they should hear.
         """
+        if self._hangup_filler_blocked:
+            return
         # No await between the caller's ok-check and this claim.
         speak_task = asyncio.create_task(self._speak_filler_task(phrase, tool_name))
         self._tts_tail = speak_task
         self._tts_tasks.add(speak_task)
         speak_task.add_done_callback(lambda t: self._tts_tasks.discard(t))
+        if self.tool_beat_secs:
+            self._schedule_filler_beat(speak_task)
         try:
             await speak_task
         except asyncio.CancelledError:
@@ -5947,9 +7432,14 @@ class VoiceSession:
         ``tool_name`` is None while the model is still thinking, before any call.
         """
         if self._filler_agent is None:
+            model = self.filler.model or self.model or self.agent.model
+            # The turn agent's params (reasoning off) come along with its model:
+            # a thinking model spends the 64 tokens before it writes the phrase.
+            same_model = model == getattr(self.agent, "model", None)
             self._filler_agent = Agent(
                 name="voice_filler",
-                model=self.filler.model or self.model or self.agent.model,
+                model=model,
+                model_params=dict(getattr(self.agent, "model_params", None) or {}) if same_model else {},
                 system_prompt=self.filler.system_prompt,
                 max_tokens=64,
                 tracing_provider=None,
@@ -5968,10 +7458,16 @@ class VoiceSession:
             )
         out = await self._filler_agent(
             prompt=prompt,
-            system_prompt=with_reply_language(self.filler.system_prompt, self.audio_input.language),
+            system_prompt=with_reply_language(
+                self.filler.system_prompt, self.effective_reply_language() or self.spoken_language
+            ),
         ).collect()
         if out.status.code != "success" or out.output is None:
             logger.debug("filler_generation_failed", status=out.status.code, error=out.error)
+            return None
+        if getattr(out.output, "stop_reason", None) in ("length", "max_tokens"):
+            # A phrase cut at the token cap ("Un", "Un momento,") is worse than silence.
+            logger.info("filler_generation_truncated", text=out.output.collect_text()[:40])
             return None
         return out.output.collect_text().strip().strip('"').strip() or None
 
@@ -6333,7 +7829,7 @@ class VoiceSession:
         if not instructions:
             return None
         parts = [p for p in (await self._agent_system_prompt(), DEFAULT_USER_IDLE_SYSTEM_PROMPT, instructions) if p]
-        idle_prompt = with_reply_language("\n\n".join(parts), self.audio_input.language)
+        idle_prompt = with_reply_language("\n\n".join(parts), self.effective_reply_language())
         if self._idle_agent is None:
             self._idle_agent = Agent(
                 name="voice_user_idle",
@@ -6568,11 +8064,13 @@ class VoiceSession:
         now = getattr(self, "_turn_prompt_now", None) or datetime.now(UTC)
         return compose_voice_system_prompt(
             resolved,
+            voice_note=audio_tags_note(self._audio_tag_policy.tags) if self._performs_audio_tags() else None,
             call_context=self.call_context,
             call_context_keys=self.prompt_call_context_keys,
             now=now,
             greeting_note=note,
-            reply_language=reply_language_instruction(self.audio_input.language),
+            continuation_note=self._continuation_note or None,
+            reply_language=reply_language_instruction(self.effective_reply_language()),
         )
 
     async def _generate_greeting(self) -> str | None:
@@ -6595,8 +8093,9 @@ class VoiceSession:
         parts = [p for p in (await self._agent_system_prompt(), DEFAULT_GREETING_SYSTEM_PROMPT, instructions) if p]
         # No user utterance yet, so the unset "match the latest message" policy
         # does not apply. A configured language still pins the opener.
-        if self.audio_input.language:
-            parts.append(reply_language_instruction(self.audio_input.language))
+        reply_tag = self.effective_reply_language()
+        if reply_tag:
+            parts.append(reply_language_instruction(reply_tag))
         # Kept on the session (like ``_filler_agent``) so the assembled prompt is
         # readable after the fact — it is the whole configuration surface of a
         # generated opener, and it runs exactly once per call.
@@ -6646,7 +8145,7 @@ class VoiceSession:
         confirmation. The scheduled-text cursor still advances so the flush
         logic does not send the same span twice.
         """
-        if not text:
+        if not text or self._hangup_committed:
             return
         if self._speculative_unconfirmed() and not self.speculative_generation.preemptive_tts:
             # Capture the preceding tail before the cursor moves, so synthesis
@@ -6655,6 +8154,88 @@ class VoiceSession:
             self._turn_tts_scheduled_text += text
             return
         self._schedule_tts_now(text)
+
+    def _hesitate(self, clean: str, *, previous_text: str = "") -> Hesitated | None:
+        """``clean`` with a hesitation sound, when it opens a model step and gets one.
+
+        Called on the TTS chain, so openings are considered in the order they
+        are spoken, and text held back for an unconfirmed speculative turn is
+        not considered until it is confirmed. A segment that is only an
+        acknowledgement ("Perfecto.") leaves the step's opening to the next one.
+        """
+        if self._hesitator is None or not self._turn_hesitation_due:
+            return None
+        language = self.effective_reply_language()
+        mid_sentence = previous_text.rstrip()[-1:] in (",", ";", ":", "—", "–")
+        hesitated, reason = self._hesitator.consider(clean, language, mid_sentence=mid_sentence)
+        self._turn_hesitation_due = reason == "acknowledgement"
+        if hesitated is not None:
+            self._turn_hesitations += 1
+            # INFO on purpose: the sound is heard on the call and is in no transcript.
+            logger.info(
+                "tts_hesitation",
+                opener=hesitated.opener.strip(),
+                text_preview=clean.strip()[:60],
+                **_trace_debug_fields(),
+            )
+        elif reason != "no_openers":
+            logger.debug("tts_hesitation_skipped", reason=reason, text_preview=clean.strip()[:60])
+        elif language not in self._hesitation_unavailable:
+            # INFO, once per language: the knob is on and these replies never hesitate.
+            self._hesitation_unavailable.add(language)
+            logger.info("tts_hesitation_unavailable", language=language, reason="no openers for the reply language")
+        return hesitated
+
+    def _performs_audio_tags(self) -> bool:
+        """This call's voice turns ``[laughs]`` into a laugh, and ``audio_tags`` is set."""
+        return self._audio_tag_policy is not None and self.tts.performs_audio_tags(self.audio_output)
+
+    def _voiced(self, text: str, *, reply: bool = False) -> str:
+        """``text`` as the voice is given it. Everything else keeps ``text``.
+
+        ``reply`` is the model's reply of a turn, where audio tags are limited
+        and counted. Any other line (a greeting, a filler) is its author's.
+        """
+        if self._audio_tag_policy is not None:
+            text, kept = self._audio_tag_policy.voiced(text, performed=self._performs_audio_tags(), limited=reply)
+            if reply and kept:
+                self._turn_audio_tags += kept
+                # INFO on purpose: the sound is heard on the call, and how often is what to tune.
+                logger.info("tts_audio_tag", count=kept, text_preview=text.strip()[:60], **_trace_debug_fields())
+        if self._pronouncer is not None:
+            text = self._pronouncer.apply(text, self._pronunciation_language())
+        return text
+
+    def _heard_segments(self) -> list[tuple[str, int]]:
+        """This turn's ``(text, bytes)`` records, for mapping played bytes to heard text.
+
+        A hesitation sound is in a record's audio and not in its text. Mapped
+        as it is, a cut early in the reply would credit the caller with words
+        the playhead had not reached. The sound's share of the audio becomes
+        a text-less segment where it was spoken, the way a filler's audio is.
+        The share is by characters, like the rest of the mapping, with the
+        sound's counted ``SOUND_AUDIO_WEIGHT`` times.
+        """
+        segments: list[tuple[str, int]] = []
+        for record in self._turn_tts_segment_records:
+            text, num_bytes = str(record[0]), int(record[1])
+            added = self._turn_tts_added.get(id(record))
+            if added is None or num_bytes <= 0:
+                segments.append((text, num_bytes))
+                continue
+            offset, chars = added
+            if not text[:offset].strip():
+                # Leading whitespace stays with the words that follow it.
+                offset = 0
+            chars *= SOUND_AUDIO_WEIGHT
+            spoken_chars = len(text) + chars
+            before = num_bytes * offset // spoken_chars
+            sound = num_bytes * chars // spoken_chars
+            if offset:
+                segments.append((text[:offset], before))
+            segments.append(("", sound))
+            segments.append((text[offset:], num_bytes - before - sound))
+        return segments
 
     def _schedule_tts_now(self, text: str, *, advance_cursor: bool = True, previous_text: str | None = None) -> None:
         if not text:
@@ -6673,6 +8254,7 @@ class VoiceSession:
             clean = _strip_markdown(text, previous_text=previous_text)
             if not clean.strip():
                 return
+            hesitated = self._hesitate(clean, previous_text=previous_text)
             # Resolve the context after the preceding boundary: an enabled beat
             # may have finished it. Otherwise reuse it to keep prosody continuous.
             if self._turn_tts_stream is None and self._turn_tts_pump is None and not self._cancel_turn.is_set():
@@ -6694,14 +8276,20 @@ class VoiceSession:
                     self._turn_tts_segment_records.append(record)
                 self._turn_tts_segments += 1
                 if record is not None:
+                    if hesitated is not None:
+                        self._turn_tts_added[id(record)] = (len(record[0]) + hesitated.offset, len(hesitated.opener))
                     record[0] += clean
+                voiced = self._voiced(clean if hesitated is None else hesitated.spoken, reply=True)
+                if not voiced.strip():
+                    # Only a mark this voice does not perform: nothing to say.
+                    return
                 try:
-                    await stream.feed(clean)
+                    await stream.feed(voiced)
                 except Exception as e:
                     logger.error("tts_feed_error", error=str(e), text_preview=clean[:80], exc_info=True)
                     await self._emit(SessionError(message=f"TTS failed: {e}"))
                 return
-            await self._speak(text, previous_text=previous_text)
+            await self._speak(text, previous_text=previous_text, hesitated=hesitated, reply=True)
 
         t = asyncio.create_task(chain())
         self._tts_tasks.add(t)
@@ -6724,6 +8312,8 @@ class VoiceSession:
             await self._await_tts_predecessor(prev)
             if self._cancel_turn.is_set():
                 return
+            # Whatever is spoken next is the opening of the step after the tool.
+            self._turn_hesitation_due = True
             stream = self._turn_tts_stream
             beat = self.tool_beat_secs or 0.0
             if stream is not None:
@@ -6742,25 +8332,314 @@ class VoiceSession:
                         await self._abort_tts_stream()
             if self._cancel_turn.is_set():
                 return
-            if beat > 0 and self._turn_audio_bytes:
-                quiet_since = self._turn_audio_playing_until
-                wait_play = quiet_since - time.monotonic()
-                if wait_play > 0:
-                    await asyncio.sleep(wait_play)
-                while self.playback.is_playing:
-                    quiet_since = max(quiet_since, time.monotonic())
-                    await asyncio.sleep(self.EVENT_TURN_POLL_SECS)
-                remaining = quiet_since + beat - time.monotonic()
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
+            await self._await_tool_beat()
 
         task = asyncio.create_task(boundary())
         self._tts_tasks.add(task)
         task.add_done_callback(lambda done: self._tts_tasks.discard(done))
         self._tts_tail = task
 
+    async def _await_tool_beat(self) -> None:
+        """Wait until ``tool_beat_secs`` after the turn's audio so far has played."""
+        beat = self.tool_beat_secs or 0.0
+        if beat <= 0 or not self._turn_audio_bytes:
+            return
+        quiet_since = self._turn_audio_playing_until
+        wait_play = quiet_since - time.monotonic()
+        if wait_play > 0:
+            await asyncio.sleep(wait_play)
+        while self.playback.is_playing:
+            quiet_since = max(quiet_since, time.monotonic())
+            await asyncio.sleep(self.EVENT_TURN_POLL_SECS)
+        remaining = quiet_since + beat - time.monotonic()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+    def _schedule_filler_beat(self, spoken: asyncio.Task) -> None:
+        """Hold the reply for ``tool_beat_secs`` after a wait phrase said for a tool call.
+
+        The model's own words before a tool get the beat in
+        :meth:`_schedule_tool_boundary`; a filler is spoken only when the model
+        said nothing, so without this the result follows the phrase with no
+        pause at all. Queued behind the phrase and ahead of the reply; the tool
+        runs through it, so one slower than the phrase plus the beat waits for
+        nothing. A phrase that covered thinking alone (no tool called by the
+        time it ended) gets none.
+        """
+
+        async def beat() -> None:
+            await self._await_tts_predecessor(spoken)
+            if spoken.cancelled() or self._cancel_turn.is_set() or self._hangup_filler_blocked:
+                return
+            if self._turn_tool_seen_at is None:
+                return
+            await self._await_tool_beat()
+
+        task = asyncio.create_task(beat())
+        self._tts_tasks.add(task)
+        task.add_done_callback(lambda done: self._tts_tasks.discard(done))
+        self._tts_tail = task
+
+    # -- Mic level ------------------------------------------------------------
+
+    def _wants_mic_activity(self) -> bool:
+        return self._caller_pace is not None or self._backchanneler is not None
+
+    def _start_mic_activity(self) -> None:
+        """Time the caller's talking from the mic level, for the behaviours that read it."""
+        if not self._wants_mic_activity():
+            return
+        if self.audio_input.encoding != "pcm_s16le":
+            # No level to read. Adaptive tempo still hears the upset words.
+            logger.warning(
+                "mic_activity_unavailable",
+                reason="mic audio is not pcm_s16le",
+                encoding=self.audio_input.encoding,
+                **_trace_debug_fields(),
+            )
+            return
+        self._mic_activity = MicActivity(self.audio_input.sample_rate)
+
+    def _note_caller_utterance(self, text: str, *, grown: bool = False) -> None:
+        """The caller said ``text`` and it gets a reply. ``grown``: it is the last utterance, longer."""
+        self._note_caller_pace(text)
+        if self._mic_activity is not None:
+            self._utterance_speech_mark = self._mic_activity.speech_secs
+        chan = self._backchanneler
+        if chan is not None:
+            self._turn_backchannels = (self._turn_backchannels if grown else 0) + chan.spoken_this_turn
+            chan.agent_replied()
+
+    # -- Listening sounds -----------------------------------------------------
+
+    BACKCHANNEL_POLL_SECS = 0.05
+
+    def _start_backchannel(self) -> asyncio.Task[None] | None:
+        """Start watching for the caller's pauses, when listening sounds are on and possible."""
+        if self._backchanneler is None:
+            return None
+        reason = None
+        if self._mic_activity is None:
+            reason = "mic audio is not pcm_s16le"
+        elif self.audio_output.encoding != "pcm_s16le":
+            reason = "agent audio is not pcm_s16le"
+        if reason is not None:
+            logger.warning("backchannel_unavailable", reason=reason, **_trace_debug_fields())
+            return None
+        self._backchannel_task = asyncio.create_task(self._backchannel_watch())
+        return self._backchannel_task
+
+    async def _backchannel_watch(self) -> None:
+        try:
+            # Ahead of the first pause: a clip asked for when it is needed arrives after it.
+            self._backchannel_clips_for(self._backchannel_language())
+            while not self._closed:
+                await asyncio.sleep(self.BACKCHANNEL_POLL_SECS)
+                try:
+                    await self._maybe_backchannel()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("backchannel_error", exc_info=True, **_trace_debug_fields())
+        except asyncio.CancelledError:
+            pass
+        finally:
+            for task in self._backchannel_clip_tasks.values():
+                task.cancel()
+
+    def _backchannel_language(self) -> str:
+        return language_key(self._pace_language()) or "*"
+
+    def _backchannel_clips_for(self, key: str) -> dict[str, bytes]:
+        """The clips of a language, starting their synthesis the first time it is asked for."""
+        if key not in self._backchannel_clip_tasks:
+            assert self._backchanneler is not None
+            phrases = self._backchanneler.phrases(None if key == "*" else key)
+            self._backchannel_clips[key] = {}
+            self._backchannel_clip_tasks[key] = asyncio.create_task(self._prepare_backchannel_clips(key, phrases))
+        return self._backchannel_clips[key]
+
+    def _agent_voice_busy(self) -> bool:
+        """The agent is speaking, or about to: a reply, the greeting, an idle prompt, a filler."""
+        if self._is_speaking or self._greeting_speaking or self._idle_prompt_speaking or self._tts_tasks:
+            return True
+        if self._current_turn_task is not None and not self._current_turn_task.done():
+            return True
+        return self._greeting_task is not None and not self._greeting_task.done()
+
+    async def _prepare_backchannel_clips(self, key: str, phrases: tuple[str, ...]) -> None:
+        """Synthesize each sound once, in the agent's voice, while the agent is not speaking."""
+        assert self.backchannel is not None
+        clips = self._backchannel_clips[key]
+        rate = self.audio_output.sample_rate
+        for phrase in phrases:
+            for _attempt in range(2):
+                while self._agent_voice_busy():
+                    await asyncio.sleep(0.1)
+                serial = self._interrupt_serial
+                try:
+                    pcm = b"".join([chunk async for chunk in self.tts.synthesize(phrase)])
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning("backchannel_clip_failed", phrase=phrase, error=str(e), **_trace_debug_fields())
+                    break
+                if serial != self._interrupt_serial:
+                    continue  # an interruption may have cut the take short: once more
+                clip = prepare_clip(pcm, rate, volume=self.backchannel.volume)
+                if clip is None:
+                    # INFO on purpose: a sound the voice cannot say briefly is never heard, and nothing else tells.
+                    logger.info(
+                        "backchannel_clip_rejected",
+                        phrase=phrase,
+                        secs=round(len(pcm) / 2 / rate, 2),
+                        **_trace_debug_fields(),
+                    )
+                else:
+                    clips[phrase] = clip
+                break
+        logger.debug("backchannel_clips_ready", language=key, phrases=list(clips), **_trace_debug_fields())
+
+    def _backchannel_pending_bytes(self) -> int:
+        """Audio of a listening sound the caller has not reached yet, on the played axis."""
+        left = self._backchannel_ends_at - time.monotonic()
+        if left <= 0:
+            return 0
+        return int(left * self.audio_output.sample_rate) * 2
+
+    def _backchannel_reason(self, utterance_secs: float) -> str | None:
+        """What says the caller, who has just paused, is not done. ``None`` when nothing does."""
+        held = self._held_user_text
+        partial = self._latest_partial_text if self._last_partial_at > self._last_commit_at else ""
+        text = (partial or held or "").strip()
+        if not text:
+            return None
+        if self._entity_kind is not None or entity_capture_with_held(held, text, partial=bool(partial)):
+            return "entity"
+        if held is not None:
+            return "held"
+        if _ends_unfinished(text):
+            return "unfinished"
+        chan = self._backchanneler
+        assert chan is not None
+        if chan.long_speech_secs is None or utterance_secs < chan.long_speech_secs:
+            return None
+        # A sentence that reads as finished is where the agent is about to answer. Three dots are a trail-off.
+        if text.endswith(_SENTENCE_CLOSED) and not text.endswith("..."):
+            return None
+        return "long"
+
+    async def _maybe_backchannel(self) -> None:
+        chan, mic = self._backchanneler, self._mic_activity
+        if chan is None or mic is None:
+            return
+        quiet = mic.quiet_secs()
+        if not chan.pause_due(quiet):
+            return
+        # The agent has the line, or is about to take it.
+        if self._closed or self._hangup_open or self._agent_voice_busy() or self.playback.is_playing:
+            return
+        if self._speculative_attempt is not None or self._commits_in_flight > 0 or self._greeting_pending_bytes() > 0:
+            return
+        total = mic.speech_secs
+        utterance_secs = total - self._utterance_speech_mark
+        clips = self._backchannel_clips_for(self._backchannel_language())
+        phrase, why = chan.decide(
+            now=time.monotonic(),
+            pause=total,
+            quiet_secs=quiet,
+            speech_secs=total - max(self._utterance_speech_mark, self._backchannel_speech_mark),
+            utterance_secs=utterance_secs,
+            reason=self._backchannel_reason(utterance_secs),
+            choices=list(clips),
+        )
+        if phrase is None:
+            return
+        clip = clips[phrase]
+        self._backchannel_speech_mark = total
+        if self._record_audio:
+            self._output_audio_chunks.append(clip)
+        if self._recorder is not None:
+            self._recorder.add_agent(clip)
+        # Before the audio is out: nothing may read these bytes as the assistant speaking.
+        self._backchannel_only = True
+        self._backchannel_ends_at = time.monotonic() + len(clip) / 2 / self.audio_output.sample_rate
+        await self._emit(AudioOutput(data=clip))
+        self.playback.on_audio_emitted(len(clip))
+        await self._emit(BackchannelSpoken(text=phrase, reason=why))
+        # INFO on purpose: the agent made a sound that no transcript holds.
+        logger.info(
+            "backchannel_spoken",
+            text=phrase,
+            reason=why,
+            quiet_secs=round(quiet or 0.0, 2),
+            utterance_secs=round(utterance_secs, 2),
+            **_trace_debug_fields(),
+        )
+
+    # -- Adaptive tempo -------------------------------------------------------
+
+    def _pace_language(self) -> str | None:
+        """The language the caller's pace is read in: the reply's, else the transcriber's."""
+        return self.effective_reply_language() or self.audio_input.language
+
+    def _speech_since_pace_mark(self) -> float | None:
+        """Seconds the caller has talked since their last utterance was heard. ``None`` without a meter."""
+        if self._mic_activity is None:
+            return None
+        return max(0.0, self._mic_activity.speech_secs - self._utterance_speech_mark)
+
+    def _note_caller_pace(self, text: str) -> None:
+        """The caller said ``text`` and it gets a reply: read their pace and mood from it."""
+        pace = self._caller_pace
+        if pace is None:
+            return
+        pace.heard(text, self._speech_since_pace_mark(), self._pace_language())
+
+    def _set_turn_tempo(self, user_text: str, *, speculative: bool) -> None:
+        """Fix the factor on ``tts_tempo`` for the turn that is starting."""
+        pace = self._caller_pace
+        assert pace is not None
+        language = self._pace_language()
+        if speculative:
+            # Its transcript is not confirmed yet, so it has not been heard: ask what it would say.
+            factor = pace.preview(user_text, self._speech_since_pace_mark(), language)
+            rate = pace.measure(user_text, self._speech_since_pace_mark())
+        else:
+            factor = pace.factor(language)
+            rate = pace.last_measured
+        self._turn_caller_rate = None if rate is None else round(rate, 2)
+        if factor != self._tempo_factor:
+            # INFO on purpose: the agent's speed changed and no transcript shows it.
+            logger.info(
+                "tts_tempo_adapted",
+                factor=factor,
+                previous=self._tempo_factor,
+                caller_syllables_per_sec=self._turn_caller_rate,
+                upset=pace.upset_left > 0 or (speculative and pace.is_upset(user_text, language)),
+                **_trace_debug_fields(),
+            )
+            self._tempo_factor = factor
+
+    def _turn_tempo_metric(self) -> float | None:
+        if self._caller_pace is None or self._turn_is_event:
+            return None
+        return round(self._effective_tts_tempo() or 1.0, 3)
+
+    def _effective_tts_tempo(self) -> float | None:
+        """``tts_tempo``, slowed by what this turn's caller asks for."""
+        if self._tempo_factor == 1.0:
+            return self.tts_tempo
+        return (self.tts_tempo if self.tts_tempo is not None else 1.0) * self._tempo_factor
+
     def _postprocess_tts(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
-        """Pause trim, then tempo. Defaults return ``chunks`` unchanged.
+        """Pause rhythm, pause trim, then tempo. Defaults return ``chunks`` unchanged.
+
+        Rhythm runs first because it sorts silences by the length the provider
+        gave them: after a cap, a sentence pause and a gap between two words
+        can be the same length. Rhythm is told the cap, so it never lengthens
+        a pause past it: the pause limiter measures silence another way and
+        cannot be relied on to undo it.
 
         Byte accounting (playback, ``_turn_audio_bytes``, the segment record,
         the call recorder) runs on whatever this yields, which is the PCM the
@@ -6776,10 +8655,33 @@ class VoiceSession:
                 logger.warning(
                     "tts_pace_skipped",
                     encoding=self.audio_output.encoding,
-                    reason="pause trimming and tempo require pcm_s16le",
+                    reason="pause rhythm, pause trimming and tempo require pcm_s16le",
                 )
             return chunks
         rate = self.audio_output.sample_rate
+        tempo = self._effective_tts_tempo()
+        rhythm = self.tts_rhythm
+        if rhythm is not None:
+            from .rhythm import LENGTHENED_MAX_SECS, shape_pauses
+
+            longest = LENGTHENED_MAX_SECS
+            if self.max_tts_pause_secs is not None:
+                longest = min(longest, self.max_tts_pause_secs)
+            chunks = shape_pauses(
+                chunks,
+                sample_rate=rate,
+                join_gaps=rhythm.join_gaps,
+                stretch_pauses=rhythm.stretch_pauses,
+                promote_gaps=rhythm.promote_gaps,
+                gap_min_secs=rhythm.gap_min_secs,
+                gap_max_secs=rhythm.gap_max_secs,
+                quiet_dbfs=rhythm.quiet_dbfs,
+                max_pause_secs=longest,
+                # Tempo plays what rhythm yields faster than real time, and
+                # rhythm needs to know when the caller has heard it all.
+                playback_rate=tempo if tempo is not None else 1.0,
+                seed=rhythm.seed,
+            )
         if self.max_tts_pause_secs is not None:
             from .pauses import limit_pauses
 
@@ -6789,7 +8691,6 @@ class VoiceSession:
                 max_pause_secs=self.max_tts_pause_secs,
                 quiet_dbfs=self.tts_quiet_dbfs,
             )
-        tempo = self.tts_tempo
         if tempo is not None and not math.isclose(tempo, 1.0, abs_tol=1e-6):
             from .tempo import change_tempo
 
@@ -6797,9 +8698,9 @@ class VoiceSession:
         return chunks
 
     def _tts_pace_enabled(self) -> bool:
-        if self.max_tts_pause_secs is not None:
+        if self.max_tts_pause_secs is not None or self.tts_rhythm is not None:
             return True
-        tempo = self.tts_tempo
+        tempo = self._effective_tts_tempo()
         return tempo is not None and not math.isclose(tempo, 1.0, abs_tol=1e-6)
 
     def _note_turn_audio(self, num_bytes: int) -> None:
@@ -6807,6 +8708,9 @@ class VoiceSession:
         self._turn_audio_playing_until = max(time.monotonic(), self._turn_audio_playing_until) + (
             num_bytes / (self.audio_output.sample_rate * 2)
         )
+        # Windows measured from "the assistant stopped" (backchannel, echo) start
+        # when this audio is expected to finish, not at the caller's next event.
+        self._last_assistant_active_at = max(self._last_assistant_active_at, self._turn_audio_playing_until)
 
     async def _await_tts_chain(self) -> None:
         """Wait for all segments scheduled with :meth:`_schedule_tts` for this turn.
@@ -6889,7 +8793,7 @@ class VoiceSession:
             # catches a TTS provider returning truncated audio.
             logger.info(
                 "turn_tts_stream_end",
-                text_chars=sum(len(r[0]) for r in records),
+                text_chars=sum(len(r[0]) + self._turn_tts_added.get(id(r), (0, 0))[1] for r in records),
                 text_preview="".join(r[0] for r in records)[:120],
                 audio_chunks=chunk_count,
                 audio_bytes=total_bytes,
@@ -6925,6 +8829,8 @@ class VoiceSession:
         greeting: bool = False,
         idle: bool = False,
         previous_text: str = "",
+        hesitated: Hesitated | None = None,
+        reply: bool = False,
     ) -> None:
         """Synthesize ``text`` and emit its audio.
 
@@ -6933,6 +8839,10 @@ class VoiceSession:
         timings, ignores the per-turn cancel flag (stopping it is
         ``interrupt()``'s job, by cancelling the task) and keeps its own
         ``[text, bytes]`` record for barge-in truncation.
+
+        ``hesitated`` is ``text`` with a hesitation sound added: the voice is
+        given that, and the record keeps ``text``. ``reply`` marks the model's
+        reply of a turn (see :meth:`_voiced`).
         """
         text = _strip_markdown(text, previous_text=previous_text)
         turnless = greeting or idle
@@ -6955,6 +8865,10 @@ class VoiceSession:
         # Filler segments record empty text: interruption truncation then counts
         # their played bytes without attributing words to the *reply*.
         segment_record: list = ["" if filler else text, 0]
+        spoken = text
+        if hesitated is not None:
+            spoken = hesitated.spoken
+            self._turn_tts_added[id(segment_record)] = (hesitated.offset, len(hesitated.opener))
         if greeting:
             # The opener belongs to no turn: it is not in any turn's segment
             # list (``_run_turn`` seeds a text-less stand-in for whatever is
@@ -6966,8 +8880,11 @@ class VoiceSession:
             self._idle_record = segment_record
         else:
             self._turn_tts_segment_records.append(segment_record)
+        voiced = self._voiced(spoken, reply=reply)
+        if not voiced.strip():
+            return
         try:
-            async for chunk in self._postprocess_tts(self.tts.synthesize(text)):
+            async for chunk in self._postprocess_tts(self.tts.synthesize(voiced)):
                 # Turnless speech predates / sits outside every turn, so the
                 # per-turn cancel flag says nothing about it: stopping it is
                 # ``interrupt()``'s job, by cancelling this task.
@@ -6999,7 +8916,7 @@ class VoiceSession:
             # early) — at ~16kHz PCM expect very roughly >1.5KB per char.
             logger.info(
                 "turn_tts_synthesize_end",
-                text_chars=len(text),
+                text_chars=len(spoken),
                 text_preview=text[:120],
                 audio_chunks=chunk_count,
                 audio_bytes=total_bytes,
@@ -7080,7 +8997,7 @@ class VoiceSession:
         heard_bytes = self._turn_heard_bytes
         if heard_bytes is None:
             heard_bytes = max(0, self.playback.played_bytes - self._turn_played_baseline)
-        segments = [(str(t), int(b)) for t, b in self._turn_tts_segment_records]
+        segments = self._heard_segments()
         heard_text = map_played_bytes_to_text(segments, heard_bytes)
         # "" means "nothing was heard"; None (never set) means "unknown".
         self._last_interruption_heard_text = heard_text
@@ -7091,10 +9008,15 @@ class VoiceSession:
             heard_bytes=heard_bytes,
             heard_chars=len(heard_text),
             generated_chars=len(self._turn_assistant_text),
-            tts_segments=len(segments),
+            tts_segments=len(self._turn_tts_segment_records),
             replace_last=replace_last,
             **_trace_debug_fields(),
         )
+        suffix = _unheard_suffix(self._turn_assistant_text, heard_text)
+        self._unheard_tail = suffix
+        # ``_turn_finalized_ok`` is still this turn's value: True after
+        # AgentTextDone, False when generation was cancelled first.
+        self._unheard_tail_resumable = bool(suffix) and self._turn_finalized_ok
 
         if replace_last and self._transcript and self._transcript[-1].role == "assistant":
             if heard_text:
@@ -7238,6 +9160,11 @@ class VoiceSession:
             predictive_endpoint=self._turn_predictive_endpoint,
             filler_spoken=self._turn_filler_count > 0,
             filler_count=self._turn_filler_count,
+            hesitations=self._turn_hesitations,
+            audio_tags=self._turn_audio_tags,
+            backchannels=0 if self._turn_is_event else self._turn_backchannels,
+            tts_tempo=self._turn_tempo_metric(),
+            caller_syllables_per_sec=None if self._turn_is_event else self._turn_caller_rate,
             event=self._turn_is_event,
             speculative=self._turn_speculative,
             speculative_generations_started=self.speculative_generations_started,

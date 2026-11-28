@@ -54,6 +54,10 @@ node_modules/
 # Internal planning docs
 planning/
 
+# Voice harness cache and acceptance dumps (PCM, wav, live reports)
+/benchmarks/voice/cache/
+/benchmarks/voice/results/
+
 # Local rust WIP — do not ship in the Python package
 /rust/
 /benchmarks/rust/
@@ -63,3 +67,6 @@ planning/
 
 # Raw voice benchmark rows (benchmarks/voice/bench_242.py writes and resumes them; summaries stay tracked)
 benchmarks/voice/242-results/*.jsonl
+
+# Voice demo hub: local-only demos and notes (client names stay out of the repository)
+/examples/voice_demos/*.local.*

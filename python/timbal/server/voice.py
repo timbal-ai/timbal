@@ -31,9 +31,13 @@ from ..voice.ambience import PRESETS as AMBIENT_PRESETS
 from ..voice.ambience import ensure_ambient_source
 from ..voice.config import (
     DEFAULT_VOICE_ID,
+    AdaptiveTempoConfig,
     AmbientAudioConfig,
+    AudioTagsConfig,
+    BackchannelConfig,
     FillerConfig,
     GreetingConfig,
+    HesitationConfig,
     RecordingConfig,
     UserIdleConfig,
     VoiceConfig,
@@ -165,6 +169,10 @@ def _normalize_declared_voice_config(runnable: Any) -> dict[str, Any] | None:
 #: default the agent never touched is not reported (or merged) as a choice.
 _SPARSE_NESTED: tuple[tuple[str, type], ...] = (
     ("filler", FillerConfig),
+    ("hesitation", HesitationConfig),
+    ("audio_tags", AudioTagsConfig),
+    ("adaptive_tempo", AdaptiveTempoConfig),
+    ("backchannel", BackchannelConfig),
     ("greeting", GreetingConfig),
     ("outbound_greeting", GreetingConfig),
     ("user_idle", UserIdleConfig),
@@ -200,6 +208,7 @@ def _portable_ambient(block: Any) -> dict[str, Any] | None:
     if isinstance(block.get("volume"), (int, float)) and not isinstance(block["volume"], bool):
         out["volume"] = float(block["volume"])
     return out
+
 
 _DROP = object()
 
@@ -312,40 +321,43 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
 # separately in :func:`select_turn_detector_spec` (mode names only, never
 # callables). ``model`` is deliberately client-settable for the playground
 # model picker; trim this set in deployments where the client is untrusted.
-CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
-    "stt_provider",
-    "stt_model",
-    "tts_provider",
-    "tts_model",
-    "voice",
-    "language",
-    "sample_rate",
-    "encoding",
-    "stt_extra",
-    "tts_extra",
-    "vad_endpointing",
-    "predict_during_speech",
-    "model",
-    "tool_beat_secs",
-    "max_tts_pause_secs",
-    "tts_quiet_dbfs",
-    "tts_tempo",
-    "hangup_grace_secs",
-    "turn_timeout_secs",
-    "turn_timeout_fallback",
-    "filler",
-    # Per-call opener: the telephony webhook's <Parameter name="greeting"> and
-    # the LiveKit hello both arrive through this allowlist, and "what this call
-    # opens with" is per-call by nature (an outbound campaign sets it per dial).
-    "greeting",
-    "outbound_greeting",
-    # Silence policy is per-call tuning too (a voicemail-heavy campaign wants a
-    # short hang-up; a support line wants patient re-engagement).
-    "user_idle",
-    # Dictation / spelling. Off unless the agent or this call turns it on.
-    "entity_patience",
-    "entity_patience_secs",
-})
+CLIENT_SETTABLE_VOICE_FIELDS = frozenset(
+    {
+        "stt_provider",
+        "stt_model",
+        "tts_provider",
+        "tts_model",
+        "voice",
+        "language",
+        "reply_language",
+        "sample_rate",
+        "encoding",
+        "stt_extra",
+        "tts_extra",
+        "vad_endpointing",
+        "predict_during_speech",
+        "model",
+        "tool_beat_secs",
+        "max_tts_pause_secs",
+        "tts_quiet_dbfs",
+        "tts_tempo",
+        "hangup_grace_secs",
+        "turn_timeout_secs",
+        "turn_timeout_fallback",
+        "filler",
+        # Per-call opener: the telephony webhook's <Parameter name="greeting"> and
+        # the LiveKit hello both arrive through this allowlist, and "what this call
+        # opens with" is per-call by nature (an outbound campaign sets it per dial).
+        "greeting",
+        "outbound_greeting",
+        # Silence policy is per-call tuning too (a voicemail-heavy campaign wants a
+        # short hang-up; a support line wants patient re-engagement).
+        "user_idle",
+        # Dictation / spelling. Off unless the agent or this call turns it on.
+        "entity_patience",
+        "entity_patience_secs",
+    }
+)
 
 #: Hello keys the transport reads directly — not ``VoiceConfig`` fields, so
 #: they must not be logged as "ignored" by the override merge.
@@ -372,6 +384,7 @@ def client_call_direction(config: dict[str, Any]) -> str | None:
         logger.info("voice_client_direction_ignored", value=raw[:40])
     return None
 
+
 # Keys a client may set *inside* ``stt_extra`` / ``tts_extra``. Tuning only.
 #
 # The adapters read the provider WebSocket host off these dicts (``stt_host``
@@ -387,44 +400,59 @@ def client_call_direction(config: dict[str, Any]) -> str | None:
 # Munsit, on-prem Deepgram or a residency endpoint.
 _OPENAI_STT_EXTRA = frozenset({"prompt", "threshold", "prefix_padding_ms", "silence_duration_ms", "noise_reduction"})
 _OPENAI_TTS_EXTRA = frozenset({"instructions"})
-CLIENT_TUNING_STT_EXTRA = _OPENAI_STT_EXTRA | frozenset({
-    # Deepgram Flux / Nova
-    "eot_timeout_ms",
-    "eot_threshold",
-    "eager_eot_threshold",
-    "endpointing",
-    "smart_format",
-    "punctuate",
-    "interim_results",
-    "keyterm",
-    "keywords",
-    # ElevenLabs Scribe + local VAD knobs (build_voice_session pops these for native-EOU providers)
-    "commit_strategy",
-    "audio_format",
-    "min_speech_duration_ms",
-    "vad_silence_threshold_secs",
-    "vad_threshold",
-    # Munsit
-    "smart_turn",
-    "hotwords",
-    "channels",
-})
-CLIENT_TUNING_TTS_EXTRA = _OPENAI_TTS_EXTRA | frozenset({
-    # ElevenLabs
-    "output_format",
-    "audio_format",
-    "auto_mode",
-    "inactivity_timeout",
-    "tts_keepalive_interval",
-    "apply_text_normalization",
-    # Munsit / Fish
-    "stability",
-    "speed",
-    "dialect",
-    "latency",
-    "volume",
-    "condition_on_previous_chunks",
-})
+# Gemini TTS takes the language and accent of a call as a tag (``language_code``: ``es-ES``, ``ca-ES``), and one
+# free-text line for the accent of a director's brief (``accent``), the only way to an accent no tag names
+# (Andalusian). A playground has to be able to set both.
+_GEMINI_TTS_EXTRA = frozenset({"accent", "language_code"})
+# Everything the Gemini adapter reads off ``tts_extra``. Only those two are client-settable; the rest is server
+# config. None of it may reach another provider when a call switches away from Gemini.
+_GEMINI_TTS_KEYS = _GEMINI_TTS_EXTRA | frozenset({"director_notes", "prefetch", "hold_ms"})
+CLIENT_TUNING_STT_EXTRA = _OPENAI_STT_EXTRA | frozenset(
+    {
+        # Deepgram Flux / Nova
+        "eot_timeout_ms",
+        "eot_threshold",
+        "eager_eot_threshold",
+        "endpointing",
+        "smart_format",
+        "punctuate",
+        "interim_results",
+        # ElevenLabs Scribe + local VAD knobs (build_voice_session pops these for native-EOU providers)
+        "commit_strategy",
+        "audio_format",
+        "min_speech_duration_ms",
+        "vad_silence_threshold_secs",
+        "vad_threshold",
+        # Munsit
+        "smart_turn",
+        "channels",
+    }
+)
+CLIENT_TUNING_TTS_EXTRA = (
+    _OPENAI_TTS_EXTRA
+    | _GEMINI_TTS_EXTRA
+    | frozenset(
+        {
+            # ElevenLabs (``speed`` / ``stability`` below are shared with Munsit / Fish)
+            "output_format",
+            "audio_format",
+            "auto_mode",
+            "similarity_boost",
+            "style",
+            "use_speaker_boost",
+            "inactivity_timeout",
+            "tts_keepalive_interval",
+            "apply_text_normalization",
+            # Munsit / Fish
+            "stability",
+            "speed",
+            "dialect",
+            "latency",
+            "volume",
+            "condition_on_previous_chunks",
+        }
+    )
+)
 
 _CLIENT_TUNING_EXTRA = {"stt_extra": CLIENT_TUNING_STT_EXTRA, "tts_extra": CLIENT_TUNING_TTS_EXTRA}
 
@@ -490,6 +518,51 @@ def _sanitize_entity_patience(updates: dict[str, Any]) -> None:
         del updates["entity_patience_secs"]
 
 
+def _drop_invalid_client_language(server: VoiceConfig, updates: dict[str, Any]) -> None:
+    """Drop a hello that would send a hint the resolved transcriber rejects.
+
+    ``model_copy`` does not re-run ``VoiceConfig`` validators. An untrusted
+    ``language`` of ``ca`` on Flux multilingual used to replace a valid agent
+    hint. A bad value is removed and the agent's language stays. A provider
+    switch that would make the agent's language or ``stt_languages`` illegal
+    is removed too. This does not raise: the call still starts.
+    """
+    from ..voice.config import flux_transcription_error
+    from ..voice.language import normalize_language_tag
+
+    if "language" in updates:
+        raw = updates["language"]
+        tag = normalize_language_tag(raw) if isinstance(raw, str) else None
+        if tag is None:
+            logger.info("voice_client_language_invalid", reason="not a language tag")
+            del updates["language"]
+        else:
+            updates["language"] = tag
+
+    def _error() -> str | None:
+        provider = str(updates.get("stt_provider", server.stt_provider) or "")
+        model = str(updates.get("stt_model", server.stt_model) or "")
+        language = updates["language"] if "language" in updates else server.language
+        return flux_transcription_error(
+            provider=provider,
+            model=model,
+            language=language,
+            stt_languages=server.stt_languages,
+        )
+
+    if _error() is None:
+        return
+    if "language" in updates:
+        logger.info("voice_client_language_invalid", reason="unsupported for this transcriber")
+        del updates["language"]
+    if _error() is None:
+        return
+    if "stt_provider" in updates or "stt_model" in updates:
+        logger.info("voice_client_stt_rejected", reason="language hints do not match the requested transcriber")
+        updates.pop("stt_provider", None)
+        updates.pop("stt_model", None)
+
+
 def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str, Any]) -> VoiceConfig:
     """Apply the optional first WebSocket JSON message over the server config.
 
@@ -529,6 +602,24 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
         except (ValueError, TypeError):
             logger.info("voice_client_hangup_grace_invalid")
             del updates["hangup_grace_secs"]
+    if "reply_language" in updates:
+        # model_copy skips the field validator. A hello of "english" would
+        # otherwise reach VoiceSession and raise before the call starts.
+        # Blank is unset and must not wipe a server pin. Null never arrives
+        # here (None is omitted above).
+        from ..voice.language import parse_reply_language
+
+        raw_reply = updates["reply_language"]
+        try:
+            parsed_reply = parse_reply_language(raw_reply)
+        except (TypeError, ValueError):
+            logger.info("voice_client_reply_language_invalid")
+            del updates["reply_language"]
+        else:
+            if parsed_reply is None:
+                del updates["reply_language"]
+            else:
+                updates["reply_language"] = parsed_reply
     if "voice" in updates:
         voice = updates["voice"]
         if isinstance(voice, str) and voice.strip():
@@ -541,7 +632,8 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     # read straight off the hello by the transport, not through VoiceConfig —
     # reporting them as ignored would be a lie in both directions.
     ignored = sorted(
-        k for k, v in client.items()
+        k
+        for k, v in client.items()
         if v is not None and k not in CLIENT_SETTABLE_VOICE_FIELDS and k not in _HELLO_TRANSPORT_KEYS
     )
     if ignored:
@@ -574,6 +666,7 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
         _merge_client_greeting(server_defaults, updates, "outbound_greeting")
     if "user_idle" in updates:
         _merge_client_user_idle(server_defaults, updates)
+    _drop_invalid_client_language(server_defaults, updates)
     # ``model_copy`` marks every update key as set, so a client ``""`` on
     # ``outbound_greeting`` reads as "declared: silence" in
     # :func:`greeting_for_direction`, exactly like the agent's own ``""``.
@@ -845,9 +938,8 @@ async def warmup_voice_stack(voice_config: VoiceConfig, *, livekit: bool | None 
       :func:`voice_onnx_warmup_intended`.
     """
     if livekit is None:
-        livekit = (
-            os.environ.get("TIMBAL_VOICE_TRANSPORT", "").strip().lower() == "livekit"
-            or bool(os.environ.get("TIMBAL_LIVEKIT_URL", "").strip())
+        livekit = os.environ.get("TIMBAL_VOICE_TRANSPORT", "").strip().lower() == "livekit" or bool(
+            os.environ.get("TIMBAL_LIVEKIT_URL", "").strip()
         )
     loop = asyncio.get_running_loop()
 
@@ -1139,6 +1231,14 @@ def build_voice_session(
             tts_extra.pop(key, None)
             if defaults.tts_provider != "openai" and isinstance(defaults.tts_extra, dict) and key in defaults.tts_extra:
                 tts_extra[key] = defaults.tts_extra[key]
+    if tts_provider != "gemini":
+        # ElevenLabs and Deepgram forward unknown keys into their query string: what a call set for Gemini
+        # (``language_code``, ``accent``) and a Gemini agent's ``director_notes``, ``prefetch`` and ``hold_ms``
+        # must not reach them. An agent of theirs keeps the ``language_code`` it set for its own provider.
+        for key in _GEMINI_TTS_KEYS:
+            tts_extra.pop(key, None)
+            if defaults.tts_provider != "gemini" and isinstance(defaults.tts_extra, dict) and key in defaults.tts_extra:
+                tts_extra[key] = defaults.tts_extra[key]
     if stt_native_eou:
         # Scribe-tuned VAD knobs don't apply to a provider-side turn machine
         # (Flux, Munsit).
@@ -1161,9 +1261,12 @@ def build_voice_session(
 
             eager_eot_threshold = flux_eager_threshold(stt_extra)
             stt_extra["eager_eot_threshold"] = str(eager_eot_threshold)
+    # Copy the agent's phrases. Later set_keyterms edits this session only.
     audio_in = AudioInputConfig(
         model=stt_model,
         language=merged.language,
+        languages=list(merged.stt_languages or []),
+        keyterms=list(merged.keyterms or []),
         sample_rate=merged.sample_rate,
         encoding=merged.encoding,
         extra=stt_extra,
@@ -1237,11 +1340,24 @@ def build_voice_session(
         greeting=(None if greeting is None else ((greeting.text or "")[:80] or "<generated>")),
         user_idle=merged.user_idle is not None,
         hangup_grace_secs=merged.hangup_grace_secs,
+        hesitation_rate=merged.hesitation.rate if merged.hesitation is not None else None,
     )
 
     session_kwargs: dict[str, Any] = {}
     if merged.filler is not None and merged.filler.enabled:
         session_kwargs["filler"] = merged.filler
+    # Server-side only: not in the hello allowlist, so this is the agent's.
+    if merged.hesitation is not None and merged.hesitation.enabled:
+        session_kwargs["hesitation"] = merged.hesitation
+    # Server-side only, like hesitation: how the agent's own words are said.
+    if merged.audio_tags is not None and merged.audio_tags.enabled:
+        session_kwargs["audio_tags"] = merged.audio_tags
+    if merged.adaptive_tempo is not None and merged.adaptive_tempo.enabled:
+        session_kwargs["adaptive_tempo"] = merged.adaptive_tempo
+    if merged.backchannel is not None and merged.backchannel.enabled:
+        session_kwargs["backchannel"] = merged.backchannel
+    if merged.pronunciations:
+        session_kwargs["pronunciations"] = merged.pronunciations
     if greeting is not None:
         session_kwargs["greeting"] = greeting
     if merged.user_idle is not None:
@@ -1274,6 +1390,9 @@ def build_voice_session(
     session_kwargs["max_tts_pause_secs"] = merged.max_tts_pause_secs
     session_kwargs["tts_quiet_dbfs"] = merged.tts_quiet_dbfs
     session_kwargs["tts_tempo"] = merged.tts_tempo
+    # Server-side only: not in the hello allowlist, so this is the agent's.
+    if merged.tts_rhythm is not None and merged.tts_rhythm.enabled:
+        session_kwargs["tts_rhythm"] = merged.tts_rhythm
     if merged.hangup_grace_secs is not None:
         session_kwargs["hangup_grace_secs"] = merged.hangup_grace_secs
     if merged.turn_timeout_secs is not None:
@@ -1303,6 +1422,8 @@ def build_voice_session(
         session_kwargs["client_events"] = defaults.events.client_notify
         session_kwargs["on_busy"] = defaults.events.on_busy
     session_kwargs["speculative_generation"] = merged.speculative_generation
+    if merged.reply_language is not None:
+        session_kwargs["reply_language"] = merged.reply_language
 
     # Call recording is read from *server* config only — env (per session,
     # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).
@@ -1390,6 +1511,7 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         AgentTextDelta,
         AgentTextDone,
         AudioOutput,
+        BackchannelSpoken,
         EventTurnStarted,
         FillerSpoken,
         SessionEnded,
@@ -1431,6 +1553,8 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         return [dump_value(event.model_dump(), mode="json")]
     if isinstance(event, FillerSpoken):
         return [{"type": "filler", "text": event.text}]
+    if isinstance(event, BackchannelSpoken):
+        return [{"type": "backchannel", "text": event.text, "reason": event.reason}]
     if isinstance(event, EventTurnStarted):
         return [
             {

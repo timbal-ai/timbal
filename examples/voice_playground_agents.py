@@ -114,7 +114,8 @@ thinking = Agent(
     model_params=_THINKING,
     system_prompt=(
         f"{_STYLE} You are a thoughtful tutor; reason carefully before answering. "
-        "For date or time questions call get_datetime."
+        "Call get_datetime only when the caller asked for the date or the time. "
+        "Do not call it for any other question."
     ),
     tools=[Tool(handler=get_datetime, description="Return the current UTC date and time.")],
     voice_config={
@@ -183,7 +184,12 @@ outbound = Agent(
             "after_user_silence_secs": 2.5,
         },
         # Voicemail / dead line: one nudge, then hang up.
-        "user_idle": {"timeout_secs": 5.0, "text": "Hello? Can you hear me?", "max_count": 1, "hangup_after_secs": 25.0},
+        "user_idle": {
+            "timeout_secs": 5.0,
+            "text": "Hello? Can you hear me?",
+            "max_count": 1,
+            "hangup_after_secs": 25.0,
+        },
     },
 )
 

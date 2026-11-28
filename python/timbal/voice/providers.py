@@ -53,6 +53,11 @@ class AudioInputConfig(BaseModel):
 
     model: str | None = None
     language: str | None = None
+    """Single transcription hint. Reply language is not this field."""
+    languages: list[str] = Field(default_factory=list)
+    """Expected languages for this connection. Empty means use ``language``."""
+    keyterms: list[str] = Field(default_factory=list)
+    """Copied per session. Replacing this list must not edit another session."""
     sample_rate: int = 16_000
     encoding: str = "pcm_s16le"
     extra: dict[str, Any] = Field(default_factory=dict)
@@ -70,10 +75,21 @@ class AudioOutputConfig(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+class SpeakerSegment(BaseModel):
+    """A run of consecutive words one speaker said, from a diarizing STT provider."""
+
+    speaker_id: str | None = None
+    """Provider label (``"speaker_0"``). Stable within one connection, not across calls."""
+    text: str
+    start: float | None = None
+    """Seconds from the start of the connection's audio."""
+    end: float | None = None
+
+
 class TranscriptEvent(BaseModel):
     """Single event from an STT provider."""
 
-    type: Literal["partial", "committed", "error", "eager", "resumed"]
+    type: Literal["partial", "committed", "error", "eager", "resumed", "diarized", "language"]
     text: str = ""
     confidence: float | None = None
     """Provider end-of-turn confidence, set on ``eager`` / ``resumed``.
@@ -82,7 +98,42 @@ class TranscriptEvent(BaseModel):
     Flux ``EagerEndOfTurn``). ``resumed`` cancels it. Neither is a commit.
     Speculative generation and during-speech prediction both consume these
     events. ``resumed`` is delivered even when ``text`` is empty.
+
+    Also set on a ``partial`` from a turn-predicting transcriber (ElevenLabs
+    Scribe v3 Live ``turn_probability``). It is informational there: the
+    provider still decides the commit, and the session does not read it.
     """
+    speakers: list[SpeakerSegment] | None = None
+    """Who said what, set on ``diarized`` only.
+
+    ``diarized`` repeats the text of the ``committed`` event before it, split
+    by speaker (ElevenLabs Scribe v3 Live with ``diarize``). It is never a
+    turn: :class:`~timbal.voice.VoiceSession` ignores it. Read it from
+    :meth:`SpeechToText.events` in a custom pipeline.
+    """
+    language: str | None = None
+    """The language the provider heard a ``committed`` utterance in, when it says.
+
+    Deepgram Nova-3 with ``language="multi"`` and Flux multilingual report one
+    per utterance; ElevenLabs Scribe does with ``include_language_detection``
+    in ``stt_extra``. ``None`` everywhere else. It is the provider's guess:
+    see :attr:`~timbal.voice.VoiceSession.spoken_language` for when the
+    session believes it.
+
+    A ``language`` event carries the same thing for the ``committed`` event
+    before it, repeating its text, when the provider names the language only
+    after the commit (Scribe with ``include_timestamps`` as well). It is never
+    a turn.
+    """
+
+
+def reported_language(value: Any) -> str | None:
+    """What a provider reported as an utterance's language: a tag, or the first of a list. None when it said nothing."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
 
 
 class SpeechToText(VoiceUsageEmitter, ABC):
@@ -117,6 +168,14 @@ class SpeechToText(VoiceUsageEmitter, ABC):
 
     @abstractmethod
     async def close(self) -> None: ...
+
+    async def update_keyterms(self, keyterms: list[str]) -> bool:  # noqa: ARG002
+        """Replace the connection's vocabulary. False when this provider cannot.
+
+        Deepgram Flux replaces the whole list. An empty list clears it.
+        Already committed audio is not retranscribed. The default does nothing.
+        """
+        return False
 
     async def update_language(self, language: str | None) -> bool:  # noqa: ARG002
         """Apply ``language`` on an already-open socket.
@@ -199,6 +258,15 @@ class TextToSpeech(VoiceUsageEmitter, ABC):
         """
         return None
 
+    def performs_audio_tags(self, config: AudioOutputConfig) -> bool:  # noqa: ARG002
+        """Optional capability: ``[laughs]`` in the text comes out as a laugh.
+
+        ``False`` (default) means the voice would read the mark aloud, so a
+        session with ``audio_tags`` set takes it out of the text. Answered for
+        the ``config`` of the call: it depends on the model.
+        """
+        return False
+
     @abstractmethod
     async def close(self) -> None: ...
 
@@ -213,7 +281,8 @@ def resolve_tts(
     ``provider`` is case-insensitive: ``"elevenlabs"`` (default when empty;
     aliases ``"el"``, ``"11labs"``), ``"munsit"`` (alias ``"faseeh"``), or
     ``"fishaudio"`` (aliases ``"fish"``, ``"fish-audio"``), or ``"deepgram"``
-    (alias ``"deepgram-aura"``), or ``"openai"``. Unknown ids raise
+    (alias ``"deepgram-aura"``), ``"gemini"`` (aliases ``"gemini-tts"``,
+    ``"google"``), or ``"openai"``. Unknown ids raise
     ``ValueError`` so the caller can log and fall back explicitly.
 
     Provider modules import lazily — selecting Munsit never imports the
@@ -240,4 +309,8 @@ def resolve_tts(
         from .deepgram_tts import DeepgramStreamTTS
 
         return DeepgramStreamTTS(api_key=api_key)
+    if p in ("gemini", "gemini-tts", "google"):
+        from .gemini_tts import GeminiStreamTTS
+
+        return GeminiStreamTTS(api_key=api_key)
     raise ValueError(f"Unknown TTS provider: {provider!r}")

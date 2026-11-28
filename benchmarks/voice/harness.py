@@ -313,7 +313,20 @@ class ScriptFeeder:
 # several labels and every number in the table would agree, convincingly.
 SWEEPABLE_STT_KEYS: dict[str, frozenset[str]] = {
     "elevenlabs": frozenset(
-        {"commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"}
+        {
+            "commit_strategy",
+            "min_silence_duration_ms",
+            "min_speech_duration_ms",
+            # Not a query knob: `model=scribe_v3_live` picks the Scribe model
+            # for the cell. `commit_strategy=turn_prediction` needs it.
+            "model",
+            # Adapter-side, not query knobs: force the commit from Scribe v3
+            # Live's own turn probability (see ElevenLabsRealtimeSTT).
+            "turn_commit_partials",
+            "turn_commit_threshold",
+            "vad_silence_threshold_secs",
+            "vad_threshold",
+        }
     ),
     "deepgram-nova": frozenset({"endpointing", "utterance_end_ms", "smart_format", "punctuate", "interim_results"}),
     "deepgram-flux": frozenset({"eot_timeout_ms", "eot_threshold", "eager_eot_threshold"}),
@@ -368,7 +381,9 @@ def stt_config(stt: str, language: str, extra: Mapping[str, Any] | None = None) 
     if stt.startswith("deepgram"):
         return AudioInputConfig(language=language, sample_rate=SAMPLE_RATE, extra=overrides)
     return AudioInputConfig(
-        model="scribe_v2_realtime",
+        # Pinned to the model every ElevenLabs baseline was measured on. The
+        # product default is `scribe_v3_live`: pass `--stt-param model=...`.
+        model=str(overrides.pop("model", "scribe_v2_realtime")),
         language=language,
         sample_rate=SAMPLE_RATE,
         extra={

@@ -33,9 +33,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -51,6 +53,23 @@ _HTML_PATH = Path(__file__).parent / "voice.html"
 
 _LOG_LINES = 400
 _STOP_GRACE_SECS = 5.0
+_JWT_IN_LOG = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+_URL_IN_LOG = re.compile(r"wss?://\S+")
+
+
+def redact_child_log(line: str) -> str:
+    """Child stdout for the terminal. Event names stay; URLs and tokens do not."""
+    return _URL_IN_LOG.sub("[redacted-url]", _JWT_IN_LOG.sub("[redacted]", line))
+
+
+def playground_page_url(host: str, port: int, transport: str = "") -> str:
+    """Page URL. ``transport`` is the query the browser reads before its saved choice."""
+    shown = "localhost" if host in ("0.0.0.0", "127.0.0.1") else host
+    base = f"http://{shown}:{port}/"
+    if transport:
+        return f"{base}?transport={transport}"
+    return base
+
 
 def _unquote(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
@@ -88,9 +107,25 @@ def mint_livekit_jwt(
     room: str,
     ttl_secs: int = 3600,
     name: str | None = None,
+    video: dict | None = None,
 ) -> str:
-    """HS256 LiveKit access token. Grant keys are camelCase, matching livekit-server."""
+    """HS256 LiveKit access token. Grant keys are camelCase, matching livekit-server.
+
+    ``video`` replaces the room-join grant. A room-list check passes
+    ``{"roomList": True}``. The default grant joins ``room``.
+    """
     now = int(time.time())
+    grant = (
+        video
+        if video is not None
+        else {
+            "roomJoin": True,
+            "room": room,
+            "canPublish": True,
+            "canSubscribe": True,
+            "canPublishData": True,
+        }
+    )
     header = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
     payload = _b64url(
         json.dumps(
@@ -102,13 +137,7 @@ def mint_livekit_jwt(
                 "iat": now,
                 "exp": now + ttl_secs,
                 "jti": uuid.uuid4().hex,
-                "video": {
-                    "roomJoin": True,
-                    "room": room,
-                    "canPublish": True,
-                    "canSubscribe": True,
-                    "canPublishData": True,
-                },
+                "video": grant,
             },
             separators=(",", ":"),
         ).encode()
@@ -192,7 +221,11 @@ class ChildServer:
     def _reader(self, proc: subprocess.Popen) -> None:
         assert proc.stdout is not None
         for line in proc.stdout:
-            self._logs.append(line.rstrip("\n"))
+            text = line.rstrip("\n")
+            self._logs.append(text)
+            # The pipe is the only copy of the child log. The terminal otherwise
+            # stays empty, which is not a missing STT session.
+            print(redact_child_log(text), file=sys.stderr, flush=True)  # noqa: T201
 
     def spawn(self, import_spec: str, port: int | None = None, transport: str = "ws") -> dict:
         spec = import_spec.strip()
@@ -224,19 +257,36 @@ class ChildServer:
         with self._lock:
             self._stop_locked()
             child_port = port or _free_port()
+            # ``--frozen`` keeps a dirty uv.lock untouched. These extras are
+            # outside the default sync set, so a fresh ``uv run`` does not
+            # install livekit.rtc unless named here. ``UV_NO_SYNC`` still wins
+            # when the caller has already synced and must not let this child
+            # rewrite the environment.
             cmd = [
                 "uv",
                 "run",
-                "python",
-                "-m",
-                "timbal.server",
-                "--import_spec",
-                resolved_spec,
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(child_port),
+                "--frozen",
+                "--extra",
+                "server",
+                "--extra",
+                "voice",
             ]
+            if kind == "livekit":
+                cmd.extend(["--extra", "voice-livekit"])
+            cmd.extend(
+                [
+                    "python",
+                    "-u",
+                    "-m",
+                    "timbal.server",
+                    "--import_spec",
+                    resolved_spec,
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(child_port),
+                ]
+            )
             self._logs.clear()
             self._logs.append(f"$ {' '.join(cmd)}  (cwd: {spec_path.parent})")
             # cwd = the agent file's directory: `uv run` walks up from there to
@@ -249,7 +299,10 @@ class ChildServer:
             # stack so picking "Smart Turn" on first Start doesn't eat the
             # ONNX/HuggingFace cold path; production servers gate warmup on
             # actual voice intent (see server.voice.voice_warmup_intended).
-            env = {**os.environ, "TIMBAL_VOICE_WARMUP": "1"}
+            # ``-u`` / PYTHONUNBUFFERED: a pipe would otherwise block-buffer
+            # the child's logs until the process exits, so the playground
+            # terminal would stay empty during the call.
+            env = {**os.environ, "TIMBAL_VOICE_WARMUP": "1", "PYTHONUNBUFFERED": "1"}
             for k, v in _read_dotenv(Path.cwd() / ".env").items():
                 env.setdefault(k, v)
             for k in _LIVEKIT_CHILD_ENV_KEYS:
@@ -450,12 +503,18 @@ def main(argv: list[str] | None = None) -> None:
         help="Default import spec prefilled in the page's spawn field (path/to/agent.py::object).",
     )
     parser.add_argument("--no-open", action="store_true", help="Don't open the browser automatically.")
+    parser.add_argument(
+        "--default-transport",
+        default="",
+        choices=("", "ws", "webrtc", "livekit"),
+        help="Open the page with ?transport= so the browser selects it ahead of a saved choice.",
+    )
     args = parser.parse_args(argv)
 
     child = ChildServer()
     handler = _make_handler(child, args.import_spec)
     httpd = ThreadingHTTPServer((args.host, args.port), handler)
-    url = f"http://{'localhost' if args.host in ('0.0.0.0', '127.0.0.1') else args.host}:{args.port}/"
+    url = playground_page_url(args.host, args.port, args.default_transport)
     print(f"Voice playground at {url}")  # noqa: T201
     if not args.no_open:
         webbrowser.open(url)

@@ -348,7 +348,15 @@ _ECHO_WINDOW_RATIO = 0.65
 # `deepgram-flux/heuristic` (`banking_digits_pause`, `banking_short_reject`), which
 # neither :func:`_is_garbage_commit` (alphanumeric) nor
 # :func:`_is_unvoiced_hallucination` (the user really had just spoken) can reach.
-_CONTENTLESS_SINGLE_TOKENS = frozenset({"i", "a", "an", "the", "of", "to", "my"})
+#
+# Spanish is the same story: after an entity hold (a DNI dictated digit by digit) Flux's
+# thresholds go back to normal and the silence commits ``"de"`` every ~0.35 s, each one an
+# interruption and a new LLM turn. Only words that cannot be an answer: "y" ("¿Y?") stays
+# out like "And?", so do the letters "o" and "u", which a caller may spell on their own, and
+# "una", which answers a count ("¿Cuántas líneas tiene?" "Una.").
+_CONTENTLESS_SINGLE_TOKENS = frozenset(
+    {"i", "a", "an", "the", "of", "to", "my"} | {"de", "del", "la", "el", "los", "las", "un", "en", "mi", "su", "con"}
+)
 
 
 def is_contentless_utterance(text: str) -> bool:
@@ -540,7 +548,7 @@ def _looks_like_fresh_hold_utterance(text: str) -> bool:
 _CORRECTION_MARKERS = frozenset(
     {"sorry", "no wait", "oh wait", "wait", "actually", "i mean", "scratch that", "my bad", "hold on"}
 )
-_TRAILING_MARKER_RE = re.compile(r"^(?P<head>.*[.!?])\s*(?P<tail>[^.!?]+[.!?]?)$", re.S)
+_TRAILING_MARKER_RE = re.compile(r"^(?P<head>.*[.!?])\s*(?P<tail>[^.!?]+[.!?]?)$", re.DOTALL)
 
 
 def _ends_with_correction_marker(text: str) -> bool:
@@ -620,6 +628,10 @@ _BACKCHANNEL_WORDS = frozenset(
         "aja",
         "claro",
         "si",
+        "d'acord",
+        "dacord",
+        "entesos",
+        "molt be",
     }
 )
 _BACKCHANNEL_PHRASES = frozenset(

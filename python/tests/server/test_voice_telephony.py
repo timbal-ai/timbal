@@ -16,7 +16,9 @@ import hmac
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
+from urllib.parse import parse_qsl
 
+import httpx
 import pytest
 from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
@@ -740,3 +742,242 @@ class TestCallContext:
 
         monkeypatch.setenv("TIMBAL_VOICE_IDENTITY_PARAMS", " , ")
         assert _identity_params({"rep_id": "R001"}) == {"rep_id": "R001"}
+
+
+# ---------------------------------------------------------------------------
+# Transfers
+# ---------------------------------------------------------------------------
+
+_DIAL = '<?xml version="1.0" encoding="UTF-8"?><Response><Dial><Number>+34930000000</Number></Dial></Response>'
+
+
+def _provider_api(monkeypatch: pytest.MonkeyPatch, status: int = 200, on_request=None) -> list[httpx.Request]:
+    """Stand in for the providers' REST APIs: every request a transfer sends lands in the returned list."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if on_request is not None:
+            on_request(request)
+        return httpx.Response(status, json={"status": "in-progress"} if status < 300 else {"message": "not allowed"})
+
+    monkeypatch.setattr(
+        "timbal.server.telephony._http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    return requests
+
+
+def _form(request: httpx.Request) -> dict[str, str]:
+    return dict(parse_qsl(request.content.decode()))
+
+
+def _no_provider_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ("TWILIO_AUTH_TOKEN", "TWILIO_ACCOUNT_SID", "TELNYX_API_KEY", "TELNYX_ACCOUNT_SID"):
+        monkeypatch.delenv(key, raising=False)
+
+
+class TestCallTransfer:
+    """``session.transfer_call`` on a phone call: the bridge gives the session the provider's way to do it."""
+
+    def test_twilio_updates_the_call_with_dial_twiml(self, monkeypatch) -> None:
+        from timbal.server import telephony as tel
+
+        _no_provider_credentials(monkeypatch)
+        monkeypatch.setenv("TWILIO_AUTH_TOKEN", "tok")
+        requests = _provider_api(monkeypatch)
+        transfer = tel.TWILIO.transferer(tel.TWILIO.start_info(_twilio_start_frame()))
+        assert transfer is not None
+
+        asyncio.run(transfer("+34930000000"))
+
+        [request] = requests
+        assert request.method == "POST"
+        assert str(request.url) == "https://api.twilio.com/2010-04-01/Accounts/AC_test/Calls/CA_test_call.json"
+        assert request.headers["authorization"] == "Basic " + base64.b64encode(b"AC_test:tok").decode()
+        assert _form(request) == {"Twiml": _DIAL}
+
+    def test_telnyx_updates_the_texml_call_the_webhook_named(self, monkeypatch) -> None:
+        """Not Call Control's ``actions/transfer``: the call is run by TeXML, and is named by the webhook's ids."""
+        from timbal.server import telephony as tel
+
+        _no_provider_credentials(monkeypatch)
+        monkeypatch.setenv("TELNYX_API_KEY", "KEY_test")
+        requests = _provider_api(monkeypatch)
+        frame = _telnyx_start_frame()
+        frame["start"]["custom_parameters"] |= {"call_sid": "v3:abc_DEF-1", "account_sid": "f5586561-acc"}
+        transfer = tel.TELNYX.transferer(tel.TELNYX.start_info(frame))
+        assert transfer is not None
+
+        asyncio.run(transfer("+34930000000"))
+
+        [request] = requests
+        assert request.method == "POST"
+        assert str(request.url) == "https://api.telnyx.com/v2/texml/Accounts/f5586561-acc/Calls/v3:abc_DEF-1"
+        assert request.headers["authorization"] == "Bearer KEY_test"
+        assert _form(request) == {"Texml": _DIAL}
+
+    def test_telnyx_stream_started_elsewhere_uses_the_call_control_id_and_the_configured_account(
+        self, monkeypatch
+    ) -> None:
+        from timbal.server import telephony as tel
+
+        _no_provider_credentials(monkeypatch)
+        monkeypatch.setenv("TELNYX_API_KEY", "KEY_test")
+        info = tel.TELNYX.start_info(_telnyx_start_frame())
+        assert tel.TELNYX.transferer(info) is None, "no account to ask: the start frame does not carry it"
+
+        monkeypatch.setenv("TELNYX_ACCOUNT_SID", "acc-from-env")
+        requests = _provider_api(monkeypatch)
+        asyncio.run(tel.TELNYX.transferer(info)("+34930000000"))
+        assert str(requests[0].url) == "https://api.telnyx.com/v2/texml/Accounts/acc-from-env/Calls/v2:CC_test"
+
+    def test_a_sip_address_is_dialled_as_one_and_escaped(self) -> None:
+        from timbal.server.telephony import _dial_xml
+
+        assert "<Dial><Sip>sip:cola@pbx.example?x=1&amp;y=2</Sip></Dial>" in _dial_xml(" sip:cola@pbx.example?x=1&y=2 ")
+        assert "<Dial><Number>+34 &lt;930&gt;</Number></Dial>" in _dial_xml("+34 <930>")
+
+    def test_without_credentials_there_is_no_transfer(self, monkeypatch) -> None:
+        from timbal.server import telephony as tel
+
+        _no_provider_credentials(monkeypatch)
+        assert tel.TWILIO.transferer(tel.TWILIO.start_info(_twilio_start_frame())) is None
+        assert tel.TELNYX.transferer(tel.TELNYX.start_info(_telnyx_start_frame())) is None
+
+    def test_a_refused_transfer_raises_with_what_the_provider_said(self, monkeypatch) -> None:
+        from timbal.server import telephony as tel
+
+        _no_provider_credentials(monkeypatch)
+        monkeypatch.setenv("TWILIO_AUTH_TOKEN", "tok")
+        _provider_api(monkeypatch, status=422)
+        transfer = tel.TWILIO.transferer(tel.TWILIO.start_info(_twilio_start_frame()))
+
+        with pytest.raises(RuntimeError, match="Twilio refused the transfer: HTTP 422.*not allowed"):
+            asyncio.run(transfer("+34930000000"))
+
+    def test_telnyx_webhook_passes_on_the_ids_a_transfer_needs(self, monkeypatch, tmp_path) -> None:
+        app = _setup_app(monkeypatch, tmp_path, _make_stt_class([]), _make_tts_class(_TTS_CHUNK))
+        with TestClient(app) as client:
+            r = client.post("/voice/telnyx/incoming", data={"CallSid": "v3:abc", "AccountSid": "f5586561-acc"})
+        assert '<Parameter name="call_sid" value="v3:abc" />' in r.text
+        assert '<Parameter name="account_sid" value="f5586561-acc" />' in r.text
+
+    def test_the_account_is_not_part_of_the_call_context(self) -> None:
+        from timbal.server.telephony import _call_context_from_start
+
+        ctx = _call_context_from_start({"call_id": "v2:CC"}, {"account_sid": "f5586561-acc", "call_sid": "v3:abc"})
+        assert ctx == {"call_sid": "v3:abc", "call_id": "v2:CC"}
+
+    def test_the_bridge_gives_the_session_its_transferer_and_a_host_may_set_its_own(self, monkeypatch) -> None:
+        pytest.importorskip("av")
+        from timbal.server import telephony as tel
+
+        _no_provider_credentials(monkeypatch)
+        monkeypatch.setenv("TWILIO_AUTH_TOKEN", "tok")
+        stt_cls = _make_stt_class([TranscriptEvent(type="committed", text="Hello")])
+        runnable = _host_runnable(monkeypatch, stt_cls, _make_tts_class(_TTS_CHUNK))
+        seen: dict = {}
+        host = FastAPI()
+
+        async def own(to: str) -> None:  # noqa: ARG001 - a host's own way to transfer
+            return None
+
+        @host.websocket("/media/{who}")
+        async def media(ws: WebSocket, who: str) -> None:
+            await ws.accept()
+
+            def observe(session, meta):  # noqa: ARG001 - the hook shape
+                seen[who] = (session.can_transfer, session.call_transferer)
+                if who == "host":
+                    session.call_transferer = own
+                seen[f"{who}_session"] = session
+
+            await tel.serve_media_ws(ws, runnable, tel.TWILIO, on_session_built=observe)
+
+        with TestClient(host) as client:
+            for who in ("bridge", "host"):
+                with client.websocket_connect(f"/media/{who}") as ws:
+                    ws.send_json(_twilio_start_frame())
+                    _collect_frames(ws)
+
+        can_transfer, transferer = seen["bridge"]
+        assert can_transfer and transferer is not None
+        assert seen["host_session"].call_transferer is own
+
+    def test_a_call_is_transferred_after_the_handoff_has_gone_out(self, monkeypatch) -> None:
+        """End to end on the bridge: the tool asks, the sentence is sent down the line, and only then is the
+        provider asked to dial. Then the stream is closed. (That the session waits for playback, not only for
+        the audio to be sent, is ``tests/voice/test_call_end.py``, with a tracker the test controls.)"""
+        pytest.importorskip("av")
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+        from timbal.server import telephony as tel
+        from timbal.types.content import ToolUseContent
+        from timbal.types.message import Message
+        from timbal.voice import current_voice_session
+
+        _no_provider_credentials(monkeypatch)
+        monkeypatch.setenv("TWILIO_AUTH_TOKEN", "tok")
+        order: list[str] = []
+        requests = _provider_api(monkeypatch, on_request=lambda _request: order.append("dial"))
+        outcomes: list[asyncio.Future] = []
+
+        class _OpenLineSTT(SpeechToText):
+            """One utterance, then the line stays open until the session closes it."""
+
+            def __init__(self, api_key=None):
+                self._closed = asyncio.Event()
+
+            async def connect(self, config: AudioInputConfig) -> None:
+                pass
+
+            async def push_audio(self, chunk: bytes) -> None:
+                pass
+
+            async def commit(self) -> None:
+                pass
+
+            async def events(self) -> AsyncIterator[TranscriptEvent]:
+                yield TranscriptEvent(type="committed", text="Quiero hablar con una persona.")
+                await self._closed.wait()
+
+            async def close(self) -> None:
+                self._closed.set()
+
+        async def transfer() -> str:
+            outcomes.append(current_voice_session().transfer_call("+34930000000"))
+            return "ok"
+
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _OpenLineSTT)
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class(_TTS_CHUNK))
+        asks = Message(
+            role="assistant", content=[ToolUseContent(id="c1", name="transfer", input={})], stop_reason="tool_use"
+        )
+        runnable = Agent(
+            name="phone_transfer", model=TestModel(responses=[asks, "Le paso con un compañero."]), tools=[transfer]
+        )
+        host = FastAPI()
+
+        @host.websocket("/media")
+        async def media(ws: WebSocket) -> None:
+            await ws.accept()
+            await tel.serve_media_ws(ws, runnable, tel.TWILIO)
+
+        with TestClient(host) as client, client.websocket_connect("/media") as ws:
+            ws.send_json(_twilio_start_frame())
+            while True:
+                try:
+                    frame = ws.receive_json()
+                except Exception:
+                    break
+                order.append(frame["event"])
+                if frame["event"] == "mark":  # the provider's echo: everything up to here has played
+                    ws.send_json({"event": "mark", "streamSid": "MZ_test_stream", "mark": frame["mark"]})
+
+        [request] = requests
+        assert str(request.url).endswith("/Accounts/AC_test/Calls/CA_test_call.json")
+        assert _form(request) == {"Twiml": _DIAL}
+        assert "media" in order and order.index("dial") > max(i for i, e in enumerate(order) if e == "media")
+        assert [outcome.result() for outcome in outcomes] == ["transferred"]

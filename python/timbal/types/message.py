@@ -26,6 +26,24 @@ SESSION_EVENT_KIND = "session_event"
 # A message the user posted to a session (not runtime: transcripts show it).
 USER_MESSAGE_KIND = "user_message"
 
+_SENTENCE_END = frozenset(".!?…。！？")
+
+
+def provider_visible_text(text: str, *, interrupted: bool) -> str:
+    """Text a model provider should see for this block.
+
+    A mid-sentence interrupted reply is otherwise a normal assistant message,
+    and smaller models copy that cut and stop after a few tokens. A finished
+    sentence stays as the caller heard it. The marker is not stored and is
+    not spoken.
+    """
+    if not interrupted:
+        return text
+    body = text.rstrip()
+    if not body or body[-1] in _SENTENCE_END:
+        return text
+    return f"{body} [interrupted]"
+
 
 def _append_anthropic_content_blocks(
     target: list[dict[str, Any]], anthropic_input: dict[str, Any] | list[dict[str, Any]]
@@ -179,6 +197,14 @@ class Message:
                     flush()
                     inputs.append(item_input)
                     continue
+                if isinstance(content_item, TextContent) and isinstance(item_input, dict):
+                    item_input = {
+                        **item_input,
+                        "text": provider_visible_text(
+                            item_input.get("text", ""),
+                            interrupted=bool(self.metadata.get("interrupted")),
+                        ),
+                    }
                 phase = getattr(content_item, "phase", None) if self.role == "assistant" else None
                 add_part(item_input, phase)
         flush()
@@ -217,6 +243,14 @@ class Message:
                 openai_input = content_item.to_openai_chat_completions_input()
                 if openai_input is None:
                     continue
+                if isinstance(content_item, TextContent) and isinstance(openai_input, dict):
+                    openai_input = {
+                        **openai_input,
+                        "text": provider_visible_text(
+                            openai_input.get("text", ""),
+                            interrupted=bool(self.metadata.get("interrupted")),
+                        ),
+                    }
                 # Enabling splitting files into multiple pages or chunks.
                 if isinstance(openai_input, list):
                     content.extend(openai_input)
@@ -241,8 +275,12 @@ class Message:
     def to_anthropic_input(self) -> dict[str, Any]:
         """Convert the message to Anthropic's expected input format."""
         content: list[dict[str, Any]] = []
+        interrupted = bool(self.metadata.get("interrupted"))
         for content_item in self.content:
-            _append_anthropic_content_blocks(content, content_item.to_anthropic_input())
+            block = content_item.to_anthropic_input()
+            if isinstance(content_item, TextContent) and isinstance(block, dict) and block.get("type") == "text":
+                block = {**block, "text": provider_visible_text(block.get("text", ""), interrupted=interrupted)}
+            _append_anthropic_content_blocks(content, block)
         # Anthropic doesn't accept the tool role. We must send this under the user role.
         role = self.role
         if role == "tool":

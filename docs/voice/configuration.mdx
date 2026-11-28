@@ -12,12 +12,84 @@ Set `Agent(voice_config=...)` to configure sessions created by the server. Use a
 Set `stt_provider` and optionally `stt_model`. These are adapter IDs and speech model IDs, separate from the `provider/model` IDs used by `Agent.model`.
 
 - **`deepgram`** or **`deepgram-flux`** (default): defaults to `flux-general-multi`; requires `DEEPGRAM_API_KEY`. Flux reports native end-of-turn events, so the session uses `provider` turn detection. When `DEEPGRAM_API_KEY` is unset, each session falls back to `elevenlabs`.
-- **`elevenlabs`**: defaults to `scribe_v2_realtime`; requires `ELEVENLABS_API_KEY`.
+- **`elevenlabs`**: defaults to `scribe_v3_live` (Scribe v3 Live); requires `ELEVENLABS_API_KEY`. Set `stt_model` to `scribe_v2_realtime` to keep the previous model. See [ElevenLabs Scribe](#elevenlabs-scribe).
 - **`deepgram-nova`**: defaults to `nova-3`; requires `DEEPGRAM_API_KEY`. Select Nova explicitly or supply a `nova-*` model.
 - **`munsit`**: defaults to `munsit-en-ar`; requires `MUNSIT_API_KEY`. Reports native utterance boundaries.
 - **`openai`**: defaults to `gpt-transcribe`; requires `OPENAI_API_KEY`. Uses a transcription-only Realtime session with server VAD. It does not report native end-of-turn, so the session uses local turn detection when `timbal[voice]` is installed and lexical detection otherwise. Flux and Munsit are the adapters that force `provider` mode.
 
-Set `language` to the conversation language. It hints transcription and, when set, tells the model to reply in that language. Omit it to follow the user's latest substantive message. See [Reply language](#reply-language). Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable.
+Set `language` to the conversation language. It hints transcription and, when set, tells the model to reply in that language. Omit it to follow the user's latest substantive message. See [Reply language](#reply-language). `keyterms` and `stt_languages` are transcription only. They do not change `reply_language`.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="norte_market",
+    model="openai/gpt-5.4-mini",
+    voice_config={
+        "language": "es",
+        "reply_language": "follow",
+        "stt_languages": ["es", "en"],
+        "keyterms": ["Norte Market", "NM1001"],
+    },
+)
+```
+
+`keyterms` is a list of at most 100 plain phrases (a name, a brand, an acronym). Do not append a Nova weight such as `term:0.15`. Deepgram Flux and Nova-3, and ElevenLabs Scribe, send them when the socket connects. Flux can replace the whole list on that socket with `VoiceSession.set_keyterms`; an empty list clears it. The new list does not merge with the old one, and audio already transcribed is not rewritten. Nova and Scribe cannot replace terms after connect. Scribe takes at most 50 terms of 20 characters each on a call: an agent that sets `stt_provider="elevenlabs"` with more, or longer, fails to load, and a Flux agent that falls back to Scribe sends the terms that fit and logs `el_stt_keyterms_trimmed`. OpenAI and Munsit reject `keyterms` at configuration time. A caller hello cannot set them. Each call copies the agent's list, so one session cannot change another's, and there is no voice handoff that would carry terms across agents.
+
+`language` and `stt_languages` on `flux-general-multi` accept only English, Spanish, French, German, Hindi, Russian, Portuguese, Japanese, Italian, and Dutch (`en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, `nl`), including regional subtags such as `es-ES`. Catalan, Arabic, Chinese, and any other tag are rejected when the agent config is built. That is a startup check: a Flux agent that used to set `language` to `ca`, `ar`, or `zh` now fails to load instead of opening a socket Flux would reject. `stt_languages` replaces the single `language` hint for speech-to-text and is only for `flux-general-multi`. `flux-general-en` rejects a hint list. `set_language` still replaces the live hint list with one supported tag. These settings do not promise that a word will be recognized, and they do not make Flux recognize Catalan.
+
+`reply_language` is separate. This replies in Catalan and still transcribes with a Spanish Flux hint. Flux does not recognize Catalan. Use another speech provider that accepts `ca` when the transcript itself must be Catalan.
+
+```python
+voice_config={"language": "es", "reply_language": "ca", "stt_provider": "deepgram"}
+```
+
+Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable. A non-empty `keyterms` list cannot also set `keyterm`, `keyterms`, `keywords`, or `hotwords` in `stt_extra`. The agent fails to build if any of those keys is present, including when the value is `None`, `""`, or `[]`. Omit the key. An empty `keyterms` (left unset, `None`, or `[]`) does not conflict, and a `keyterm` that exists only in `stt_extra` is still passed through.
+
+### ElevenLabs Scribe
+
+`scribe_v3_live` is the default ElevenLabs model. `scribe_v2_realtime` is still served and takes the same settings, except the two marked below. Scribe options go in `stt_extra` and are sent as given:
+
+```python
+agent = Agent(
+    name="support",
+    model="openai/gpt-5.4-mini",
+    voice_config={
+        "stt_provider": "elevenlabs",
+        "language": "ca",
+        "stt_extra": {"diarize": True},
+    },
+)
+```
+
+- **`commit_strategy`**: `"vad"` (the default: Scribe commits after `vad_silence_threshold_secs` of silence), `"manual"`, or `"turn_prediction"` (Scribe v3 Live only). See [Scribe turn prediction](#scribe-turn-prediction) before choosing the last one.
+- **`vad_silence_threshold_secs`**: 1.2 by default here. Scribe accepts 0.192 to 3.0.
+- **`turn_commit_threshold`**: 0.75 on Scribe v3 Live. Commits when Scribe's turn probability reaches that score, without waiting out the silence. `0` or `None` turns it off. See [Scribe turn prediction](#scribe-turn-prediction).
+- **`diarize`**: Scribe v3 Live only. Each committed transcript is followed by a `TranscriptEvent` of type `diarized`, whose `speakers` list holds one `SpeakerSegment` (`speaker_id`, `text`, `start`, `end`) per run of words from the same speaker. `VoiceSession` ignores these events: they never start a turn and are not sent to the client. Read them from `stt.events()` in a [custom pipeline](/voice/custom-pipelines).
+- **`secondary_languages`**: other languages the caller may use, next to `language`.
+
+A setting the chosen model does not accept (`turn_prediction` or `diarize` on `scribe_v2_realtime`, an unknown model id) ends the session with the reason ElevenLabs gave, for example `STT fatal (invalid_request): The 'diarize' parameter is only supported by scribe_v3_live.`
+
+Scribe closes the session when a commit arrives with less than 0.3 seconds of audio since the previous one (`commit_throttled`). The session's endpointer and Scribe can reach the same boundary together, so the adapter does not send a commit within 0.4 seconds of the last one, its own or Scribe's, and logs `el_stt_commit_skipped`. A commit that crosses Scribe's on the wire can still be throttled. That ends the call with `STT fatal (commit_throttled)`.
+
+#### Scribe turn prediction
+
+Scribe v3 Live scores each interim transcript with the probability that the caller has finished. It arrives as `confidence` on `partial` transcript events, under every commit strategy.
+
+`commit_strategy="turn_prediction"` has Scribe commit when that score reaches about 0.9. The score is not adjustable. `vad_silence_threshold_secs` still applies as a ceiling: Scribe commits at that much silence whatever the score. At the default 1.2 seconds it behaves like `"vad"`, except that a finished question or sentence commits about half a second sooner. Raising the ceiling keeps a mid-sentence pause in one piece, and makes short answers slow: the score climbs slowly after "No." or "Okay.", which then take two to three seconds to commit. With the session's local turn detector, a ceiling of 2 or 3 seconds also let the session's commit and Scribe's collide. Keep the ceiling at 1.2 seconds when you use it.
+
+`turn_commit_threshold` applies a score of ours instead, and it is what a session uses by default. The adapter commits when a partial reaches it, and Scribe's silence ceiling stays as the backstop. The default is 0.75 on Scribe v3 Live with `commit_strategy="vad"`. `scribe_v2_realtime` sends no score, so nothing changes there. With `"manual"` it is off unless you set it, and with `"turn_prediction"` it is off: the two commits would collide, and an agent that sets both fails to load.
+
+```python
+voice_config={
+    "stt_provider": "elevenlabs",
+    "stt_extra": {"turn_commit_threshold": 0},  # off: commit on Scribe's VAD silence only
+}
+```
+
+In the replay harness, with the local turn detector, the default took median dead air from 1.36 to 1.02 seconds and passed every run, where the same sessions without it lost 7 of 156. That is two batches of synthetic audio, not a measurement on your calls.
+
+`turn_commit_partials` (default 1) asks for that many consecutive partials at or above the score with the same words. At 0.75 a caller is rarely cut off mid-sentence. At 0.6 it happens often enough to hear. An utterance Scribe scores low, such as a bare number, waits for the silence ceiling, so a higher ceiling makes those turns slower. Measurements are in `benchmarks/voice/README.md`.
 
 ## Speech providers
 
@@ -26,6 +98,7 @@ Set `tts_provider`, `tts_model`, and `voice` for the output provider:
 - **`elevenlabs`** (default): defaults to `eleven_v4_turbo`; requires `ELEVENLABS_API_KEY` and an accessible ElevenLabs voice ID. Supports incremental text through one streaming context per reply. Set `tts_model` to `eleven_flash_v2_5` for the previous default.
 - **`deepgram`**: defaults to `aura-2-thalia-en`; requires `DEEPGRAM_API_KEY`. The full Aura model ID identifies the voice and language.
 - **`fishaudio`**: defaults to `s2.1-pro`; requires `FISH_API_KEY`. Use a Fish reference voice ID for `voice` when selecting a reference voice.
+- **`gemini`**: defaults to `gemini-3.8-flash-tts` and the prebuilt voice `Fenrir`; requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`. `voice` is a prebuilt voice name. Set `tts_extra={"language_code": "es-ES"}` (a tag with its region) so the accent stays the same for the whole call. Every request to Gemini is a separate take with its own pitch, so a reply is spoken in as few requests as possible: only whole sentences are sent, and a sentence waits up to `tts_extra["hold_ms"]` milliseconds (default 200, `0` to turn it off) for the ones right behind it. A model that writes its reply in one burst gets one request per reply. The request holds the text to speak and nothing else. `tts_extra["accent"]` and `tts_extra["director_notes"]` put a director's brief before it, and with a brief the model sometimes says words that are not in the text.
 - **`munsit`**: defaults to `faseeh-v1-preview`; requires `MUNSIT_API_KEY`. The fallback voice is `MUNSIT_VOICE_ID` or `ar-uae-male-1`.
 - **`openai`**: defaults to `gpt-4o-mini-tts` and `coral`; requires `OPENAI_API_KEY`. Synthesizes complete text segments as they become ready.
 
@@ -54,7 +127,7 @@ The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate
 
 ## Pace synthesized speech
 
-Both controls are off unless you set them, and both need the `timbal[voice]` extra. They apply only to the cascaded pipeline (transcription, then the agent, then speech), not to a `RealtimeSession`. They run on the PCM the caller hears, after the speech provider returns it, and only when the session encoding is PCM16 (`pcm_s16le`, or the `linear16` / `pcm16` aliases). Any other encoding is left unchanged and a warning is logged. An interrupted reply is still cut to the audio that was actually played.
+These controls are off unless you set them, and they need the `timbal[voice]` extra. They apply only to the cascaded pipeline (transcription, then the agent, then speech), not to a `RealtimeSession`. They run on the PCM the caller hears, after the speech provider returns it, and only when the session encoding is PCM16 (`pcm_s16le`, or the `linear16` / `pcm16` aliases). Any other encoding is left unchanged and a warning is logged. An interrupted reply is still cut to the audio that was actually played.
 
 `max_tts_pause_secs` must be `0` or greater. It shortens an internal silence quieter than `tts_quiet_dbfs` (default `-45`, which leaves breaths in) down to that many seconds. Pause trimming does not delay the start of the reply. `tts_tempo` must be greater than `0`. It changes the speaking rate without changing the pitch: `1.0` leaves the audio alone, and a value above `1` is faster. Tempo holds 20–50 ms before the first samples, and a short tail is flushed once no new audio arrives for 0.25 s. `None` on either field disables it. An invalid value in a client hello is dropped and the server's value is kept.
 
@@ -69,11 +142,85 @@ agent = Agent(
 )
 ```
 
+### Pause rhythm
+
+A synthesized voice tends to leave a 0.12 to 0.20 s gap between two words where a person runs them together, and its sentence pauses are all about the same length. `tts_rhythm` reshapes the silences between words and leaves the speech samples as they are. It runs before `max_tts_pause_secs` and `tts_tempo`.
+
+Each silence between two stretches of speech is sorted by its length. Shorter than `gap_min_secs`, it is the closure of a consonant and is not changed. Up to `gap_max_secs`, it is a gap between two words: it can be closed, or turned into a pause. Longer than that, it is a pause at a comma or a full stop, and it can be lengthened. The silence before the first word and after the last one is not changed. Neither is a silence of 0.9 s or more.
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `join_gaps` | `0.0` | Share of the gaps between two words that are closed to 23 to 73 ms. |
+| `stretch_pauses` | `0.0` | Share of the pauses at a comma or a full stop that are lengthened 1.4 to 2.3 times. |
+| `promote_gaps` | `0.0` | Share of the gaps between two words that become a pause of 0.30 to 0.55 s, as when a speaker stops to think. |
+| `gap_min_secs` | `0.12` | A silence shorter than this is the closure of a consonant and is never changed. |
+| `gap_max_secs` | `0.20` | A silence at least this long is a pause, not a gap between two words. At most `0.9`. |
+| `quiet_dbfs` | `-42.0` | A 10 ms frame whose RMS level is under this belongs to a silence. From `-90` to `-20`. |
+| `seed` | `None` | Fixes which silences are picked, for a repeatable test. |
+
+Each share is a number from 0 to 1. `join_gaps` and `promote_gaps` draw from the same gaps, so together they are at most 1. `gap_max_secs` must be at least `gap_min_secs`. A boolean is not accepted where a number is expected. A block that breaks any of these fails when the agent is built. `tts_rhythm=True` selects `join_gaps=0.9`, `stretch_pauses=0.8`, `promote_gaps=0.08`. A block with no share set changes nothing. `tts_rhythm` is server-only: a client hello cannot set or clear it.
+
+What `tts_rhythm` does not do:
+
+- **Lengthen a pause past 0.55 s**, or past `max_tts_pause_secs` when that is lower. This holds with no cap set. A pause the provider made longer than that is left as it is.
+- **Cut or repeat soft sound.** A silence found by its frame level still holds the end of a word, a final "s", or a breath. Only its true silence is removed or repeated: the longest stretch of frames with no sample over `quiet_dbfs`. A joined gap keeps at least 10 ms of that stretch. A silence with less than 30 ms of it is not lengthened. `quiet_dbfs` is an RMS level over a 10 ms frame. `tts_quiet_dbfs` is a peak level, so the two numbers do not compare.
+- **Hold speech back.** Speech is passed on as it arrives. A silence is held until the speech after it arrives, because its length is not known before. If the provider stalls, the held silence is passed on unchanged once the caller has heard the audio before it, and the rest of that silence is not reshaped.
+
+A provider that takes the reply as one stream of text (ElevenLabs, Deepgram, Fish Audio) returns one stream of audio, so a pause between two sentences is shaped like any other. A provider that synthesizes each sentence on its own (OpenAI, Munsit) returns one clip per sentence. Gemini returns one clip per request, which is one or more sentences. The pause between two sentences is then the end of one clip and the start of the next, and it keeps the length the provider gave it.
+
+Each stream of audio that had a silence between words logs one `tts_rhythm_shaped` line at INFO: how many silences it found (`gaps`), and how many were `joined`, `promoted`, `stretched`, `kept` (a word gap the draw left alone), `skipped` (picked, but with no true silence to work on or already at the bound) and `released` (given up because the provider stalled).
+
+```python
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5.4-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={"language": "es", "tts_rhythm": True, "max_tts_pause_secs": 0.55},
+)
+```
+
+### Match the caller's pace
+
+`tts_tempo` is one speed for the whole call. `adaptive_tempo` slows the agent down for a caller who talks slowly, or who is upset, and never speeds it up: each reply is spoken at `tts_tempo` times a factor between `slowest` and 1, so `tts_tempo` stays the fastest the agent talks. It is off unless you set it, and it is server-side.
+
+```python
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5.4-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={"language": "es", "tts_tempo": 1.05, "adaptive_tempo": True},
+)
+```
+
+`True` is `{"slowest": 0.9}`. `None`, `False` and an empty block leave the tempo fixed.
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `slowest` | `0.9` | The factor for the slowest caller, from 0.6 to 1. `1` leaves the caller's pace out and keeps only `upset_tempo`. |
+| `slow_rate` | `None` | Syllables per second of speech at or below which the factor is `slowest`. Unset, it is the reply language's: 4.4 for `es`, `ca`, `it` and `pt`, 4.2 for `fr`, 3.6 for `en` and `de`, 4.0 for any other. |
+| `normal_rate` | `None` | Syllables per second at or above which the factor is 1: 6.0, 5.6, 5.0 and 5.5 for the same languages. Between the two rates the factor is a straight line. It must be greater than `slow_rate`. |
+| `upset_tempo` | `0.93` | The factor while the caller is upset. `None` leaves mood out. |
+| `upset_turns` | `3` | Replies spoken at `upset_tempo` after an utterance with an upset word in it. |
+| `upset_words` | `None` | Words and phrases that mark an upset caller ("harto", "vergüenza", "ridiculous"), matched whole, without accents or case. A list serves every language. A dict is keyed by language and replaces that language's list. Unset uses the built-in lists for `es`, `en` and `ca`. |
+
+The caller's pace is the syllables of each committed utterance, counted from its text, over the seconds of speech the session heard on the mic for it. The mic level is read in 20 ms frames against the quietest frame of the last 3 s, so line noise is not speech. An utterance with fewer than 8 syllables or less than 1 s of speech is not measured ("sí", "vale"). Neither is one with a figure in it, since the transcript writes "12" where the caller said "doce", nor one that comes out under 1.5 or over 9.5 syllables per second, which is a transcript and an audio that do not match. Each measure moves the call's pace halfway toward it. The factor is the lower of the pace's and the mood's, and it is decided when a turn starts: the reply to an utterance is already spoken at the pace that utterance set.
+
+What it needs and what it leaves alone:
+
+- **PCM16 mic audio.** With any other mic encoding the pace is not measured, `mic_activity_unavailable` is logged once, and only `upset_tempo` applies.
+- **PCM16 agent audio**, as `tts_tempo` does.
+- **A greeting, a filler and an idle prompt** are spoken at the factor of the last turn. Before the first utterance that is 1.
+- **Speech while the agent is talking** is not counted, since a mic without echo cancellation hears the agent.
+
+A turn whose factor is not the previous turn's logs `tts_tempo_adapted` at INFO with the `factor`, the `previous` one, `caller_syllables_per_sec` and whether the caller counts as `upset`. `TurnMetrics.tts_tempo` is the tempo the turn was spoken at: `tts_tempo`, or 1 without it, times the factor. It is `None` when `adaptive_tempo` is off. `TurnMetrics.caller_syllables_per_sec` is the pace measured for the utterance the turn answers, when there was one.
+
 ## What a client may override
 
-A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `hangup_grace_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, `user_idle`, `entity_patience`, and `entity_patience_secs`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. `hangup_grace_secs` is 0 to 30 seconds. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
+A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `reply_language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `hangup_grace_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, `user_idle`, `entity_patience`, and `entity_patience_secs`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. `hangup_grace_secs` is 0 to 30 seconds. An invalid `reply_language` (a malformed tag or a non-string) is dropped and the server's value is kept. A blank hello value is dropped the same way. `"follow"` and a well-formed tag replace it. A blank, non-string, or non-tag `language` is dropped for every provider, and the agent's language stays. The call still starts. The ten-language check (`en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, `nl`) applies only when the hello resolves to Flux multilingual: `stt_provider` is `deepgram` or `deepgram-flux`, and the model is not `flux-general-en`, Nova, Scribe, or an OpenAI transcription model. Nova, Scribe, and OpenAI keep a well-formed tag such as `ca`. On Flux multilingual, an unsupported hello `language` is dropped first. If that still cannot keep the agent's own `language` or its `stt_languages`, the hello's `stt_provider` and `stt_model` are both dropped. A Nova agent with `language: "ca"` whose hello selects Flux multilingual stays on Nova with `ca`. A Flux agent with `stt_languages` whose hello selects Nova stays on Flux with that list. A supported tag such as `fr` replaces `language` and does not replace `stt_languages` or `reply_language`. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
 
-Recording, ambient audio, `events`, `speculative_generation`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, `first_flush_min_words`, and `prompt_call_context_keys` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`, `speculative_generation`) are treated as unset so they do not wipe an inherited value.
+Recording, ambient audio, `events`, `speculative_generation`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, `first_flush_min_words`, `prompt_call_context_keys`, `keyterms`, `stt_languages`, `tts_rhythm`, `adaptive_tempo`, `pronunciations`, `audio_tags`, and `backchannel` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`, `speculative_generation`, `tts_rhythm`, `adaptive_tempo`, `pronunciations`, `audio_tags`, `backchannel`) are treated as unset so they do not wipe an inherited value.
+
+`hesitation` is server-only as well, and an empty `hesitation` block is unset. See [Hesitation sounds](#hesitation-sounds).
 
 ## Mix providers
 
@@ -104,11 +251,18 @@ This assignment replaces the agent's declared config. Keep any greetings or othe
 
 `voice_config["language"]` is the conversation language, not only a transcription hint.
 
-- **Set** (`"en"`, `"es"`, `"es-ES"`, any BCP-47 tag the provider accepts): the model is told to reply in that language, including short replies and waiting phrases. A Spanish-first agent keeps `"es"`. The tag is also sent to speech-to-text (`language_hint` on Deepgram Flux multi, `language_code` on ElevenLabs Scribe, `language` on Deepgram Nova). Default OpenAI `gpt-transcribe` sends `languages: [tag]`; other OpenAI transcription models send a single `language`.
-- **Unset**: the model follows the language of the user's latest substantive message (a full request, question, or correction). Accent, fillers, names, and a single word from another language do not switch the reply. If the agent's own system prompt already names one reply language, that instruction stands.
-- **Explicit switch**: the pin yields when the user asks to use another language. Saying a sentence in another language is not, by itself, that request. Call `set_language` when the conversation language should actually change, so the next turn's instruction and the transcription hint move together.
+- **Set** (`"en"`, `"es"`, `"es-ES"`): unless `reply_language` is set, the model is told to reply in that language, including short replies and waiting phrases. A Spanish-first agent keeps `"es"`. The tag is also sent to speech-to-text (`language_hint` on Deepgram Flux multi, `language_code` on ElevenLabs Scribe, `language` on Deepgram Nova). Default OpenAI `gpt-transcribe` sends `languages: [tag]`; other OpenAI transcription models send a single `language`. On `flux-general-multi`, `language` and `stt_languages` accept only `en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, and `nl`. `ca`, `ar`, and `zh` fail when that Flux config is built. A supported hint plus `reply_language: "ca"` changes the spoken reply only. Flux still does not recognize Catalan. Point `stt_provider` at a provider that accepts Catalan when the transcript must be Catalan.
+- **Unset**: unless `reply_language` is set, the model follows the language of the user's latest substantive message (a full request, question, or correction). Accent, fillers, names, and a single word from another language do not switch the reply. If the agent's own system prompt already names one reply language, that instruction stands.
+- **`reply_language`**: leave it unset to keep the rules above. `"follow"` makes the reply follow the latest substantive message even when `language` is set as a transcription hint. A well-formed BCP-47 tag pins the reply to that tag and does not change the hint. `set_language` still updates the hint, and it moves the next turn's reply instruction only when `reply_language` is unset.
+- **Explicit switch**: the pin yields when the user asks to use another language. Saying a sentence in another language is not, by itself, that request. Call `set_language` when the conversation language should actually change. Unless `reply_language` is set, that moves the next turn's reply instruction and the transcription hint together. With `reply_language` set, only the hint moves.
 
-Deepgram Flux applies the new hint on the open socket. A `Configure` message with `language_hints: ["en"]` replaces a sticky hint; `language_hints: []` clears it and Flux goes back to auto-detect. Audio already transcribed is not reprocessed. `flux-general-en` does not accept a language hint. ElevenLabs Scribe, Deepgram Nova, and OpenAI transcription read the hint when the socket opens: `set_language` still changes the reply instruction immediately and stores the tag for the next connection. Munsit only sends `language=ar` (`ar` and a tag such as `ar-AE` both become `ar`). Any other tag is dropped (`munsit_stt_language_dropped`) and is not sent on the next connection.
+```python
+voice_config = {"language": "es", "reply_language": "follow"}
+```
+
+`"follow"` is case-insensitive. On an agent config, a blank string is the same as unset. A malformed tag (`english`, a sentence, `en-`) raises `ValueError` when that config is built. A non-string raises `TypeError`. Accepted `reply_language` tags are two or three letters, an optional four-letter script, and an optional region: `en`, `es-ES`, `zh-Hans`, `es-419`, `ca`. That is the reply pin, not the Flux transcription list. A caller hello that sends a bad or blank `reply_language` does not raise: the value is dropped and the server's `reply_language` stays.
+
+Deepgram Flux applies a supported hint on the open socket. A `Configure` message with `language_hints: ["en"]` replaces a sticky hint; `language_hints: []` clears it and Flux goes back to auto-detect. Audio already transcribed is not reprocessed. Flux processes one `Configure` at a time, so a hint, a keyterm list, or a turn-threshold change is sent after Flux acknowledges the previous message. A newer change of the same kind replaces one that is still waiting. On `flux-general-multi`, `set_language("ca")` raises `ValueError` before the socket or the stored hint changes. The previous hint, including an `stt_languages` list, stays. `reply_language` is not changed. `flux-general-en` does not accept a language hint: `set_language` does not retarget that socket, and the reply pin can still move when `reply_language` is unset. ElevenLabs Scribe, Deepgram Nova, and OpenAI transcription read the hint when the socket opens: `set_language` stores the tag for the next connection and does not retarget the open socket. Unless `reply_language` is set, the reply instruction uses that tag on the next turn. Munsit only sends `language=ar` (`ar` and a tag such as `ar-AE` both become `ar`). Any other tag is dropped (`munsit_stt_language_dropped`) and is not sent on the next connection.
 
 From a tool on the call, `current_voice_session()` is the live session. The tool is not registered for you. Add it only on agents that should be able to switch.
 
@@ -125,20 +279,39 @@ async def set_conversation_language(language: str) -> str:
     session = current_voice_session()
     if session is None:
         return "No active call."
-    await session.set_language(language)
+    try:
+        await session.set_language(language)
+    except ValueError as exc:
+        return str(exc)
     return f"Conversation language is now {language}."
+
+
+async def set_transcription_terms(terms: list[str]) -> str:
+    """Replace the names and product terms for this call.
+
+    Pass plain phrases, such as ["Norte Market", "NM1001"].
+    Pass [] to clear them.
+    """
+    session = current_voice_session()
+    if session is None:
+        return "No active call."
+    try:
+        await session.set_keyterms(terms)
+    except ValueError as exc:
+        return str(exc)
+    return "Transcription terms updated."
 
 
 agent = Agent(
     name="voice_assistant",
     model="openai/gpt-6.1-terra",
     system_prompt="Reply in one or two short spoken sentences.",
-    tools=[set_conversation_language],
+    tools=[set_conversation_language, set_transcription_terms],
     voice_config={"language": "es"},
 )
 ```
 
-`set_language` returns true when the open transcriber accepted the hint. The reply instruction changes on the next turn either way. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. The line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
+`set_language` returns true when the open transcriber took the hint. On Flux, true means the `Configure` message was sent or queued, not that Flux applied it; a rejection is logged as `dg_flux_configure_failed`. `set_keyterms` reports the same way. Unless `reply_language` is set, the reply instruction uses the new tag on the next turn. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. On Flux multilingual, a tag outside `en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, and `nl` raises `ValueError` the same way, before a `Configure` message is sent. `set_keyterms` replaces the whole list. It raises `ValueError` for a weighted phrase such as `term:0.15`, a blank phrase, more than 100 phrases, or a connection that cannot replace terms (Nova, Scribe, OpenAI, Munsit, or Flux with no open socket). The call's previous terms stay. The tools above return that error text instead of failing the turn. The reply line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
 
 ## Speculative generation
 
@@ -146,7 +319,7 @@ See [Turn-taking and interruptions](/voice/turn-taking#speculative-generation). 
 
 ## Ending the call
 
-`hangup_grace_secs` is the quiet window after a goodbye, from 0 to 30 seconds. Unset hangs up once that audio has played. When it is set, the hangup tool should await `session.commit_hangup()` so the window is spent before teardown. Bare `session.end_call()` still requests teardown immediately and then opens this window. See [Let the caller end the call](/voice/tools#let-the-caller-end-the-call).
+`hangup_grace_secs` is the quiet window after a goodbye, from 0 to 30 seconds. Unset hangs up once that audio has played. When it is set, the hangup tool should await `session.commit_hangup()` so the window is spent before teardown. Inside that wait, a short acknowledgement does not cancel it; "wait" and any other request do. Bare `session.end_call()` does not use that split: any new caller speech cancels its close. It still requests teardown immediately and then opens this window. See [Let the caller end the call](/voice/tools#let-the-caller-end-the-call).
 
 ## Turn detection
 
@@ -159,6 +332,171 @@ See [Greetings](/voice/greetings) for fixed and generated openers, timing, and o
 ## Tool-call fillers
 
 See [Spoken fillers](/voice/fillers) to enable a waiting phrase, tune generation, or repeat it during a long tool call. [Thinking sounds](/voice/thinking-sounds) are a separate browser feature.
+
+## Hesitation sounds
+
+A person on the phone does not open every sentence cleanly. Now and then the first thing out is a sound while the thought forms. `hesitation` puts that sound in front of some replies: "Eh... son diez con sesenta." It is off unless you set it, it is server-side (a caller hello cannot set or clear it), and it applies only to the cascaded pipeline, not to a `RealtimeSession`.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5.4-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={"language": "es", "hesitation": True},
+)
+```
+
+`True` is `{"rate": 0.15}`. `None`, `False`, an empty block and `{"rate": 0}` add nothing.
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `rate` | `0.15` | Chance, from 0 to 1, that a reply opening that can take a sound gets one. |
+| `openers` | `None` | The sounds. A list serves every language. A dict is keyed by language, as `filler.phrases` is: `"es"`, `"en"`, region dropped, `"*"` for any other. |
+| `seed` | `None` | Fixes the draws, for a repeatable test. |
+
+The sound is only in the text sent to the speech provider. Reply deltas, `AgentTextDone`, the transcript and the agent's memory keep the model's words. An opening is the start of what the session speaks at the start of a turn, or after a tool call. Nothing else can get a sound: not a later sentence of the same reply, and not a line the session speaks as written (a greeting, a filler, an idle prompt, the hangup farewell, the turn-timeout fallback, the rest of a reply resumed after a false interruption).
+
+The sound goes before the first clause of three words or more. A clause ends at a comma, full stop, colon, semicolon, question mark, exclamation mark, ellipsis or dash that is followed by a space or ends the segment; the comma in "10,60" does not end one. Many replies open with a word or two of acknowledgement, and the sound then goes after it, where the thought starts: "Perfecto. Eh... tu factura es de cuarenta euros.", "Vale, Marta, mm... lo miro ahora mismo." After a comma the sound keeps its lower case. An agent whose replies all open that way would otherwise never hesitate.
+
+An opening gets a sound when all of these hold:
+
+- **The clause starts with a letter.** Not with a figure, `¿`, `¡`, a quote or a bracket.
+- **At most two short clauses come before it, and none is a greeting or a goodbye.** "Hola, soy Laura de Norte Market" and "Hasta luego, que vaya bien" are said clean, and so is a reply that is only short clauses ("Vale, perfecto."). When the first segment the session speaks is only an acknowledgement ("Perfecto."), the next segment is the one considered.
+- **The model did not hesitate on its own.** A clause that starts with one of the language's openers ("A ver, ..."), or with a bare "mm", "eh", "ehm", "um", "uh", "hmm", "ah" or "er" of any length followed by a comma, a full stop, an ellipsis or a dash, is left as it is and counts as hesitated.
+- **The opening before it was not hesitated**, by the session or by the model. That is the previous turn's opening, or the one before the tool call.
+- **A random draw falls under `rate`.**
+
+No two openings in a row are hesitated, so the share that gets a sound is at most `rate`, and it is `rate / (1 + rate)` when every opening can take one: 0.13 for the default, every other one for `1`. The same sound is not used twice running when the language has another. After the sound, the reply's first word loses its capital when its second character is a lowercase letter, so an acronym ("DNI") and a one-letter word ("A", "I") keep theirs.
+
+Write each opener the way the voice should read it, ending in a comma or an ellipsis: `"eh..."` pauses longer than `"eh,"`. It starts with a letter and has at most 24 characters, and a language takes at most 24 of them. A block that breaks one of these rules fails when the config is built. The built-in sounds, used for a language `openers` does not cover (no entry for it and no `"*"`):
+
+| Language | Sounds |
+| --- | --- |
+| `es` | `eh...`, `mm...`, `pues...`, `a ver,`, `mm,`, `eh,` |
+| `en` | `um,`, `well,`, `so,`, `mm,` |
+| `ca` | `eh...`, `mm...`, `doncs...`, `a veure,`, `mm,`, `eh,` |
+
+The language is the one the reply is pinned to: `reply_language` when it is a tag, otherwise `language`. With neither set, or with `reply_language: "follow"`, only a list or the `"*"` entry is used. A reply language with no sounds is spoken clean, and `tts_hesitation_unavailable` is logged once per language at INFO.
+
+What it costs and what it leaves alone:
+
+- **First audio is not delayed.** The sound is the first audio. The reply's first word comes later by the length of the sound: 0.33 to 0.93 s (median 0.58 s) for the built-in sounds on ElevenLabs `eleven_v4_turbo`, before `tts_tempo`.
+- **An interrupted reply keeps the words the caller heard, without the sound.** The sound's audio is taken out before played bytes are mapped to text. On that voice a sound takes about twice the audio of as many characters of the sentence behind it (0.8 to 3.5 times over 32 syntheses, median 2.0), so its share is counted double. A cut within that share keeps none of the reply.
+- **A speculative reply that is dropped does not count.** Nobody heard it, so the reply that is spoken can still hesitate.
+- **A reply the caller cuts before its audio starts does count.** The sound was already added to the text for the voice, so `TurnMetrics.hesitations` includes it and the next opening is said clean.
+
+Each sound logs `tts_hesitation` at INFO with the `opener` and the start of the reply, and `TurnMetrics.hesitations` counts them for the turn. An opening that got none logs `tts_hesitation_skipped` at DEBUG with the reason: `already`, `not_a_word`, `short_opening`, `acknowledgement` (the segment was only one; the next is considered), `after_hesitation` or `draw`. `voice_session_config` logs `hesitation_rate`.
+
+## Pronunciations
+
+A neural voice decides take by take how to read an acronym: "DNI" brisk in one reply and letter by letter in the next. `pronunciations` maps a term to the way it should be said, in the text sent to the speech provider and nowhere else. Reply deltas, the transcript and the agent's memory keep the model's spelling.
+
+```python
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5.4-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={
+        "language": "es",
+        "pronunciations": {"DNI": "deneí", "NIE": "níe", "CIF": "cif", "SMS": "esemese"},
+    },
+)
+```
+
+`{term: spoken}` applies to every reply language. `{language: {term: spoken}}` is keyed like `filler.phrases` (`"es"`, `"en"`, region dropped), with `"*"` for every language; a language's own entry for a term wins. The language is the one the reply is pinned to (`reply_language`, else `language`). With `reply_language="follow"` it is the one the caller speaks, which your application sets with `session.set_spoken_language("es")` or a multilingual transcriber reports, and `language` until one is known. A term is matched whole and in the letter case it was given: `"NIE"` is replaced in "el NIE." and left alone in "NIEs", "DNIE" and "nie". Where two terms overlap, the longest wins. A term has at most 64 characters, a spoken form at most 200, and a language at most 200 terms. It applies to everything the session speaks: replies, greetings, fillers, idle prompts. It is server-side, and an empty block is unset.
+
+Which terms a voice needs help with is something to measure on that voice. `benchmarks/voice/tts_acronyms.py` reads how long a term takes inside a sentence over repeated takes; on ElevenLabs `eleven_v3_conversational` the four terms above took a median of 0.95 to 1.32 s as written and 0.43 to 0.54 s in their spoken form, and "NIF" and "IBAN" needed nothing. On `eleven_multilingual_v2` the same four were already brisk as written (0.45 to 0.60 s) and a spoken form bought nothing. The spelling matters as much as the idea: "nie" without its accent was still read slowly in 6 of 15 takes, and "ese eme ese" was slower than "SMS". An interrupted reply is cut by characters of the model's text, so a spoken form much longer than its term shifts the cut by that difference.
+
+## Laughs and sighs
+
+Some voices perform a bracketed mark as a sound: `[laughs]`, `[sighs]`. `audio_tags` lets the model write them, and keeps them away from a voice that would read them aloud. It is off unless you set it, and it is server-side.
+
+```python
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5.4-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={"language": "es", "tts_model": "eleven_v3_conversational", "audio_tags": True},
+)
+```
+
+`True` is the default marks: `laughs`, `chuckles`, `sighs`, `exhales`, `clears throat`. A list is those marks. `None`, `False`, an empty block and an empty list are off.
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `tags` | the five above | The marks, without brackets, as the voice's provider documents them (English). Up to 12, each a word or two of letters. |
+| `max_per_reply` | `1` | Marks spoken in one reply, from 1 to 5. The ones past it are taken out. |
+| `rest_replies` | `1` | Replies after one with a mark that go without. `0` lets every reply have one. |
+
+What happens depends on the voice of the call:
+
+- **A voice that performs them** (ElevenLabs `eleven_v3`, `eleven_v3_conversational` and the `eleven_v4` models): the system prompt gets a note that lists the marks and says to use them in a few replies of the call at most, never in a greeting or a goodbye and never next to data. What the model writes is then limited by `max_per_reply` and `rest_replies` before it is spoken.
+- **Any other voice**: the model is told nothing, and a mark it writes anyway is taken out of the text sent to the voice. ElevenLabs Flash v2.5 and Multilingual v2 say the mark as a word ("Chuckles. Claro que sí...").
+
+A bracketed word or two that is not in `tags` is taken out for both. Only the text sent to the voice changes: reply deltas, `AgentTextDone`, the transcript and the agent's memory keep what the model wrote, so a client that shows the reply should hide the mark or style it (`timbal.voice.audio_tags.strip_audio_tags` removes them). A line the application wrote itself (a greeting, a filler phrase) keeps its marks on a voice that performs them and is not counted against the limits. Each reply that keeps a mark logs `tts_audio_tag` at INFO, and `TurnMetrics.audio_tags` counts them for the turn.
+
+`benchmarks/voice/tts_audio_tags.py` measures which case a voice is in. A custom `TextToSpeech` adapter says so by overriding `performs_audio_tags(config)`, which is false by default.
+
+## Listening sounds
+
+A person listening on the phone does not stay silent while the other dictates a number or explains a problem: they say "ajá", "mm-hm", "vale". `backchannel` has the agent do that, in its own voice, when the caller pauses and is clearly not done. It is off unless you set it, it is server-side, and it applies only to the cascaded pipeline.
+
+```python
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5.4-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={"language": "es", "entity_patience": True, "backchannel": True},
+)
+```
+
+`True` is `{"rate": 0.7}`. `None`, `False`, an empty block and `{"rate": 0}` are off.
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `rate` | `0.7` | Share of the pauses that qualify which get a sound, from 0 to 1. |
+| `phrases` | `None` | The sounds, written the way the voice should read them. A list serves every language. A dict is keyed like `filler.phrases`, `"*"` for any other. Up to 12 per language, 24 characters each. |
+| `pause_secs` | `0.45` | Silence on the mic before a sound, from 0.25 to 2. |
+| `min_speech_secs` | `1.5` | Seconds the caller must have talked since the last sound, or since they started. A group of a dictated number needs 0.8 s at most. |
+| `min_gap_secs` | `3.0` | Least time between two sounds. |
+| `max_per_turn` | `3` | Most sounds before the agent's next reply. |
+| `long_speech_secs` | `6.0` | After this long talking, a pause in the middle of a sentence gets a sound with no other sign that the caller has more to say. `None` leaves length out. |
+| `volume` | `0.6` | Level of the sound against the voice as synthesized, from 0.05 to 1.5. |
+| `seed` | `None` | Fixes the draws, for a repeatable test. |
+
+A pause qualifies when the mic has been quiet for `pause_secs` (and no more than 0.6 s past it: after that the moment has gone), the caller has said enough since the last sound, and one of these says they are not done:
+
+- **`entity`**: what they have said so far ends in a number, a spelling or a code that is still being dictated. This is the same reading `entity_patience` uses, and it works with that setting off.
+- **`held`**: the session is holding a committed utterance for the rest of the phrase (`hold_unfinished_secs`, or `entity_patience`).
+- **`unfinished`**: the caption ends in a word that cannot end a sentence ("porque", "y", "because").
+- **`long`**: they have been talking for `long_speech_secs` and the caption does not end a sentence (a period, a question mark, an exclamation mark; three dots are a trail-off and do not count).
+
+A short utterance, a finished sentence and a question get nothing: the agent answers those. A dictated number is the exception. The session cannot tell that the last group was the last, so a sound may follow it while `entity_patience` waits for more. Nothing is said either while the agent is speaking or has audio still playing, while a reply is being prepared (a committed utterance, a speculative attempt), or during a hangup.
+
+The sound is not a turn. There is no model call, nothing is added to the transcript or to the agent's memory, and a caller who goes on talking over it interrupts nothing. A call recording has its audio. The session emits `BackchannelSpoken(text, reason)` after its audio, which a WebSocket or WebRTC client receives as `{"type": "backchannel", "text": "Ajá.", "reason": "entity"}`, and `TurnMetrics.backchannels` counts the ones said since the agent's previous reply. Each logs `backchannel_spoken` at INFO.
+
+The built-in sounds, used for a language `phrases` does not cover:
+
+| Language | Sounds |
+| --- | --- |
+| `es` | `Ajá.`, `Mm-hm.`, `Vale.` |
+| `ca` | `Ahà.`, `Mm-hm.` |
+| `en` | `Mm-hm.`, `Uh-huh.`, `Right.`, `Okay.` |
+| any other | `Mm-hm.` |
+
+"Sí" and "yes" are left out on purpose: a caller can take them for an answer. The language is the reply language, as for hesitation sounds.
+
+What it needs and what it costs:
+
+- **PCM16 mic and agent audio.** With any other encoding `backchannel_unavailable` is logged once and no sound is said.
+- **A session that waits.** A sound can only fall in a pause the endpointer does not take for the end of the turn. Set `entity_patience` for dictated numbers. A pause after a single number word ("es el doce...") is not a number being dictated yet, so the turn may end there, with or without this setting. So may a pause after a clause that could be a whole sentence: Deepgram Flux ended the turn at each one in test calls, and the agent started to answer.
+- **One synthesis per sound per call.** Each phrase of the reply language is synthesized once, in the background, from the start of the call (and again for another language after a language change). They are synthesized one at a time, and each is started only while the agent is not speaking, so the first is ready shortly after the greeting. A take that is silent or longer than 1.2 s is discarded (`backchannel_clip_rejected`): the voice read it as a sentence. Until a language's clips are ready, no sound is said.
+- **Echo.** On a mic without echo cancellation the agent's own "ajá" comes back on the mic. It is not counted as the caller talking, but the transcriber may write it into the caller's utterance. A browser with echo cancellation and a phone handset are not affected.
+- **Reply latency is not changed.** A sound that is still playing when the reply starts is played to its end first, at most its own length (0.3 to 0.8 s for the built-in sounds, by voice model).
+
+`benchmarks/voice/tts_backchannels.py` checks that a voice says each phrase as the short sound it is, and `benchmarks/voice/backchannel_call.py` runs real calls with and without the setting. In those calls (Deepgram Flux, ElevenLabs `eleven_v3_conversational`, a dictated ID number and an explanation with two mid-sentence pauses) every sound started 0.38 to 0.50 s after the caller went quiet and none over their speech, and the calls had the same turns, the same transcript and the same reply latency as without the setting.
 
 ## Operator defaults
 

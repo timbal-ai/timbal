@@ -521,8 +521,9 @@ class TestHangupGoodbye:
         started = time.monotonic()
         assert await asyncio.wait_for(session.commit_hangup(), 5.0) is True
         assert time.monotonic() - started < 2.0  # not the 20 s cap
-        # Nothing was heard yet: the window waits for the goodbye that follows.
-        assert session._end_call_grace_secs == 0.2
+        # Nothing had been said: the session spoke the farewell itself, so its window already passed.
+        assert session._hangup_farewell_text
+        assert session._end_call_grace_secs == 0
         session._stop_end_call()
 
 

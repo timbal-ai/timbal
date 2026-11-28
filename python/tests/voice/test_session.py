@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
@@ -2654,6 +2655,71 @@ class TestStalePartialSweeper:
         assert session.transcript[0].role == "user"
         assert session.transcript[0].text == "What are you doing?"
 
+    async def test_ignored_acks_are_not_resurrected_by_the_sweeper(self) -> None:
+        """The live sequence: Yeah. then Yeah. Okay. are consumed while the
+        reply is still in the ear. The stale-partial watchdog must not turn
+        that caption into a model turn once the backchannel window closes.
+        The next real request runs once. The same words later are a new turn.
+        """
+        agent = Agent(name="t", model=TestModel(responses=["moon", "again"]), tools=[])
+        stt = DelayedMockSTT()
+        session = VoiceSession(agent=agent, stt=stt, tts=MockTTS(), turn_detector="provider")
+        session._stale_partial_poll_secs = 0.05
+        session._stale_partial_commit_secs = 0.25
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        def _user_texts() -> list[str]:
+            return [entry.text for entry in session.transcript if entry.role == "user"]
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            session._is_speaking = True
+            session._last_assistant_active_at = time.monotonic()
+            await stt.inject(TranscriptEvent(type="partial", text="Yeah."))
+            await stt.inject(TranscriptEvent(type="committed", text="Yeah."))
+            await stt.inject(TranscriptEvent(type="partial", text="Yeah. Okay."))
+            await stt.inject(TranscriptEvent(type="committed", text="Yeah. Okay."))
+            await asyncio.sleep(0.05)
+            # Trailing caption of the ack we already handled.
+            await stt.inject(TranscriptEvent(type="partial", text="Yeah. Okay."))
+            session._is_speaking = False
+            session._last_assistant_active_at = time.monotonic() - 10
+            await asyncio.sleep(0.8)
+            # The provider's late final of the same acknowledgement is not a new turn.
+            await stt.inject(TranscriptEvent(type="committed", text="Yeah. Okay."))
+            await asyncio.sleep(0.1)
+            assert _user_texts() == []
+            await stt.inject(TranscriptEvent(type="partial", text="Tell me about the moon."))
+            await stt.inject(TranscriptEvent(type="committed", text="Tell me about the moon."))
+            while _user_texts() != ["Tell me about the moon."]:
+                await asyncio.sleep(0.01)
+            while session._is_speaking:
+                await asyncio.sleep(0.01)
+            session._last_assistant_active_at = time.monotonic() - 10
+            # A later provider commit of the same acknowledgement is new speech.
+            await stt.inject(TranscriptEvent(type="partial", text="Yeah. Okay."))
+            await stt.inject(TranscriptEvent(type="committed", text="Yeah. Okay."))
+            while _user_texts() != ["Tell me about the moon.", "Yeah. Okay."]:
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+        assert _user_texts() == ["Tell me about the moon.", "Yeah. Okay."]
+        assert sum(isinstance(event, AgentTextDone) for event in events) == 2
+
     async def _run_churn_scenario(self, endpointer: object) -> tuple[_StuckPartialSTT, VoiceSession]:
         """Stranded partial while the provider keeps emitting *new* partials
         faster than the stale threshold, so transcript staleness never accrues.
@@ -2915,6 +2981,137 @@ class TestToolSpeech:
         await asyncio.wait_for(session.interrupt(), 1)
         assert "Must not be heard." not in tts.synthesized_texts
         assert not any(not task.done() for task in session._tts_tasks)
+
+    @pytest.mark.parametrize("tool_delay", [0, 0.9])
+    async def test_beat_follows_a_filler_spoken_for_the_tool(self, tool_delay):
+        """The model said nothing before the tool, so the wait phrase is the
+        pre-tool speech: the result waits for the beat after it, and a tool
+        slower than the phrase plus the beat waits for nothing."""
+        from timbal.types.content import ToolUseContent
+        from timbal.types.message import Message
+        from timbal.voice import FillerConfig
+
+        times = {}
+
+        async def lookup() -> str:
+            await asyncio.sleep(tool_delay)
+            times["tool_done"] = time.monotonic()
+            return "done"
+
+        class TimedTTS(MockTTS):
+            async def synthesize(self, text):
+                times["filler" if "moment" in text else "post"] = time.monotonic()
+                async for chunk in super().synthesize(text):
+                    yield chunk
+
+        call = Message(
+            role="assistant",
+            content=[ToolUseContent(id="c1", name="lookup", input={})],
+            stop_reason="tool_use",
+        )
+        tts = TimedTTS(chunk=b"\x00" * 3200, num_chunks=1)
+        session = VoiceSession(
+            agent=Agent(name="desk", tools=[lookup], model=TestModel(responses=[call, "Done."])),
+            stt=MockSTT(),
+            tts=tts,
+            turn_detector="heuristic",
+            filler=FillerConfig(phrases=["One moment."], delay_secs=0.0),
+            tool_beat_secs=0.5,
+        )
+        await asyncio.wait_for(session._run_turn("check"), 5)
+        assert tts.synthesized_texts == ["One moment.", "Done."]
+        if tool_delay:
+            # The beat (over 0.6 s after the call) ran out while the tool worked.
+            assert times["post"] - times["tool_done"] < 0.4
+        else:
+            # 0.1 s of phrase audio, then the 0.5 s beat (minus a coarse clock tick).
+            assert times["post"] - times["filler"] >= 0.58
+
+    @pytest.mark.parametrize(
+        "calls,spoken",
+        [
+            (["lookup"], ["One moment.", "Done."]),
+            (["transfer"], ["Done."]),
+            (["transfer", "lookup"], ["Done."]),  # no filler from the unlisted call on
+            (["lookup", "transfer"], ["One moment.", "Done."]),
+        ],
+    )
+    async def test_filler_tools_names_the_calls_that_get_one(self, calls, spoken):
+        """``delay_secs=0`` speaks the phrase at the call, so a tool that says
+        its own line has to be left out by name."""
+        from timbal.types.content import ToolUseContent
+        from timbal.types.message import Message
+        from timbal.voice import FillerConfig
+
+        async def lookup() -> str:
+            await asyncio.sleep(0.1)  # long enough for the phrase to go out while it works
+            return "found"
+
+        async def transfer() -> str:
+            return "say: Done."
+
+        steps = [
+            Message(role="assistant", content=[ToolUseContent(id=f"c{i}", name=name, input={})], stop_reason="tool_use")
+            for i, name in enumerate(calls)
+        ]
+        tts = MockTTS()
+        session = VoiceSession(
+            agent=Agent(name="desk", tools=[lookup, transfer], model=TestModel(responses=[*steps, "Done."])),
+            stt=MockSTT(),
+            tts=tts,
+            turn_detector="heuristic",
+            filler=FillerConfig(phrases=["One moment."], delay_secs=0.0, tools=["lookup"]),
+        )
+        await asyncio.wait_for(session._run_turn("check"), 5)
+        assert tts.synthesized_texts == spoken
+
+    async def test_filler_that_covered_thinking_alone_gets_no_beat(self):
+        session, _, tts = _make_session()
+        session.tool_beat_secs = 60
+        await session._speak_filler("One moment.", "")
+        session._schedule_tts("Answer.")
+        await asyncio.wait_for(session._await_tts_chain(), 5)
+        assert tts.synthesized_texts == ["One moment.", "Answer."]
+
+    async def test_interrupt_cancels_the_beat_after_a_filler(self):
+        session, _, tts = _make_session()
+        session.tool_beat_secs = 60
+        session._turn_tool_seen_at = time.monotonic()
+        await session._speak_filler("One moment.", "lookup")
+        session._schedule_tts("Must not be heard.")
+        session._current_turn_task = asyncio.create_task(session._await_tts_chain())
+        await asyncio.sleep(0.02)
+        await asyncio.wait_for(session.interrupt(), 1)
+        assert tts.synthesized_texts == ["One moment."]
+        assert not any(not task.done() for task in session._tts_tasks)
+
+    async def test_filler_cut_by_a_hangup_leaves_no_beat_before_the_farewell(self):
+        started = asyncio.Event()
+
+        class HeldTTS(MockTTS):
+            async def synthesize(self, text):
+                self.synthesized_texts.append(text)
+                yield self._chunk
+                if "moment" in text:
+                    started.set()
+                    await asyncio.Event().wait()
+
+        tts = HeldTTS()
+        session = VoiceSession(
+            agent=Agent(name="desk", model=TestModel(responses=["done"])),
+            stt=MockSTT(),
+            tts=tts,
+            turn_detector="heuristic",
+            tool_beat_secs=60,
+        )
+        session._turn_tool_seen_at = time.monotonic()
+        session._turn_filler_task = asyncio.create_task(session._speak_filler("One moment.", "lookup"))
+        await asyncio.wait_for(started.wait(), 5)
+        assert session._turn_audio_bytes  # the phrase was cut after some of it went out
+        session._block_hangup_filler()
+        session._schedule_tts("Goodbye.")
+        await asyncio.wait_for(session._await_tts_chain(), 5)
+        assert tts.synthesized_texts == ["One moment.", "Goodbye."]
 
 
 class TestEmptyCallerTurnRecovery:

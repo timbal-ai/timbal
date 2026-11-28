@@ -1,6 +1,7 @@
 """Cache-friendly voice system prompts.
 
-The suffix after the static instructions is, in order: the call-context
+The suffix after the static instructions is, in order: what the session says
+about its voice (the same on every call of the agent), the call-context
 fields the server opted into (stable for the call), the ``voice_prompt``
 dynamic text, the UTC time for this turn, the already-greeted note, then the
 reply-language line. OpenAI and Groq cache an exact prefix, so per-call lines have to
@@ -30,12 +31,15 @@ def compose_voice_system_prompt(
     call_context: Mapping[str, str] | None,
     now: datetime,
     greeting_note: str | None = None,
+    continuation_note: str | None = None,
     reply_language: str | None = None,
     call_context_keys: Collection[str] | None = None,
+    voice_note: str | None = None,
 ) -> SystemPrompt:
     """Static instructions, then per-call lines, then per-turn lines.
 
-    Order of the suffix: the ``call_context_keys`` fields of ``call_context``,
+    Order of the suffix: ``voice_note`` (what this voice can do, the same for
+    every call), the ``call_context_keys`` fields of ``call_context``,
     the caller's ``dynamic`` text, the UTC clock, the already-greeted note, the
     reply-language line. ``now`` is captured once per turn so a tool loop does
     not move the clock between LLM calls.
@@ -63,7 +67,19 @@ def compose_voice_system_prompt(
     clock = f"Current date and time (UTC): {_utc_stamp(now)}"
     # Caller and customer are stable for the call, so they stay ahead of the
     # clock. OpenAI and Groq stop the cached prefix at the first changed byte.
-    dynamic_parts = [part for part in (facts, user_dynamic, clock, greeting_note or "", reply_language or "") if part]
+    dynamic_parts = [
+        part
+        for part in (
+            voice_note or "",
+            facts,
+            user_dynamic,
+            clock,
+            greeting_note or "",
+            continuation_note or "",
+            reply_language or "",
+        )
+        if part
+    ]
     return SystemPrompt(static=static, dynamic="\n\n".join(dynamic_parts))
 
 

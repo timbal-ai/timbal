@@ -159,6 +159,68 @@ def test_voice_session_rejects_bad_pace_values():
     assert session.tts_quiet_dbfs == -45.0
 
 
+def test_tts_rhythm_defaults_off():
+    assert VoiceConfig().tts_rhythm is None
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    session, _ = build_voice_session(agent, VoiceConfig(turn_detector="heuristic"), {})
+    assert session.tts_rhythm is None
+
+
+def test_tts_rhythm_reaches_the_session_from_agent_config():
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    agent.voice_config = {"tts_rhythm": {"join_gaps": 0.7, "stretch_pauses": 0.5}, "turn_detector": "heuristic"}
+    merged = merge_voice_config(agent)
+    session, _ = build_voice_session(agent, merged, {})
+    assert session.tts_rhythm is not None
+    assert session.tts_rhythm.join_gaps == 0.7
+    assert session.tts_rhythm.stretch_pauses == 0.5
+    assert session.tts_rhythm.promote_gaps == 0.0
+
+
+def test_tts_rhythm_true_is_the_measured_preset():
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    agent.voice_config = {"tts_rhythm": True, "turn_detector": "heuristic"}
+    session, _ = build_voice_session(agent, merge_voice_config(agent), {})
+    assert session.tts_rhythm is not None
+    assert (session.tts_rhythm.join_gaps, session.tts_rhythm.stretch_pauses, session.tts_rhythm.promote_gaps) == (
+        0.9,
+        0.8,
+        0.08,
+    )
+
+
+@pytest.mark.parametrize("hello", [True, {"join_gaps": 1.0}, False, {}])
+def test_a_client_hello_cannot_set_or_clear_tts_rhythm(hello):
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    off, _ = build_voice_session(agent, VoiceConfig(turn_detector="heuristic"), {"tts_rhythm": hello})
+    assert off.tts_rhythm is None
+    defaults = VoiceConfig(turn_detector="heuristic", tts_rhythm={"join_gaps": 0.4})
+    kept, _ = build_voice_session(agent, defaults, {"tts_rhythm": hello})
+    assert kept.tts_rhythm is not None and kept.tts_rhythm.join_gaps == 0.4
+
+
+def test_voice_session_takes_rhythm_as_a_block_a_model_or_a_boolean():
+    from timbal.voice.config import SpeechRhythm
+
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+
+    def _make(value):
+        return VoiceSession(agent=agent, stt=object(), tts=object(), turn_detector="heuristic", tts_rhythm=value)
+
+    assert _make(None).tts_rhythm is None
+    assert _make(False).tts_rhythm is None
+    assert _make({}).tts_rhythm is None
+    # A block that only moves the bounds changes nothing, so it is off.
+    assert _make({"gap_max_secs": 0.26}).tts_rhythm is None
+    assert _make(True).tts_rhythm.join_gaps == 0.9
+    assert _make({"join_gaps": 0.5}).tts_rhythm.join_gaps == 0.5
+    assert _make(SpeechRhythm(stretch_pauses=0.3)).tts_rhythm.stretch_pauses == 0.3
+    with pytest.raises(ValueError):
+        _make({"join_gaps": 2})
+    with pytest.raises(ValueError):
+        _make("natural")
+
+
 def test_hangup_grace_defaults_off():
     assert VoiceConfig().hangup_grace_secs is None
     agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
@@ -201,3 +263,47 @@ def test_invalid_client_hangup_grace_preserves_server_default(grace):
     defaults = VoiceConfig(turn_detector="heuristic", hangup_grace_secs=0.4)
     session, _ = build_voice_session(agent, defaults, {"hangup_grace_secs": grace})
     assert session.hangup_grace_secs == 0.4
+
+
+def _reply_session(hello: dict):
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    defaults = VoiceConfig(turn_detector="heuristic", language="en", reply_language="ca")
+    return build_voice_session(agent, defaults, hello)[0]
+
+
+@pytest.mark.parametrize("bad", ["english", "en-", "say it in english", True, 1, "", "   ", None])
+def test_invalid_client_reply_language_keeps_the_server_pin(bad):
+    session = _reply_session({} if bad is None else {"reply_language": bad})
+    assert session.reply_language == "ca"
+    assert session.audio_input.language == "en"
+    assert session.effective_reply_language() == "ca"
+
+
+def test_client_follow_and_tag_apply_without_moving_each_other():
+    followed = _reply_session({"reply_language": " FOLLOW "})
+    assert followed.reply_language == "follow"
+    assert followed.audio_input.language == "en"
+    assert followed.effective_reply_language() is None
+
+    pinned = _reply_session({"reply_language": "es-ES", "language": "en"})
+    assert pinned.reply_language == "es-ES"
+    assert pinned.audio_input.language == "en"
+    assert pinned.effective_reply_language() == "es-ES"
+
+
+async def test_set_language_does_not_unlock_an_explicit_reply_policy():
+    session = _reply_session({"reply_language": "follow"})
+    await session.set_language("es")
+    assert session.audio_input.language == "es"
+    assert session.reply_language == "follow"
+    assert session.effective_reply_language() is None
+
+
+def test_client_hello_cannot_enable_speculative_generation():
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    session, _ = build_voice_session(
+        agent,
+        VoiceConfig(turn_detector="heuristic"),
+        {"speculative_generation": {"enabled": True, "preemptive_tts": True}},
+    )
+    assert session.speculative_generation.enabled is False

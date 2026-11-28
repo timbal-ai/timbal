@@ -1,0 +1,40 @@
+{
+  "demos": [
+    {
+      "id": "luzia",
+      "orden": 10,
+      "name": "Luzia Energía",
+      "description": "Eléctrica ficticia: te identifica por el DNI dictado, explica la factura y prepara cambios.",
+      "import_spec": "examples/voice_retos_demo.py::agent",
+      "model_env": "RETOS_MODEL",
+      "tuning_env": "TIMBAL_VOICE_DEMO_TUNING",
+      "probar": [
+        "Hola, quería saber por qué mi última factura es tan alta.",
+        "Mi DNI es uno, dos, tres, cuatro, cinco, seis, siete, ocho, zeta.",
+        "Quiero cambiar el día de cargo al veinte.",
+        "Sí, confírmalo."
+      ],
+      "nota": "Clienta de prueba: Marta Soler, DNI 12345678Z. Interrúmpele a mitad de una frase larga: se calla y te escucha."
+    },
+    {
+      "id": "norte",
+      "orden": 20,
+      "name": "Norte Market",
+      "description": "Tienda ficticia: consulta pedidos y envíos y cambia la nota de entrega con confirmación.",
+      "import_spec": "examples/voice_support_demo.py::agent",
+      "model_env": "TIMBAL_VOICE_DEMO_MODEL",
+      "tuning_env": "TIMBAL_VOICE_DEMO_TUNING",
+      "default_model": "google/gemini-2.5-flash",
+      "hello": { "greeting": "Norte Market, buenas. ¿En qué te puedo ayudar?" },
+      "ocultar": ["naturalidad:ninguno"],
+      "probar": [
+        "Hola, ¿me dices cómo va el pedido mil uno?",
+        "¿Y dónde está el paquete ahora mismo?",
+        "Quiero cambiar la nota de entrega: que lo dejen en conserjería.",
+        "Sí, confírmalo.",
+        "Eso era todo, gracias. Hasta luego."
+      ],
+      "nota": "Pedidos de prueba: 1001 (Ana Ruiz, Barcelona), 1002 (tarda unos segundos en responder) y 1003 (entregado)."
+    }
+  ]
+}

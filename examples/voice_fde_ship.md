@@ -14,7 +14,7 @@ voice_config = {
 }
 ```
 
-`ignore_backchannels` and `speculative_generation` are server-only. A browser hello cannot turn them off. `end_call` awaits `session.commit_hangup()` so speech inside the 1.2s grace window cancels the hangup. A bare `session.end_call()` does not.
+`ignore_backchannels` and `speculative_generation` are server-only. A browser hello cannot turn them off. `end_call` awaits `session.commit_hangup()` so a real follow-up inside the 1.2s grace window cancels the hangup. A short "alright" or another goodbye does not, and the soft-timeout filler does not speak on that tool. If the model calls `end_call` without saying goodbye, the session speaks one. A bare `session.end_call()` does not wait out the grace window before requesting teardown.
 
 The example file is not in the wheel (`/examples` is excluded from the sdist). Check out the branch and run from the repo root.
 
@@ -75,7 +75,7 @@ uv run python examples/voice_fde_ship.py
 ## What to try
 
 - **Language pin.** With the default, replies stay English, including after a Spanish word that is not an explicit request to switch. Restart with `TIMBAL_VOICE_LANGUAGE=es` for a Spanish line. Restart with `TIMBAL_VOICE_LANGUAGE=unset` and change language mid-call; the reply should follow the latest full request, not a backchannel or a borrowed word.
-- **Hangup retract within ~1s.** Say goodbye. While the agent is saying goodbye, within about a second say "wait, one more thing". The line stays up and the tool returns that you spoke again. Say goodbye and stay quiet to actually hang up.
+- **Hangup retract within ~1s.** Say goodbye. You should hear a goodbye (the model's, or a short one from the session if it skipped straight to `end_call`) and not "One moment." While that is playing, within about a second say "wait, one more thing". The line stays up. "Alright" or "bye" during that same window does not. Say goodbye again and stay quiet to hang up.
 - **Spoken phone number, no premature cut.** Say "my number is six five five, zero one two, three four" with short pauses between groups, or spell a name ("J, O, N, E, S"). The agent should hold the turn across the groups instead of answering after the first one.
 - **Slow-tool filler.** Ask it to look up order 1001. `check_order` sleeps 4 seconds. After about 0.8s of silence you should hear "One moment." then the status.
 - **Speculative barge-in.** Ask a question, then talk over the answer ("stop", "no, that's wrong"). The reply should cut. While it is speaking, "yeah", "okay got it", and "vale" should not cut it.

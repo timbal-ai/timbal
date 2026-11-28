@@ -6,6 +6,30 @@ from timbal.types import File, Message
 from timbal.types.content import FileContent, TextContent, ThinkingContent, ToolResultContent, ToolUseContent
 
 
+def test_interrupted_mid_sentence_is_marked_only_on_the_wire() -> None:
+    heard = "The Moon is"
+    message = Message(
+        role="assistant",
+        content=[TextContent(text=heard)],
+        metadata={"interrupted": True},
+    )
+    assert message.collect_text() == heard
+    chat = message.to_openai_chat_completions_input()
+    assert chat["content"][0]["text"] == "The Moon is [interrupted]"
+    responses = message.to_openai_responses_input()
+    assert responses[0]["content"][0]["text"] == "The Moon is [interrupted]"
+    anthropic = message.to_anthropic_input()
+    assert anthropic["content"][0]["text"] == "The Moon is [interrupted]"
+    finished = Message(
+        role="assistant",
+        content=[TextContent(text="The Moon is Earth's satellite.")],
+        metadata={"interrupted": True},
+    )
+    assert finished.to_openai_chat_completions_input()["content"][0]["text"] == "The Moon is Earth's satellite."
+    plain = Message(role="assistant", content=[TextContent(text=heard)])
+    assert plain.to_openai_chat_completions_input()["content"][0]["text"] == heard
+
+
 def test_message_text_validation() -> None:
     message = Message(role="assistant", content=[TextContent(text="Hello, World!")])
     assert isinstance(message, Message)
