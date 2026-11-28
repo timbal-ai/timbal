@@ -13,7 +13,7 @@ from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
 from timbal.voice import SessionStarted, TranscriptEvent, VoiceSessionEvent, current_voice_session
 
-from .test_end_call import _call, end_call
+from .test_end_call import GOODBYE, _call, _hangs_up_with, end_call
 from .test_session import FakePlaybackTracker
 from .test_voice_events import _Model, _session, _texts, _until
 
@@ -83,6 +83,50 @@ class TestOnClose:
 
         assert done == ["saved"]
         await asyncio.wait_for(call, timeout=3.0)
+
+    async def test_the_run_does_not_end_while_a_callback_is_running(self) -> None:
+        """The agent hangs up from the session's own task while the transport reads ``run()`` to its end. A
+        transport that tears the call down when ``run()`` ends must not do so in the middle of a callback."""
+        session, stt, _tts = _session(_hangs_up_with(GOODBYE), tools=[end_call])
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        release, seen = asyncio.Event(), []
+
+        async def save() -> None:
+            seen.append("started")
+            await release.wait()
+            seen.append("saved")
+
+        session.on_close(save)
+        await stt.inject(TranscriptEvent(type="committed", text="Vale, vamos a terminar."))
+        await _until(lambda: seen == ["started"])
+        await asyncio.sleep(0.3)
+        assert session.closed and not call.done(), "the run ended in the middle of an on_close callback"
+
+        release.set()
+        await asyncio.wait_for(call, timeout=3.0)
+        assert seen == ["started", "saved"]
+
+    async def test_a_cancelled_close_does_not_take_the_callback_with_it(self) -> None:
+        session, _stt, _tts = _session(_Model())
+        call = await _call(session, [])
+        release, seen = asyncio.Event(), []
+
+        async def save() -> None:
+            seen.append("started")
+            await release.wait()
+            seen.append("saved")
+
+        session.on_close(save)
+        closing = asyncio.create_task(session.close())
+        await _until(lambda: seen == ["started"])
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+
+        release.set()
+        await asyncio.wait_for(call, timeout=3.0)
+        assert seen == ["started", "saved"]
 
     async def test_runs_when_the_run_ends_without_close(self) -> None:
         """A consumer that stops reading: nobody called ``close()``, and the call is over all the same."""

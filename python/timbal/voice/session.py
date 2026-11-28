@@ -1640,6 +1640,7 @@ class VoiceSession:
         # ``on_close()``: each callback with the context it was registered in.
         self._close_callbacks: list[tuple[Callable[[], Any], contextvars.Context]] = []
         self._close_callbacks_due = False
+        self._close_callbacks_runner: asyncio.Task[None] | None = None
         self._close_callback_tasks: set[asyncio.Task[None]] = set()
         # commit_hangup is in flight (or teardown was requested and not retracted).
         # An acknowledgement during that window is not a new request.
@@ -2910,10 +2911,26 @@ class VoiceSession:
             task.add_done_callback(self._close_callback_tasks.discard)
 
     async def _run_close_callbacks(self) -> None:
-        """Run the ``on_close`` callbacks not run yet. Called by ``close()`` and by ``run()`` as it ends."""
-        # One at a time off the list: a second caller finds only what is left, and a cancelled one
-        # leaves the rest for it.
+        """Run the ``on_close`` callbacks not run yet, and wait for the ones another caller is running.
+
+        ``close()`` and ``run()``'s end both come here, often on two tasks at once: the agent hangs up from the
+        ``end_call`` task while the transport is reading ``run()`` to its end. The callbacks run on a task of
+        their own, so whichever asks second waits for the same ones (``run()`` does not end, and a host tear the
+        call down, in the middle of one), and a caller that is cancelled while it waits does not take them with it.
+        """
         self._close_callbacks_due = True
+        while self._close_callbacks or self._close_callbacks_runner is not None:
+            if self._close_callbacks_runner is None:
+                self._close_callbacks_runner = asyncio.get_running_loop().create_task(self._call_close_callbacks())
+            await asyncio.shield(self._close_callbacks_runner)
+
+    async def _call_close_callbacks(self) -> None:
+        try:
+            await self._call_each_close_callback()
+        finally:
+            self._close_callbacks_runner = None
+
+    async def _call_each_close_callback(self) -> None:
         while self._close_callbacks:
             callback, context = self._close_callbacks.pop(0)
             name = getattr(callback, "__qualname__", None) or type(callback).__name__

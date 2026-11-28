@@ -372,7 +372,7 @@ async def take_order(item: str) -> str:
     return f"Added {item}."
 ```
 
-`close()` waits for each callback for up to 10 seconds (`VoiceSession.ON_CLOSE_TIMEOUT_SECS`). A callback that raises is logged as `voice_on_close_failed` and the others still run. Registered on a call that is already over, the callback runs straight away.
+`close()` waits for each callback for up to 10 seconds (`VoiceSession.ON_CLOSE_TIMEOUT_SECS`), and `run()` does not end before they have finished, so a transport that tears the call down when `run()` ends does not cut one short. A callback that raises is logged as `voice_on_close_failed` and the others still run. Registered on a call that is already over, the callback runs straight away.
 
 `await session.wait_until_heard()` is for a task of your own that must act after the agent's current reply has been heard: it returns true once the turn has finished and its audio has played out, and false if the caller spoke first or the call ended. Do not await it inside a tool. A tool is part of the turn it waits for, so there it can only give up after 20 seconds. To hang up or transfer after the reply, `end_call()` and `transfer_call()` already wait this way.
 
