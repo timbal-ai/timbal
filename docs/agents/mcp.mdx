@@ -263,6 +263,7 @@ A connection whose event loop has closed went with it, and `close()` from any lo
 Failure handling on top of the SDK:
 
 - **Transport dies mid-call** (server process exits, HTTP connection refused): the in-flight call fails immediately with `connection lost during tools/call ...` instead of hanging, the connection is forgotten, and the next call reconnects. The cached tools stay valid.
+- **Response stream ends before its answer** (an HTTP gateway cuts the stream of a server that died mid-call): the call fails at once with the same `connection lost during tools/call ...` error, instead of waiting for `timeout`. The session itself is fine, so nothing reconnects. A stream whose events carried an id is resumed first; the call fails only if resuming does.
 - **Stale session** (an HTTP server restarted or expired the session while you were idle, so it 404s your `Mcp-Session-Id` with `Session terminated`): the session is reset and the request retried once, transparently. Safe for any request — a 404 means the server never saw it.
 - **Server unreachable**: `ConnectionError("MCP server 'name' failed to connect: ConnectError: ...")` with the real cause, not anyio's `unhandled errors in a TaskGroup`.
 - **Server accepts but never answers**: `timeout=` (default 600s, per tool via `tool_timeouts=`) turns it into a `TimeoutError`; the session stays up and the next call works. The handshake is bounded only by `connect_timeout=` (default `None`, but the TCP connect itself is capped at 30s).
