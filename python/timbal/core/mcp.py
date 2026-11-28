@@ -470,10 +470,11 @@ _RUN_CONNECTION_IDLE_S = 60.0
 # a platform that never answers it would hold the run past its ``timeout``); the closes go on past it.
 _RUN_END_CLOSE_S = 10.0
 
-# What close() and a run's end say when what they would close belongs to another event loop.
-_OTHER_LOOP = (
-    "belongs to another event loop, which alone can close it. Call close() on the loop that owns the connection "
-    "(for example runner.run(server.close()) for an asyncio.Runner)."
+# What close() and a run's end say when what they would close belongs to another event loop: how to close it there.
+_CLOSE_ON_OWNER = (
+    "Call close() on the loop that owns the connection: runner.run(server.close()) for an asyncio.Runner, or "
+    "asyncio.run_coroutine_threadsafe(server.close(), loop).result() for a loop running in another thread "
+    "(await asyncio.wrap_future(...) of it from async code)."
 )
 
 
@@ -1092,7 +1093,11 @@ class MCPServer(ToolSet):
         if owner.is_closed():
             self._drop_run(key)
             return None
-        raise RuntimeError(f"MCP server {self._label!r}: the platform connection of a run that ended {_OTHER_LOOP}")
+        raise RuntimeError(
+            f"MCP server {self._label!r}: the platform connection of a run that ended belongs to another event loop "
+            "than the one ending the run, so it was not closed here. It closes on its own loop once idle "
+            f"({_RUN_CONNECTION_IDLE_S:g} s after its last call). {_CLOSE_ON_OWNER}"
+        )
 
     def _end_run_here(self, key: str) -> Awaitable[None] | None:
         entry = self._run_connections.get(key)
@@ -1968,7 +1973,8 @@ class MCPServer(ToolSet):
         owners += [task for task in list(self._owners_closing) if not task.done()]
         if any(_elsewhere(task.get_loop(), loop) for task in owners):
             raise RuntimeError(
-                f"MCP server {self._label!r}: close() was called on another event loop; its session {_OTHER_LOOP}"
+                f"MCP server {self._label!r}: close() was called on another event loop than the one that owns its "
+                f"session, which alone can close it. {_CLOSE_ON_OWNER}"
             )
 
     async def _settle_closes(self, loop: asyncio.AbstractEventLoop) -> None:

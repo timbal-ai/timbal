@@ -2172,6 +2172,7 @@ class TestRunEndHooks:
             assert ran == ["next"] and not flush.done()  # the task is that loop's, untouched
             failures = [fields for event, fields in logged if event == "run_end_hook_failed"]
             assert len(failures) == 1 and "another event loop" in failures[0]["error"]
+            assert "asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, that_loop))" in failures[0]["error"]
 
             async def outcome():  # read on its own loop, once let go
                 return await flush
@@ -2180,6 +2181,37 @@ class TestRunEndHooks:
             reading = asyncio.wrap_future(asyncio.run_coroutine_threadsafe(outcome(), owner))
             assert await asyncio.wait_for(reading, 10) == "flushed"
         finally:
+            owner.call_soon_threadsafe(owner.stop)
+            thread.join(10)
+            owner.close()
+
+    async def test_a_hook_hands_work_to_another_loop_the_way_its_error_says(self):
+        """The way the error above gives: the hook hands its work to the other loop and returns
+        ``asyncio.wrap_future`` of it, a future of the loop ending the run, which the end waits for."""
+        import threading
+
+        from timbal.state.context import RunContext
+
+        owner = asyncio.new_event_loop()
+        thread = threading.Thread(target=owner.run_forever)
+        thread.start()
+        try:
+            flushed, release = [], threading.Event()
+
+            async def flush():  # runs on its own loop
+                await asyncio.to_thread(release.wait, 30)
+                flushed.append(asyncio.get_running_loop() is owner)
+
+            context = RunContext()
+            context.on_end(lambda: asyncio.wrap_future(asyncio.run_coroutine_threadsafe(flush(), owner)))
+            hooks = asyncio.ensure_future(context._run_end_hooks())
+            done, _ = await asyncio.wait({hooks}, timeout=0.3)
+            assert not done  # waiting for the flush
+            release.set()
+            await asyncio.wait_for(hooks, 10)
+            assert flushed == [True]
+        finally:
+            release.set()
             owner.call_soon_threadsafe(owner.stop)
             thread.join(10)
             owner.close()

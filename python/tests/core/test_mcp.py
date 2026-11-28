@@ -1399,11 +1399,19 @@ class TestCloseOnAnotherLoop:
             server._tools_cache, server._tools_cache_run_id = ["the list"], "run"
             server._inflight[1] = "a call in flight"
             before = self.state(server)
-            with pytest.raises(RuntimeError, match=self.OWNS):
+            with pytest.raises(RuntimeError, match=self.OWNS) as refused:
                 asyncio.run(asyncio.wait_for(server.close(), 10))
             assert self.state(server) == before
             assert not server._get_lock().locked() and not server._get_tools_lock().locked()
-            asyncio.run_coroutine_threadsafe(server.close(), owner_loop).result(10)
+            # It says how: on a Runner, or handed to a loop running in another thread (blocking, or awaited).
+            assert "runner.run(server.close())" in str(refused.value)
+            assert "asyncio.run_coroutine_threadsafe(server.close(), loop).result()" in str(refused.value)
+            assert "await asyncio.wrap_future(" in str(refused.value)
+
+            async def as_it_says():  # the awaited form, from async code on another loop
+                await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(server.close(), owner_loop))
+
+            asyncio.run(asyncio.wait_for(as_it_says(), 10))
             assert server._session is None and server._owner_task is None and server._tools_cache is None
         finally:
             stop()
@@ -1732,8 +1740,9 @@ class TestCloseOnAnotherLoop:
             async def end_the_run():
                 return service._run_ended("run")
 
-            with pytest.raises(RuntimeError, match=self.OWNS):
+            with pytest.raises(RuntimeError, match=self.OWNS) as refused:
                 asyncio.run(asyncio.wait_for(end_the_run(), 10))
+            assert "closes on its own loop once idle (60 s after its last call)" in str(refused.value)
             assert service._run_connections == {"run": entry} and not entry.ended and entry.close_task is None
             assert not service._close_tasks and closed == []
             assert "run" not in service._run_hooked  # the hook ran, once

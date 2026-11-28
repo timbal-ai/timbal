@@ -268,7 +268,8 @@ async def _awaited(awaitable: Any) -> Any:
             # Not the future itself: its repr can carry what it holds.
             raise RuntimeError(
                 f"an end hook returned a pending {type(awaitable).__name__} of another event loop than the one "
-                "ending the run, which cannot await it: return a coroutine, or a future of the run's own loop"
+                "ending the run, which cannot await it. Return a coroutine or a future of the run's own loop; for "
+                "work on another loop, asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, that_loop))"
             )
     return await awaitable
 
