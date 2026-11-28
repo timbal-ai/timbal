@@ -428,6 +428,16 @@ def _shown_events(root: Any) -> set[str]:
     }
 
 
+def _acted_on(steered: dict[str, Any], dispatched: Any) -> bool:
+    """Whether a dead turn recorded tool calls after it took this steered event (``in_flight.events``): it says
+    how many it had recorded then (``dispatched_before``), and ``dispatched`` is what it recorded in all. A
+    snapshot from before the count was kept does not say: read as it was then (no)."""
+    before = steered.get("dispatched_before")
+    if not isinstance(before, int) or isinstance(before, bool) or not isinstance(dispatched, list):
+        return False
+    return len(dispatched) > before
+
+
 def _was_cut(status: Any) -> bool:
     """A run that ended because it was cancelled from outside (a close, an interrupt), as opposed to one
     that ended by itself, parked on an approval or a question included."""
@@ -3022,14 +3032,19 @@ class ChatSession:
             self._root_at(run_id, in_flight)
             self._parked = False
             # What its stored memory shows it took, by event id (every message built from session events
-            # carries them). A steered one it does not show would be lost with the run: back in the queue.
+            # carries them). A steered one it does not show would be lost with the run: back in the queue,
+            # unless the turn recorded a tool call after taking it. That call came from a model call that read
+            # it and may have run, and queued again the message would run it again: the recovery turn is told
+            # about it instead (no stored run holds it). Its id joins _shown_events, so no copy is queued.
             self._shown_events = _shown_events(root)
-            self._restore_events(
-                [event for event in events if event.get("steered") and event.get("id") not in self._shown_events]
-            )
+            unshown = [event for event in events if event.get("steered") and event.get("id") not in self._shown_events]
+            acted_on = [event for event in unshown if _acted_on(event, dispatched)]
+            self._restore_events([event for event in unshown if event not in acted_on])
+            self._shown_events.update(event.get("id") for event in acted_on)
             # Calls the session recorded and the trace does not show (saved before them) are unconfirmed.
             completed, unconfirmed = _tool_calls(context, calls)
-            notice = _recovery_notice(completed, unconfirmed)
+            asked = [text for text in (event.get("text") for event in acted_on) if text]
+            notice = _recovery_notice(completed, unconfirmed, asked=asked)
         if self.on_dead_turn == "drop":
             return "dropped"
         if self.on_dead_turn == "notify":
@@ -3086,5 +3101,10 @@ class ChatSession:
             or any(taken.get("id") == event.id for taken in flight["events"])
         ):
             return False
-        flight["events"].append({**event.to_dict(), "steered": True})
+        # With how many of the turn's tool calls it had recorded then: a call recorded after it came from a model
+        # call that read it (it is taken at a step boundary, before that step's model call), so a restart that
+        # finds no trace of it does not take it for a message nothing acted on (_acted_on).
+        flight["events"].append(
+            {**event.to_dict(), "steered": True, "dispatched_before": len(flight.get("dispatched") or ())}
+        )
         return True

@@ -2178,12 +2178,58 @@ class TestSteeredMessages:
         provider.crashed = False
         return session, also
 
-    async def test_one_the_stored_run_does_not_show_goes_back_in_the_queue(self, db):
+    async def test_one_the_turn_went_on_to_act_on_is_not_run_again(self, db):
+        """The stored run does not show the steered message (nothing of the run was stored after it), but the
+        turn recorded a tool call after taking it: that call came from a model call that read the message, and
+        may have run. Queued again, the message would run it again. The recovery turn is told about both."""
         provider, store = db
         session, also = await self._steered_then_crashed(provider, store, trace_until_steered=False)
+        second = Gate(released=True)
+        agent = steering_agent(provider, Gate(released=True), second)
+        restored = await ChatSession.from_store(agent, store, session.id)
+        assert restored.state()["pending"] == []
+        notice = restored._wakes[0].text
+        assert 'It was answering: "also".' in notice
+        assert "Started but not confirmed (each may or may not have run): first({}); second({})." in notice
+        started = await records(restored, "turn_started", 1, after=after_restore(restored))
+        await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert [s["trigger"]["kind"] for s in started] == ["recovery"]
+        await until(lambda: not restored.busy)
+        assert restored.state()["pending"] == [] and not restored._wakes
+        assert second.calls == 0
+        await restored.close()
+
+    async def test_one_the_turn_recorded_no_call_after_goes_back_in_the_queue(self, db):
+        """Nothing was recorded after the turn took it (each call is stored before it runs): nothing acted on it."""
+        provider, store = db
+        session, also = await self._steered_then_crashed(provider, store, trace_until_steered=False)
+        stale = await store.load(session.id)
+        # As stored before the turn recorded the call it made for the message (its write never landed).
+        assert [call["name"] for call in stale.in_flight["dispatched"]] == ["first", "second"]
+        assert stale.in_flight["events"][1]["dispatched_before"] == 1  # taken after `first`, before `second`
+        stale.in_flight["dispatched"].pop()
+        await store.save(stale, expect_version=stale.version)
         agent = steering_agent(provider, Gate(released=True), Gate(released=True))
         restored = await ChatSession.from_store(agent, store, session.id)
         assert [p["event_id"] for p in restored.state()["pending"]] == [also.id]
+        started = await records(restored, "turn_started", 2, after=after_restore(restored))
+        await records(restored, "turn_finished", 2, after=after_restore(restored))
+        assert [s["trigger"]["kind"] for s in started] == ["recovery", "user_message"]
+        await restored.close()
+
+    async def test_one_from_a_snapshot_that_does_not_say_when_it_was_taken_goes_back_in_the_queue(self, db):
+        """A snapshot written before steered events kept how many calls the turn had recorded when it took them
+        (``dispatched_before``) cannot tell whether a call followed one: it is read as it was then, queued again."""
+        provider, store = db
+        session, also = await self._steered_then_crashed(provider, store, trace_until_steered=False)
+        stale = await store.load(session.id)
+        for event in stale.in_flight["events"]:
+            event.pop("dispatched_before", None)
+        await store.save(stale, expect_version=stale.version)
+        agent = steering_agent(provider, Gate(released=True), Gate(released=True))
+        restored = await ChatSession.from_store(agent, store, session.id)
+        assert [p["event_id"] for p in restored.state()["pending"]] == [also.id]
+        assert "It was answering" not in restored._wakes[0].text
         started = await records(restored, "turn_started", 2, after=after_restore(restored))
         await records(restored, "turn_finished", 2, after=after_restore(restored))
         assert [s["trigger"]["kind"] for s in started] == ["recovery", "user_message"]

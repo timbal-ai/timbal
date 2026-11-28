@@ -571,6 +571,16 @@ async def steered(c):
     await c.settle()
 
 
+async def steered_into_work(c):
+    """A message steered into a turn that only read so far, asking for a side effect: the turn's next step runs
+    it. With the trace store away, the dead run's stored memory does not show the message, and recovery must
+    not take it for one the turn never acted on."""
+    await c.send("check")
+    if await c.until(lambda: c.calls["lookup"] or c.at_rest()):
+        await c.send("work", mode="steer")
+    await c.settle()
+
+
 async def approved(c):
     await c.send("pay")
     await c.settle()  # parks on the approval, answers it, runs the charge
@@ -695,6 +705,7 @@ SCENARIOS = {
     "two_steps": two_steps,
     "queued": queued,
     "steered": steered,
+    "steered_into_work": steered_into_work,
     "approved": approved,
     "questioned": questioned,
     "woken": woken,
