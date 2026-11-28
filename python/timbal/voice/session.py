@@ -2621,7 +2621,9 @@ class VoiceSession:
 
         A resumable tail is left for :meth:`_begin_user_turn`, which speaks it.
         While audio is playing, or within the backchannel window after it, the
-        ack is dropped. Idle "okay" later is still a turn.
+        ack is dropped. Idle "okay" later is still a turn, and so is one that
+        answers a question the caller has just heard: people say "sí" to "¿Es
+        correcto?" well inside that window.
         """
         if not false_interrupt_followup(text):
             return False
@@ -2631,7 +2633,19 @@ class VoiceSession:
             return True
         if not self._last_assistant_active_at:
             return False
+        if self._assistant_asked():
+            return False
         return time.monotonic() - self._last_assistant_active_at <= _BACKCHANNEL_GRACE_SECS
+
+    def _assistant_asked(self) -> bool:
+        """The assistant's last line is a question the caller has heard to its end.
+
+        The reply is done and its audio has played out. While it is still
+        generating or playing, its text runs ahead of what the caller heard.
+        """
+        if self._assistant_audio_playing or (self._is_speaking and not self._speculative_unconfirmed()):
+            return False
+        return ends_with_question(self._last_assistant_line())
 
     def effective_reply_language(self) -> str | None:
         """Tag the reply instruction uses. ``set_language`` does not move this when ``reply_language`` is set."""
@@ -3900,13 +3914,7 @@ class VoiceSession:
             mic_speech_since_last_commit=self._mic_speech_since_last_commit(),
             partials_since_last_commit=self._partials_since_last_commit,
             holding=holding,
-            # Only a question the caller has heard: the reply is done and its audio has played out. While it
-            # is still generating or playing, its text runs ahead of what the caller heard.
-            assistant_asked=(
-                not assistant_active
-                and not self._assistant_audio_playing
-                and ends_with_question(self._last_assistant_line())
-            ),
+            assistant_asked=self._assistant_asked(),
         )
 
     def _last_assistant_line(self) -> str:

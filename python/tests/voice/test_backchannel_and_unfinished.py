@@ -16,6 +16,7 @@ sees those commits as new turns.
 from __future__ import annotations
 
 import math
+import time
 
 import pytest
 from pydantic import ValidationError
@@ -620,3 +621,46 @@ class TestSessionAssistantAsked:
         assert session._turn_state().assistant_asked is False
         session._is_speaking = False
         assert session._turn_state().assistant_asked is True
+
+    @staticmethod
+    def _asked(question: str, *, ended_secs_ago: float, ignore_backchannels: bool) -> VoiceSession:
+        """A session whose assistant said ``question`` and whose audio stopped playing ``ended_secs_ago``."""
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+        from timbal.voice.session import TranscriptEntry
+
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        session = VoiceSession(
+            agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), ignore_backchannels=ignore_backchannels
+        )
+        session._transcript.append(TranscriptEntry(role="assistant", text=question))
+        session._last_assistant_active_at = time.monotonic() - ended_secs_ago
+        return session
+
+    @pytest.mark.parametrize("ignore_backchannels", [False, True])
+    @pytest.mark.parametrize("answer", ["Sí.", "Vale.", "Yes."])
+    async def test_a_quick_yes_to_a_question_that_just_ended_is_a_turn(
+        self, answer: str, ignore_backchannels: bool
+    ) -> None:
+        """People answer a yes/no question within a second. Dropped, they have to say it again."""
+        session = self._asked(
+            "Uno dos tres; zeta. ¿Es correcto?", ended_secs_ago=0.3, ignore_backchannels=ignore_backchannels
+        )
+        assert session._pure_ack_keeps_the_reply(answer) is False
+        await session._handle_committed(answer)
+        task = session._current_turn_task
+        assert task is not None
+        await task
+        assert [entry.text for entry in session._transcript if entry.role == "user"] == [answer]
+
+    @pytest.mark.parametrize("ignore_backchannels", [False, True])
+    async def test_an_ack_after_a_statement_is_still_not_a_turn(self, ignore_backchannels: bool) -> None:
+        session = self._asked("Ya está guardado.", ended_secs_ago=0.3, ignore_backchannels=ignore_backchannels)
+        await session._handle_committed("Vale.")
+        assert session._current_turn_task is None
+        assert [entry.text for entry in session._transcript if entry.role == "user"] == []
+
+    async def test_an_ack_over_a_question_still_playing_is_not_its_answer(self) -> None:
+        session = self._asked("¿Es correcto?", ended_secs_ago=0.0, ignore_backchannels=True)
+        session._is_speaking = True  # the caller has not heard the question yet
+        assert session._pure_ack_keeps_the_reply("Sí.") is True
