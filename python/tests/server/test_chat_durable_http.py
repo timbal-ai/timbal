@@ -626,6 +626,10 @@ def test_the_store_choice(tmp_path, monkeypatch):
     monkeypatch.setenv("TIMBAL_CHAT_STORE", "postgres://x")
     with pytest.raises(RuntimeError, match="TIMBAL_CHAT_STORE"):
         session_store_for(memory_agent)
+    # A database in memory would be a new, empty one on every call: the store's error, not a crash at startup.
+    monkeypatch.setenv("TIMBAL_CHAT_STORE", "sqlite:///:memory:")
+    with pytest.raises(RuntimeError, match="TIMBAL_CHAT_STORE.*in memory"):
+        session_store_for(sqlite_agent)
 
 
 def test_a_session_with_a_collected_message_is_not_reaped(client, monkeypatch):

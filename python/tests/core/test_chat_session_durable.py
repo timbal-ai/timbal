@@ -4216,6 +4216,144 @@ class TestAStoreThatHangs:
         assert (await store.load("s1")).session_id == "s1"  # started again by the next call
         assert await store.list_ids() == ["s1"]
 
+    async def test_a_call_through_a_moved_link_queues_with_the_file_it_names_now(self, tmp_path):
+        """A store's calls run in the order they were made, on the thread of the file its path names when the
+        call is made. A link moved from one file to another sends the next call to the new file's queue, behind
+        or ahead of that file's other calls as they were made, never to the old file's (busy) thread."""
+        import os
+        import threading
+
+        first_dir, second_dir, link = tmp_path / "first", tmp_path / "second", tmp_path / "link"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        try:
+            os.symlink(first_dir, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("no symbolic links here (Windows without the privilege)")
+        through_link = SqliteChatSessionStore(link / "s.db")
+        first, second = SqliteChatSessionStore(first_dir / "s.db"), SqliteChatSessionStore(second_dir / "s.db")
+        await through_link.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)  # the first file
+        assert await second.load("s1") is None  # the second file, opened
+        link.unlink()
+        os.symlink(second_dir, link, target_is_directory=True)
+        stuck, release = threading.Event(), threading.Event()
+        held = asyncio.ensure_future(first._run(lambda _conn: (stuck.set(), release.wait(30))))
+        try:
+            await asyncio.wait_for(asyncio.to_thread(stuck.wait, 30), 30)  # the first file's thread is busy
+            # Made in this order: tasks start in the order they were created, and each queues its call before
+            # its first await.
+            saved = asyncio.ensure_future(
+                through_link.save(SessionSnapshot(session_id="s2", agent="agent"), expect_version=None)
+            )
+            loaded = asyncio.ensure_future(second.load("s2"))
+            snapshot = await asyncio.wait_for(loaded, 30)
+            assert snapshot is not None and snapshot.session_id == "s2"  # the save went first, in the same queue
+            assert await asyncio.wait_for(saved, 30) == 1
+        finally:
+            release.set()
+        await asyncio.wait_for(held, 30)
+        assert await first.load("s2") is None  # and not into the file the link named before
+
+    async def test_a_call_through_a_link_that_followed_a_renamed_directory_queues_with_the_file(self, tmp_path):
+        """The directory is renamed with the database in it (the same file, the same inode) and the link moved
+        to follow it, while a call made by the old path before the rename is still running: the link and the new
+        path resolve to one key, so their calls share its queue, in the order they were made."""
+        import os
+        import threading
+
+        from timbal.state import chat_store
+
+        old_dir, new_dir, link = tmp_path / "old", tmp_path / "new", tmp_path / "link"
+        old_dir.mkdir()
+        try:
+            os.symlink(old_dir, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("no symbolic links here (Windows without the privilege)")
+        through_link = SqliteChatSessionStore(link / "sessions.db")
+        await through_link.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
+        stuck, release = threading.Event(), threading.Event()
+        held = asyncio.ensure_future(
+            SqliteChatSessionStore(old_dir / "sessions.db")._run(lambda _conn: (stuck.set(), release.wait(30)))
+        )
+        try:
+            await asyncio.wait_for(asyncio.to_thread(stuck.wait, 30), 30)  # the file's thread is busy
+            try:
+                os.rename(old_dir, new_dir)
+                renamed = True
+            except OSError:
+                renamed = False  # Windows: a directory with an open file in it is not renamed
+            if renamed:
+                link.unlink()
+                os.symlink(new_dir, link, target_is_directory=True)
+                assert chat_store._store_thread(link / "sessions.db") is chat_store._store_thread(
+                    new_dir / "sessions.db"
+                )
+                saved = asyncio.ensure_future(
+                    through_link.save(SessionSnapshot(session_id="s2", agent="agent"), expect_version=None)
+                )
+                loaded = asyncio.ensure_future(SqliteChatSessionStore(new_dir / "sessions.db").load("s2"))
+        finally:
+            release.set()
+        await asyncio.wait_for(held, 30)  # nothing left running, also when this test is skipped
+        if not renamed:
+            pytest.skip("an open database's directory cannot be renamed here")
+        assert await asyncio.wait_for(saved, 30) == 1
+        snapshot = await asyncio.wait_for(loaded, 30)
+        assert snapshot is not None and snapshot.session_id == "s2"  # the save went first, in the same queue
+
+    async def test_a_new_file_at_a_renamed_files_old_path_gets_a_queue_of_its_own(self, tmp_path):
+        """A directory renamed with its database, and a new database made at the old path: two files, so two
+        queues. A hang or a burst of work on one holds up nothing of the other."""
+        import os
+
+        from timbal.state import chat_store
+
+        old_dir, new_dir = tmp_path / "old", tmp_path / "new"
+        old_dir.mkdir()
+        await SqliteChatSessionStore(old_dir / "s.db").save(
+            SessionSnapshot(session_id="s1", agent="agent"), expect_version=None
+        )
+        try:
+            os.rename(old_dir, new_dir)
+        except OSError:
+            pytest.skip("an open database's directory cannot be renamed here")
+        old_dir.mkdir()
+        await SqliteChatSessionStore(old_dir / "s.db").save(
+            SessionSnapshot(session_id="s9", agent="agent"), expect_version=None
+        )
+        assert chat_store._store_thread(new_dir / "s.db") is not chat_store._store_thread(old_dir / "s.db")
+        assert await SqliteChatSessionStore(new_dir / "s.db").load("s9") is None  # and two files, as they were
+        assert (await SqliteChatSessionStore(new_dir / "s.db").load("s1")).session_id == "s1"
+
+    async def test_a_store_call_does_not_wait_for_another_files_open(self, tmp_path):
+        """The registry of open databases has one lock for every file. A thread opening another one may hold
+        it (a slow file system): a call to a store whose file is open waits for nothing of that, on the event
+        loop or on its own thread."""
+        import threading
+
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        store = SqliteChatSessionStore(tmp_path / "open.db")
+        await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
+        holding, release, outcome = threading.Event(), threading.Event(), {}
+
+        def opens_another():
+            with sqlite_module._DATABASES_LOCK:
+                holding.set()
+                outcome["released_in_time"] = release.wait(10)
+
+        holder = threading.Thread(target=opens_another, daemon=True)
+        holder.start()
+        try:
+            assert holding.wait(30)
+            # Blocked on the lock, the event loop could not run this test on until the holder gives up.
+            loaded = await store.load("s1")
+        finally:
+            release.set()
+            holder.join(30)
+        assert loaded is not None and loaded.session_id == "s1"
+        assert outcome["released_in_time"]  # released by this test once the load was done, not by the timeout
+
     @pytest.mark.parametrize("ended_by", ["an error", "a cancellation"])
     async def test_a_restore_that_fails_does_not_wait_past_its_lease_to_let_it_go(self, db, ended_by):
         """It lets go of the lease it took, through the store. One that does not answer is waited for only

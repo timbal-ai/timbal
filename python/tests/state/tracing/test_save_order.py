@@ -1171,6 +1171,33 @@ class TestEachLoopKeepsItsOwnOrder:
         await asyncio.wait_for(held, DEADLINE)
         assert stored_t1(lower, context.id, "r") == 5
 
+    @pytest.mark.parametrize(
+        "first_name", ["traces.db", "missing/../traces.db"], ids=["plain-first", "through-missing-first"]
+    )
+    async def test_one_sqlite_file_through_a_missing_directory_keeps_one_order(self, tmp_path, monkeypatch, first_name):
+        """SQLite opens ``missing/../traces.db`` as ``traces.db`` (it drops ``missing/..`` from the name), while a
+        stat of that name fails (``missing`` is not there). Through either name first, the two are one connection
+        and one order: a save through one is held before it commits, the end is committed through the other, then
+        the held write finds a newer one stored and leaves it."""
+        monkeypatch.chdir(tmp_path)
+        other_name = "missing/../traces.db" if first_name == "traces.db" else "traces.db"
+        first = SqliteTracingProvider.configured(_path=first_name)
+        second = SqliteTracingProvider.configured(_path=other_name)
+        db = sqlite_module.database(first_name)
+        assert sqlite_module.database(other_name) is db
+        lock = HeldLock(db, monkeypatch)
+        lock.armed = True
+        context = self.context(first)
+        held = asyncio.create_task(first.put(context))
+        try:
+            assert await asyncio.to_thread(lock.parked.wait, DEADLINE)
+            context._trace["r"].t1 = 5
+            await asyncio.wait_for(second.put(context), DEADLINE)
+        finally:
+            lock.go.set()
+        await asyncio.wait_for(held, DEADLINE)
+        assert stored_t1(tmp_path / "traces.db", context.id, "r") == 5
+
 
 class TestCollectionsForksAndKeptLoops:
     """What runs a save's cleanup, or holds its locks, from outside: a collection, a fork, a loop kept but stopped."""

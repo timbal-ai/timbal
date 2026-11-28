@@ -734,6 +734,179 @@ class TestPerSpanStorage:
         assert mine is not stored and mine.alive() and not stored.alive()
         assert sqlite_module.database(path) is mine  # and it is the one everybody gets from now on
 
+    def test_two_threads_opening_one_file_look_at_it_outside_the_registrys_lock(self, tmp_path, monkeypatch):
+        """Every file's callers take the registry's lock, the event loop's too. The thread that finds another
+        one's connection stored meanwhile checks it (a stat) and closes its own without holding that lock: a
+        slow file system holds up only that file's callers."""
+        import threading
+
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        class Lock:
+            """The registry's lock, saying which thread holds it."""
+
+            def __init__(self):
+                self.lock, self.owner = threading.Lock(), None
+
+            def __enter__(self):
+                self.lock.acquire()
+                self.owner = threading.get_ident()
+
+            def __exit__(self, *exc):
+                self.owner = None
+                self.lock.release()
+
+        registry = Lock()
+        monkeypatch.setattr(sqlite_module, "_DATABASES_LOCK", registry)
+        real_file_at, under_lock = sqlite_module._file_at, []
+
+        def file_at(path):
+            under_lock.append(registry.owner == threading.get_ident())
+            return real_file_at(path)
+
+        monkeypatch.setattr(sqlite_module, "_file_at", file_at)
+        path = tmp_path / "opened-twice.db"
+        entered, go = threading.Event(), threading.Event()
+        real, calls = sqlite3.connect, []
+
+        def connect(target, *args, **kwargs):
+            calls.append(target)
+            if len(calls) == 1:  # the first thread's open: held until the other one stored its connection
+                entered.set()
+                go.wait(30)
+            return real(target, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite_module.sqlite3, "connect", connect)
+        got = []
+        slow = threading.Thread(target=lambda: got.append(sqlite_module.database(path)), daemon=True)
+        slow.start()
+        assert entered.wait(30)
+        stored = sqlite_module.database(path)
+        go.set()
+        slow.join(30)
+        assert got == [stored]  # one connection per file: the one stored first
+        assert under_lock and not any(under_lock)
+
+    def test_a_path_is_resolved_once_while_it_names_the_same_file(self, tmp_path, monkeypatch):
+        """Every store and trace call asks for its database. Resolving the path reads the file system each time
+        (on Windows it opens the file, ~250 us): it is resolved once per spelling, and every call still checks
+        that the spelling names the connection's file."""
+        from pathlib import Path
+
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        real, resolves = Path.resolve, []
+
+        def resolve(self, *args, **kwargs):
+            resolves.append(str(self))
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve)
+        path = tmp_path / "once.db"
+        first = sqlite_module.database(path)
+        for _ in range(20):
+            assert sqlite_module.database(path) is first
+            assert sqlite_module.database(str(path)) is first  # the same spelling as a str
+        assert resolves == [str(path)]
+
+    def test_a_relative_path_follows_the_working_directory(self, tmp_path, monkeypatch):
+        """A relative path names another file once the working directory changes: the connection and the session
+        store's thread are that file's from the next call on, as when the path was resolved on every call."""
+        from pathlib import Path
+
+        from timbal.state import chat_store
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        here, there = tmp_path / "here", tmp_path / "there"
+        here.mkdir()
+        there.mkdir()
+        monkeypatch.chdir(here)
+        mine = sqlite_module.database("follows-the-cwd.db")
+        assert mine.names(here / "follows-the-cwd.db")
+        assert chat_store._store_thread(Path("follows-the-cwd.db")) is chat_store._store_thread(
+            here / "follows-the-cwd.db"
+        )
+        monkeypatch.chdir(there)
+        # The thread first, before any database() call: it is chosen when a store call is made, by the path's key.
+        assert chat_store._store_thread(Path("follows-the-cwd.db")) is chat_store._store_thread(
+            there / "follows-the-cwd.db"
+        )
+        theirs = sqlite_module.database("follows-the-cwd.db")
+        assert theirs is not mine and theirs.names(there / "follows-the-cwd.db")
+        assert sqlite_module.database(here / "follows-the-cwd.db") is mine  # still the other file's
+
+    def test_a_path_with_a_trailing_slash_keeps_its_connection(self, tmp_path):
+        """SQLite opens ``Path(path)``, which drops a trailing slash; a stat of the path as given fails on it.
+        The file is checked by the name it was opened by, so the one connection is kept."""
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        path = tmp_path / "slash.db"
+        first = sqlite_module.database(f"{path}/")
+        assert sqlite_module.database(f"{path}/") is first
+        assert sqlite_module.database(path) is first
+
+    @pytest.mark.parametrize(
+        "name",
+        [":memory:", "file::memory:", "file::memory:?cache=shared", "file:sessions?mode=memory&cache=shared"],
+        ids=["memory", "uri-memory", "uri-memory-shared", "uri-mode-memory"],
+    )
+    def test_a_database_in_memory_is_refused(self, tmp_path, monkeypatch, name):
+        """One connection per file, checked against the file on every call: a database in memory has no file, so
+        every call would open a new, empty one and lose what was written. Refused where it is configured (a store,
+        a provider) and where it would be opened, before anything reaches SQLite or the disk."""
+        from timbal.state.chat_store import SqliteChatSessionStore
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        monkeypatch.chdir(tmp_path)
+        opened = []
+        monkeypatch.setattr(sqlite_module.sqlite3, "connect", lambda *args, **_: opened.append(args))
+        with pytest.raises(ValueError, match="InMemoryChatSessionStore"):
+            SqliteChatSessionStore(name)
+        with pytest.raises(ValueError, match="InMemoryTracingProvider"):
+            SqliteTracingProvider.configured(_path=name)
+        with pytest.raises(ValueError, match="in memory"):
+            sqlite_module.database(name)
+        assert opened == [] and list(tmp_path.iterdir()) == []
+
+    def test_a_file_uri_reaches_sqlite_as_given(self, monkeypatch):
+        """SQLite reads a ``file:`` name as a URI on a build that reads URIs. Resolved, it would be an ordinary
+        file of that name in the working directory, so it is opened exactly as given, as it always was."""
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        opened = []
+
+        def connect(target, *_args, **_kwargs):
+            opened.append(target)
+            raise sqlite3.OperationalError("not opened in this test")
+
+        monkeypatch.setattr(sqlite_module.sqlite3, "connect", connect)
+        with pytest.raises(sqlite3.OperationalError, match="not opened in this test"):
+            sqlite_module.database("file:reaches-sqlite-as-given.db?mode=rwc")
+        assert opened == ["file:reaches-sqlite-as-given.db?mode=rwc"]
+
+    def test_a_path_through_a_moved_link_reaches_the_file_it_names_now(self, tmp_path):
+        import os
+
+        from timbal.state import chat_store
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        first_dir, second_dir, link = tmp_path / "first", tmp_path / "second", tmp_path / "link"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        try:
+            os.symlink(first_dir, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("no symbolic links here (Windows without the privilege)")
+        first = sqlite_module.database(link / "t.db")
+        assert sqlite_module.database(first_dir / "t.db") is first  # one connection, whatever the spelling
+        link.unlink()
+        os.symlink(second_dir, link, target_is_directory=True)
+        second = sqlite_module.database(link / "t.db")
+        assert second is not first and second.names(second_dir / "t.db")
+        assert sqlite_module.database(second_dir / "t.db") is second
+        assert sqlite_module.database(first_dir / "t.db") is first
+        assert chat_store._store_thread(link / "t.db") is chat_store._store_thread(second_dir / "t.db")
+
     async def test_a_failed_save_leaves_its_spans_to_the_next_and_the_connection_clean(self, tmp_path):
         from timbal.state import get_run_context, set_run_context
 
