@@ -67,6 +67,122 @@ class _SpeechThatEnded:
         return self.secs if _session_now() - window_secs <= self.ended_at else 0.0
 
 
+def _quiet_secs(session, grace_secs: float) -> float:
+    """The least real time from the goodbye's playback ending to the hangup, with a ``grace_secs`` window.
+
+    The playback tail is an asyncio sleep, which can end up to one clock resolution early (15.6 ms on Windows before
+    Python 3.13), and the test measures with that same clock. The window is timed on the session's clock, which in
+    the coarse run reads up to one tick early, so the window can close that much sooner in real time. A stall only
+    adds to both.
+    """
+    resolution = time.get_clock_info("monotonic").resolution
+    return session.END_CALL_TAIL_SECS + grace_secs - COARSE_TICK - 2 * resolution
+
+
+def _turn_over(session) -> bool:
+    """Nothing of the agent's turn is still running, so only playback or the caller can be holding the line."""
+    turn = session._current_turn_task
+    return (turn is None or turn.done()) and not session._is_speaking and not session._tts_tasks
+
+
+class _Hangup:
+    """The session's hangup task, as decisions a test can wait for instead of sleeping.
+
+    Checking that the call stays up used to mean sleeping past the moment a broken session would have hung up. That
+    was most of this file's run time, and a guess that a stalled runner can get wrong. ``last_hold`` is when (real
+    clock) the task last found the line busy after the agent's turn was over, which keeps the call up for another
+    poll. ``window_opened`` is the open confirmation window's own start, the ``since`` it checks the caller's speech
+    against, on the session's clock. ``heard_in_window`` is set when a window ended on the caller speaking: a check
+    after the window can catch the same speech, so a test of the window itself asserts this. ``closing_at`` is when
+    (real clock) ``close()`` was first called, before any of its cleanup.
+    """
+
+    def __init__(self, session) -> None:
+        self.session = session
+        self.last_hold: float | None = None
+        self.window_opened: float | None = None
+        self.heard_in_window = False
+        self.closing_at: float | None = None
+        self._in_window = False
+        busy, grace, speech, close = (
+            session._end_call_busy,
+            session._end_call_grace,
+            session._hangup_grace_speech,
+            session.close,
+        )
+
+        def _busy(commit_at: float) -> bool:
+            held = busy(commit_at)
+            if held and _turn_over(session):
+                self.last_hold = time.monotonic()
+            return held
+
+        def _speech(commit_at: float, *, since: float) -> bool:
+            # Only the window calls this, first before it awaits, so the start is known as soon as the window is open.
+            if self._in_window and self.window_opened is None:
+                self.window_opened = since
+            return speech(commit_at, since=since)
+
+        async def _grace(commit_at: float) -> bool:
+            self._in_window = True
+            try:
+                heard = await grace(commit_at)
+            finally:
+                self._in_window = False
+                self.window_opened = None
+            self.heard_in_window = self.heard_in_window or heard
+            return heard
+
+        async def _close() -> None:
+            if self.closing_at is None:
+                self.closing_at = time.monotonic()
+            await close()
+
+        session._end_call_busy = _busy
+        session._end_call_grace = _grace
+        session._hangup_grace_speech = _speech
+        session.close = _close
+
+    async def held(self, message: str, for_secs: float = 0.3) -> None:
+        """The task still finds the line busy ``for_secs`` from now, so whatever holds it lasted that long.
+
+        A hold that lapses sooner fails: the session hangs up, or its task ends. 0.3 s is more than the sleeps this
+        replaced proved (tail + 0.3 s from the goodbye catches a hold that lapses within about 0.2 s). The task's own
+        cap, ``END_CALL_MAX_WAIT_SECS`` (20 s), is far beyond these waits.
+        """
+        session, since = self.session, time.monotonic()
+        await _until(
+            lambda: (
+                session.closed
+                or session._end_call_task is None
+                or (self.last_hold is not None and self.last_hold - since >= for_secs)
+            )
+        )
+        assert not session.closed, message
+        assert session._end_call_task is not None, "the hangup task ended while the line was meant to be held"
+
+    async def inside_the_window(self) -> None:
+        """The confirmation window is open, and the session's clock has moved past its start.
+
+        A caller event from now on is inside the window, even on the coarse clock, where one in the window's own tick
+        reads as no later than its start.
+        """
+        await _until(
+            lambda: self.session.closed or (self.window_opened is not None and _session_now() > self.window_opened)
+        )
+        assert not self.session.closed, "hung up before the test saw the confirmation window open"
+
+    def closed_after(self, start: float) -> float:
+        """Real seconds from ``start`` to the moment ``close()`` was called."""
+        assert self.closing_at is not None, "close() was never called"
+        return self.closing_at - start
+
+    async def dropped(self) -> None:
+        """The task ended without hanging up, so nothing is left that could."""
+        await _until(lambda: self.session._end_call_task is None)
+        assert not self.session.closed
+
+
 async def end_call() -> str:
     session = current_voice_session()
     assert session is not None
@@ -107,14 +223,14 @@ class TestEndCall:
     async def test_hangs_up_once_the_goodbye_has_played(self) -> None:
         tracker = FakePlaybackTracker()
         session, stt, _tts = _session(_hangs_up_with(GOODBYE), tools=[end_call], tracker=tracker)
+        hangup = _Hangup(session)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
 
         tracker.playing = True
         await stt.inject(TranscriptEvent(type="committed", text="Vale, vamos a terminar."))
         await _until(lambda: GOODBYE in _texts(events))
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.3)
-        assert not session.closed, "hung up over its own goodbye"
+        await hangup.held("hung up over its own goodbye")
 
         tracker.playing = False
         await asyncio.wait_for(call, timeout=3.0)
@@ -123,6 +239,7 @@ class TestEndCall:
     async def test_the_caller_speaking_again_keeps_the_call_up(self) -> None:
         tracker = FakePlaybackTracker()
         session, stt, _tts = _session(_hangs_up_with(GOODBYE, "Dime."), tools=[end_call], tracker=tracker)
+        hangup = _Hangup(session)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
 
@@ -132,9 +249,8 @@ class TestEndCall:
         await stt.inject(TranscriptEvent(type="committed", text="Espera, una cosa más."))
         await _until(lambda: "Dime." in _texts(events))
         tracker.playing = False
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.5)
+        await hangup.dropped()
 
-        assert not session.closed
         await stt.finish()
         await asyncio.wait_for(call, timeout=3.0)
 
@@ -158,6 +274,7 @@ class TestEndCall:
 
         tracker = FlushingTracker()
         session, stt, _tts = _session(_hangs_up_with(GOODBYE, "Dime."), tools=[end_call], tracker=tracker)
+        hangup = _Hangup(session)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
 
@@ -167,19 +284,18 @@ class TestEndCall:
         # Partial barge-in interrupts immediately and flushes playback before the commit lands.
         await stt.inject(TranscriptEvent(type="partial", text="Espera, una cosa"))
         await _until(lambda: not tracker.playing)
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.3)
-        assert not session.closed, "hung up while caller was mid-utterance after barge-in"
+        await hangup.held("hung up while caller was mid-utterance after barge-in")
 
         await stt.inject(TranscriptEvent(type="committed", text="Espera, una cosa más."))
         await _until(lambda: "Dime." in _texts(events))
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.3)
-        assert not session.closed
+        await hangup.dropped()
         await stt.finish()
         await asyncio.wait_for(call, timeout=3.0)
 
     async def test_local_vad_speech_holds_hangup(self) -> None:
         tracker = FakePlaybackTracker()
         session, stt, _tts = _session(_hangs_up_with(GOODBYE), tools=[end_call], tracker=tracker)
+        hangup = _Hangup(session)
         endpointer = _FakeEndpointer(speech_secs=0.4)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
@@ -187,8 +303,7 @@ class TestEndCall:
 
         await stt.inject(TranscriptEvent(type="committed", text="Vale, vamos a terminar."))
         await _until(lambda: GOODBYE in _texts(events))
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.3)
-        assert not session.closed, "hung up while local VAD heard caller speech"
+        await hangup.held("hung up while local VAD heard caller speech")
 
         endpointer.speech_secs = 0.0
         await asyncio.wait_for(call, timeout=3.0)
@@ -214,6 +329,7 @@ class TestEndCall:
             tracker=tracker,
         )
         session.turn_detector = GatedDetector()
+        hangup = _Hangup(session)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
 
@@ -225,15 +341,17 @@ class TestEndCall:
         await asyncio.wait_for(entered.wait(), timeout=2.0)
         tracker.playing = False
 
-        # Even past the quiet window + hang-up tail, an in-flight detector decision blocks hang-up.
-        await asyncio.sleep(session.EVENT_TURN_QUIET_SECS + session.END_CALL_TAIL_SECS + 0.3)
-        assert not session.closed, "hung up while committed utterance was awaiting turn_detector.on_committed"
+        # With the goodbye played out, an in-flight detector decision still blocks hang-up, past the event-turn quiet
+        # window too: a hold that lapses with it fails.
+        await hangup.held(
+            "hung up while committed utterance was awaiting turn_detector.on_committed",
+            for_secs=session.EVENT_TURN_QUIET_SECS + 0.3,
+        )
 
         # Accepted speech cancels the hang-up.
         release.set()
         await _until(lambda: "Dime." in _texts(events))
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.3)
-        assert not session.closed
+        await hangup.dropped()
 
         # Now request end_call again, and send an utterance that the detector ignores as noise.
         entered.clear()
@@ -242,8 +360,7 @@ class TestEndCall:
         await stt.inject(TranscriptEvent(type="partial", text="noise"))
         await stt.inject(TranscriptEvent(type="committed", text="noise"))
         await asyncio.wait_for(entered.wait(), timeout=2.0)
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.3)
-        assert not session.closed, "hung up before detector finished evaluating noise"
+        await hangup.held("hung up before detector finished evaluating noise")
 
         release.set()
         await asyncio.wait_for(call, timeout=3.0)
@@ -324,6 +441,7 @@ class TestEndCall:
             tracker=tracker,
             hangup_grace_secs=grace,
         )
+        hangup = _Hangup(session)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
 
@@ -331,11 +449,10 @@ class TestEndCall:
         await stt.inject(TranscriptEvent(type="committed", text="Vale, vamos a terminar."))
         await _until(lambda: GOODBYE in _texts(events))
         tracker.playing = False
-        # Past the playback tail, still inside the confirmation window.
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.15)
-        assert not session.closed, "hung up before hangup_grace_secs elapsed"
+        heard = time.monotonic()
         await asyncio.wait_for(call, timeout=3.0)
         assert session.closed
+        assert hangup.closed_after(heard) >= _quiet_secs(session, grace), "hung up before hangup_grace_secs elapsed"
 
     async def test_commit_during_grace_cancels_hangup(self) -> None:
         tracker = FakePlaybackTracker()
@@ -345,6 +462,7 @@ class TestEndCall:
             tracker=tracker,
             hangup_grace_secs=1.0,
         )
+        hangup = _Hangup(session)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
 
@@ -352,12 +470,11 @@ class TestEndCall:
         await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
         await _until(lambda: GOODBYE in _texts(events))
         tracker.playing = False
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.2)
-        assert not session.closed, "closed before the retraction could land"
+        await hangup.inside_the_window()
         await stt.inject(TranscriptEvent(type="committed", text="espera"))
         await _until(lambda: "Dime." in _texts(events))
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.4)
-        assert not session.closed
+        await hangup.dropped()
+        assert hangup.heard_in_window
         await stt.finish()
         await asyncio.wait_for(call, timeout=3.0)
 
@@ -369,6 +486,7 @@ class TestEndCall:
             tracker=tracker,
             hangup_grace_secs=1.2,
         )
+        hangup = _Hangup(session)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
 
@@ -376,12 +494,11 @@ class TestEndCall:
         await stt.inject(TranscriptEvent(type="committed", text="Goodbye."))
         await _until(lambda: GOODBYE in _texts(events))
         tracker.playing = False
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.35)
-        assert not session.closed
+        await hangup.inside_the_window()
         # Not a configured retraction word — any non-echo speech cancels.
         await stt.inject(TranscriptEvent(type="partial", text="hold on"))
-        await _until(lambda: session._end_call_task is None)
-        assert not session.closed
+        await hangup.dropped()
+        assert hangup.heard_in_window
         await stt.finish()
         await asyncio.wait_for(call, timeout=3.0)
 
@@ -391,8 +508,10 @@ class TestEndCall:
             _hangs_up_with(GOODBYE),
             tools=[end_call],
             tracker=tracker,
-            hangup_grace_secs=0.4,
+            # Long enough that a stalled runner still finds it open.
+            hangup_grace_secs=1.0,
         )
+        hangup = _Hangup(session)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
 
@@ -400,10 +519,11 @@ class TestEndCall:
         await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
         await _until(lambda: GOODBYE in _texts(events))
         tracker.playing = False
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.1)
+        await hangup.inside_the_window()
         await stt.inject(TranscriptEvent(type="partial", text="hasta luego"))
         await asyncio.wait_for(call, timeout=3.0)
         assert session.closed
+        assert not hangup.heard_in_window, "the goodbye's echo counted as the caller"
 
     async def test_vad_speech_during_grace_cancels_even_after_it_stops(self) -> None:
         tracker = FakePlaybackTracker()
@@ -413,6 +533,7 @@ class TestEndCall:
             tracker=tracker,
             hangup_grace_secs=1.2,
         )
+        hangup = _Hangup(session)
         endpointer = _FakeEndpointer(speech_secs=0.0)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
@@ -422,14 +543,12 @@ class TestEndCall:
         await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
         await _until(lambda: GOODBYE in _texts(events))
         tracker.playing = False
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.35)
-        assert not session.closed
+        await hangup.inside_the_window()
         endpointer.speech_secs = 0.4
-        await _until(lambda: session._end_call_task is None)
-        assert not session.closed
+        # The hangup task ends on the speech, so the caller going quiet again cannot bring the hangup back.
+        await hangup.dropped()
+        assert hangup.heard_in_window
         endpointer.speech_secs = 0.0
-        await asyncio.sleep(0.3)
-        assert not session.closed
         await stt.finish()
         await asyncio.wait_for(call, timeout=3.0)
 
@@ -451,6 +570,7 @@ class TestEndCall:
         )
         session, stt, _tts = _session(model, tools=[end_call_later], tracker=tracker)
         assert session.hangup_grace_secs == 0
+        hangup = _Hangup(session)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
 
@@ -458,10 +578,10 @@ class TestEndCall:
         await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
         await _until(lambda: GOODBYE in _texts(events))
         tracker.playing = False
-        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.25)
-        assert not session.closed
+        heard = time.monotonic()
         await asyncio.wait_for(call, timeout=3.0)
         assert session.closed
+        assert hangup.closed_after(heard) >= _quiet_secs(session, 0.8), "the tool's grace_secs did not apply"
 
     async def test_tool_can_hang_up_immediately_when_the_session_waits(self) -> None:
         async def end_call_now() -> str:
@@ -608,11 +728,18 @@ class TestEndCall:
 class TestCommitHangup:
     async def test_caller_speech_skips_the_tool_side_effect(self) -> None:
         committed: list[bool] = []
+        waiting = asyncio.Event()
+        finished = asyncio.Event()
 
         async def end_call() -> str:
             session = current_voice_session()
             assert session is not None
-            ok = await session.commit_hangup()
+            # Set just before commit_hangup runs to its first wait: the test wakes once it waits.
+            waiting.set()
+            try:
+                ok = await session.commit_hangup()
+            finally:
+                finished.set()
             committed.append(ok)
             return "ended" if ok else "cancelled"
 
@@ -628,13 +755,15 @@ class TestCommitHangup:
 
         tracker.playing = True
         await stt.inject(TranscriptEvent(type="committed", text="Cuelga la llamada."))
-        await asyncio.sleep(0.15)
+        await asyncio.wait_for(waiting.wait(), timeout=2.0)
+        # The goodbye is still playing, so commit_hangup is still waiting: a False now would owe nothing to the caller.
+        assert not finished.is_set(), "commit_hangup returned before the caller spoke again"
         # A new commit interrupts the turn that is still inside commit_hangup.
         # The handler must not reach the hangup, either because the wait
         # returns false or because the interruption cancels it first.
         await stt.inject(TranscriptEvent(type="committed", text="No, espera, todavía necesito ayuda."))
         tracker.playing = False
-        await asyncio.sleep(0.4)
+        await asyncio.wait_for(finished.wait(), timeout=3.0)
         assert committed == [] or committed == [False]
         assert session._end_call_task is None
         assert not session.closed
