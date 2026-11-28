@@ -247,7 +247,9 @@ For long-running processes (servers, bots), create the `MCPServer` once and reus
 
 Each connection is owned by a dedicated task, so `close()` can be called from any task of the event loop that opened it, and in any order across servers. From another event loop it raises `RuntimeError` without touching the connection, because only the loop that owns it can close it. Call `close()` there instead:
 
-```python
+```python fragment
+import asyncio
+
 # The server was used on a loop running in another thread:
 asyncio.run_coroutine_threadsafe(server.close(), loop).result()
 # ...the same from async code:
