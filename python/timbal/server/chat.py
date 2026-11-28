@@ -394,7 +394,36 @@ async def _apply_queued(session: ChatSession) -> bool:
             "accepted: retry.",
             headers=_RETRY,
         ) from e
-    return True
+    # Let go meanwhile (another request found the lease gone, idle reaping): this copy takes nothing more.
+    return not session.handed_off
+
+
+class _LetGo(Exception):
+    """The copy a route was using was let go (another process took the session, or it was closed and kept for the
+    next one) before the request was stored here: nothing of it is (a copy let go writes nothing more), so the
+    route queues it for whoever serves the session now."""
+
+
+async def _stored_here(request: Request, session: ChatSession, mark: int, undo: Any) -> None:
+    """:func:`_stored` for a request the route took itself. :class:`_LetGo` when the copy was let go before the
+    request was stored, with a store that has an inbox (without one, the ``409`` as before). Stored before it was
+    let go, it stands; a write that may hold it still out is a ``503`` that says not to resend."""
+    try:
+        await _stored(session, mark, undo)
+    except HTTPException as e:
+        if e.status_code != 409 or not session.handed_off or not _has_inbox(request):
+            raise
+        if session.stored_since(mark):
+            return  # whoever restores the session has it
+        if session.may_be_stored(mark):
+            raise HTTPException(
+                status_code=503,
+                detail=f"Chat session {session.id!r} moved to another process while this was stored: it may have "
+                "been stored. Do not resend.",
+            ) from e
+        if undo is not None:
+            undo()
+        raise _LetGo from e
 
 
 def _app_sessions(app: Any) -> dict[str, ChatSession]:
@@ -902,13 +931,20 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
         # What other workers queued comes first; and a copy that finds its lease gone has let the session go: the
         # request is queued for the process that holds it now.
         session, held = None, _HeldElsewhere(session_id)
-    if session is None or key is not None:
-        if mode is not None and mode not in SEND_MODES:
-            # What send() refuses there, refused here: the worker that applies it can tell nobody.
-            raise HTTPException(status_code=400, detail=f"mode must be one of {list(SEND_MODES)}, got {mode!r}")
-        if not text.strip():
-            raise HTTPException(status_code=400, detail="A session event needs non-empty text.")  # (as send())
-        return await _queue(request, session_id, held, "message", {"text": text, "mode": mode}, key=key)
+    if session is not None and key is None:
+        try:
+            return await _send_here(request, session, text, mode)
+        except _LetGo:
+            held = _HeldElsewhere(session_id)  # let go meanwhile: queued for whoever serves it now
+    if mode is not None and mode not in SEND_MODES:
+        # What send() refuses there, refused here: the worker that applies it can tell nobody.
+        raise HTTPException(status_code=400, detail=f"mode must be one of {list(SEND_MODES)}, got {mode!r}")
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="A session event needs non-empty text.")  # (as send())
+    return await _queue(request, session_id, held, "message", {"text": text, "mode": mode}, key=key)
+
+
+async def _send_here(request: Request, session: ChatSession, text: str, mode: Any) -> JSONResponse:
     busy = session.busy
     try:
         # The message is only queued here: 'now' and 'interrupt' cut the running turn once it is stored, so a
@@ -917,9 +953,11 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
+        if session.handed_off and _has_inbox(request):
+            raise _LetGo from e  # closed and kept since the route found it: nothing was posted
         raise HTTPException(status_code=409, detail=str(e)) from e
     mark = session.mark()
-    await _stored(session, mark, lambda: session.withdraw(event.id))  # the 202 means it survives a restart
+    await _stored_here(request, session, mark, lambda: session.withdraw(event.id))  # a 202 survives a restart
     session.cut_for(event, mode)
     return _json(
         {"message": {**event.receipt(), "text": event.text}, "mode": mode or session.busy_mode, "busy": busy},
@@ -987,25 +1025,36 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
         # What other workers queued comes first; and a copy that finds its lease gone has let the session go: the
         # request is queued for the process that holds it now.
         session, held = None, _HeldElsewhere(session_id)
-    if session is None or key is not None:
+    if session is not None and key is None:
         try:
-            _, sender, message_id, _ = check_agent_message(
-                text,
-                sender=sender,
-                message_id=body.get("message_id"),
-                reply_to=body.get("reply_to"),
-                priority=body.get("priority") or "normal",
-                hops=hops,
-            )
-        except PeerRejected as e:
-            return JSONResponse(
-                status_code=_REJECTED_STATUS.get(e.reason, 422), content={"detail": str(e), "reason": e.reason}
-            )
-        if key is None and message_id is not None:
-            key = _agent_message_key(sender, message_id)
-        item = {name: body.get(name) for name in ("from", "text", "message_id", "reply_to")}
-        item.update(priority=body.get("priority") or "normal", hops=hops)
-        return await _queue(request, session_id, held, "agent_message", item, key=key)
+            return await _receive_here(request, session, session_id, body, sender, text, hops)
+        except _LetGo:
+            held = _HeldElsewhere(session_id)  # let go meanwhile: queued for whoever serves it now
+    try:
+        _, sender, message_id, _ = check_agent_message(
+            text,
+            sender=sender,
+            message_id=body.get("message_id"),
+            reply_to=body.get("reply_to"),
+            priority=body.get("priority") or "normal",
+            hops=hops,
+        )
+    except PeerRejected as e:
+        return JSONResponse(
+            status_code=_REJECTED_STATUS.get(e.reason, 422), content={"detail": str(e), "reason": e.reason}
+        )
+    if key is None and message_id is not None:
+        key = _agent_message_key(sender, message_id)
+    item = {name: body.get(name) for name in ("from", "text", "message_id", "reply_to")}
+    item.update(priority=body.get("priority") or "normal", hops=hops)
+    return await _queue(request, session_id, held, "agent_message", item, key=key)
+
+
+async def _receive_here(
+    request: Request, session: ChatSession, session_id: str, body: dict[str, Any], sender: str, text: str, hops: int
+) -> JSONResponse:
+    from ..core.peers import PeerRejected
+
     # The message's key in the store, also here: queued before (to another worker, or to this one before a restore,
     # which forgets what the session held in memory), it is that item. Asked only when the session's own dedupe
     # does not know the message (which says how it stands), and never written here: a worker that never queues pays
@@ -1042,13 +1091,15 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
             hops=hops,
         )
     except PeerRejected as e:
+        if e.reason == "closed" and session.handed_off and _has_inbox(request):
+            raise _LetGo from e  # closed and kept since the route found it: nothing was posted
         return JSONResponse(
             status_code=_REJECTED_STATUS.get(e.reason, 422), content={"detail": str(e), "reason": e.reason}
         )
     mark = session.mark()
     # A copy of one it has: nothing new to take back if the store fails.
     undo = None if receipt["duplicate"] else (lambda: session.withdraw(receipt["event_id"]))
-    await _stored(session, mark, undo)
+    await _stored_here(request, session, mark, undo)
     return _json(receipt, status_code=202)
 
 
@@ -1105,19 +1156,28 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
         # What other workers queued comes first; and a copy that finds its lease gone has let the session go: the
         # request is queued for the process that holds it now.
         session, held = None, _HeldElsewhere(session_id)
-    if session is None or key is not None:
+    if session is not None and key is None:
         try:
-            check_wake(text, key=body.get("key"), tool_policy=policy, trigger=trigger)
-        except (ValueError, TypeError) as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        item = {
-            "text": text,
-            "key": body.get("key"),
-            "tool_policy": policy,
-            "silent_ok": bool(body.get("silent_ok", True)),
-            "trigger": trigger,
-        }
-        return await _queue(request, session_id, held, "wake", item, key=key)
+            return await _wake_here(request, session, body, text, policy, trigger)
+        except _LetGo:
+            held = _HeldElsewhere(session_id)  # let go meanwhile: queued for whoever serves it now
+    try:
+        check_wake(text, key=body.get("key"), tool_policy=policy, trigger=trigger)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    item = {
+        "text": text,
+        "key": body.get("key"),
+        "tool_policy": policy,
+        "silent_ok": bool(body.get("silent_ok", True)),
+        "trigger": trigger,
+    }
+    return await _queue(request, session_id, held, "wake", item, key=key)
+
+
+async def _wake_here(
+    request: Request, session: ChatSession, body: dict[str, Any], text: str, policy: Any, trigger: Any
+) -> JSONResponse:
     try:
         wake_id = session.wake(
             text,
@@ -1130,8 +1190,10 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
         # TypeError: a trigger a durable session cannot store (the body parser lets NaN through).
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
+        if session.handed_off and _has_inbox(request):
+            raise _LetGo from e  # closed and kept since the route found it: nothing was queued
         raise HTTPException(status_code=409, detail=str(e)) from e
-    await _stored(session, session.mark(), lambda: session.withdraw(wake_id))
+    await _stored_here(request, session, session.mark(), lambda: session.withdraw(wake_id))
     return _json({"wake_id": wake_id, "busy": session.busy}, status_code=202)
 
 

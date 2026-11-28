@@ -732,3 +732,95 @@ class TestBugbotOn341:
             assert response.status_code == 202 and response.json()["queued"] == "inbox", response.text
         assert [i["body"]["text"] for i in waiting(client, session_id)] == ["first", "second"]
         assert client.app.state.chat_sessions.get(session_id) is None or client.app.state.chat_sessions[session_id].lost
+
+    def _taken_elsewhere(self, client, session_id):
+        store = client.app.state.chat_store
+        client.portal.call(store.release_lease, session_id, process_owner())
+        client.portal.call(store.acquire_lease, session_id, ELSEWHERE)
+
+    def test_a_request_on_a_copy_another_request_just_let_go_is_queued(self, client, monkeypatch):
+        """Two requests in flight: the other one found the lease gone and let the session go; this one had passed
+        _session() before that, and its read of what is queued returned at once (the copy is lost). It was sent on
+        the dying copy, whose store write is refused: a 409."""
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        session = client.app.state.chat_sessions[session_id]
+        self._taken_elsewhere(client, session_id)
+
+        async def other_request_lost_it():
+            session._lose("taken: found by another request")
+
+        monkeypatch.setattr(session, "apply_queued", other_request_lost_it)
+        response = post(client, session_id, "messages", {"text": "hi"})
+        assert response.status_code == 202 and response.json()["queued"] == "inbox", response.text
+        assert [i["body"]["text"] for i in waiting(client, session_id)] == ["hi"]
+
+    def test_an_agent_message_whose_copy_is_lost_while_it_is_stored_is_queued(self, client, monkeypatch):
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        session = client.app.state.chat_sessions[session_id]
+        self._taken_elsewhere(client, session_id)
+        real_receive = session.receive_agent_message
+
+        async def then_lost(*args, **kwargs):
+            receipt = await real_receive(*args, **kwargs)
+            session._lose("taken while it was stored")  # nothing of it is stored now: a lost copy writes nothing
+            return receipt
+
+        monkeypatch.setattr(session, "receive_agent_message", then_lost)
+        monkeypatch.setattr(session, "apply_queued", _nothing_queued)
+        response = post(client, session_id, "agent_messages", {"from": "bob", "text": "x", "message_id": "am_1"})
+        assert response.status_code == 202 and response.json()["queued"] == "inbox", response.text
+        assert [i["body"]["text"] for i in waiting(client, session_id)] == ["x"]
+
+    def test_an_agent_message_whose_copy_was_let_go_before_it_was_taken_is_queued(self, client, monkeypatch):
+        """Let go here (idle reaping) between the read of what is queued and the message being taken: refused
+        as closed (409), though the session lives on in its store."""
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        session = client.app.state.chat_sessions[session_id]
+        store = client.app.state.chat_store
+        real_find = store.find_inbox_key
+
+        async def reaped_meanwhile(*args, **kwargs):
+            await session.close(keep=True)
+            return await real_find(*args, **kwargs)
+
+        monkeypatch.setattr(store, "find_inbox_key", reaped_meanwhile)
+        response = post(client, session_id, "agent_messages", {"from": "bob", "text": "x", "message_id": "am_1"})
+        assert response.status_code == 202 and response.json()["queued"] == "inbox", response.text
+
+    def test_a_request_stored_before_its_copy_was_let_go_stands_and_is_not_queued_again(self, client, monkeypatch):
+        """Its write landed before the copy learned the lease was gone: whoever restores the session runs it, so it
+        is answered as taken, and not queued a second time."""
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        session = client.app.state.chat_sessions[session_id]
+        real_receive = session.receive_agent_message
+
+        async def stored_then_lost(*args, **kwargs):
+            receipt = await real_receive(*args, **kwargs)
+            await session.flush()  # stored
+            session._lose("taken after it was stored")
+            return receipt
+
+        monkeypatch.setattr(session, "receive_agent_message", stored_then_lost)
+        response = post(client, session_id, "agent_messages", {"from": "bob", "text": "x", "message_id": "am_1"})
+        assert response.status_code == 202 and "queued" not in response.json(), response.text
+        assert response.json()["duplicate"] is False
+        assert client.portal.call(client.app.state.chat_store.inbox_waiting, session_id) == 0  # not queued again
+
+    def test_without_an_inbox_a_request_on_a_copy_let_go_is_still_a_409(self, client, monkeypatch):
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        session = client.app.state.chat_sessions[session_id]
+        monkeypatch.setattr(client.app.state.chat_store, "supports_inbox", False)
+        real_send = session.send
+
+        def then_lost(*args, **kwargs):
+            event = real_send(*args, **kwargs)
+            session._lose("taken")
+            return event
+
+        monkeypatch.setattr(session, "send", then_lost)
+        response = post(client, session_id, "messages", {"text": "hi"})
+        assert response.status_code == 409, response.text
+
+
+async def _nothing_queued():
+    return None
