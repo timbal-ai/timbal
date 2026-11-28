@@ -753,6 +753,111 @@ class TestPlatformConnectionPerRun:
             runner.run(asyncio.wait_for(service.close(), 30))
             assert opened[0][0]._session is None and not service._run_connections
 
+    def test_a_failed_close_recorded_while_the_runs_end_reads_elsewhere_is_still_seen(self, platform, monkeypatch):
+        """The run's connection is let go of on its loop and its close fails; that loop pauses before ``_close_done``
+        records it as cut. A stream closed from another loop then ends the run there, and ``_close_done`` runs in the
+        middle of that end's reads (tried at each read it makes of the server's state). The session is still open,
+        so the end must raise (the run logs it) at every point. Read collection by collection, a connection moving
+        from the close records to the cut list between two reads was in neither, and the end returned quietly
+        (review on #334)."""
+        from timbal import Tool
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        opened, _ = platform
+        held, ended, run_ended, state = [], [], MCPServer._run_ended, {"at": 0, "reads": -1, "hold": False}
+        close_done = MCPServer._close_done
+
+        def hold(self, key, entry, task):  # the run's loop pauses before the failed close's done callback runs
+            if state["hold"]:
+                held.append((self, key, entry, task))
+            else:
+                close_done(self, key, entry, task)
+
+        def recording(self, key, owner):
+            state["reads"] = 0
+            try:
+                result = run_ended(self, key, owner)
+            except RuntimeError:
+                ended.append("raised")
+                raise
+            finally:
+                state["reads"] = -1
+            ended.append("returned")
+            return result
+
+        monkeypatch.setattr(MCPServer, "_close_done", hold)
+        monkeypatch.setattr(MCPServer, "_run_ended", recording)
+
+        class Raced(MCPServer):
+            def __getattr__(self, name):
+                value = super().__getattr__(name)
+                if state["reads"] >= 0 and name.startswith("_"):
+                    state["reads"] += 1
+                    if state["reads"] == state["at"] and held:
+                        close_done(*held.pop())  # the run's loop runs it now, between two of the end's reads
+                return value
+
+        class FailingOnce:
+            def __init__(self, server):
+                self.server, self.calls = server, 0
+
+            async def close(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("the server's close() raised")
+                await self.server.close()
+
+        def streaming(service):
+            async def streamer():  # opens the run's connection on its loop, then waits
+                await service.resolve()
+                yield "first"
+                await asyncio.Event().wait()
+
+            set_run_context(None)
+            set_call_id(None)
+            set_parent_call_id(None)
+            stream = Tool(name="streamer", handler=streamer)._stream()
+
+            async def read_first():
+                async for event in stream:
+                    if event.type == "DELTA":
+                        return
+
+            return stream, read_first
+
+        at = 0
+        while True:
+            at += 1
+            service = Raced(transport="http", service="api")
+            stream, read_first = streaming(service)
+
+            with asyncio.Runner() as runner:
+                runner.run(asyncio.wait_for(read_first(), 30))
+                ((key, entry),) = service._run_connections.items()
+                entry.server = FailingOnce(entry.server)
+
+                state["hold"] = True
+                runner.run(asyncio.wait_for(self.let_go(service, key, entry), 30))
+                state["hold"] = False
+                assert len(held) == 1 and entry.server.calls == 1
+                state["at"] = at
+                asyncio.run(asyncio.wait_for(stream.aclose(), 10))  # from another loop, the run's paused
+                tried_every_read = bool(held)  # the end made fewer reads than that: every point was tried
+                if held:
+                    close_done(*held.pop())
+                assert ended[-1] == "raised", (at, ended)
+                runner.run(asyncio.wait_for(service.close(), 30))  # closes the cut connection on its loop
+                assert entry.server.calls == 2 and not service._run_connections and not service._unclosed
+            if tried_every_read:
+                break
+        assert at > 2 and len(opened) == at  # the end read the server's state more than once
+
+    @staticmethod
+    async def let_go(service, key, entry):
+        """The run's connection let go of on its loop (as its idle close does), its close awaited."""
+        await asyncio.wait({service._retire_run_connection(key, entry)})
+        await asyncio.sleep(0)  # its done callbacks
+
     def test_a_stream_closed_from_another_loop_after_close_ends_quietly(self, platform):
         """As above, but ``close()`` on the Runner's loop closed the run's connection first: the run's end on the other
         loop has nothing left to close, so its hook returns instead of raising a failure the run logs
@@ -1412,6 +1517,13 @@ class TestCloseOnAnotherLoop:
         )
 
     @staticmethod
+    def pool(service, key, entry):
+        """A run's connection pooled as ``_project_connection`` pools one: counted open (``_run_open``) until a close
+        of it succeeds."""
+        service._run_open[key] = service._run_open.get(key, 0) + 1
+        service._run_connections[key] = entry
+
+    @staticmethod
     def call_on(loop):
         """The record of a tools/call in flight on ``loop``, as ``_begin_call`` leaves it (its abort future is made
         there)."""
@@ -2002,7 +2114,7 @@ class TestCloseOnAnotherLoop:
         service = MCPServer(transport="http", service="api")
         try:
             entry = _RunConnection(Server(), "fingerprint", owner_loop)
-            service._run_connections["run"] = entry
+            self.pool(service, "run", entry)
             service._run_hooked["run"] = owner_loop
 
             async def end_the_run():
@@ -2025,53 +2137,83 @@ class TestCloseOnAnotherLoop:
         "left",
         [
             "nothing",
+            "a close that succeeded, not yet recorded",
             "a cut connection",
             "a close still going",
             "a close that failed, not yet recorded",
             "a close that was cut, not yet recorded",
+            "a connection in use that close() let go of",
         ],
     )
-    def test_a_runs_end_on_another_loop_refuses_only_while_the_run_has_something_to_close(self, left):
-        """The run's end on another loop than the run's: with nothing of the run's left (a close() on its loop closed it
-        all), it returns, so the run logs no failure (review on #334); with a connection whose close was cut, or a
-        close still going there, it raises as when the connection is pooled. So it does for a close that ended cut
-        or failed while its loop paused before ``_close_done`` recorded it as cut: the session is still open (it
-        returned quietly; review on #334)."""
+    def test_a_runs_end_on_another_loop_refuses_only_while_the_run_has_something_to_close(self, monkeypatch, left):
+        """The run's end on another loop than the run's, once the run's loop has let go of its connection: with the
+        connection closed (a close() on its loop closed it all), it returns, so the run logs no failure (review on
+        #334); with its close cut or failed (kept as cut), or still going there, it raises as when the connection
+        is pooled. So it does for a close that ended cut or failed while its loop paused before ``_close_done``
+        recorded it as cut: the session is still open (it returned quietly; review on #334); and for a connection a
+        call still uses when close() let go of it, open until that call ends. A close that succeeded is closed, also
+        before its ``_close_done`` ran (it raised; review on #334)."""
         from timbal.core.mcp import _RunConnection
+
+        held, close_done = [], MCPServer._close_done
+        if left.endswith("not yet recorded"):  # the run's loop pauses before the close's done callback runs
+            monkeypatch.setattr(MCPServer, "_close_done", lambda *args: held.append(args))
+        release = asyncio.Event()
+
+        class Server:
+            async def close(self):
+                if left == "a close still going":
+                    await release.wait()
+                elif "cut" in left:
+                    raise asyncio.CancelledError
+                elif "failed" in left:
+                    raise RuntimeError("the server's close() raised")
 
         owner_loop, stop = self.owner_thread()
         service = MCPServer(transport="http", service="api")
         try:
-            if left == "a cut connection":
-                cut = _RunConnection(object(), "fingerprint", owner_loop)
-                service._unclosed[id(cut)] = ("run", cut)
-            elif left == "a close still going":
-                service._run_closes["run"] = {owner_loop.create_future()}
-            elif left.startswith("a close that"):
-                ended = owner_loop.create_future()
-                if "failed" in left:
-                    owner_loop.call_soon_threadsafe(ended.set_exception, RuntimeError("the server's close() raised"))
-                else:
-                    owner_loop.call_soon_threadsafe(ended.cancel)
-                asyncio.run_coroutine_threadsafe(asyncio.sleep(0), owner_loop).result(10)
-                assert ended.done()
-                service._run_closes["run"] = {ended}  # its done callback, _close_done, has not run
-            elif left == "nothing":
-                done = owner_loop.create_future()
-                owner_loop.call_soon_threadsafe(done.set_result, None)
-                asyncio.run_coroutine_threadsafe(asyncio.sleep(0), owner_loop).result(10)
-                service._run_closes["run"] = {done}  # one that finished, its record not dropped yet
+            entry = _RunConnection(Server(), "fingerprint", owner_loop)
+            self.pool(service, "run", entry)
             service._run_hooked["run"] = owner_loop
+
+            async def let_go():
+                if left == "a connection in use that close() let go of":
+                    entry.users = 1
+                    await service.close()  # takes it from the pool; its last user closes it
+                    assert entry.ended and entry.close_task is None
+                    return
+                task = service._retire_run_connection("run", entry)
+                if left != "a close still going":
+                    await asyncio.wait({task})
+                    await asyncio.sleep(0)  # its done callbacks
+
+            asyncio.run_coroutine_threadsafe(let_go(), owner_loop).result(10)
+            assert len(held) == (1 if left.endswith("not yet recorded") else 0)
+            assert bool(service._unclosed) == (left == "a cut connection")
 
             async def end_the_run():
                 return service._run_ended("run", owner_loop)
 
-            if left == "nothing":
+            if left in ("nothing", "a close that succeeded, not yet recorded"):
                 assert asyncio.run(asyncio.wait_for(end_the_run(), 10)) is None
             else:
                 with pytest.raises(RuntimeError, match=self.OWNS):
                     asyncio.run(asyncio.wait_for(end_the_run(), 10))
             assert "run" not in service._run_hooked
+
+            async def settle():  # what the run's loop does once it runs again
+                for args in held:
+                    close_done(*args)
+                if entry.users:  # its call ends: the last user closes it
+                    entry.users = 0
+                    service._retire_run_connection("run", entry)
+                release.set()
+                for task in list(service._close_tasks):
+                    await asyncio.wait({task})
+                for _, kept in list(service._unclosed.values()):
+                    kept.cancel_idle()
+
+            asyncio.run_coroutine_threadsafe(settle(), owner_loop).result(10)
         finally:
             stop()
 
@@ -2132,7 +2274,7 @@ class TestCloseOnAnotherLoop:
             Closes("closes"),
         )
         entry = _RunConnection(Server(), "fingerprint", asyncio.get_running_loop())
-        service._run_connections["run"] = entry
+        self.pool(service, "run", entry)
         first = service._retire_run_connection("run", entry)
         await asyncio.wait({first})
         await asyncio.sleep(0)  # its done callbacks
@@ -2220,7 +2362,7 @@ class TestCloseOnAnotherLoop:
         try:
 
             async def fail_its_close():  # a credential change there, whose close failed
-                service._run_connections["run"] = _RunConnection(FailsOnce(), "fingerprint", owner_loop)
+                self.pool(service, "run", _RunConnection(FailsOnce(), "fingerprint", owner_loop))
                 await asyncio.wait({service._retire_run_connection("run")})
                 await until(lambda: service._unclosed)  # kept, out of the pool
 

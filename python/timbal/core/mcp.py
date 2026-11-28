@@ -368,11 +368,6 @@ def _coerce_elicit_resume(
     return mcp_types.ElicitResult(action="accept", content=content), None
 
 
-def _succeeded(task: asyncio.Future) -> bool:
-    """Whether ``task`` has ended without being cut or failing."""
-    return task.done() and not task.cancelled() and task.exception() is None
-
-
 def _fail_future(future: asyncio.Future, error: BaseException) -> None:
     """Fail ``future`` unless it is done already; run on the future's own loop."""
     if not future.done():
@@ -976,6 +971,13 @@ class MCPServer(ToolSet):
     # Runs whose end hook is registered, with the run's loop: one hook per run, which finds the run's connection
     # when the run ends (a connection let go of earlier is not kept alive by it). The hook carries the loop itself.
     _run_hooked: dict[str, asyncio.AbstractEventLoop] = PrivateAttr(default_factory=dict)
+    # Per run, its connections opened and not yet closed successfully: one more as a connection is pooled
+    # (``_project_connection``), one less as its close returns (``_close_run_connection``), the key gone at none, and at
+    # the run's own end, after which nothing reads it (``_end_run_here``). Written by the
+    # run's loop alone (a closed loop's is forgotten from anywhere, ``_drop_run``). A run's end on another loop reads
+    # it in one step (``_run_holds``): read collection by collection (the pool, the cut list, the close records), a
+    # connection moving between two of them during the reads was found in neither (review on #334).
+    _run_open: dict[str, int] = PrivateAttr(default_factory=dict)
 
     def _provider_identity(self) -> tuple:
         # Its name, where it is reached and who it is reached as (headers, env, auth: two tenants of one endpoint are
@@ -1074,6 +1076,7 @@ class MCPServer(ToolSet):
             entry = None
         if entry is None:
             entry = _RunConnection(self._new_project_server(url, headers), fingerprint, asyncio.get_running_loop())
+            self._run_open[key] = self._run_open.get(key, 0) + 1  # before it is pooled, and before the hook
             self._run_connections[key] = entry
             if key not in self._run_hooked:
                 # The hook carries the run's loop: another loop may end the run as soon as on_end has accepted it, so
@@ -1136,22 +1139,15 @@ class MCPServer(ToolSet):
         )
 
     def _run_holds(self, key: str) -> bool:
-        """Whether the run ``key`` may have a connection still open: pooled, cut (its close cut or failed), or with a
-        close that has not succeeded (still going, or ended cut or failed before ``_close_done`` recorded it as cut;
-        its loop may be paused there; review on #334). Read from another loop's thread, each collection from a copy.
-        The run's loop records a connection's next place before taking it out of the last one
-        (``_retire_run_connection``, ``_close_done``, ``_retry_unclosed``, ``close()``; not ``_end_run_here``, the run's
-        own end, which no other end of the run runs beside), so a read between two steps still finds it. What the loop
-        opens after the read (a background child calling once the run has ended) is closed by its idle close, and a
-        connection still in use when ``close()`` or a credential change let go of it by its last user (nothing is
-        left open; the error is not raised for it)."""
-        if key in self._run_connections:
-            return True
-        if any(kept == key for kept, _ in list(self._unclosed.values())):
-            return True
-        return any(not _succeeded(task) for task in list(self._run_closes.get(key, ())))
+        """Whether the run ``key`` has a connection still open: one opened and not closed successfully (``_run_open``),
+        pooled, in use, cut, or with a close going or ended cut or failed before ``_close_done`` recorded it (its
+        loop may be paused there). One read, from another loop's thread: nothing a step of the run's loop does can
+        make it miss one. What that loop opens after the read (a background child calling once the run has ended)
+        is closed by its idle close."""
+        return self._run_open.get(key, 0) > 0
 
     def _end_run_here(self, key: str) -> Awaitable[None] | None:
+        self._run_open.pop(key, None)  # read only by the run's end, which runs once: none left behind
         entry = self._run_connections.get(key)
         if entry is not None:
             entry.ended = True
@@ -1169,19 +1165,17 @@ class MCPServer(ToolSet):
             entry = self._run_connections.get(key)
         if entry is None:
             return None
+        self._unpool(key, entry)
         entry.cancel_idle()
         if entry.users:
-            self._unpool(key, entry)
             entry.ended = True
             return None
         if entry.close_task is None:
-            entry.close_task = task = asyncio.get_running_loop().create_task(entry.server.close())
+            entry.close_task = task = asyncio.get_running_loop().create_task(self._close_run_connection(key, entry))
             self._close_tasks.add(task)
             self._run_closes.setdefault(key, set()).add(task)
             task.add_done_callback(functools.partial(self._close_done, key, entry))
             task.add_done_callback(_log_close_failure)
-        # After its close is recorded: a run's end read on another thread finds one or the other (_run_holds).
-        self._unpool(key, entry)
         return entry.close_task
 
     # A run's connections and close records are written by the run's loop alone (a run is keyed to its loop,
@@ -1198,6 +1192,7 @@ class MCPServer(ToolSet):
         and its cut connections, which hold their credential headers."""
         self._run_connections.pop(key, None)
         self._run_closes.pop(key, None)
+        self._run_open.pop(key, None)
         for ident, (kept_key, _) in list(self._unclosed.items()):
             if kept_key == key:
                 self._unclosed.pop(ident, None)
@@ -1207,6 +1202,7 @@ class MCPServer(ToolSet):
         self._close_tasks.discard(task)
         for key in [key for key, closes in list(self._run_closes.items()) if task in closes]:
             self._discard_close(key, task)
+            self._run_open.pop(key, None)  # the run's loop closed: its connections went with it
 
     def _discard_close(self, key: str, task: asyncio.Task) -> None:
         """Take ``task`` off the run ``key``'s close records, and the record once empty."""
@@ -1219,12 +1215,7 @@ class MCPServer(ToolSet):
 
     def _close_done(self, key: str, entry: "_RunConnection", task: asyncio.Task) -> None:
         self._close_tasks.discard(task)
-        try:
-            self._keep_if_cut(key, entry, task)
-        finally:
-            self._discard_close(key, task)  # after it is kept as cut: a run's end read on another thread finds it
-
-    def _keep_if_cut(self, key: str, entry: "_RunConnection", task: asyncio.Task) -> None:
+        self._discard_close(key, task)
         if (task.cancelled() or task.exception() is not None) and not task.get_loop().is_closed():
             # Cut, or failed (the server's close() raised: what it could not close is still open), before the session
             # had closed: it may still be open. Kept out of the pool (a later call of the run must not reuse it and
@@ -1236,14 +1227,28 @@ class MCPServer(ToolSet):
             entry.cancel_idle()
             entry.idle = task.get_loop().call_later(_RUN_CONNECTION_IDLE_S, self._retry_unclosed, key, entry)
 
+    async def _close_run_connection(self, key: str, entry: "_RunConnection") -> None:
+        """A run connection's close: counted closed (``_run_open``) in the step its close returns, before the task
+        ends. Counted in ``_close_done`` instead, a run's end read on another loop while the run's loop paused before
+        that callback took a closed connection for an open one (review on #334). A cut or failed close is not
+        counted: the session may still be open."""
+        await entry.server.close()
+        self._closed_one(key)
+
+    def _closed_one(self, key: str) -> None:
+        """One of the run ``key``'s connections closed (``_run_open``)."""
+        left = self._run_open.get(key, 0) - 1
+        if left > 0:
+            self._run_open[key] = left
+        else:
+            self._run_open.pop(key, None)
+
     def _retry_unclosed(self, key: str, entry: "_RunConnection") -> None:
         """A cut connection's idle close, on its loop: closed again unless a close() or its run's end took it first
         (they cancel this when they do)."""
         entry.idle = None
-        kept = self._unclosed.get(id(entry))
-        if kept is not None and kept[1] is entry:
+        if self._unclosed.pop(id(entry), None) is not None:
             self._retire_run_connection(key, entry)
-            self._unclosed.pop(id(entry), None)  # after its close is recorded, as in _retire_run_connection
 
     # ------------------------------------------------------------------ session
 
@@ -2054,9 +2059,6 @@ class MCPServer(ToolSet):
         # Let go of before any wait, so a close() running beside this one waits for their closes too.
         for key, entry in entries:
             task = self._retire_run_connection(key, entry)
-            kept = self._unclosed.get(id(entry))
-            if kept is not None and kept[1] is entry:
-                self._unclosed.pop(id(entry), None)  # a cut one, its close now recorded
             if task is not None:
                 ledger.add(task)
         # Shielded: a close() that is cancelled stops waiting, the closes go on (gather would cancel them).
@@ -2183,8 +2185,7 @@ class MCPServer(ToolSet):
                 self._inflight.pop(key, None)
 
     def _take_run_connections(self, loop: asyncio.AbstractEventLoop) -> list[tuple[str, "_RunConnection"]]:
-        """This loop's run connections, pooled or cut (those cut are left in ``_unclosed`` until close() has recorded
-        their close: a run's end read on another thread finds them, ``_run_holds``). What a loop that has closed
+        """This loop's run connections, pooled or cut (those cut are taken out at once). What a loop that has closed
         held went with it and is forgotten (its cut connections hold their credential headers); another loop's is
         left to that loop."""
         taken: list[tuple[str, _RunConnection]] = []
@@ -2194,12 +2195,15 @@ class MCPServer(ToolSet):
                 taken.append((key, entry))
             elif owner.is_closed():
                 self._unpool(key, entry)  # (another close() on another thread may be forgetting it too)
+                self._run_open.pop(key, None)
         for ident, (key, entry) in list(self._unclosed.items()):
             owner = entry.loop or loop
             if owner is loop:
-                taken.append((key, entry))  # left in the cut list until close() records its close
+                if self._unclosed.pop(ident, None) is not None:
+                    taken.append((key, entry))
             elif owner.is_closed():
                 self._unclosed.pop(ident, None)
+                self._run_open.pop(key, None)
         for task in list(self._close_tasks):
             if _gone(task.get_loop(), loop):
                 self._forget_close(task)
