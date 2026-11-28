@@ -6994,9 +6994,12 @@ class VoiceSession:
         if self._turn_tool_seen_at is None:
             self._turn_tool_seen_at = time.monotonic()
             self._turn_tool_seen.set()
-        if _is_hangup_tool_name(tool_name) or self._hangup_filler_blocked:
+        listed = self.filler is None or self.filler.tools is None or tool_name in self.filler.tools
+        if _is_hangup_tool_name(tool_name) or not listed or self._hangup_filler_blocked:
             # Named hangup tools block before the handler runs, so a zero
             # soft-timeout cannot speak "One moment." ahead of commit_hangup.
+            # A tool left out of ``filler.tools`` is blocked the same way: it
+            # says its own line (a transfer, a goodbye under another name).
             self._block_hangup_filler()
             return
         if self.filler is None or not self.filler.enabled or self._turn_filler_task is not None or self._turn_is_event:
@@ -7387,6 +7390,8 @@ class VoiceSession:
         self._tts_tail = speak_task
         self._tts_tasks.add(speak_task)
         speak_task.add_done_callback(lambda t: self._tts_tasks.discard(t))
+        if self.tool_beat_secs:
+            self._schedule_filler_beat(speak_task)
         try:
             await speak_task
         except asyncio.CancelledError:
@@ -8327,19 +8332,50 @@ class VoiceSession:
                         await self._abort_tts_stream()
             if self._cancel_turn.is_set():
                 return
-            if beat > 0 and self._turn_audio_bytes:
-                quiet_since = self._turn_audio_playing_until
-                wait_play = quiet_since - time.monotonic()
-                if wait_play > 0:
-                    await asyncio.sleep(wait_play)
-                while self.playback.is_playing:
-                    quiet_since = max(quiet_since, time.monotonic())
-                    await asyncio.sleep(self.EVENT_TURN_POLL_SECS)
-                remaining = quiet_since + beat - time.monotonic()
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
+            await self._await_tool_beat()
 
         task = asyncio.create_task(boundary())
+        self._tts_tasks.add(task)
+        task.add_done_callback(lambda done: self._tts_tasks.discard(done))
+        self._tts_tail = task
+
+    async def _await_tool_beat(self) -> None:
+        """Wait until ``tool_beat_secs`` after the turn's audio so far has played."""
+        beat = self.tool_beat_secs or 0.0
+        if beat <= 0 or not self._turn_audio_bytes:
+            return
+        quiet_since = self._turn_audio_playing_until
+        wait_play = quiet_since - time.monotonic()
+        if wait_play > 0:
+            await asyncio.sleep(wait_play)
+        while self.playback.is_playing:
+            quiet_since = max(quiet_since, time.monotonic())
+            await asyncio.sleep(self.EVENT_TURN_POLL_SECS)
+        remaining = quiet_since + beat - time.monotonic()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+    def _schedule_filler_beat(self, spoken: asyncio.Task) -> None:
+        """Hold the reply for ``tool_beat_secs`` after a wait phrase said for a tool call.
+
+        The model's own words before a tool get the beat in
+        :meth:`_schedule_tool_boundary`; a filler is spoken only when the model
+        said nothing, so without this the result follows the phrase with no
+        pause at all. Queued behind the phrase and ahead of the reply; the tool
+        runs through it, so one slower than the phrase plus the beat waits for
+        nothing. A phrase that covered thinking alone (no tool called by the
+        time it ended) gets none.
+        """
+
+        async def beat() -> None:
+            await self._await_tts_predecessor(spoken)
+            if spoken.cancelled() or self._cancel_turn.is_set() or self._hangup_filler_blocked:
+                return
+            if self._turn_tool_seen_at is None:
+                return
+            await self._await_tool_beat()
+
+        task = asyncio.create_task(beat())
         self._tts_tasks.add(task)
         task.add_done_callback(lambda done: self._tts_tasks.discard(done))
         self._tts_tail = task

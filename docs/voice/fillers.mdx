@@ -44,6 +44,25 @@ agent.voice_config["filler"] = {
 
 The session appends the [reply-language policy](/voice/configuration#reply-language) after this prompt. Generation starts when the tool call is detected and overlaps the delay. The phrase is spoken only while the turn still needs a filler and no substantive reply has started. Omit `model` to use the session's LLM, or set a full `provider/model` ID to choose a separate generator.
 
+## Always say it, then pause
+
+A quick lookup answered at once can sound less like someone checking than like a recording. To have the assistant say the phrase on every tool call and leave a moment before the result:
+
+```python
+agent.voice_config["filler"] = {
+    "delay_secs": 0,
+    "tools": ["get_delivery_status"],
+    "phrases": {"en": ["One moment.", "Let me see."]},
+}
+agent.voice_config["tool_beat_secs"] = 0.5
+```
+
+`delay_secs: 0` speaks the phrase when the tool is called instead of after a second of waiting; ready-made `phrases` cost no model call. [`tool_beat_secs`](/voice/tools#speak-before-a-tool-call) is the minimum silence after the phrase has played and before the result is synthesized. The tool runs through both, so a lookup slower than the phrase plus the pause is not held back. Both are off by default.
+
+`tools` names the calls that get the phrase, as the model calls them. Leave it out and every tool call does, which at `delay_secs: 0` includes a tool that says its own line: a transfer, a save, a hangup tool under a name of your own ("One moment." before "Goodbye."). A turn that calls a tool outside the list says no filler from that call on. `end_call` and the other built-in hangup names never get one.
+
+If the model says something itself before the call ("Sure."), the filler stays quiet, and the same pause follows the model's words.
+
 ## Longer waits
 
 For tools that legitimately take longer, opt into repeats:

@@ -244,7 +244,14 @@ class FillerConfig(BaseModel):
     """Generator LLM ("provider/model", or a TestModel in tests).
     None → the session's LLM; set something fast/cheap for best latency."""
     delay_secs: float = Field(default=1.0, ge=0.0)
-    """Grace period — tools that finish sooner never get a filler."""
+    """Grace period — tools that finish sooner never get a filler. ``0`` speaks
+    it at the call, for every tool: see ``tools``."""
+    tools: list[str] | None = None
+    """Names of the tools whose call gets a filler, as the model calls them.
+    ``None`` (default): any tool. With ``delay_secs=0`` that includes a tool
+    that says its own line (a transfer, a save, a hangup tool under a name of
+    your own), so list the lookups here. A turn that calls a tool outside the
+    list says no filler from that call on, as with ``end_call``."""
     timeout_secs: float = Field(default=5.0, gt=0.0)
     """Generation deadline (after the delay); expiry skips the filler silently."""
     repeat_secs: float | None = Field(default=None, gt=0.0)
@@ -1245,8 +1252,10 @@ class VoiceConfig(BaseModel):
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     """Minimum silence after pre-tool audio before post-tool synthesis.
 
-    None or zero disables. Tool execution overlaps the speech and the beat;
-    tools with no preceding speech never delay the first spoken word.
+    None or zero disables. Pre-tool audio is what the model said before the
+    call, or a filler spoken for it (``filler.delay_secs=0`` says one on every
+    call). Tool execution overlaps the speech and the beat; tools with no
+    preceding speech never delay the first spoken word.
     """
     max_tts_pause_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     """Cap internal silence in synthesized PCM. ``None`` (default) leaves the

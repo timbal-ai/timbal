@@ -68,6 +68,13 @@ Tool execution continues during playback and the pause, so a sufficiently slow
 tool adds no extra wait. There is no pause before the first spoken response when
 the model called the tool without an acknowledgement.
 
+A [spoken filler](/voice/fillers) said for the tool call counts as the
+acknowledgement: the result waits the same pause after the filler has played.
+With `filler.delay_secs` at `0` the phrase goes out at the call, so a fast
+lookup sounds like "One moment." — pause — result rather than the result on its
+own. A filler that only covered the model's thinking, with no tool called by
+the time it ended, gets no pause.
+
 An enabled pause finishes the pre-tool streaming TTS context and uses a new
 context for the result. With the pause disabled, providers that support flushing and confirming delivery of each audio segment
 keep their context open across the tool call. Other providers finish the context
