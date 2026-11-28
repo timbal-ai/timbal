@@ -34,6 +34,7 @@
             "pages": [
               "agents/index",
               "agents/tools",
+              "agents/sap",
               "agents/mcp",
               "agents/structured-output",
               "agents/memory",

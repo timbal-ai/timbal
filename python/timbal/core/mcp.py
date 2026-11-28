@@ -632,6 +632,7 @@ class MCPServer(ToolSet):
 
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
+    follow_redirects: bool = True
 
     auth: httpx.Auth | None = Field(default=None, exclude=True)
     """``httpx.Auth`` applied to every HTTP request, for credentials that rotate during a
@@ -789,6 +790,7 @@ class MCPServer(ToolSet):
             transport="http",
             url=url,
             headers=headers,
+            follow_redirects=self.follow_redirects,
             timeout=self.timeout,
             tool_timeouts=self.tool_timeouts,
             connect_timeout=self.connect_timeout,
@@ -852,7 +854,7 @@ class MCPServer(ToolSet):
             headers=self.headers if self.headers else None,
             auth=self.auth,
             timeout=self._http_timeout(),
-            follow_redirects=True,
+            follow_redirects=self.follow_redirects,
         ) as http_client:
             async with streamable_http_client(self.url, http_client=http_client) as (read, write, get_session_id):
                 async with self._client_session(read, write) as session:
