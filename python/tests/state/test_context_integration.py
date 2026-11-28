@@ -2060,6 +2060,54 @@ class TestRunEndHooks:
         assert hook_call_id == seen["run"].root_span().call_id
         assert closer_after == (None, None)
 
+    def test_the_time_left_for_the_hooks_is_read_on_the_clock_that_set_it(self):
+        """A root Tool's stream is closed from another loop, whose clock has another origin (120 s behind), once its
+        budget has run out: the run returns at once, its end hook's work going on behind it. Read on the closing
+        loop's clock, the budget looked 120 s long and the run waited for the hook."""
+        import threading
+
+        from timbal.state import set_call_id, set_parent_call_id, set_run_context
+
+        called = []
+
+        def hook():
+            called.append(True)
+            return asyncio.Event().wait()  # work that outlives the run's budget
+
+        async def streamer():
+            get_run_context().on_end(hook)
+            yield "first"
+            await asyncio.Event().wait()
+
+        class Behind(asyncio.SelectorEventLoop):
+            def time(self):
+                return super().time() - 120
+
+        owner_loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=owner_loop.run_forever)
+        thread.start()
+        try:
+
+            async def read_first():
+                set_run_context(None)
+                set_call_id(None)
+                set_parent_call_id(None)
+                stream = Tool(name="streamer", handler=streamer, timeout=0.05)._stream()
+                async for event in stream:
+                    if event.type == "DELTA":
+                        return stream, asyncio.get_running_loop().time()
+
+            stream, read_at = asyncio.run_coroutine_threadsafe(read_first(), owner_loop).result(30)
+            while owner_loop.time() < read_at + 0.1:  # the budget, set before that, has run out on its own clock
+                threading.Event().wait(0.01)
+            with asyncio.Runner(loop_factory=Behind) as runner:
+                runner.run(asyncio.wait_for(stream.aclose(), 5))  # back at once, no budget left to wait in
+            assert called == [True]
+        finally:
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+            thread.join(10)
+            owner_loop.close()
+
     async def test_unhashable_awaitables_from_hooks_are_awaited(self):
         """A hook may return any awaitable: a dataclass implementing ``__await__`` is not hashable."""
         from dataclasses import dataclass

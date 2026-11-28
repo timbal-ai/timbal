@@ -229,7 +229,7 @@ async def ask() -> None:
 For long-running processes (servers, bots), create the `MCPServer` once and reuse it across runs — reconnecting per request adds latency, especially for stdio servers that spawn a subprocess.
 </Warning>
 
-Each connection is owned by a dedicated task, so `close()` can be called from any task and in any order across servers. Failure handling on top of the SDK:
+Each connection is owned by a dedicated task, so `close()` can be called from any task of the event loop that opened it, and in any order across servers. From another event loop it raises `RuntimeError` without touching the connection: call `close()` on the loop that owns it (for example `runner.run(server.close())` for an `asyncio.Runner`). Failure handling on top of the SDK:
 
 - **Transport dies mid-call** (server process exits, HTTP connection refused): the in-flight call fails immediately with `connection lost during tools/call ...` instead of hanging, the connection is forgotten, and the next call reconnects. The cached tools stay valid.
 - **Stale session** (an HTTP server restarted or expired the session while you were idle, so it 404s your `Mcp-Session-Id` with `Session terminated`): the session is reset and the request retried once, transparently. Safe for any request — a 404 means the server never saw it.
