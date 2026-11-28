@@ -8,6 +8,9 @@ import structlog
 # Format: comma-separated list of event names, e.g. "tracing_setup,parent_trace_not_found"
 SUPPRESSED_EVENTS: set[str] = set()
 
+# Set on the root handler `setup_logging()` adds, so a later call replaces it instead of adding another.
+_HANDLER_MARK = "_timbal_setup_logging"
+
 
 def _load_suppressed_events() -> None:
     """Load suppressed events from environment variable."""
@@ -78,7 +81,14 @@ def setup_logging() -> None:
 
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
+    setattr(handler, _HANDLER_MARK, True)
 
+    # Called again (every `create_app()` calls it, so a test process does many times), replace the handler an
+    # earlier call added: adding one per call wrote every record once per call. Handlers the application added
+    # are left as they are.
     root = logging.getLogger()
+    for earlier in [h for h in root.handlers if getattr(h, _HANDLER_MARK, False)]:
+        root.removeHandler(earlier)
+        earlier.close()
     root.addHandler(handler)
     root.setLevel(log_level)
