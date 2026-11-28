@@ -1,5 +1,6 @@
 """`timbal.logs.setup_logging()` called more than once (every `create_app()` does) keeps one handler of its own."""
 
+import contextlib
 import io
 import json
 import logging
@@ -16,39 +17,44 @@ def _ours(root):
     return [h for h in root.handlers if getattr(h, _HANDLER_MARK, None) is True]
 
 
-@pytest.fixture
-def root_logging(monkeypatch):
-    """The root logger with no handler of timbal's; after the test, the root logger, the logger class and
-    structlog's config as they were.
+@contextlib.contextmanager
+def _isolated_root_logging():
+    """The root logger with no handler of timbal's; on the way out, the root logger, the logger class, structlog's
+    config and the `TIMBAL_*` logging variables as they were.
 
-    A handler an earlier `create_app()` of this process left is taken off for the test and put back as it was:
-    `setup_logging()` would reconfigure it, pointing it at the test's stream.
+    A handler an earlier `create_app()` of this process left is taken off and put back as it was: `setup_logging()`
+    would reconfigure it, pointing it at the test's stream. The root logger's handlers come back in their order, a
+    handler's filter may change the record the next one formats. pytest adds and removes the same handler objects
+    in a test's setup, call and teardown, so the list taken at setup is the one to put back at teardown.
     """
     root = logging.getLogger()
-    earlier = _ours(root)
-    for handler in earlier:
+    original = root.handlers[:]
+    for handler in _ours(root):
         root.removeHandler(handler)
     handlers, level, logger_class = root.handlers[:], root.level, logging.getLoggerClass()
     configured, config = structlog.is_configured(), structlog.get_config()
-    monkeypatch.delenv("TIMBAL_SUPPRESS_EVENTS", raising=False)
-    monkeypatch.delenv("TIMBAL_LOG_FORMAT", raising=False)
-    monkeypatch.delenv("TIMBAL_LOG_LEVEL", raising=False)
-    try:
-        yield root, handlers
-    finally:
-        for handler in root.handlers[:]:
-            if handler not in handlers:
-                root.removeHandler(handler)
+    with pytest.MonkeyPatch.context() as env:
+        for name in ("TIMBAL_SUPPRESS_EVENTS", "TIMBAL_LOG_FORMAT", "TIMBAL_LOG_LEVEL"):
+            env.delenv(name, raising=False)
+        try:
+            yield root, handlers
+        finally:
+            added = [h for h in root.handlers if h not in original]
+            root.handlers[:] = original  # one step: never without a handler, nor with the test's and these at once
+            for handler in added:
                 handler.close()
-        for handler in handlers + earlier:
-            if handler not in root.handlers:
-                root.addHandler(handler)
-        root.setLevel(level)
-        logging.setLoggerClass(logger_class)  # `structlog.stdlib.LoggerFactory()` sets the process's logger class
-        if configured:
-            structlog.configure(**config)
-        else:
-            structlog.reset_defaults()
+            root.setLevel(level)
+            logging.setLoggerClass(logger_class)  # `structlog.stdlib.LoggerFactory()` sets the process's logger class
+            if configured:
+                structlog.configure(**config)
+            else:
+                structlog.reset_defaults()
+
+
+@pytest.fixture
+def root_logging():
+    with _isolated_root_logging() as isolated:
+        yield isolated
 
 
 def _added(root, before):
@@ -200,3 +206,47 @@ class TestSetupLoggingTwice:
 
         assert theirs in root.handlers
         assert len(_added(root, before)) == 2
+
+
+class TestIsolatedRootLogging:
+    """The isolation the tests above run in puts back what `setup_logging()` changes in the process."""
+
+    @pytest.fixture
+    def earlier_then_theirs(self):
+        """A handler of timbal's an earlier `create_app()` left, then one of the application's, after it."""
+        root = logging.getLogger()
+        earlier, theirs = logging.StreamHandler(io.StringIO()), logging.StreamHandler(io.StringIO())
+        setattr(earlier, _HANDLER_MARK, True)
+        root.addHandler(earlier)
+        root.addHandler(theirs)
+        try:
+            yield earlier, theirs
+        finally:
+            root.removeHandler(earlier)
+            root.removeHandler(theirs)
+
+    def test_takes_off_an_earlier_handler_of_timbals_and_puts_every_handler_back_in_order(self, earlier_then_theirs):
+        earlier, theirs = earlier_then_theirs
+        root = logging.getLogger()
+        expected = root.handlers[:]
+
+        with _isolated_root_logging(), pytest.MonkeyPatch.context() as mp:
+            assert earlier not in root.handlers
+            assert theirs in root.handlers
+            mp.setattr(sys, "stderr", io.StringIO())
+            setup_logging()  # adds the test's own handler of timbal's, taken off on the way out
+
+        assert root.handlers == expected
+
+    def test_puts_the_logger_class_back(self):
+        process_class = logging.getLoggerClass()  # an earlier `create_app()` of this process may have set structlog's
+        logging.setLoggerClass(logging.Logger)
+        try:
+            with _isolated_root_logging(), pytest.MonkeyPatch.context() as mp:
+                mp.setattr(sys, "stderr", io.StringIO())
+                setup_logging()
+                assert logging.getLoggerClass() is not logging.Logger
+
+            assert logging.getLoggerClass() is logging.Logger
+        finally:
+            logging.setLoggerClass(process_class)
