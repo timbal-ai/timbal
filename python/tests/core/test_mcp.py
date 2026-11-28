@@ -1655,15 +1655,29 @@ class TestCloseOnAnotherLoop:
         assert not service._run_connections and not service._unclosed
         assert not service._close_tasks and not service._run_closes
 
-    def test_a_run_connection_of_another_loop_is_left_to_its_run(self):
-        """``service="api"``: a run's connections belong to the run, on its loop. close() from another loop neither
-        closes them nor raises (``main``'s close() never touched a call's connection, from any loop), and does not
+    @pytest.mark.parametrize("owner", ["running", "paused"])
+    def test_a_run_connection_of_another_loop_is_left_to_its_run(self, owner):
+        """``service="api"``: a run's connections belong to the run, on its loop (running in another thread, or an
+        ``asyncio.Runner`` between two ``run()`` calls). close() from another loop neither closes them nor raises
+        (``main``'s close() never touched a call's connection, from any loop), changes nothing of them, and does not
         wait for a close already going there: they are left to their run's end or idle close, or a close() there."""
         import threading
 
         from timbal.core.mcp import _RunConnection
 
-        owner_loop, stop = self.owner_thread()
+        if owner == "running":
+            owner_loop, stop = self.owner_thread()
+
+            def there(coroutine):
+                return asyncio.run_coroutine_threadsafe(coroutine, owner_loop).result(10)
+
+        else:
+            runner = asyncio.Runner()
+            owner_loop, stop = runner.get_loop(), runner.close
+
+            def there(coroutine):
+                return runner.run(asyncio.wait_for(coroutine, 10))
+
         closed, release = [], threading.Event()
 
         class Server:
@@ -1685,12 +1699,12 @@ class TestCloseOnAnotherLoop:
                 service._run_connections["changed"] = _RunConnection(SlowClose(), "fingerprint", owner_loop)
                 service._retire_run_connection("changed")
 
-            asyncio.run_coroutine_threadsafe(let_go(), owner_loop).result(10)
+            there(let_go())
             before = self.state(service)
             asyncio.run(asyncio.wait_for(service.close(), 10))  # does not wait for the slow close
             assert self.state(service) == before and closed == [] and not pooled.ended
             release.set()
-            asyncio.run_coroutine_threadsafe(service.close(), owner_loop).result(10)
+            there(service.close())
             assert closed == [True, True, True] and not service._run_connections and not service._unclosed
         finally:
             release.set()
