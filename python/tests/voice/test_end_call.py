@@ -9,6 +9,7 @@ from contextlib import aclosing
 from types import SimpleNamespace
 
 import pytest
+import timbal.voice.session as voice_session_module
 from timbal.core.tool import Tool
 from timbal.types.content import TextContent, ToolResultContent, ToolUseContent
 from timbal.types.message import Message
@@ -42,11 +43,30 @@ def _session_clock(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
     timestamp comparison hung up on that caller). Only the session module's clock is coarse; asyncio's
     timers are untouched."""
     if request.param == "coarse_clock":
-        import timbal.voice.session as session_module
-
         coarse = SimpleNamespace(**{name: getattr(time, name) for name in dir(time) if not name.startswith("_")})
         coarse.monotonic = lambda: time.monotonic() // COARSE_TICK * COARSE_TICK
-        monkeypatch.setattr(session_module, "time", coarse)
+        monkeypatch.setattr(voice_session_module, "time", coarse)
+
+
+def _session_now() -> float:
+    """The session's clock: coarse in the ``coarse_clock`` run."""
+    return voice_session_module.time.monotonic()
+
+
+class _SpeechThatEnded:
+    """VAD history holding ``secs`` of speech that ended at ``ended_at`` on the session's clock.
+
+    A window sees it only if it reaches back to ``ended_at``. A fake keyed on the window's length alone ("speech in
+    any window of 0.45 s or more") never ages: when the event loop runs late, the session's window grows long
+    enough to reach it, while real speech from before the window stays before it.
+    """
+
+    def __init__(self, secs: float, *, ended_at: float) -> None:
+        self.secs = secs
+        self.ended_at = ended_at
+
+    def speech_secs_in_window(self, window_secs: float) -> float:
+        return self.secs if _session_now() - window_secs <= self.ended_at else 0.0
 
 
 async def end_call() -> str:
@@ -497,15 +517,11 @@ class TestEndCall:
     async def test_pre_grace_vad_still_waits_out_the_window(self) -> None:
         session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.3)
         session._end_call_grace_secs = 0.3
-
-        class OnlyUnanchored:
-            def speech_secs_in_window(self, window_secs: float) -> float:
-                return 0.4 if window_secs >= 0.45 else 0.0
-
-        session._endpointer = OnlyUnanchored()  # type: ignore[assignment]
-        started = time.monotonic()
+        # Speech that ended just before the window opens: the 0.5 s lookback holds it, the window never does.
+        session._endpointer = _SpeechThatEnded(0.4, ended_at=_session_now() - 0.05)  # type: ignore[assignment]
+        started = _session_now()
         assert not await session._end_call_grace(0.0)
-        assert time.monotonic() - started >= 0.25
+        assert _session_now() - started >= 0.25
         assert not session.closed
 
     def _arm_grace(self, session) -> None:
@@ -528,14 +544,10 @@ class TestEndCall:
     def test_echo_that_aged_out_of_the_tail_does_not_cancel(self) -> None:
         session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
         self._arm_grace(session)
-
-        class AgedOut:
-            def speech_secs_in_window(self, window_secs: float) -> float:
-                # Still inside a 0.5s lookback, gone from a window that starts at the tail.
-                return 0.4 if window_secs >= 0.35 else 0.0
-
-        session._endpointer = AgedOut()  # type: ignore[assignment]
-        since = time.monotonic() - (session.END_CALL_TAIL_SECS + 0.05)
+        since = _session_now() - (session.END_CALL_TAIL_SECS + 0.05)
+        # Speech that ended 0.1 s into the tail: still inside a 0.5 s lookback, gone from a window that starts at
+        # the tail's end.
+        session._endpointer = _SpeechThatEnded(0.4, ended_at=since + 0.1)  # type: ignore[assignment]
         assert not session._cancel_hangup_for_speech(0.0, since)
 
     def test_a_partial_during_the_tail_still_cancels(self) -> None:

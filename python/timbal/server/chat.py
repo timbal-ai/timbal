@@ -90,7 +90,10 @@ def session_store_for(agent: Any) -> ChatSessionStore | None:
         if not raw.startswith("sqlite:///") or len(raw) == len("sqlite:///"):
             raise RuntimeError(f"{STORE_ENV} must be 'memory' or 'sqlite:///path/to.db', got {raw!r}")
         _require_durable_traces(agent)
-        return SqliteChatSessionStore(raw[len("sqlite:///") :])
+        try:
+            return SqliteChatSessionStore(raw[len("sqlite:///") :])
+        except ValueError as e:  # a database in memory: kept as the store's error, like any value it cannot honour
+            raise RuntimeError(f"{STORE_ENV}={raw!r}: {e}") from e
     provider = getattr(agent, "tracing_provider", None)
     if isinstance(provider, type) and issubclass(provider, SqliteTracingProvider) and provider._path is not None:
         return SqliteChatSessionStore(provider._path, synchronous=provider.synchronous)

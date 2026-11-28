@@ -397,6 +397,9 @@ class SqliteChatSessionStore(ChatSessionStore):
     same file)."""
 
     def __init__(self, path: Path | str, *, synchronous: str = "NORMAL") -> None:
+        from .tracing.providers.sqlite import refuse_in_memory
+
+        refuse_in_memory(path)  # a database in memory would be a new, empty one on every call
         self.path = Path(path)
         self.synchronous = synchronous
 
