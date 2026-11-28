@@ -5,6 +5,7 @@ from .config import (
     FillerConfig,
     GreetingConfig,
     RecordingConfig,
+    SpeculativeGeneration,
     UserIdleConfig,
     VoiceConfig,
     VoiceEventsConfig,
@@ -46,6 +47,10 @@ from .playback import (
     BufferedPlaybackTracker,
     PlaybackTracker,
 )
+from .predictive_eou import (
+    SpeechEouPredictor,
+)
+from .prompt import voice_prompt
 from .providers import (
     AudioInputConfig,
     AudioOutputConfig,
@@ -162,11 +167,13 @@ __all__ = [
     "RecordingConfig",
     "SemanticTurnDetector",
     "SessionEnded",
+    "SpeculativeGeneration",
     "SileroVad",
     "SessionError",
     "SessionInterrupted",
     "SessionStarted",
     "SmartTurnEouModel",
+    "SpeechEouPredictor",
     "SpeechToText",
     "TextEouPredictor",
     "TextToSpeech",
@@ -188,6 +195,7 @@ __all__ = [
     "VoiceUsageEvent",
     "current_voice_session",
     "endpointing_delay",
+    "voice_prompt",
     "resolve_stt",
     "resolve_turn_detector",
     "stt_provider_id",

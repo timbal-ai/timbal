@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...types.message import Message
 from ...utils import transform_schema
+from .prompt_cache import anthropic_system_param
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -79,9 +80,6 @@ def prepare_messages_request(
         "stream": True,
     }
 
-    if system_prompt:
-        anthropic_kwargs["system"] = system_prompt
-
     if tools:
         if not deferred_tools:
             anthropic_tools = [tool.anthropic_schema for tool in tools]
@@ -119,8 +117,15 @@ def prepare_messages_request(
     anthropic_kwargs.update(provider_params)
     if extra_tools:
         anthropic_kwargs["tools"] = [*anthropic_kwargs.get("tools", []), *extra_tools]
-    if anthropic_kwargs["cache_control"] is None:
-        del anthropic_kwargs["cache_control"]
+    if anthropic_kwargs.get("cache_control") is None:
+        anthropic_kwargs.pop("cache_control", None)
+    # After provider_params, so an override TTL is the breakpoint's TTL too and
+    # cache_control=None stays a full opt-out (no block marker either).
+    # An explicit ``system`` in provider_params is the caller's override, as before: it wins.
+    if "system" not in provider_params:
+        system = anthropic_system_param(system_prompt, anthropic_kwargs.get("cache_control"))
+        if system is not None:
+            anthropic_kwargs["system"] = system
     _drop_stale_tool_references(
         anthropic_kwargs["messages"], {tool.get("name") for tool in anthropic_kwargs.get("tools") or ()}
     )
@@ -132,7 +137,7 @@ def prepare_messages_request(
                 "format": {
                     "type": "json_schema",
                     "schema": transform_schema(output_model),
-                }
+                },
             }
         res = await client.messages.create(extra_headers=extra_headers, **anthropic_kwargs)
         async for chunk in res:

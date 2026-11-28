@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from timbal import Agent
+from timbal.core.llm.prompt_cache import system_prompt_text
 from timbal.core.test_model import TestModel
 from timbal.state import get_run_context
 from timbal.voice import (
@@ -723,10 +724,12 @@ class TestTurnTimeout:
             await stt.inject(TranscriptEvent(type="committed", text="Hello?"))
             while not any(isinstance(e, SessionError) for e in events):
                 await asyncio.sleep(0.01)
-            # The bounded rescue expires after min(turn_timeout_secs, 10s).
             while not tts.synthesize_calls:
                 await asyncio.sleep(0.01)
-            await asyncio.sleep(0.3)
+            # The bounded rescue expires after min(turn_timeout_secs, 10s), and the turn then ends on its own: wait
+            # for that, not for a time it usually takes.
+            while session._current_turn_task is not None and not session._current_turn_task.done():
+                await asyncio.sleep(0.01)
             await stt.finish()
 
         async def _run() -> None:
@@ -736,7 +739,7 @@ class TestTurnTimeout:
                     events.append(ev)
                 await driver
 
-        await asyncio.wait_for(_run(), timeout=5)
+        await asyncio.wait_for(_run(), timeout=10)  # a hang guard: the turn takes about 0.2 s
 
         assert any(isinstance(e, SessionError) and "timed out" in e.message for e in events)
         assert tts.synthesize_calls  # rescue was attempted against the dead TTS
@@ -956,8 +959,11 @@ class TestDeliveryAndPromptSections:
 
         assert "Hello, caller." in " ".join(tts.synthesized_texts)
         (llm_input,) = self._llm_inputs(session)
-        # Nothing tells the model its text is private, and it has no tool to answer with instead.
-        assert not llm_input.get("system_prompt")
+        # Nothing tells the model its text is private, and it has no tool to answer with instead. (A call's
+        # prompt still carries its per-turn facts: the clock, the reply language.)
+        prompt = system_prompt_text(llm_input.get("system_prompt")) or ""
+        assert "send_message" not in prompt
+        assert "Current date and time" in prompt
         assert [tool.name for tool in llm_input.get("tools") or []] == []
         assert "delivery" not in session._last_run_context.root_span().metadata
 

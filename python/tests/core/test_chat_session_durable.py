@@ -2,6 +2,8 @@
 
 import asyncio
 import copy
+import inspect
+import time
 from typing import Any
 
 import pytest
@@ -2283,27 +2285,71 @@ def renewals(store, renew):
     store.acquire_lease = acquire
 
 
+# A lease for setting a session up on: a third of it, when its first renewal is due, is far past the setup's
+# 30 s hang guards and a CI runner that stops the whole process (70-260 s seen), so none is out when
+# `lease_from_here` takes over, and a stalled runner does not use it up.
+SETUP_TTL = 3600.0
+
+
+async def lease_from_here(session, store, ttl):
+    """Shorten ``session``'s lease to ``ttl``, counted from a renewal sent here, in the store and in the session.
+
+    A test sets its session up on `SETUP_TTL` and shortens the lease once the session is where it wants it: a
+    stalled runner then costs the setup nothing. Setting ``lease_ttl_s`` alone does not do it: the store keeps
+    the long lease it gave, and the session's renewal loop has planned by it, so its first renewal comes a third
+    of the long lease later and the next is planned by the long one too, past the end of the short lease: the
+    session gives that up without trying. From here it renews by ``ttl``, as after a renewal of its own.
+    """
+    assert not session.lost and session._lease_task is not None
+    # Its next renewal is not due yet, so none is out: one sent by the long lease could land after the one
+    # below and stamp the long lease again.
+    assert time.monotonic() < session._lease_from + store.lease_ttl_s / 3
+    store.lease_ttl_s = ttl
+    async with asyncio.timeout(30):  # a hang guard: for a renewal that never comes back, and for asking again
+        while True:
+            sent = time.monotonic()  # (a lease counts from when the request that confirmed it was sent)
+            await store.acquire_lease(session.id, process_owner())
+            # Back before its first renewal is due: the session then plans as after a renewal of its own. A
+            # runner that stalled while this was out (after the store wrote it, say) has used up part of the
+            # short lease, and the session would renew at once, or past nine tenths of it give it up: ask again.
+            # Until the swap below the session still plans by the long lease, so the asking costs it nothing.
+            if time.monotonic() < sent + ttl / 3:
+                break
+    # Swapped with no await in between: a save that found no renewal loop would start a second one, counted
+    # from the old lease, and the assignment below would hide it from close().
+    session._stop_lease()
+    session._lease_from = sent
+    session._lease_task = task = asyncio.get_running_loop().create_task(session._renew_lease())
+    # Once the loop has planned by ``ttl``: a lease set after this one (another worker's) must not be the one
+    # it plans by.
+    await until(lambda: inspect.getcoroutinestate(task.get_coro()) != inspect.CORO_CREATED)
+    assert not session.lost
+
+
 class TestLeaseRunsOut:
     """A lease this process could not renew runs out at a time the store and the session both know. The
     session has stopped by then, its turn with it: the worker the store gives the session to next must not
     find the old one still acting."""
 
     # Every test here first gets its session mid-tool, still the owner. A stalled event loop (a busy CI
-    # runner) uses up the lease as surely as a store that does not answer, and the session then rightly gives
-    # it up: a 0.9 s lease leaves about 0.4 s between a failed renewal and the end of the lease, and a
-    # runner took more than that during the setup alone; this one leaves 1.4 s. It is the lease for the
-    # whole test: the store stamps it when it gives it, and the session has planned its next renewal by the
-    # one it holds, so a shorter one set under a live session is given up without a renewal being tried.
+    # runner) uses up a lease as surely as a store that does not answer, and the session then rightly gives
+    # it up: during the setup of a session on a 3 s lease, a windows-latest runner kept the event loop from
+    # running through the whole window that lease gives its first renewal (from 1 s to 2.7 s), on the first
+    # attempt and on the retry ("the 3 s lease ran out, 3.78 s after its last renewal: no renewal was tried").
+    # So the setup runs on `SETUP_TTL`, and the session is given the lease a test is about once it is
+    # mid-tool (`lease_from_here`). This one leaves 1.4 s between a failed renewal and its end.
     KEPT_TTL = 3.0
 
     async def _mid_tool(self, db, ttl=KEPT_TTL):
         provider, store = db
-        store.lease_ttl_s = ttl
+        store.lease_ttl_s = SETUP_TTL
         till = Till()
         session = ChatSession(make_agent(provider, till), session_store=store)
         session.send("start")
         await asyncio.wait_for(till.entered.wait(), 30)
-        await session.flush()
+        async with asyncio.timeout(30):  # (a hang guard: a save that never comes back)
+            await session.flush()
+        await lease_from_here(session, store, ttl)
         return session, store, till
 
     @pytest.mark.parametrize("store_is", ["hung", "down", "deaf"])
@@ -4078,12 +4124,14 @@ class TestAStoreThatHangs:
         """A renewal that gets no answer is one that did not happen. After a whole lease without one, another
         process may hold the session: this copy stops, as it does when renewals fail."""
         provider, store = db
-        # Long enough to still be held when the turn below is over, on a stalled runner too (see KEPT_TTL).
-        store.lease_ttl_s = TestLeaseRunsOut.KEPT_TTL
+        # Still held when the turn below is over, on a stalled runner too (see `lease_from_here`).
+        store.lease_ttl_s = SETUP_TTL
         session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
         session.send("hello")
         await records(session, "turn_finished", 1)
-        await session.flush()
+        async with asyncio.timeout(30):  # (a hang guard: a save that never comes back)
+            await session.flush()
+        await lease_from_here(session, store, TestLeaseRunsOut.KEPT_TTL)
         hang(store)
         await asyncio.wait_for(session.wait_closed(), 30)
         assert session.lost and session.handed_off
@@ -4167,6 +4215,144 @@ class TestAStoreThatHangs:
         await until(lambda: not alive())
         assert (await store.load("s1")).session_id == "s1"  # started again by the next call
         assert await store.list_ids() == ["s1"]
+
+    async def test_a_call_through_a_moved_link_queues_with_the_file_it_names_now(self, tmp_path):
+        """A store's calls run in the order they were made, on the thread of the file its path names when the
+        call is made. A link moved from one file to another sends the next call to the new file's queue, behind
+        or ahead of that file's other calls as they were made, never to the old file's (busy) thread."""
+        import os
+        import threading
+
+        first_dir, second_dir, link = tmp_path / "first", tmp_path / "second", tmp_path / "link"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        try:
+            os.symlink(first_dir, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("no symbolic links here (Windows without the privilege)")
+        through_link = SqliteChatSessionStore(link / "s.db")
+        first, second = SqliteChatSessionStore(first_dir / "s.db"), SqliteChatSessionStore(second_dir / "s.db")
+        await through_link.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)  # the first file
+        assert await second.load("s1") is None  # the second file, opened
+        link.unlink()
+        os.symlink(second_dir, link, target_is_directory=True)
+        stuck, release = threading.Event(), threading.Event()
+        held = asyncio.ensure_future(first._run(lambda _conn: (stuck.set(), release.wait(30))))
+        try:
+            await asyncio.wait_for(asyncio.to_thread(stuck.wait, 30), 30)  # the first file's thread is busy
+            # Made in this order: tasks start in the order they were created, and each queues its call before
+            # its first await.
+            saved = asyncio.ensure_future(
+                through_link.save(SessionSnapshot(session_id="s2", agent="agent"), expect_version=None)
+            )
+            loaded = asyncio.ensure_future(second.load("s2"))
+            snapshot = await asyncio.wait_for(loaded, 30)
+            assert snapshot is not None and snapshot.session_id == "s2"  # the save went first, in the same queue
+            assert await asyncio.wait_for(saved, 30) == 1
+        finally:
+            release.set()
+        await asyncio.wait_for(held, 30)
+        assert await first.load("s2") is None  # and not into the file the link named before
+
+    async def test_a_call_through_a_link_that_followed_a_renamed_directory_queues_with_the_file(self, tmp_path):
+        """The directory is renamed with the database in it (the same file, the same inode) and the link moved
+        to follow it, while a call made by the old path before the rename is still running: the link and the new
+        path resolve to one key, so their calls share its queue, in the order they were made."""
+        import os
+        import threading
+
+        from timbal.state import chat_store
+
+        old_dir, new_dir, link = tmp_path / "old", tmp_path / "new", tmp_path / "link"
+        old_dir.mkdir()
+        try:
+            os.symlink(old_dir, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("no symbolic links here (Windows without the privilege)")
+        through_link = SqliteChatSessionStore(link / "sessions.db")
+        await through_link.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
+        stuck, release = threading.Event(), threading.Event()
+        held = asyncio.ensure_future(
+            SqliteChatSessionStore(old_dir / "sessions.db")._run(lambda _conn: (stuck.set(), release.wait(30)))
+        )
+        try:
+            await asyncio.wait_for(asyncio.to_thread(stuck.wait, 30), 30)  # the file's thread is busy
+            try:
+                os.rename(old_dir, new_dir)
+                renamed = True
+            except OSError:
+                renamed = False  # Windows: a directory with an open file in it is not renamed
+            if renamed:
+                link.unlink()
+                os.symlink(new_dir, link, target_is_directory=True)
+                assert chat_store._store_thread(link / "sessions.db") is chat_store._store_thread(
+                    new_dir / "sessions.db"
+                )
+                saved = asyncio.ensure_future(
+                    through_link.save(SessionSnapshot(session_id="s2", agent="agent"), expect_version=None)
+                )
+                loaded = asyncio.ensure_future(SqliteChatSessionStore(new_dir / "sessions.db").load("s2"))
+        finally:
+            release.set()
+        await asyncio.wait_for(held, 30)  # nothing left running, also when this test is skipped
+        if not renamed:
+            pytest.skip("an open database's directory cannot be renamed here")
+        assert await asyncio.wait_for(saved, 30) == 1
+        snapshot = await asyncio.wait_for(loaded, 30)
+        assert snapshot is not None and snapshot.session_id == "s2"  # the save went first, in the same queue
+
+    async def test_a_new_file_at_a_renamed_files_old_path_gets_a_queue_of_its_own(self, tmp_path):
+        """A directory renamed with its database, and a new database made at the old path: two files, so two
+        queues. A hang or a burst of work on one holds up nothing of the other."""
+        import os
+
+        from timbal.state import chat_store
+
+        old_dir, new_dir = tmp_path / "old", tmp_path / "new"
+        old_dir.mkdir()
+        await SqliteChatSessionStore(old_dir / "s.db").save(
+            SessionSnapshot(session_id="s1", agent="agent"), expect_version=None
+        )
+        try:
+            os.rename(old_dir, new_dir)
+        except OSError:
+            pytest.skip("an open database's directory cannot be renamed here")
+        old_dir.mkdir()
+        await SqliteChatSessionStore(old_dir / "s.db").save(
+            SessionSnapshot(session_id="s9", agent="agent"), expect_version=None
+        )
+        assert chat_store._store_thread(new_dir / "s.db") is not chat_store._store_thread(old_dir / "s.db")
+        assert await SqliteChatSessionStore(new_dir / "s.db").load("s9") is None  # and two files, as they were
+        assert (await SqliteChatSessionStore(new_dir / "s.db").load("s1")).session_id == "s1"
+
+    async def test_a_store_call_does_not_wait_for_another_files_open(self, tmp_path):
+        """The registry of open databases has one lock for every file. A thread opening another one may hold
+        it (a slow file system): a call to a store whose file is open waits for nothing of that, on the event
+        loop or on its own thread."""
+        import threading
+
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        store = SqliteChatSessionStore(tmp_path / "open.db")
+        await store.save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
+        holding, release, outcome = threading.Event(), threading.Event(), {}
+
+        def opens_another():
+            with sqlite_module._DATABASES_LOCK:
+                holding.set()
+                outcome["released_in_time"] = release.wait(10)
+
+        holder = threading.Thread(target=opens_another, daemon=True)
+        holder.start()
+        try:
+            assert holding.wait(30)
+            # Blocked on the lock, the event loop could not run this test on until the holder gives up.
+            loaded = await store.load("s1")
+        finally:
+            release.set()
+            holder.join(30)
+        assert loaded is not None and loaded.session_id == "s1"
+        assert outcome["released_in_time"]  # released by this test once the load was done, not by the timeout
 
     @pytest.mark.parametrize("ended_by", ["an error", "a cancellation"])
     async def test_a_restore_that_fails_does_not_wait_past_its_lease_to_let_it_go(self, db, ended_by):

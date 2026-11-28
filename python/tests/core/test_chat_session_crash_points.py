@@ -30,6 +30,7 @@ is one point of this space; these find the others.
 import asyncio
 import collections
 import contextlib
+import sys
 
 import pytest
 from timbal import Agent, Tool
@@ -42,6 +43,8 @@ from timbal.state.tracing.providers import SqliteTracingProvider
 from timbal.types.content import ToolUseContent
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
+
+from ..conftest import close_sqlite_databases
 
 # A test that times out because nothing in its process ran, or because something blocked the event loop, says
 # so, with the stacks (conftest.py `loop_watchdog`): on loaded CI runners a test process has stood still for
@@ -63,6 +66,47 @@ def isolated_context(monkeypatch):
     set_parent_call_id(None)
     yield
     set_run_context(None)
+
+
+# The one SQLite file of a test (in its tmp_path): every run of a sweep stores its sessions and traces there.
+DATABASE = "sessions.db"
+
+
+@pytest.fixture(autouse=True)
+def one_database(tmp_path):
+    """One file for all the runs of a test, not one per run. Each run has a session and runs of its own (new ids),
+    so no run reads another's rows, and a new process of a run reads the same file, as before. A file per run
+    was most of a sweep's time on Windows: creating one (WAL, schema), then closing and deleting it, took
+    40-180 ms there against 2-3 ms on Linux and macOS (measured on windows-latest, 2026-11)."""
+    yield
+    release(tmp_path / DATABASE)
+
+
+@pytest.fixture(autouse=True)
+def fine_timer():
+    """Waits as long as the scenarios ask for, on Windows too.
+
+    Windows ends a wait at a tick of its timer, every 15.6 ms by default, and with Python 3.13's precise clock a
+    3 ms sleep often takes two ticks: each poll of :meth:`Client.settle`, each tool's pause and the window a
+    second restore is watched in took 15-31 ms there instead of 3-10 ms (a third of a sweep's time on
+    windows-latest / py3.13). This asks for a 1 ms timer for the test's length, as Linux and macOS have: a 3 ms
+    sleep then takes 3.4-4 ms there. Before Python 3.13 ``time.monotonic`` still moves in 15-16 ms steps under it
+    (measured), so its coarse-clock cases of CLAUDE.md still run; ``time.time`` and ``time.time_ns`` may move in
+    finer ones (not measured). No test here reads the wall clock, and one that needs two events to share a
+    wall-clock timestamp sets that clock itself. Since Windows 10 2004 the timer request is the process's own:
+    other workers' waits keep their ticks."""
+    if sys.platform != "win32":
+        yield
+        return
+    import ctypes
+
+    winmm = ctypes.WinDLL("winmm")
+    granted = winmm.timeBeginPeriod(1) == 0  # TIMERR_NOERROR
+    try:
+        yield
+    finally:
+        if granted:
+            winmm.timeEndPeriod(1)
 
 
 # -- The fault -------------------------------------------------------------------
@@ -234,18 +278,11 @@ async def take_over(store, session_id) -> int | None:
 
 
 def release(path) -> None:
-    """Close this run's database and delete it: the provider keeps one connection per file for the life of
-    the process, and a sweep opens hundreds of files."""
+    """Close a test's database and delete it: a worker runs hundreds of these tests, each with a file of its own."""
     from pathlib import Path
 
-    from timbal.state.tracing.providers import sqlite
-
+    close_sqlite_databases(path)
     resolved = str(Path(path).resolve())
-    with sqlite._DATABASES_LOCK:
-        for key in [key for key in sqlite._DATABASES if key[0] == resolved]:
-            db = sqlite._DATABASES.pop(key)
-            with db.lock:
-                db.conn.close()
     for suffix in ("", "-wal", "-shm"):
         Path(resolved + suffix).unlink(missing_ok=True)
 
@@ -723,9 +760,6 @@ def texts(message):
     return " ".join(b.get("text") or "" for b in message.get("content") or [] if isinstance(b, dict))
 
 
-_RUNS = iter(range(10**9))
-
-
 async def stalled(fault, session) -> None:
     """A session that lost its lease stopped without writing, for another process to restore: what a server
     does with it (it restores a handed-off session on its next request). After a ``"stall"`` fault it must
@@ -761,7 +795,7 @@ async def run_once(tmp_path, scenario, durability, *faults):
     (none left: nothing fails any more); settle; return what to check."""
     before = asyncio.all_tasks()
     calls = collections.Counter()
-    path = tmp_path / f"{scenario}-{durability}-{next(_RUNS)}.db"
+    path = tmp_path / DATABASE
     faults = list(faults) or [Fault()]
     fault = faults.pop(0)
     legacy = scenario in LEGACY_SNAPSHOTS
@@ -816,7 +850,6 @@ async def check(result, label):
         session = result["session"]
         if session is not None and not session.closed:
             await session.close(keep=True)  # a failed check: nothing of it may leak into the next run
-        release(result["path"])
 
 
 async def _check(result, label):
@@ -1021,7 +1054,7 @@ async def test_a_takeover_at_any_write_is_never_written_over(tmp_path, scenario)
     for at in range(clean["writes"][0]):
         fault = Fault(at, "taken")
         calls = collections.Counter()
-        path = tmp_path / f"{scenario}-taken-{at}.db"
+        path = tmp_path / DATABASE
         provider = FaultySqlite.configured(_path=path, fault=fault, durability="sync")
         store = faulty_store(path, fault)
         session = ChatSession(make_agent(provider, calls), session_store=store, collect_window=0.0)
@@ -1049,5 +1082,4 @@ async def test_a_takeover_at_any_write_is_never_written_over(tmp_path, scenario)
             if not session.closed:
                 await session.close(keep=True)
             forget(session)
-            release(path)
     assert not failures, f"{len(failures)} of {points} takeover points:\n" + "\n".join(failures)

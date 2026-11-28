@@ -43,7 +43,7 @@ from ..types.approval import Cancel
 from ..types.content import FileContent, TextContent
 from ..types.file import File
 from ..types.message import Message
-from .runnable import Runnable
+from .runnable import InterruptionMode, Runnable
 from .tool import Tool
 from .tool_set import ToolSet
 
@@ -909,6 +909,14 @@ class MCPServer(ToolSet):
     ambient trace context. It can correlate its own calls; our ids do not link them across servers
     (an ambient ``traceparent`` does, as any OpenTelemetry-instrumented request's headers would).
     Never any credential."""
+
+    interruption_mode: InterruptionMode = "allow"
+    """Barge-in policy copied onto every tool this server exposes.
+
+    Same values as ``Tool.interruption_mode``. ``allow`` (default) leaves caller
+    barge-in unchanged. A server that must finish a transfer or read back a
+    confirmation sets ``disable_during_tool`` or ``disable_during_tool_and_turn``.
+    """
 
     sampling_model: Any = None
     """Timbal model string (e.g. ``"anthropic/claude-haiku-4-5"``) or a ``TestModel`` used
@@ -1880,7 +1888,12 @@ class MCPServer(ToolSet):
             read_only=bool(annotations and annotations.get("readOnlyHint") is True),
             defer_loading=self.defer_loading,
             search_group=self.name,
+            interruption_mode=self.interruption_mode,
             requires_approval=approval_policy,
+            # Destructive tools are marked. Speculative generation holds every
+            # tool until EndOfTurn, not only this flag. The flag does nothing
+            # when speculation is off.
+            defer_until_eot=_is_destructive(mcp_tool),
             approval_prompt=f"Run {title or exposed_name}?" if requires_approval else None,
             approval_description=(mcp_tool.description or None) if requires_approval else None,
             approval_kind="mcp_tool" if requires_approval else None,

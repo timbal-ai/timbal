@@ -1,9 +1,10 @@
 name: CI
 
 # Two lanes, decided by the `plan` job (scripts/ci_plan.py):
-# - full: every OS x Python, tests in parallel. The merge queue, manual runs, and pull requests while
-#   the merge queue is not on. It is what has to pass before anything lands.
-# - fast: Ubuntu + the lowest supported Python, tests in parallel. Pull requests into main once the repo
+# - full: every Python on Ubuntu 26.04, macOS and Windows, plus the lowest on Ubuntu 24.04; tests in parallel.
+#   The merge queue, manual runs, and pull requests while the merge queue is not on. It is what has to pass
+#   before anything lands.
+# - fast: Ubuntu 26.04 + the lowest supported Python, tests in parallel. Pull requests into main once the repo
 #   variable CI_MERGE_QUEUE=true (the merge queue then runs the full lane on what is about to land).
 #   Pull requests into release/** always run the full lane: GitHub has no merge queue for a branch pattern.
 # A pull request, or a merge queue group, that touches nothing the tests read runs no tests.
@@ -23,7 +24,8 @@ on:
         type: choice
         options:
           - all
-          - ubuntu-latest
+          - ubuntu-26.04  # scripts/ci_plan.py FULL
+          - ubuntu-24.04
           - macos-latest
           - windows-latest
 
@@ -76,6 +78,12 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
+          # The key names the runner's own Python (setup-python runs after this step), so without the matrix's
+          # every job of one OS in a full run shares a key and they race to save it ("Unable to reserve cache").
+          cache-suffix: py${{ matrix.python }}
+          # A cache is read back only from its own ref or main's, and main runs no CI: a merge queue run's ref is
+          # new each time and gone after it, so what it saved was never read (~10 MB and ~2 s per job).
+          save-cache: ${{ github.event_name != 'merge_group' }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -90,13 +98,14 @@ jobs:
         run: uv sync --dev --extra all
 
       - name: Smoke import (catches platform-specific import errors)
-        run: uv run python -c "import timbal; from timbal.state.tracing.providers import JsonlTracingProvider, InMemoryTracingProvider, PlatformTracingProvider, SqliteTracingProvider; print('ok')"
+        run: uv run python -c "import timbal; import av, numpy; from timbal.state.tracing.providers import JsonlTracingProvider, InMemoryTracingProvider, PlatformTracingProvider, SqliteTracingProvider; print('ok', av.__version__, numpy.__version__)"
 
       - name: Audit models.yaml (offline)
         run: uv run python scripts/audit_models.py --offline
 
-      # Everything in parallel, then the tests marked `serial` (none today) one at a time. Both passes
-      # always run; either failing fails the step. One cell of the full lane measures coverage, over both.
+      # Everything in parallel, then the tests marked `serial` one at a time (today `python/tests/test_isolation.py`,
+      # whose two tests must run in order in one process). Both passes always run; either failing fails the step.
+      # One cell of the full lane measures coverage, over both.
       # - Workers: one per core minus one. With every core busy, the event loop, SQLite threads and background
       #   uploads starve, and that is when rare stalls showed up; a free core costs little.
       # - A failed test is retried once (pytest-rerunfailures): a rare flake does not fail the job, a real
@@ -110,10 +119,12 @@ jobs:
           workers=$(uv run python -c "import os; print(max(1, (os.cpu_count() or 2) - 1))")
           cov=""
           if [ "$COVERAGE" = "true" ]; then cov="--cov=timbal --cov-report=term-missing"; fi
-          retry="--reruns 1 --reruns-delay 1"
+          # --rerun-show-tracebacks: a test that passed on retry still logs why its first attempt failed
+          # (under "rerun test summary info"); without it the log has only its RERUN line.
+          retry="--reruns 1 --reruns-delay 1 --rerun-show-tracebacks"
           rc=0
           uv run pytest -n "$workers" --dist worksteal -m "not integration and not serial" $retry $cov 2>&1 | tee pytest.log || rc=$?
-          # Exit 5: no test is marked `serial` (none needs it today); the step does not fail for that.
+          # Exit 5: no test marked `serial` was collected; the step does not fail for that.
           uv run pytest -m "serial and not integration" $retry $cov ${cov:+--cov-append} 2>&1 | tee -a pytest.log \
             || { s=$?; [ "$s" -eq 5 ] || rc=$s; }
           flaky=$(uv run python scripts/ci_flaky.py pytest.log)

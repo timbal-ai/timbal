@@ -12,6 +12,8 @@ from timbal.server.chat import session_store_for
 from timbal.server.http import create_app
 from timbal.state.chat_store import SessionSnapshot, SqliteChatSessionStore, process_owner
 
+from ..conftest import close_sqlite_databases
+
 AGENT = textwrap.dedent(
     """
     import asyncio, os
@@ -413,18 +415,6 @@ def test_a_trace_store_that_cannot_be_opened_does_not_stop_the_server(tmp_path, 
         assert refused.status_code == 503 and client.get("/chat/sessions").json() == []
 
 
-def _close_database(path):
-    """Close this process's connection to the SQLite file at ``path`` (the write-ahead log is folded into it)."""
-    from pathlib import Path
-
-    from timbal.state.tracing.providers import sqlite as sqlite_module
-
-    resolved = str(Path(path).resolve())
-    with sqlite_module._DATABASES_LOCK:
-        for key in [key for key in sqlite_module._DATABASES if key[0] == resolved]:
-            sqlite_module._DATABASES.pop(key).conn.close()
-
-
 def test_sessions_with_work_are_found_once_the_store_is_back(tmp_path, monkeypatch):
     """Startup could not look, so it keeps looking: a session with a message waiting is brought back when the
     store answers again, without a client asking for it."""
@@ -445,7 +435,7 @@ def test_sessions_with_work_are_found_once_the_store_is_back(tmp_path, monkeypat
     staging.mkdir()
     seeded = SqliteChatSessionStore(staging / "timbal.db")
     asyncio.run(seeded.save(SessionSnapshot(session_id="s1", agent="agent", pending=[message]), expect_version=None))
-    _close_database(staging / "timbal.db")  # Windows does not rename a folder with a file open in it
+    close_sqlite_databases(staging / "timbal.db")  # Windows does not rename a folder with a file open in it
     with TestClient(create_app()) as client:
         sessions = client.app.state.chat_sessions
         assert sessions == {}
@@ -626,6 +616,10 @@ def test_the_store_choice(tmp_path, monkeypatch):
     monkeypatch.setenv("TIMBAL_CHAT_STORE", "postgres://x")
     with pytest.raises(RuntimeError, match="TIMBAL_CHAT_STORE"):
         session_store_for(memory_agent)
+    # A database in memory would be a new, empty one on every call: the store's error, not a crash at startup.
+    monkeypatch.setenv("TIMBAL_CHAT_STORE", "sqlite:///:memory:")
+    with pytest.raises(RuntimeError, match="TIMBAL_CHAT_STORE.*in memory"):
+        session_store_for(sqlite_agent)
 
 
 def test_a_session_with_a_collected_message_is_not_reaped(client, monkeypatch):

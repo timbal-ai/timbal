@@ -11,6 +11,12 @@ from timbal.state import set_run_context
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig
 from timbal.state.context import RunContext
 
+# A hang guard, not a timing check. Local discovery connects to `localhost`, and this server listens on 127.0.0.1
+# only: on Windows `localhost` is ::1 first, where a refused connection is reported after about 2 s, so each new
+# connection waits out Happy Eyeballs' 0.25 s before it tries 127.0.0.1, and this HTTP/1.0 server takes a new one
+# per request. The handshake then took about 0.75 s of what was a 2 s budget, which a busy runner went past.
+CONNECT_TIMEOUT = 30
+
 
 def caller(token):
     set_run_context(
@@ -89,7 +95,7 @@ def endpoint(monkeypatch):
 async def test_local_discovery_and_invocation(endpoint):
     _, requests = endpoint
     caller("alice")
-    server = MCPServer(name="crm", transport="http", service="api", connect_timeout=2)
+    server = MCPServer(name="crm", transport="http", service="api", connect_timeout=CONNECT_TIMEOUT)
     tools = await server.resolve()
     assert [t.name for t in tools] == ["crm__who"]
     assert await tools[0].handler() == "alice"
@@ -103,7 +109,7 @@ async def test_gateway_route_and_concurrent_identity_isolation(endpoint, monkeyp
     monkeypatch.setenv("TIMBAL_PROJECT_ENV_ID", "123")
     monkeypatch.setenv("TIMBAL_PROJECT_ENV_ORIGIN", f"http://127.0.0.1:{port}")
     caller("alice")
-    server = MCPServer(transport="http", service="api", connect_timeout=2)
+    server = MCPServer(transport="http", service="api", connect_timeout=CONNECT_TIMEOUT)
     tool = (await server.resolve())[0]
 
     async def invoke(token):
@@ -119,7 +125,7 @@ async def test_gateway_route_and_concurrent_identity_isolation(endpoint, monkeyp
 @pytest.mark.usefixtures("endpoint")
 async def test_failed_discovery_does_not_poison_next_caller():
     caller("rejected")
-    server = MCPServer(transport="http", service="api", connect_timeout=2)
+    server = MCPServer(transport="http", service="api", connect_timeout=CONNECT_TIMEOUT)
     with pytest.raises(ConnectionError):
         await server.resolve()
     caller("bob")

@@ -1,5 +1,9 @@
 """Agents for exercising every voice_config knob in the /voice playground.
 
+The #242 ship config is not in this file. Call
+``examples/voice_fde_ship.py::agent`` (see ``examples/voice_fde_ship.md``).
+The agents below are a knob tour.
+
 One module, several agents — pick one with the import spec's ``::name``. All
 run on Groq (``qwen3.8-27b`` — fast enough that TTS never waits on the LLM),
 override with ``TIMBAL_VOICE_DEMO_MODEL``. Keys come from the repo-root ``.env``

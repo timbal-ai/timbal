@@ -28,6 +28,44 @@ production live in that gap.
 | `score.py` | JSONL records, scorecard aggregation, baseline diffing |
 | `cli.py` | runner, reporting, regression gate |
 | `bench_cpu.py` | concurrency ceiling: sessions per event loop / per CPU (no API keys) |
+| `bench_ttft.py` | model first-token p50/p95 for a fixed ~7k-token voice prompt (needs provider keys) |
+
+## First-token benchmark
+
+`bench_ttft.py` times the first streamed text token of one fixed voice prompt,
+cold and cache-hit, for OpenAI (`gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.4-mini`),
+Groq (`openai/gpt-oss-20b`, `openai/gpt-oss-120b`), and Anthropic Haiku 4.5 and
+Haiku 5.5. The Bedrock EU rows (`eu.anthropic.claude-haiku-4-5-20251001-v1:0`
+in `eu-central-1`, and `eu.anthropic.claude-haiku-5-5`) are in the same matrix.
+Direct calls are the default. `--base-url provider=URL` sends that provider
+through another base URL, such as the platform proxy. `--eu` points OpenAI at
+`https://eu.api.openai.com/v1`. Groq has no self-serve region pin; those rows
+stay on `api.groq.com`.
+
+```bash
+uv run python benchmarks/voice/bench_ttft.py --list
+uv run python benchmarks/voice/bench_ttft.py --samples 6
+uv run python benchmarks/voice/bench_ttft.py --eu --samples 6
+uv run python benchmarks/voice/bench_ttft.py \
+    --base-url openai=https://host/orgs/ORG/proxies/openai-completions/v1 \
+    --base-url groq=https://host/orgs/ORG/proxies/openai-completions/v1 \
+    --base-url anthropic=https://host/orgs/ORG/proxies/anthropic \
+    --api-key-env TIMBAL_API_KEY
+```
+
+Keys, when you want that row to run: `OPENAI_API_KEY`, `GROQ_API_KEY`,
+`ANTHROPIC_API_KEY`. Bedrock EU uses `AWS_BEARER_TOKEN_BEDROCK`, or
+`AWS_ACCESS_KEY_ID` plus `AWS_SECRET_ACCESS_KEY` (and `AWS_SESSION_TOKEN` when
+the key is temporary). A missing key skips the row and names the variable.
+The report prints p50/p95 overall, for cache misses, and for cache hits, plus
+the hit rate and the provider's `prompt_tokens`. OpenAI and Groq read
+`cached_tokens`. Anthropic and Bedrock read `cache_read_input_tokens`.
+Temperature is not sent. The prompt is the same bytes every sample.
+
+The CI check for silence-to-first-audio p95 and false cuts is
+`python/tests/voice/test_voice_regression.py`. It replays the text of the
+scenarios in this directory (trailing conjunction, noise, hesitation, barge-in)
+through `VoiceSession` with `TestModel`. It does not call a speech provider.
 
 ## `bench_cpu.py` — how many sessions fit in one process
 

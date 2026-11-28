@@ -90,6 +90,7 @@ from ..types.run_status import RunStatus
 from ..utils import coerce_to_dict, dump, invalidate_message_dump_caches
 from .attachment_limit import AttachmentSpills, apply_attachment_limit
 from .llm import _llm_router
+from .llm.prompt_cache import SystemPrompt
 from .memory_compaction import MemoryCompactor
 from .models import Model, base_usage_metric, get_context_window
 from .peers import _SEND_TO_AGENT_FALLBACKS, SEND_TO_AGENT_NAME, carry_sent_ids, start_batch
@@ -107,6 +108,7 @@ from .tool_result_offload import (
     create_read_offloaded,
 )
 from .tool_set import ToolSet
+from .voice_context import CURRENT_VOICE_SESSION
 
 logger = structlog.get_logger("timbal.core.agent")
 
@@ -377,6 +379,13 @@ def _unused_name(base: str, fallbacks: tuple[str, ...], taken: set[str]) -> str:
     while f"{base}_{number}" in taken:
         number += 1
     return f"{base}_{number}"
+
+
+def is_dispatcher(tools: Any, name: Any) -> bool:
+    """Whether ``name`` is the ``call_tool`` dispatcher among ``tools`` (one model call's), not a tool of the
+    agent's own that took one of its names: the check :meth:`Agent._dispatched` makes, for code that sees the
+    call but not the step."""
+    return any(isinstance(tool, _CallTool) and tool.name == name for tool in tools or ())
 
 
 def is_call_tool_name(name: Any) -> bool:
@@ -1209,12 +1218,14 @@ class Agent(Runnable):
     """LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5') or a TestModel for offline testing."""
     system_prompt: (
         str
+        | SystemPrompt
         | dict[str, str]
-        | Callable[[], str | dict[str, str]]
-        | Callable[[], Coroutine[Any, Any, str | dict[str, str]]]
+        | Callable[[], str | SystemPrompt | dict[str, str]]
+        | Callable[[], Coroutine[Any, Any, str | SystemPrompt | dict[str, str]]]
         | None
     ) = None
-    """System prompt. Can be a string, sync callable, or async callable returning a string.
+    """System prompt. A string, a :class:`SystemPrompt` (static prefix, then a per-turn suffix), or a
+    sync/async callable returning either.
 
     Or named sections (``{name: text}``, or a callable returning them): a root agent then pins them
     in session data and sends the same prompt every turn, so the provider's prompt cache keeps
@@ -1674,6 +1685,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """See base class."""
         if self._system_prompt_fn is not None:
             system_prompt = f"<{self._system_prompt_fn.__name__}>"
+        elif isinstance(self.system_prompt, SystemPrompt):
+            # The text the model gets, static part first: readers of the config
+            # (``codegen flow``, the platform's editor) treat the prompt as text.
+            system_prompt = self.system_prompt.as_text()
         else:
             system_prompt = self.system_prompt
 
@@ -1772,7 +1787,23 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         return AgentContinuation(self, max_idle_secs=max_idle_secs, max_continuations=max_continuations, **kwargs)
 
-    async def _resolve_system_prompt(self) -> str | dict[str, str] | None:
+    async def _resolve_input_params(self, input: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Resolve a callable ``system_prompt`` inside the run, before the trace dump.
+
+        Voice turns pass a callable so it sees the forked ``RunContext`` (session
+        data, ``parent_id``). A string is left as-is. The resolved text is what
+        lands on ``span.input``.
+        """
+        resolved = await super()._resolve_input_params(input)
+        prompt = resolved.get("system_prompt")
+        if callable(prompt):
+            value = prompt()
+            if inspect.isawaitable(value):
+                value = await value
+            resolved["system_prompt"] = value
+        return resolved
+
+    async def _resolve_system_prompt(self) -> str | SystemPrompt | dict[str, str] | None:
         """Resolve system prompt by executing callable or embedded template functions.
 
         Sections (``{name: text}``) come back as a dict, skills as their own section.
@@ -1791,12 +1822,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return sections
 
         if self._system_prompt_skills:
-            if not isinstance(system_prompt, str):
+            # Skills are stable, so they stay on the cached prefix.
+            if isinstance(system_prompt, SystemPrompt):
+                static = system_prompt.static
+                skills = self._system_prompt_skills
+                static = f"{static}\n\n{skills}" if static else skills
+                system_prompt = system_prompt.model_copy(update={"static": static})
+            elif not isinstance(system_prompt, str):
                 system_prompt = self._system_prompt_skills
             else:
                 system_prompt += "\n\n" + self._system_prompt_skills
 
-        if system_prompt is not None and not isinstance(system_prompt, str):
+        if system_prompt is not None and not isinstance(system_prompt, str | SystemPrompt):
             logger.warning(
                 "Invalid system prompt type after resolution, ignoring...",
                 system_prompt=system_prompt,
@@ -1805,6 +1842,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             system_prompt = None
 
         return system_prompt
+
+    def _voice_system_prompt(self, system_prompt: str | SystemPrompt | None) -> str | SystemPrompt | None:
+        """On a voice turn of this agent, keep per-turn facts after the static prefix.
+
+        Greeting and filler agents are different instances, so they do not pick
+        up the call's caller, clock, or customer block.
+        """
+        # Lazy: voice.session imports Agent. Only a live call pays for it.
+        from ..voice.session import current_voice_session
+
+        session = current_voice_session()
+        if session is None or session.agent is not self:
+            return system_prompt
+        return session.prompt_for_turn(system_prompt)
 
     def _find_pending_tool_uses(self, memory: list[Message]) -> list[ToolUseContent]:
         """Return any tool_uses in the most recent assistant message that
@@ -3028,6 +3079,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 tools = [tool for tool in tools if self._tool_allowed(tool, tool_policy)]
                 commands = {key: tool for key, tool in commands.items() if tool in tools}
                 self._record_allowed_tools(tools, tool_policy)
+        # Voice barge-in policy, keyed by the name the LLM calls, kept on the call's own session: concurrent
+        # calls share this Agent, and each resolves its own catalog. Only the non-default modes are stored;
+        # VoiceSession treats a missing name as allow. Only on a call: everywhere else nothing reads it.
+        session = CURRENT_VOICE_SESSION.get()
+        if session is not None and getattr(session, "agent", None) is self:
+            session._tool_interruption_modes = {
+                tool.name: mode for tool in tools if (mode := getattr(tool, "interruption_mode", "allow")) != "allow"
+            }
+            # What a call_tool dispatch can run: the session counts a dispatched call under its target only then.
+            session._resolved_tool_names = frozenset(tool.name for tool in tools)
         return tools, commands, tools_names, tool_providers
 
     def _tell_alike_sets_apart(self, sets: list[tuple[str, list[str], list[int]]], providers: dict[int, str]) -> None:
@@ -3661,11 +3722,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         tools: list[Tool],
         names: Collection[str],
         name: str | None,
-        system_prompt: str | None,
+        system_prompt: str | SystemPrompt | None,
         offered: bool,
         kept: str | None = None,
         warned: set[str] | None = None,
-    ) -> tuple[list[Tool], str, str | None]:
+    ) -> tuple[list[Tool], str, str | SystemPrompt | None]:
         """A step's tools with the delivery tool (``delivery="tool"``), the tool's name, and the system prompt.
 
         The name is picked at the turn's first step (``name`` is None then) among every name the agent has
@@ -3677,7 +3738,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if name is None:
             name = kept or self._send_tool_name(names)
             note = DEFAULT_DELIVERY_NOTE.format(tool=name)
-            system_prompt = f"{system_prompt}\n\n{note}" if system_prompt else note
+            if isinstance(system_prompt, SystemPrompt):
+                # Fixed for the turn: on the cached prefix, before the per-turn suffix.
+                static = f"{system_prompt.static}\n\n{note}" if system_prompt.static else note
+                system_prompt = system_prompt.model_copy(update={"static": static})
+            else:
+                system_prompt = f"{system_prompt}\n\n{note}" if system_prompt else note
         if offered and name in names:
             # A tool set that changed its catalog inside the turn, or since the turn paused: the name is the reply's.
             # (Said once a turn: ``warned``.)
@@ -4816,6 +4882,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 system_prompt = _render_pinned(sections_state["pinned"], sections_state["key"])
             else:
                 system_prompt = _render_sections(system_prompt)
+        # A voice turn keeps its per-turn facts after the static prefix (sections rendered first).
+        if CURRENT_VOICE_SESSION.get() is not None:
+            system_prompt = self._voice_system_prompt(system_prompt)
         # delivery="tool". The tool's name, fixed at the turn's first step (the system prompt says it): it
         # depends on the names of the step's tools, a tool set's included.
         send_name: str | None = None
@@ -5676,6 +5745,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             if repinned is not None:
                                 sections_state = repinned
                                 system_prompt = self._sections_prompt(repinned, send_name)
+                                # Rebuilt as text from the pin: a call keeps its per-turn facts (caller, clock,
+                                # reply language) for the rest of the turn too.
+                                if CURRENT_VOICE_SESSION.get() is not None:
+                                    system_prompt = self._voice_system_prompt(system_prompt)
 
                 # Output-side guardrails: model_output rails run on the final assistant
                 # message; model_step rails run on EVERY assistant message (including

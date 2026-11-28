@@ -73,8 +73,16 @@ class AudioOutputConfig(BaseModel):
 class TranscriptEvent(BaseModel):
     """Single event from an STT provider."""
 
-    type: Literal["partial", "committed", "error"]
-    text: str
+    type: Literal["partial", "committed", "error", "eager", "resumed"]
+    text: str = ""
+    confidence: float | None = None
+    """Provider end-of-turn confidence, set on ``eager`` / ``resumed``.
+
+    ``eager`` is a prediction while the caller may still continue (Deepgram
+    Flux ``EagerEndOfTurn``). ``resumed`` cancels it. Neither is a commit.
+    Speculative generation and during-speech prediction both consume these
+    events. ``resumed`` is delivered even when ``text`` is empty.
+    """
 
 
 class SpeechToText(VoiceUsageEmitter, ABC):
@@ -109,6 +117,16 @@ class SpeechToText(VoiceUsageEmitter, ABC):
 
     @abstractmethod
     async def close(self) -> None: ...
+
+    async def update_language(self, language: str | None) -> bool:  # noqa: ARG002
+        """Apply ``language`` on an already-open socket.
+
+        ``None`` clears a hint where the provider can. Return True only when
+        the live connection was updated. The default does nothing: the next
+        :meth:`connect` reads ``AudioInputConfig.language``. Deepgram Flux
+        ``flux-general-multi`` is the adapter that updates in place.
+        """
+        return False
 
 
 class TTSStream(ABC):
