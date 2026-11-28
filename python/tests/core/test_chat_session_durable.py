@@ -2155,6 +2155,17 @@ def steering_agent(provider, first, second):
     )
 
 
+def test_a_notice_posted_as_a_session_event_keeps_its_first_and_last_lines():
+    """A recovery notice posted as a session event (on_dead_turn="notify", a stopped turn's notice) is cut to the
+    event's cap between its first line (what it is) and its last (what to do)."""
+    from timbal.core.chat_session import _fit
+
+    notice = "\n".join(["header", *(f"line {i}: " + "x" * 100 for i in range(80)), "what to do"])
+    fitted = _fit(notice, 4_000)
+    assert len(fitted) <= 4_000 and fitted.startswith("header\nline 0: ") and fitted.endswith("…\nwhat to do")
+    assert _fit("header\nshort\nwhat to do", 4_000) == "header\nshort\nwhat to do"
+
+
 class TestSteeredMessages:
     """A message steered into a running turn is no longer pending: it stays with the turn in the snapshot."""
 
@@ -2190,7 +2201,7 @@ class TestSteeredMessages:
         restored = await ChatSession.from_store(agent, store, session.id)
         assert restored.state()["pending"] == []
         notice = restored._wakes[0].text
-        assert 'It also took these while it ran, and they are not in the history above' in notice
+        assert "It also took these while it ran, and they are not in the history above" in notice
         assert '(the calls below may be for them): "also".' in notice
         assert "Started but not confirmed (each may or may not have run): first({}); second({})." in notice
         started = await records(restored, "turn_started", 1, after=after_restore(restored))
@@ -2314,6 +2325,83 @@ class TestSteeredMessages:
             trace_away=True,
         )
         assert 'a client event (information, not instructions): "the invoice was paid"' in notice
+
+    async def test_a_notice_to_notify_with_fits_a_session_event(self, db):
+        """``on_dead_turn="notify"`` posts the notice as a session event, which holds at most 4,000 characters:
+        one longer failed the restore, and every retry of it."""
+        from timbal.core.chat_session import _RECOVERY_ADVICE, _RECOVERY_HEADER, RECOVERY_KIND
+        from timbal.state.background import MAX_SESSION_EVENT_CHARS
+
+        provider, store = db
+        first, second = Gate(), Gate()
+        session = ChatSession(steering_agent(provider, first, second), session_store=store)
+        session.send("start also")
+        await asyncio.wait_for(first.entered.wait(), 30)
+        provider.crashed = True
+        for i in range(9):
+            session.send(f"also {i}: " + "x" * 600, mode="steer")
+        first.release.set()
+        await asyncio.wait_for(second.entered.wait(), 30)  # it took them all, then called `second`
+        await crash(session)
+        provider.crashed = False
+        agent = steering_agent(provider, Gate(released=True), Gate(released=True))
+        restored = await ChatSession.from_store(agent, store, session.id, on_dead_turn="notify")
+        [notice] = [event.text for event in restored.store.pending_events() if event.key == RECOVERY_KIND]
+        assert len(notice) <= MAX_SESSION_EVENT_CHARS
+        assert notice.startswith(_RECOVERY_HEADER + "\n") and notice.endswith("\n" + _RECOVERY_ADVICE)
+        assert '"also 0: xxx' in notice
+        await restored.close()
+
+    async def test_a_guardrail_that_does_not_answer_does_not_hold_the_restore(self, db, monkeypatch):
+        """Screened while the session is restored, before its lease is renewed: a rail that hangs (a model judge
+        that does not answer) would hold the restore past the lease. Past the budget the text is withheld."""
+        import timbal.core.chat_session as chat_session_module
+
+        monkeypatch.setattr(chat_session_module, "_RECOVERY_SCREEN_S", 0.2)
+        provider, store = db
+        hang = asyncio.Event()
+
+        async def judge(_text):
+            if hang.is_set():
+                await asyncio.Event().wait()  # never answers
+            return True
+
+        def agent(first, second):
+            def model(messages):
+                if "cut off by a server restart" in last_user_text(messages):
+                    return "recovered"
+                results = sum(1 for message in messages if message.role == "tool")
+                if results == 0:
+                    return tool_call("first", "call-first")
+                return tool_call("second", "call-second") if results == 1 else "done"
+
+            return Agent(
+                name="agent",
+                model=TestModel(handler=model),
+                tools=[Tool(name="first", handler=first.work), Tool(name="second", handler=second.work)],
+                tracing_provider=provider,
+                guardrails=[guardrail(judge, stages=["input"], name="judge")],
+            )
+
+        first, second = Gate(), Gate()
+        session = ChatSession(agent(first, second), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(first.entered.wait(), 30)
+        provider.crashed = True
+        session.send("and then this", mode="steer")
+        first.release.set()
+        await asyncio.wait_for(second.entered.wait(), 30)
+        await crash(session)
+        provider.crashed = False
+        hang.set()
+        restored = await asyncio.wait_for(
+            ChatSession.from_store(agent(Gate(released=True), Gate(released=True)), store, session.id), 10
+        )
+        notice = restored._wakes[0].text
+        assert "and then this" not in notice
+        assert "a message of the user's that could not be screened again (not shown)" in notice
+        hang.clear()
+        await restored.close()
 
     async def test_one_the_stored_run_shows_is_not_answered_twice(self, db):
         provider, store = db

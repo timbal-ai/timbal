@@ -90,6 +90,9 @@ _RESTORE_RETRY_MAX_S = 30.0
 # How much of a lease before its end a session that could not renew it stops. Stopping takes a moment (the
 # turn is cancelled, not cut off), and the store's clock is not this process's.
 _LEASE_MARGIN = 0.1
+# How long a restore may spend screening what a dead turn took while it ran (ChatSession._named_for_recovery),
+# all of it together, at most a sixth of the store's lease: it runs before the lease is renewed.
+_RECOVERY_SCREEN_S = 5.0
 _RECOVERY_HEADER = "Your previous turn was cut off by a server restart (the user did not write this)."
 _RECOVERY_ADVICE = (
     "Continue where you left off. Do not repeat completed actions. Before redoing one that is not confirmed, "
@@ -644,6 +647,17 @@ def _recovery_notice(
         lines.append("No tool call had run yet.")
     lines.append(_RECOVERY_ADVICE)
     return "\n".join(lines)
+
+
+def _fit(notice: str, limit: int) -> str:
+    """``notice`` in at most ``limit`` characters (a session event's cap, for a notice posted as one): its first line
+    (what it is) and its last (what to do) whole, what is between them cut short."""
+    if len(notice) <= limit:
+        return notice
+    head, _, rest = notice.partition("\n")
+    middle, _, tail = rest.rpartition("\n")
+    fitted = f"{head}\n{middle[: max(limit - len(head) - len(tail) - 3, 0)]}…\n{tail}"
+    return fitted if len(fitted) <= limit else notice[: limit - 1] + "…"
 
 
 def _stopped_notice(asked: list[str]) -> str:
@@ -2900,7 +2914,9 @@ class ChatSession:
             if wake is not None:
                 asked.append(wake.get("text") or "")
             self._store.post_event(
-                _stopped_notice([text for text in asked if text]), key=RECOVERY_KIND, announce="silent"
+                _fit(_stopped_notice([text for text in asked if text]), MAX_SESSION_EVENT_CHARS),
+                key=RECOVERY_KIND,
+                announce="silent",
             )
 
     def _requeue_kept_events(self, dead_run_id: str | None) -> None:
@@ -2952,13 +2968,19 @@ class ChatSession:
         guardrail reads, and the snapshot holds an event as it was sent. So a user's message is screened by the
         agent's input guardrails first, as the turn screened it when it took it: one they block is named without
         its text (the turn was told no more), one they leave nothing of is left out (it joined nothing), one that
-        cannot be screened is named without its text. Other events say where they came from, as the turn's notice
+        cannot be screened (an error, or no answer within ``_RECOVERY_SCREEN_S``) is named without its text. Other events say where they came from, as the turn's notice
         of them did: an application's, a client's (information, not instructions), another agent's."""
         from ..guardrails.types import GuardrailContext, GuardrailStage
         from ..types.message import USER_MESSAGE_KIND
 
         runner = getattr(self._agent, "_guardrail_runner", None)
         screen = runner is not None and runner.has_stage(GuardrailStage.INPUT)
+        # Before the lease is renewed (from_store), so bounded: a rail that does not answer withholds the text.
+        budget = _RECOVERY_SCREEN_S
+        if self._session_store is not None:
+            budget = min(budget, self._session_store.lease_ttl_s / 6)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + budget
         named = []
         for event in events:
             text = event.get("text") or ""
@@ -2983,7 +3005,10 @@ class ChatSession:
                 payload = Message(role="user", content=[TextContent(text=text)], metadata=metadata)
                 ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._agent._path, payload=payload)
                 try:
-                    outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
+                    left = deadline - loop.time()
+                    if left <= 0:
+                        raise TimeoutError("no time left to screen it")
+                    outcome = await asyncio.wait_for(runner.run_stage(GuardrailStage.INPUT, text, ctx), left)
                 except Exception:
                     logger.warning(
                         "chat_session_recovery_unscreened", session_id=self.id, chars=len(text), exc_info=True
@@ -3114,7 +3139,8 @@ class ChatSession:
             return "dropped"
         if self.on_dead_turn == "notify":
             # Rides with the next turn: it does not start one.
-            self._store.post_event(notice, key=RECOVERY_KIND, announce="silent")
+            # A session event holds MAX_SESSION_EVENT_CHARS: past it, post_event raised and failed every restore.
+            self._store.post_event(_fit(notice, MAX_SESSION_EVENT_CHARS), key=RECOVERY_KIND, announce="silent")
             return "notified"
         self._wakes.insert(
             0,
