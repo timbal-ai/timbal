@@ -1497,129 +1497,152 @@ class TestCloseOnAnotherLoop:
         finally:
             stop()
 
-    @pytest.mark.parametrize("owner", ["paused", "busy"])
-    def test_a_session_whose_owner_has_ended_is_forgotten_from_another_loop(self, monkeypatch, owner):
-        """The transport's owner task ended on its loop (the server process exited), and that loop paused, or is busy
-        in a callback, before the task's done callback forgot the session. Nothing of it is live: close() from
-        another loop does not refuse, and forgets the session where it runs, without its locks or its loop, clearing
-        the caches, as on 0e7071e4 (review on #334)."""
+    @staticmethod
+    def ended_owner(monkeypatch, until_ended, error=None):
+        """A session on a loop of its own thread whose transport ends (the server process exits) once ``end()`` is
+        called, ``until_ended`` running in the owner task as it ends (it pauses the loop, or queues a callback that
+        does not yield, ahead of the task's done callbacks). Returns (server, loop, thread, end)."""
         import threading
 
-        owner_loop = asyncio.new_event_loop()
-        hold, holding, gates = threading.Event(), threading.Event(), {}
-
-        def block():  # a callback that does not yield
-            holding.set()
-            hold.wait(30)
+        owner_loop, gates = asyncio.new_event_loop(), {}
 
         async def run_session(_self, ready, _closed):
             gates["drop"] = asyncio.Event()
             ready.set_result(object())
             await gates["drop"].wait()  # the transport, until the server process exits
-            if owner == "paused":
-                asyncio.get_running_loop().stop()  # stops before the task's done callbacks run
-            else:
-                asyncio.get_running_loop().call_soon(block)  # queued ahead of the task's done callbacks
+            until_ended(asyncio.get_running_loop())
+            if error is not None:
+                raise error
 
         monkeypatch.setattr(MCPServer, "_run_session", run_session)
         server = MCPServer(transport="stdio", command="unused")
         thread = threading.Thread(target=owner_loop.run_forever)
         thread.start()
+        asyncio.run_coroutine_threadsafe(server._connect(), owner_loop).result(10)
+        return server, owner_loop, thread, lambda: owner_loop.call_soon_threadsafe(gates["drop"].set)
+
+    @staticmethod
+    def stop_ended(owner_loop, thread):
+        """Let the owner's loop run what it has pending (its task's done callbacks), then stop and close it."""
+        import threading
+
+        if not owner_loop.is_closed():
+            if not thread.is_alive():
+                thread = threading.Thread(target=owner_loop.run_forever)
+                thread.start()
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+            thread.join(10)
+            owner_loop.close()
+
+    @pytest.mark.parametrize("owner", ["paused", "busy"])
+    def test_a_session_whose_owner_has_ended_is_left_to_its_loop(self, monkeypatch, owner):
+        """The transport's owner task ended on its loop (the server process exited), and that loop paused, or is busy
+        in a callback, before the task's done callback forgot the session. Nothing of it is live: close() from
+        another loop does not refuse (as on 0e7071e4), and writes nothing of it, that loop being free to reconnect
+        meanwhile; the done callback forgets it once that loop runs it (review on #334)."""
+        import threading
+
+        hold, holding = threading.Event(), threading.Event()
+
+        def block():  # a callback that does not yield
+            holding.set()
+            hold.wait(30)
+
+        def until_ended(loop):
+            if owner == "paused":
+                loop.stop()  # stops before the task's done callbacks run
+            else:
+                loop.call_soon(block)  # queued ahead of the task's done callbacks
+
+        server, owner_loop, thread, end = self.ended_owner(monkeypatch, until_ended)
         try:
-            asyncio.run_coroutine_threadsafe(server._connect(), owner_loop).result(10)
-            server._tools_cache, server._inflight[1] = ["the list"], "a call that died with the transport"
-            owner_loop.call_soon_threadsafe(gates["drop"].set)
+            server._tools_cache, server._inflight[1] = ["the list"], "a call of that loop's"
+            end()
             if owner == "paused":
                 thread.join(10)
                 assert not thread.is_alive() and not owner_loop.is_running()
             else:
                 assert holding.wait(10)
             assert server._owner_task.done() and server._session is not None  # its done callback has not run
+            before = self.state(server)
             asyncio.run(asyncio.wait_for(server.close(), 10))
-            assert server._session is None and server._session_task is None and server._owner_task is None
-            assert server._tools_cache is None and not server._inflight
+            assert self.state(server) == before
         finally:
             hold.set()
-            if not thread.is_alive():  # its pending callbacks run, finding the session already forgotten
-                thread = threading.Thread(target=owner_loop.run_forever)
-                thread.start()
-            owner_loop.call_soon_threadsafe(owner_loop.stop)
-            thread.join(10)
-            owner_loop.close()
-        assert server._session is None
+            self.stop_ended(owner_loop, thread)
+        assert server._session is None and server._session_task is None and server._owner_task is None
 
-    def test_an_ended_owners_error_is_read_and_logged_when_close_forgets_it(self, monkeypatch):
+    @pytest.mark.parametrize("then", ["its loop runs again", "its loop closed"])
+    def test_an_ended_owners_error_is_read_once_whoever_forgets_it(self, monkeypatch, then):
         """The transport died with an error and its loop paused before the owner task's done callback ran. close()
-        from another loop forgets the session, and reads and logs the task's error as a close on its loop does: the
-        done callback, finding the session already forgotten, no longer reads it, and asyncio would report it later
-        as never retrieved (Bugbot on #334)."""
+        from another loop leaves it to that loop, whose callback reads and logs the error when it runs; if that loop
+        closes instead (its callbacks dropped), close() forgets the session and reads and logs the error itself, as a
+        close on its loop does. Either way once, and asyncio reports nothing as never retrieved (Bugbot on #334)."""
         import gc
-        import threading
 
         from timbal.core import mcp as mcp_module
 
-        logged, unretrieved, gates = [], [], {}
+        logged, unretrieved = [], []
 
         class Recorder:
             def __getattr__(self, level):
-                return lambda event, **fields: logged.append((event, fields))
+                return lambda _event, **fields: logged.append(fields.get("error"))
 
         monkeypatch.setattr(mcp_module, "logger", Recorder())
-        owner_loop = asyncio.new_event_loop()
+        error = ConnectionError("the server process exited")
+        server, owner_loop, thread, end = self.ended_owner(monkeypatch, lambda loop: loop.stop(), error)
         owner_loop.set_exception_handler(lambda _loop, context: unretrieved.append(context["message"]))
-
-        async def run_session(_self, ready, _closed):
-            gates["drop"] = asyncio.Event()
-            ready.set_result(object())
-            await gates["drop"].wait()
-            asyncio.get_running_loop().stop()  # pauses before the task's done callbacks run
-            raise ConnectionError("the server process exited")
-
-        monkeypatch.setattr(MCPServer, "_run_session", run_session)
-        server = MCPServer(transport="stdio", command="unused")
-        thread = threading.Thread(target=owner_loop.run_forever)
-        thread.start()
         try:
-            asyncio.run_coroutine_threadsafe(server._connect(), owner_loop).result(10)
-            owner_loop.call_soon_threadsafe(gates["drop"].set)
+            end()
             thread.join(10)
             assert server._owner_task.done() and server._session is not None  # its done callback has not run
+            if then == "its loop closed":
+                owner_loop.close()  # its pending callbacks dropped: they never run
             asyncio.run(asyncio.wait_for(server.close(), 10))
-            assert server._session is None
-            errors = [fields["error"] for event, fields in logged if event == "Error closing MCP connection"]
-            assert errors == ["ConnectionError: the server process exited"]
         finally:
-            if not thread.is_alive():  # its pending callbacks run, finding the session forgotten
-                thread = threading.Thread(target=owner_loop.run_forever)
-                thread.start()
-            owner_loop.call_soon_threadsafe(owner_loop.stop)
-            thread.join(10)
-            owner_loop.close()
+            self.stop_ended(owner_loop, thread)
+        assert server._session is None
+        assert logged.count("ConnectionError: the server process exited") == 1
+        del error
         gc.collect()
         assert not [message for message in unretrieved if "never retrieved" in message]
 
-    def test_forgetting_an_ended_owner_keeps_a_session_its_loop_opened_since(self):
-        """close() on another loop forgets an owner task that has ended; that owner's loop, still running, opens a new
-        session just as close() comes to forget: only the ended owner's references go, never the new session's (it
-        would be left open with nothing referring to it)."""
+    def test_an_ended_owners_replacement_and_its_calls_are_left_alone(self):
+        """close() on another loop finds an owner task that has ended, on a loop that still runs; that loop publishes a
+        new session, with a call in flight on it, just as close() decides what to do with the ended one. close() writes
+        nothing of that loop's: the new session's references and the call's record stay (cleared, the new session was
+        left open with nothing referring to it, and the call lost its elicitation prompt; review on #334)."""
         other = asyncio.new_event_loop()  # the owner's loop: alive, not this one
-        ended, new, fresh = other.create_future(), other.create_future(), object()
+        ended, new, closed = other.create_future(), other.create_future(), asyncio.Event()
         ended.set_result(None)
-        armed = [True]
+        fresh, call = object(), object()
+        inside, published = [], []
 
         class Raced(MCPServer):
+            async def _close_own_session(self, loop):
+                inside.append(True)
+                try:
+                    return await super()._close_own_session(loop)
+                finally:
+                    inside.clear()
+
             def __getattr__(self, name):
-                if name == "_session_task" and armed:
-                    armed.clear()  # close() looks at the session as the owner's loop publishes a new one
-                    self.__pydantic_private__.update(_owner_task=new, _session_task=new, _session=fresh)
-                return super().__getattr__(name)
+                value = super().__getattr__(name)
+                if inside and name == "_owner_task" and not published:
+                    published.append(True)  # it read the ended owner; the owner's loop now opens a new session
+                    self.__pydantic_private__.update(
+                        _owner_task=new, _session_task=new, _session=fresh, _session_closed=closed
+                    )
+                    self._inflight[7] = call
+                return value
 
         server = Raced(transport="stdio", command="unused")
         server.__pydantic_private__.update(_owner_task=ended, _session_task=ended, _session=object())
         try:
             asyncio.run(asyncio.wait_for(server.close(), 10))
-            assert not armed
+            assert published
             assert server._session is fresh and server._session_task is new and server._owner_task is new
+            assert server._session_closed is closed and server._inflight == {7: call}
         finally:
             other.close()
 

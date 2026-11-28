@@ -1984,8 +1984,8 @@ class MCPServer(ToolSet):
         has not closed (open, in its handshake, or still shutting down after a close() that was cut): its owner task,
         locks and transport are bound to that loop. The owner reference is read first: a close there moves the owner
         to ``_owners_closing`` before it lets go of the reference, so one of the two reads finds it. An owner task
-        that has ended is not refused: nothing of its session is live, and close() forgets it where it runs (its
-        loop may not have run the task's done callback yet: paused, or busy in a callback)."""
+        that has ended is not refused: nothing of its session is live. Its loop may not have run the task's done
+        callback yet (paused, or busy in a callback); that callback forgets it (``_close_own_session``)."""
         owner = self._owner_task
         owners = [owner] if owner is not None and not owner.done() else []
         owners += [task for task in list(self._owners_closing) if not task.done()]
@@ -2033,31 +2033,29 @@ class MCPServer(ToolSet):
         return left
 
     async def _close_own_session(self, loop: asyncio.AbstractEventLoop) -> None:
-        """The server's own session (a standalone server's), closed on this loop, which owns it and its locks. One
-        of another loop whose owner task has ended, or whose loop has closed, is gone: only the references are
-        dropped, and the caches cleared (its calls in flight died with it), without its locks or its loop."""
+        """The server's own session (a standalone server's), closed on this loop, which owns it and its locks. One of
+        a loop that has closed went with it: only the references are dropped, its error read, and the caches cleared
+        (its calls in flight died with it). One of another loop that still runs, its owner task ended (refused
+        otherwise, ``_refuse_other_loops``), is left to that loop: its done callback forgets it and reads its error.
+        Nothing of a running loop's is written here: it may publish a new session at any moment, with calls of its
+        own in ``_inflight``, and no check made here can stay true until a write after it."""
         task = self._owner_task  # (a handshake under way, or the published session: one read)
         if task is None:
             # Its refs gone (an earlier close() forgot them and is still shutting it down, holding the locks): the
             # owner it signalled.
             closing = [owner for owner in list(self._owners_closing) if not owner.done()]
             task = closing[0] if closing else None
-        if task is not None and task.get_loop() is not loop and (task.done() or task.get_loop().is_closed()):
-            # Only references that are still that owner's: its loop, if it runs, may have opened a session since.
-            # Its error is read here, as a close on its loop reads it: its done callback, finding the session
-            # forgotten, does not.
-            if self._session_task is task:
-                self._forget_session(task)
-                if task.done():
-                    self._read_owner_error(task)
-            elif self._owner_task is task:
-                self._owner_task = None
-                if task.done():
-                    self._read_owner_error(task)
-            self._drop_caches()
-            return
         if task is not None and task.get_loop() is not loop:
-            return  # opened on another loop since close() began: a new connection, not this close()'s
+            if task.get_loop().is_closed():
+                # Its done callback will never run: forgotten here, its error read as a close on its loop reads it.
+                if self._session_task is task:
+                    self._forget_session(task)
+                elif self._owner_task is task:
+                    self._owner_task = None
+                if task.done():
+                    self._read_owner_error(task)
+                self._drop_caches()
+            return  # a running loop's (ended, or opened since close() began): that loop's to forget
         # Nothing open nor opening is closed here too, which clears the caches.
         await self._close_session_here()
 
