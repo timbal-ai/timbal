@@ -148,12 +148,39 @@ def _resolve(spelling: str) -> tuple[str, str]:
     return found
 
 
+def _in_memory(spelling: str) -> bool:
+    """Whether SQLite opens ``spelling`` as a database in memory: ``:memory:``, or a ``file:`` URI whose path is
+    ``:memory:`` or that asks for ``mode=memory`` (on a build that reads URIs). SQLite's own checks are exact and
+    case-sensitive."""
+    if spelling == ":memory:":
+        return True
+    if not spelling.startswith("file:"):
+        return False
+    path, _, query = spelling[len("file:") :].partition("?")
+    return path == ":memory:" or "mode=memory" in query.partition("#")[0].split("&")
+
+
+def refuse_in_memory(path: Path | str) -> None:
+    """Raise ``ValueError`` for a database SQLite keeps in memory (``:memory:``, ``file::memory:``, a URI with
+    ``mode=memory``).
+
+    This process keeps one connection per database file and checks it against the file on every call. A database
+    in memory has no file, so every call would open a new, empty one, and whatever was written would be lost.
+    Traces and sessions kept in memory are InMemoryTracingProvider's and InMemoryChatSessionStore's.
+    """
+    spelling = os.fspath(path)
+    if _in_memory(spelling):
+        raise ValueError(
+            f"{spelling!r} is a SQLite database in memory, which would be opened again, empty, on every call: "
+            "use InMemoryTracingProvider or InMemoryChatSessionStore to keep traces or sessions in memory"
+        )
+
+
 def _sqlite_name(spelling: str) -> bool:
-    """Whether SQLite gives ``spelling`` a meaning of its own instead of a file's: ``:memory:``, and a name that
-    starts with ``file:``, which a build that reads URIs takes for one (``file:x?mode=memory``). Such a name is
-    opened as given: resolved, it is an ordinary file of that name in the working directory. SQLite's own checks
-    are exact and case-sensitive."""
-    return spelling == ":memory:" or spelling.startswith("file:")
+    """Whether SQLite may give ``spelling`` a meaning of its own instead of a file's: a name that starts with
+    ``file:``, which a build that reads URIs takes for one. Such a name is opened as given: resolved, it is an
+    ordinary file of that name in the working directory. (A database in memory never gets this far.)"""
+    return spelling.startswith("file:")
 
 
 def _registered(spelling: str, mode: str) -> tuple[str, "_Database | None", bool]:
@@ -275,14 +302,15 @@ def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
     # The connection under the path's key, while the path names its file (a file deleted and written again is
     # another file: don't write to the old inode).
     spelling = os.fspath(path)
+    refuse_in_memory(spelling)
     resolved_path, db, names_it = _registered(spelling, mode)
     if names_it:
         return db
     key = (resolved_path, mode)
     # Opened by its resolved path, which every spelling of the path shares and a stat can follow (SQLite would
     # open ``missing/../traces.db`` as ``traces.db``, where a stat of that spelling fails): the connection, the
-    # file it is to (``_file``, which finds the file's _FileOrder) and alive() go by one path. A name of SQLite's
-    # own (``:memory:``, a ``file:`` URI) is opened as given, as it always was: it names no file to resolve to.
+    # file it is to (``_file``, which finds the file's _FileOrder) and alive() go by one path. A ``file:`` URI is
+    # opened as given, as it always was: SQLite may read it as a URI, which names no file to resolve to.
     # Outside the registry's lock, which every database of the process goes through: a file that cannot be
     # opened now (a stalled mount) holds up its own callers, not those of every other file.
     opened = _Database(spelling if _sqlite_name(spelling) else Path(resolved_path), mode)
@@ -343,6 +371,16 @@ class SqliteTracingProvider(TracingProvider):
 
     _path: Path | None = None
     synchronous: str = "NORMAL"
+
+    @classmethod
+    @override
+    def configured(cls, **kwargs: Any) -> type[TracingProvider]:
+        """See base class. A database in memory is refused here, when it is configured (``refuse_in_memory``)."""
+        provider = super().configured(**kwargs)
+        path = getattr(provider, "_path", None)
+        if path is not None:
+            refuse_in_memory(path)
+        return provider
 
     @classmethod
     def _db(cls) -> _Database:

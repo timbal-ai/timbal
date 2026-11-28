@@ -845,35 +845,44 @@ class TestPerSpanStorage:
         assert sqlite_module.database(f"{path}/") is first
         assert sqlite_module.database(path) is first
 
-    @pytest.mark.parametrize("name", [":memory:", "file:sessions?mode=memory&cache=shared"])
-    async def test_sqlites_own_names_stay_off_disk(self, tmp_path, monkeypatch, name):
-        """SQLite gives ``:memory:``, and a ``file:`` URI where its build reads URIs, a meaning of its own. Such a
-        name is opened as given: resolved, it would be an ordinary file of that name in the working directory."""
-        from timbal.state.chat_store import SessionSnapshot, SqliteChatSessionStore
+    @pytest.mark.parametrize(
+        "name",
+        [":memory:", "file::memory:", "file::memory:?cache=shared", "file:sessions?mode=memory&cache=shared"],
+        ids=["memory", "uri-memory", "uri-memory-shared", "uri-mode-memory"],
+    )
+    def test_a_database_in_memory_is_refused(self, tmp_path, monkeypatch, name):
+        """One connection per file, checked against the file on every call: a database in memory has no file, so
+        every call would open a new, empty one and lose what was written. Refused where it is configured (a store,
+        a provider) and where it would be opened, before anything reaches SQLite or the disk."""
+        from timbal.state.chat_store import SqliteChatSessionStore
         from timbal.state.tracing.providers import sqlite as sqlite_module
 
         monkeypatch.chdir(tmp_path)
-        reads_uris = True
-        if name.startswith("file:"):
-            sqlite3.connect("file:probe?mode=memory").close()
-            reads_uris = not any(tmp_path.iterdir())
-            for left in tmp_path.iterdir():
-                left.unlink()
-        real, opened = sqlite3.connect, []
+        opened = []
+        monkeypatch.setattr(sqlite_module.sqlite3, "connect", lambda *args, **_: opened.append(args))
+        with pytest.raises(ValueError, match="InMemoryChatSessionStore"):
+            SqliteChatSessionStore(name)
+        with pytest.raises(ValueError, match="InMemoryTracingProvider"):
+            SqliteTracingProvider.configured(_path=name)
+        with pytest.raises(ValueError, match="in memory"):
+            sqlite_module.database(name)
+        assert opened == [] and list(tmp_path.iterdir()) == []
 
-        def connect(target, *args, **kwargs):
+    def test_a_file_uri_reaches_sqlite_as_given(self, monkeypatch):
+        """SQLite reads a ``file:`` name as a URI on a build that reads URIs. Resolved, it would be an ordinary
+        file of that name in the working directory, so it is opened exactly as given, as it always was."""
+        from timbal.state.tracing.providers import sqlite as sqlite_module
+
+        opened = []
+
+        def connect(target, *_args, **_kwargs):
             opened.append(target)
-            return real(target, *args, **kwargs)
+            raise sqlite3.OperationalError("not opened in this test")
 
         monkeypatch.setattr(sqlite_module.sqlite3, "connect", connect)
-        await SqliteChatSessionStore(name).save(SessionSnapshot(session_id="s1", agent="agent"), expect_version=None)
-        provider = SqliteTracingProvider.configured(_path=name)
-        context = RunContext(tracing_provider=provider)
-        context._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}
-        await provider._store(context)
-        assert opened and set(opened) == {name}  # SQLite gets the name itself, on any build
-        if reads_uris:  # a build that does not read URIs takes a file: name for a file's, as it always did
-            assert list(tmp_path.iterdir()) == []
+        with pytest.raises(sqlite3.OperationalError, match="not opened in this test"):
+            sqlite_module.database("file:reaches-sqlite-as-given.db?mode=rwc")
+        assert opened == ["file:reaches-sqlite-as-given.db?mode=rwc"]
 
     def test_a_path_through_a_moved_link_reaches_the_file_it_names_now(self, tmp_path):
         import os

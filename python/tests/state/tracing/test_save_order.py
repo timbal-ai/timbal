@@ -1171,7 +1171,9 @@ class TestEachLoopKeepsItsOwnOrder:
         await asyncio.wait_for(held, DEADLINE)
         assert stored_t1(lower, context.id, "r") == 5
 
-    @pytest.mark.parametrize("first_name", ["traces.db", "missing/../traces.db"])
+    @pytest.mark.parametrize(
+        "first_name", ["traces.db", "missing/../traces.db"], ids=["plain-first", "through-missing-first"]
+    )
     async def test_one_sqlite_file_through_a_missing_directory_keeps_one_order(self, tmp_path, monkeypatch, first_name):
         """SQLite opens ``missing/../traces.db`` as ``traces.db`` (it drops ``missing/..`` from the name), while a
         stat of that name fails (``missing`` is not there). Through either name first, the two are one connection

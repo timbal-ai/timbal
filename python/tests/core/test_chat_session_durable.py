@@ -4279,18 +4279,24 @@ class TestAStoreThatHangs:
             await asyncio.wait_for(asyncio.to_thread(stuck.wait, 30), 30)  # the file's thread is busy
             try:
                 os.rename(old_dir, new_dir)
+                renamed = True
             except OSError:
-                pytest.skip("an open database's directory cannot be renamed here")
-            link.unlink()
-            os.symlink(new_dir, link, target_is_directory=True)
-            assert chat_store._store_thread(link / "sessions.db") is chat_store._store_thread(new_dir / "sessions.db")
-            saved = asyncio.ensure_future(
-                through_link.save(SessionSnapshot(session_id="s2", agent="agent"), expect_version=None)
-            )
-            loaded = asyncio.ensure_future(SqliteChatSessionStore(new_dir / "sessions.db").load("s2"))
+                renamed = False  # Windows: a directory with an open file in it is not renamed
+            if renamed:
+                link.unlink()
+                os.symlink(new_dir, link, target_is_directory=True)
+                assert chat_store._store_thread(link / "sessions.db") is chat_store._store_thread(
+                    new_dir / "sessions.db"
+                )
+                saved = asyncio.ensure_future(
+                    through_link.save(SessionSnapshot(session_id="s2", agent="agent"), expect_version=None)
+                )
+                loaded = asyncio.ensure_future(SqliteChatSessionStore(new_dir / "sessions.db").load("s2"))
         finally:
             release.set()
-        await asyncio.wait_for(held, 30)
+        await asyncio.wait_for(held, 30)  # nothing left running, also when this test is skipped
+        if not renamed:
+            pytest.skip("an open database's directory cannot be renamed here")
         assert await asyncio.wait_for(saved, 30) == 1
         snapshot = await asyncio.wait_for(loaded, 30)
         assert snapshot is not None and snapshot.session_id == "s2"  # the save went first, in the same queue
