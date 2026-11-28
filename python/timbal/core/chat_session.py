@@ -941,6 +941,9 @@ class ChatSession:
         # one a pull hands out again is not applied again (see _inbox_applied).
         self._inbox_recent: deque[str] = deque(maxlen=window)
         self._inbox_cuts: list[tuple[SessionEvent, SendMode | None, int]] = []
+        # Items the session refused (a bad body, its guardrails, who it accepts): acked with their keys forgotten
+        # (ack_inbox(forget=True)), so that a retry is screened again; until then, not refused twice.
+        self._inbox_refused: dict[str, None] = {}
         # The drain and apply_queued() apply one item at a time, in the order the store holds them.
         self._inbox_lock = asyncio.Lock()
         # When the request that last confirmed the lease was sent (monotonic): the store counted the lease
@@ -2857,8 +2860,13 @@ class ChatSession:
             else:
                 self._inbox_seen.append(item_id)
 
+    def refused_from_inbox(self, item_id: str) -> bool:
+        """Whether the session refused this inbox item and its key is not forgotten yet: a retry of it is screened
+        again, not answered as a duplicate of the item."""
+        return item_id in self._inbox_refused
+
     def _inbox_applied(self, item_id: str) -> bool:
-        if item_id in self._inbox_unacked or item_id in self._inbox_seen:
+        if item_id in self._inbox_unacked or item_id in self._inbox_seen or item_id in self._inbox_refused:
             return True
         if item_id in self._inbox_recent:
             # Applied here, and acked by the save that stored it, yet pulled again: a pull that read the inbox
@@ -2958,7 +2966,25 @@ class ChatSession:
             await self.flush()
         except (SessionNotStored, SessionLeased):
             return False
-        if self._acks_with_save or self.closed or self._lost or not ids:
+        if self.closed or self._lost:
+            return True
+        refused = [item_id for item_id in ids if item_id in self._inbox_refused]
+        if refused:
+            # Nothing of them is in the session, so nothing ties this to a save.
+            try:
+                await store.ack_inbox(self.id, owner, refused, forget=True)
+            except SessionLeased as e:
+                self._lose(str(e))
+                return False
+            except LookupError:
+                return True
+            except Exception as e:
+                logger.warning("chat_session_inbox_ack_failed", session_id=self.id, error=str(e))
+                return False
+            for item_id in refused:
+                self._inbox_refused.pop(item_id, None)
+        ids = [item_id for item_id in ids if item_id not in refused]
+        if self._acks_with_save or not ids:
             return True
         try:
             await store.ack_inbox(self.id, owner, ids)
@@ -3045,7 +3071,7 @@ class ChatSession:
                 # The session is open, and the loop that serves it is not running (receive_agent_message): it is
                 # not refused, it waits for that loop.
                 return _INBOX_LATER
-            self._mark_applied(item_id)
+            self._inbox_refused[item_id] = None  # (acked with its key forgotten: _inbox_stored)
             logger.warning("chat_session_inbox_item_refused", session_id=self.id, inbox_id=item_id, error=str(e))
             self._record("inbox_refused", inbox_id=item_id, item_kind=kind, error=str(e))
             return _INBOX_APPLIED

@@ -211,6 +211,18 @@ async def _restore(request: Request, session_id: str) -> ChatSession | None:
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except SessionLeased as e:
+        # Met before the snapshot is read (from_store takes the lease first): whose session it is decides between
+        # another worker of this agent (409, or queued for it) and a session this agent has none of (404).
+        try:
+            snapshot = await asyncio.wait_for(store.load(session_id), timeout)
+        except Exception as error:
+            why = str(error) or type(error).__name__  # (a timeout says nothing of itself)
+            logger.error("chat_session_restore_failed", session_id=session_id, error=why)
+            raise HTTPException(
+                status_code=503, detail=f"Chat session {session_id!r} could not be read: {why}", headers=_RETRY
+            ) from error
+        if snapshot is None or snapshot.closed or snapshot.agent != agent.name:
+            raise HTTPException(status_code=404, detail=f"No chat session {session_id!r}.") from e
         raise _HeldElsewhere(session_id) from e
     except Exception as e:
         # The store or the run's trace could not be read: nothing was taken over, the stored state stays.
@@ -235,7 +247,13 @@ def _idempotency_key(request: Request) -> str | None:
         return None
     if not 1 <= len(key) <= MAX_INBOX_KEY_CHARS:
         raise HTTPException(status_code=400, detail=f"Idempotency-Key must be 1 to {MAX_INBOX_KEY_CHARS} characters.")
+    if key.startswith(_AGENT_KEY_PREFIX):
+        # The keys the server gives messages from agents (_agent_message_key): a client's would take over one.
+        raise HTTPException(status_code=400, detail=f"Idempotency-Key cannot start with {_AGENT_KEY_PREFIX!r}.")
     return key
+
+
+_AGENT_KEY_PREFIX = "agent_message:"
 
 
 async def _queue(
@@ -262,8 +280,10 @@ async def _queue(
     timeout = _store_timeout()
     agent = _agent(request)
     try:
-        # With the agent: several can share a store, and the lease was met before the snapshot's agent was read.
-        posted = store.post_inbox(session_id, kind, item, idempotency_key=key, agent=agent.name)
+        # The agent, to a store that takes it (one written before ``agent=`` is not handed it): the post then
+        # checks it in its own write. _restore checked it already, by the snapshot.
+        mine = {"agent": agent.name} if _posts_take_agent(store) else {}
+        posted = store.post_inbox(session_id, kind, item, idempotency_key=key, **mine)
         inbox_id = await asyncio.wait_for(posted, timeout)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=f"No chat session {session_id!r}.") from e
@@ -280,17 +300,27 @@ async def _queue(
             if key is not None
             else "do not resend (an Idempotency-Key makes a retry safe)"
         )
+        _watch_queued(request.app, agent, store, session_id)  # if it was
         raise HTTPException(status_code=503, detail=f"{why}. It may have been queued: {then}.") from e
-    if held is not None:
-        _watch_queued(request.app, agent, store, session_id)
+    _watch_queued(request.app, agent, store, session_id)
     return _json({"queued": "inbox", "inbox_id": inbox_id, "session_id": session_id}, status_code=202)
 
 
+def _posts_take_agent(store: ChatSessionStore) -> bool:
+    """Whether the store's ``post_inbox`` takes ``agent=`` by name (``**kwargs`` may not hand it on)."""
+    import inspect
+
+    try:
+        return "agent" in inspect.signature(store.post_inbox).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def _watch_queued(app: Any, agent: Any, store: ChatSessionStore, session_id: str) -> None:
-    """After queuing for a session another worker serves: that worker may let it go (idle reaping, a shutdown)
-    before it takes the item, and nothing else would restore the session until a request asked for it or a server
-    started. So this worker tries to restore it, as startup does for the sessions it skipped (``_retry_restores``:
-    every third of a lease, while the session has work and nobody here serves it). One per session."""
+    """After queuing for a session (or a post that may have landed): the worker that serves it, this one or
+    another, may let it go (idle reaping, a shutdown) before it takes the item, and nothing else would restore the
+    session until a request asked for it or a server started. So this worker watches it (``_watch_inbox``) until
+    nothing waits in its inbox. One per session."""
     if getattr(app.state, "chat_closing", False):
         return
     watches: dict[str, asyncio.Task] = getattr(app.state, "chat_queued_watch", None) or {}
@@ -298,10 +328,40 @@ def _watch_queued(app: Any, agent: Any, store: ChatSessionStore, session_id: str
     task = watches.get(session_id)
     if task is not None and not task.done():
         return
-    task = watches[session_id] = asyncio.get_running_loop().create_task(
-        _retry_restores(app, agent, store, [session_id])
-    )
+    task = watches[session_id] = asyncio.get_running_loop().create_task(_watch_inbox(app, agent, store, session_id))
     task.add_done_callback(lambda done: _watch_done(watches, session_id, done))
+
+
+async def _watch_inbox(app: Any, agent: Any, store: ChatSessionStore, session_id: str) -> None:
+    """Every third of a lease, while items wait in the session's inbox: nothing to do while this process serves the
+    session (its drain takes them) or another live one does (its lease holds); restored here once it is free, which
+    applies them. Ends once nothing waits, whatever other work the session has (a turn, a parked question): its
+    owner's own business, and each round of a restore attempt is a write to the store."""
+    interval = _RESTORE_RETRY_S if _RESTORE_RETRY_S is not None else max(store.lease_ttl_s / 3, 0.05)
+    while not getattr(app.state, "chat_closing", False):
+        await asyncio.sleep(interval)
+        if getattr(app.state, "chat_closing", False):
+            return
+        try:
+            if not await asyncio.wait_for(store.inbox_waiting(session_id), _STARTUP_DISCOVERY_S):
+                return
+            sessions = _app_sessions(app)
+            current = sessions.get(session_id)
+            if current is not None:
+                if not current.handed_off:
+                    continue  # served here: its drain takes them
+                # Let go or lost, and maybe still closing: a copy made now would be bound to the task store while
+                # this one still holds it (its turn may still run), as _session() waits for too.
+                await asyncio.wait_for(current.wait_closed(), _STARTUP_DISCOVERY_S)
+                if sessions.get(session_id) is current:
+                    sessions.pop(session_id)
+            await asyncio.wait_for(_restore_once(app, agent, store, session_id), _STARTUP_DISCOVERY_S)
+        except SessionLeased:
+            continue  # another worker serves it
+        except (LookupError, ValueError):
+            return  # gone, or not this agent's
+        except Exception as e:  # (a timeout included) looked at again next round
+            logger.warning("chat_session_inbox_watch_failed", session_id=session_id, error=str(e) or type(e).__name__)
 
 
 def _watch_done(watches: dict[str, asyncio.Task], session_id: str, task: asyncio.Task) -> None:
@@ -322,12 +382,15 @@ async def _apply_queued(session: ChatSession) -> None:
     except SessionLeased as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
+        # A timeout may be the store, or a batch the drain is applying (another agent's message being screened):
+        # either way the request would go ahead of it.
         hung = isinstance(e, TimeoutError)
-        why = f"the session store did not answer within {timeout:g} s" if hung else f"the session store failed: {e}"
+        why = f"not done within {timeout:g} s" if hung else f"the session store failed: {e}"
         logger.error("chat_session_inbox_read_failed", session_id=session.id, error=why)
         raise HTTPException(
             status_code=503,
-            detail=f"What other workers queued for the session could not be read ({why}). Nothing was accepted: retry.",
+            detail=f"What other workers queued for the session could not be applied first ({why}). Nothing was "
+            "accepted: retry.",
             headers=_RETRY,
         ) from e
 
@@ -935,11 +998,12 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
         item.update(priority=body.get("priority") or "normal", hops=hops)
         return await _queue(request, session_id, held, "agent_message", item, key=key)
     await _apply_queued(session)  # what other workers queued before this comes first
-    # The message's key in the store, also here: queued before (to another worker, or to this one before a
-    # restore, which forgets what the session held in memory), it is that item; taken here, it is recorded
-    # for a retry that reaches another worker. The session's own dedupe knows only what it saw since its restore.
+    # The message's key in the store, also here: queued before (to another worker, or to this one before a restore,
+    # which forgets what the session held in memory), it is that item. Asked only when the session's own dedupe
+    # does not know the message (which says how it stands), and never written here: a worker that never queues pays
+    # one read, no write. A key whose item the session refused was forgotten (ack_inbox(forget=True)), or is being:
+    # the retry is screened again.
     store = _store(request)
-    known_key = None
     if store is not None and store.supports_inbox:
         try:
             _, known_sender, known_id, _ = check_agent_message(
@@ -951,11 +1015,11 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
                 hops=hops,
             )
         except PeerRejected:
-            known_sender = known_id = None  # refused below, as before
-        if known_id is not None:
-            known_key = _agent_message_key(known_sender, known_id)
-            found = await _bounded(store.find_inbox_key(session_id, known_key), session_id)
-            if found is not None:
+            known_id = None  # refused below, as before
+        if known_id is not None and session._agent_message(known_sender, known_id) is None:
+            key = _agent_message_key(known_sender, known_id)
+            found = await _bounded(store.find_inbox_key(session_id, key), session_id)
+            if found is not None and not session.refused_from_inbox(found[0]):
                 item_id, acked = found
                 receipt = {"event_id": item_id, "key": None, "state": "delivered" if acked else "pending"}
                 receipt.update(run_id=None, message_id=known_id, duplicate=True)
@@ -977,26 +1041,19 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
     # A copy of one it has: nothing new to take back if the store fails.
     undo = None if receipt["duplicate"] else (lambda: session.withdraw(receipt["event_id"]))
     await _stored(session, mark, undo)
-    if known_key is not None and not receipt["duplicate"]:
-        try:
-            # After the message is stored: recorded first, a store that then failed would leave the key naming a
-            # message that was taken back, and the sender's retry would be dropped. A crash in between leaves a
-            # retry through another worker to the session's own dedupe, as before the inbox.
-            await _bounded(store.keep_inbox_key(session_id, known_key, receipt["event_id"]), session_id)
-        except HTTPException:
-            pass  # (logged) the message is stored: its 202 stands
     return _json(receipt, status_code=202)
 
 
 def _agent_message_key(sender: str, message_id: str) -> str:
     """An agent message's idempotency key: its sender and id, which may both hold colons, so the sender's length
-    comes first (``support:eu`` + ``7`` and ``support`` + ``eu:7`` are two keys). At most 210 characters."""
-    return f"agent_message:{len(sender)}:{sender}:{message_id}"
+    comes first (``support:eu`` + ``7`` and ``support`` + ``eu:7`` are two keys). At most 210 characters. A
+    client's ``Idempotency-Key`` cannot take this prefix (_idempotency_key)."""
+    return f"{_AGENT_KEY_PREFIX}{len(sender)}:{sender}:{message_id}"
 
 
 async def _bounded(call: Any, session_id: str) -> Any:
     """A store call a route makes, within the routes' store bound: ``503`` with ``Retry-After`` when it fails
-    (the calls this is for change nothing)."""
+    (the call this is for, a lookup, changes nothing)."""
     timeout = _store_timeout()
     try:
         return await asyncio.wait_for(call, timeout)

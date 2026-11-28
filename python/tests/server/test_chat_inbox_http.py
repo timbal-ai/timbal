@@ -17,6 +17,7 @@ AGENT = textwrap.dedent(
     from pathlib import Path
     from timbal import Agent
     from timbal.core.test_model import TestModel
+    from timbal.guardrails import Verdict, guardrail
     from timbal.state.tracing.providers import SqliteTracingProvider
 
     DIR = Path(os.environ["E2E_DIR"])
@@ -25,9 +26,17 @@ AGENT = textwrap.dedent(
         text = next((m.collect_text() for m in reversed(messages) if m.role == "user"), "")
         return f"echo: {text.splitlines()[-1][:60]}"
 
+    # Refuses what says "forbidden" while the file `blocking` exists: a refusal a test can lift (a rail that failed).
+    rail = guardrail(
+        lambda text: Verdict.block("forbidden") if "forbidden" in text and (DIR / "blocking").exists() else True,
+        name="forbidden",
+        stages=["input"],
+    )
+
     agent = Agent(
         name="agent",
         model=TestModel(handler=handler),
+        guardrails=[rail],
         tracing_provider=SqliteTracingProvider.configured(_path=DIR / "timbal.db"),
     )
     """
@@ -218,7 +227,8 @@ class TestAStoreThatDoesNotAnswer:
         "not sent", and a model then sends again under a new id). A post that may have landed never says so,
         keyed or not; the detail says whether a retry with the key is safe."""
         session_id = served_elsewhere(client)
-        monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", "0.1")
+        # A bound above what a slow disk adds to every call (TIMBAL_TEST_SLOW_IO), far below forever.
+        monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", "1")
         store = client.app.state.chat_store
 
         async def hangs(*_args, **_kwargs):
@@ -433,6 +443,12 @@ class TestReviewOn341:
         state, records = settled(client, session_id, lambda _st, _rs: True)
         assert state["turns"] == 1 and len([r for r in records if r["kind"] == "agent_message"]) == 0
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Known gap, as on main: a message taken directly, consumed by a turn and forgotten by a restore is not "
+        "known to the session's dedupe, so a retry through another worker is queued again. Recording every direct "
+        "message's key in the store would cost every worker a write and a row per message (review on #341).",
+    )
     def test_an_agent_message_taken_directly_then_retried_through_another_worker_is_not_queued(self, client):
         session_id = client.post("/chat/sessions", json={}).json()["session_id"]
         body = {"from": "bob", "text": "the build is green", "message_id": "am_9"}
@@ -483,3 +499,220 @@ class TestReviewOn341:
         second = post(client, session_id, "agent_messages", {"from": "support", "text": "b", "message_id": "eu:7"})
         assert first.json()["inbox_id"] != second.json()["inbox_id"]
         assert sorted(i["body"]["text"] for i in waiting(client, session_id)) == ["a", "b"]
+
+
+def inbox_rows(client, session_id):
+    def count(conn):
+        return conn.execute("SELECT count(*) FROM chat_inbox WHERE session_id = ?", (session_id,)).fetchone()[0]
+
+    return client.portal.call(client.app.state.chat_store._run, count)
+
+
+class TestReviewRound2On341:
+    """Findings of the second review on timbal#341 (of the fixes for the first), each reproduced before its fix."""
+
+    def test_a_queued_agent_message_the_owner_refused_is_screened_again_when_retried(self, client, tmp_path):
+        """Refused where it was applied (its guardrail), then retried directly: screened again (the rail may have
+        failed for a moment), not answered as a duplicate that was delivered."""
+        (tmp_path / "blocking").touch()
+        session_id = served_elsewhere(client)
+        body = {"from": "bob", "text": "a forbidden request", "message_id": "am_r1"}
+        assert post(client, session_id, "agent_messages", body).json()["queued"] == "inbox"
+        client.portal.call(client.app.state.chat_store.release_lease, session_id, ELSEWHERE)
+        assert client.get(f"/chat/sessions/{session_id}").status_code == 200  # restored here: refused, logged
+        settled(client, session_id, lambda _st, rs: any(r["kind"] == "inbox_refused" for r in rs))
+        retried = post(client, session_id, "agent_messages", body)
+        assert retried.status_code == 403 and retried.json()["reason"] == "blocked", retried.text
+        (tmp_path / "blocking").unlink()  # the rail lets it through now: the retry is taken
+        again = post(client, session_id, "agent_messages", body)
+        assert again.status_code == 202 and again.json()["duplicate"] is False, again.text
+
+    def test_a_duplicate_still_pending_says_pending(self, client):
+        """No turn has taken it yet: a retry is a duplicate of a message still pending (the key the store kept for
+        it said "delivered")."""
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        session = client.app.state.chat_sessions[session_id]
+        go, real_admit = asyncio.Event(), session._admit
+
+        async def admit():  # no turn takes it meanwhile
+            await go.wait()
+            await real_admit()
+
+        session._admit = admit
+        body = {"from": "bob", "text": "hold on", "message_id": "am_p"}
+        first = post(client, session_id, "agent_messages", body)
+        again = post(client, session_id, "agent_messages", body)
+        client.portal.call(go.set)
+        assert first.json()["duplicate"] is False and again.json()["duplicate"] is True
+        assert first.json()["state"] == again.json()["state"] == "pending", (first.text, again.text)
+
+    def test_a_message_taken_directly_writes_nothing_to_the_inbox(self, client):
+        """A single worker never queues: it must not pay a write and a row per message from an agent."""
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        for n in range(5):
+            response = post(
+                client, session_id, "agent_messages", {"from": "bob", "text": f"m{n}", "message_id": f"am_{n}"}
+            )
+            assert response.status_code == 202
+        assert inbox_rows(client, session_id) == 0
+
+    def test_a_store_whose_post_takes_no_agent_still_queues_and_refuses_other_agents(self, client, monkeypatch):
+        """A store written before ``agent=``: its post is not handed it (it raised TypeError, a 400 that RemotePeer
+        read as "invalid"), and another agent's session is refused all the same."""
+        from timbal.state.chat_store import SessionSnapshot
+
+        store = client.app.state.chat_store
+        real_post = store.post_inbox
+
+        async def older(session_id, kind, body, *, idempotency_key=None):
+            return await real_post(session_id, kind, body, idempotency_key=idempotency_key)
+
+        monkeypatch.setattr(store, "post_inbox", older)
+        session_id = served_elsewhere(client)
+        assert post(client, session_id, "messages", {"text": "hi"}).status_code == 202
+        snapshot = SessionSnapshot(session_id="not-mine", agent="another_agent")
+        client.portal.call(lambda: store.save(snapshot, expect_version=None, owner=ELSEWHERE))
+        assert post(client, "not-mine", "messages", {"text": "hi"}).status_code == 404
+
+    def test_another_agents_session_held_elsewhere_is_a_404_on_every_route(self, client):
+        from timbal.state.chat_store import SessionSnapshot
+
+        store = client.app.state.chat_store
+        snapshot = SessionSnapshot(session_id="not-mine", agent="another_agent")
+        client.portal.call(lambda: store.save(snapshot, expect_version=None, owner=ELSEWHERE))
+        assert client.get("/chat/sessions/not-mine").status_code == 404
+        assert client.post("/chat/sessions/not-mine/interrupt").status_code == 404
+        assert client.post("/chat/sessions/not-mine/resume", json={"resume": {"a": True}}).status_code == 404
+
+    def test_a_keyed_post_to_a_session_this_worker_then_lets_go_is_applied(self, client, monkeypatch):
+        """Keyed, the serving worker queues the request in its own inbox; if it lets the session go before its
+        drain takes it (idle reaping, a shutdown), the item is restored and applied all the same."""
+        import timbal.server.chat as chat_module
+        from timbal.core.chat_session import ChatSession
+
+        monkeypatch.setattr(chat_module, "_RESTORE_RETRY_S", 0.05)
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        session = client.app.state.chat_sessions[session_id]
+        real_take = ChatSession._take_items
+
+        async def held_back(self, items):
+            if self is session:
+                await asyncio.Event().wait()  # let go before it takes them (cancelled with its lease)
+            return await real_take(self, items)
+
+        monkeypatch.setattr(ChatSession, "_take_items", held_back)
+        assert post(client, session_id, "messages", {"text": "keyed"}, **{"Idempotency-Key": "k1"}).status_code == 202
+        sessions = client.app.state.chat_sessions
+        client.portal.call(lambda: session.close(keep=True))  # let go, as idle reaping does: closed, then unmapped
+        if sessions.get(session_id) is session:
+            sessions.pop(session_id)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (sessions.get(session_id) and sessions[session_id].turns == 1):
+            time.sleep(0.02)
+        assert sessions.get(session_id) is not None and sessions[session_id].turns == 1
+
+    def test_a_post_that_may_have_landed_is_watched_too(self, client, monkeypatch):
+        """A 503 that says the post may have been queued: if it was, its session is watched like any other."""
+        import timbal.server.chat as chat_module
+
+        monkeypatch.setattr(chat_module, "_RESTORE_RETRY_S", 0.05)
+        monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", "1")
+        session_id = served_elsewhere(client)
+        store = client.app.state.chat_store
+        real_post = store.post_inbox
+
+        async def lands_then_hangs(*args, **kwargs):
+            await real_post(*args, **kwargs)
+            await asyncio.sleep(20)
+
+        monkeypatch.setattr(store, "post_inbox", lands_then_hangs)
+        assert post(client, session_id, "messages", {"text": "maybe"}).status_code == 503
+        monkeypatch.setattr(store, "post_inbox", real_post)
+        client.portal.call(store.release_lease, session_id, ELSEWHERE)
+        sessions = client.app.state.chat_sessions
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (sessions.get(session_id) and sessions[session_id].turns == 1):
+            time.sleep(0.02)
+        assert sessions.get(session_id) is not None and sessions[session_id].turns == 1
+
+    def test_the_watch_ends_once_nothing_waits_in_the_inbox(self, client, monkeypatch):
+        """The owner took the item, and the session still has work of its own (a turn, a pending event): the
+        watch stops there, rather than taking the file's write lock every round for as long as that lasts."""
+        import timbal.server.chat as chat_module
+        from timbal.state.chat_store import SessionSnapshot
+
+        monkeypatch.setattr(chat_module, "_RESTORE_RETRY_S", 0.05)
+        store = client.app.state.chat_store
+        busy = SessionSnapshot(session_id="busy", agent="agent", wakes=[{"id": "w1", "text": "later"}])
+        client.portal.call(lambda: store.save(busy, expect_version=None, owner=ELSEWHERE))
+        assert post(client, "busy", "messages", {"text": "hi"}).json()["queued"] == "inbox"
+        items = client.portal.call(store.pull_inbox, "busy", ELSEWHERE)
+        client.portal.call(store.ack_inbox, "busy", ELSEWHERE, [i["id"] for i in items])  # the owner took it
+        deadline = time.monotonic() + 10
+        watches = lambda: getattr(client.app.state, "chat_queued_watch", None) or {}  # noqa: E731
+        while time.monotonic() < deadline and watches().get("busy") is not None:
+            time.sleep(0.02)
+        assert watches().get("busy") is None
+
+    def test_a_client_key_cannot_take_an_agents_key(self, client):
+        session_id = served_elsewhere(client)
+        response = post(client, session_id, "messages", {"text": "hi"}, **{"Idempotency-Key": "agent_message:3:bob:m1"})
+        assert response.status_code == 400, response.text
+        assert waiting(client, session_id) == []
+
+    def test_a_direct_request_waiting_for_queued_work_being_applied_is_not_blamed_on_the_store(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", "1")
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        session = client.app.state.chat_sessions[session_id]
+        store = client.app.state.chat_store
+        client.portal.call(session._inbox_lock.acquire)  # the drain applying a slow batch (a guardrail's model call)
+        try:
+            client.portal.call(lambda: store.post_inbox(session_id, "message", {"text": "queued", "mode": None}))
+            response = post(client, session_id, "messages", {"text": "hi"})
+        finally:
+            client.portal.call(session._inbox_lock.release)
+        assert response.status_code == 503 and response.headers.get("Retry-After")
+        assert "did not answer" not in response.json()["detail"], response.text
+
+    def test_the_watch_restores_a_session_only_once_the_copy_here_is_done_closing(self, client, monkeypatch):
+        """This process lets the session go while items wait (idle reaping): until its close is done, that copy may
+        still run its turn and holds the session's task store. A copy the watch made meanwhile was a second one
+        (under the same lease owner), and the message was lost between them."""
+        import timbal.server.chat as chat_module
+        from timbal.core.chat_session import ChatSession
+
+        monkeypatch.setattr(chat_module, "_RESTORE_RETRY_S", 0.02)
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        session = client.app.state.chat_sessions[session_id]
+        order = []
+        real_take, real_settle = ChatSession._take_items, session._settle_store
+
+        async def held_back(self, items):
+            if self is session:
+                await asyncio.Event().wait()  # let go before it takes them (cancelled with its lease)
+            return await real_take(self, items)
+
+        async def slow_settle():
+            await asyncio.sleep(0.5)
+            await real_settle()
+            order.append("closed")
+
+        real_restore = ChatSession.from_store.__func__
+
+        async def restore(cls, *args, **kwargs):
+            order.append("restore")
+            return await real_restore(cls, *args, **kwargs)
+
+        monkeypatch.setattr(ChatSession, "_take_items", held_back)
+        monkeypatch.setattr(ChatSession, "from_store", classmethod(restore))
+        session._settle_store = slow_settle
+        assert post(client, session_id, "messages", {"text": "keyed"}, **{"Idempotency-Key": "k1"}).status_code == 202
+        client.portal.call(lambda: session.close(keep=True))
+        sessions = client.app.state.chat_sessions
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (sessions.get(session_id) and sessions[session_id].turns == 1):
+            time.sleep(0.02)
+        assert order[:2] == ["closed", "restore"], order
+        assert sessions[session_id] is not session and sessions[session_id].turns == 1

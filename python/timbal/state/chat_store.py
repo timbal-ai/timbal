@@ -404,11 +404,11 @@ class ChatSessionStore(ABC):
         request directly asks whether it was queued before. A store without it answers None."""
         return None
 
-    async def keep_inbox_key(self, session_id: str, key: str, item_id: str) -> None:  # noqa: ARG002
-        """Record that the request ``key`` names was taken directly, as an item ``item_id`` already acked: for
-        :data:`INBOX_KEY_KEPT_S` a post with the key is that item, and queues nothing. Nothing when the key names an
-        item already, or the session is not stored. A store without it records nothing."""
-        return None
+    async def inbox_waiting(self, session_id: str) -> int:
+        """How many items wait in the session's inbox (no lease needed: a worker that queued for a session another
+        serves looks, to restore it if that one lets it go with items waiting). The base class answers from
+        :meth:`list_ids`, which counts a session's other work too: 1 when the session has any."""
+        return int(session_id in await self.list_ids(with_work=True))
 
     async def pull_inbox(self, session_id: str, owner: str, *, wait_s: float = 0.0) -> list[dict[str, Any]]:
         """The items not acked yet, oldest first (``{id, kind, body, posted_at}``), waiting up to ``wait_s`` for a
@@ -416,10 +416,11 @@ class ChatSessionStore(ABC):
         ``LookupError``: no stored session."""
         raise NotImplementedError(f"{type(self).__name__} has no inbox")
 
-    async def ack_inbox(self, session_id: str, owner: str, ids: Collection[str]) -> None:
+    async def ack_inbox(self, session_id: str, owner: str, ids: Collection[str], *, forget: bool = False) -> None:
         """Remove items the owner applied and stored (one with a key stays as its key alone, for
-        :data:`INBOX_KEY_KEPT_S`). :class:`SessionLeased` when another owner holds the lease, and then nothing is
-        removed. ``LookupError``: no stored session."""
+        :data:`INBOX_KEY_KEPT_S`). ``forget``: their keys go too, for items the owner refused (a retry of one is
+        screened again, not answered as the item that was refused). :class:`SessionLeased` when another owner holds
+        the lease, and then nothing is removed. ``LookupError``: no stored session."""
         raise NotImplementedError(f"{type(self).__name__} has no inbox")
 
 
@@ -500,10 +501,12 @@ class InMemoryChatSessionStore(ChatSessionStore):
     def _waiting(self, session_id: str) -> list[_MemoryItem]:
         return [item for item in self._inbox.get(session_id, ()) if item.acked_at is None]
 
-    def _ack(self, session_id: str, ids: Collection[str]) -> None:
+    def _ack(self, session_id: str, ids: Collection[str], *, forget: bool = False) -> None:
         done, now = set(ids), time.time()
         kept = []
         for item in self._inbox.get(session_id, ()):
+            if forget and item.id in done:
+                continue  # the item and its key
             if item.acked_at is None and item.id in done:
                 if item.key is None:
                     continue
@@ -573,24 +576,16 @@ class InMemoryChatSessionStore(ChatSessionStore):
         item = self._keyed(session_id, key, time.time())
         return (item.id, item.acked_at is not None) if item is not None else None
 
-    async def keep_inbox_key(self, session_id: str, key: str, item_id: str) -> None:
-        now = time.time()
-        row = self._rows.get(session_id)
-        if row is None or row[0].closed or self._keyed(session_id, key, now) is not None:
-            return
-        items = self._inbox.setdefault(session_id, [])
-        items[:] = [item for item in items if item.key != key]  # (one kept past its time)
-        item = _MemoryItem(item_id, "agent_message", "{}", key, now)
-        item.acked_at = now
-        items.append(item)
+    async def inbox_waiting(self, session_id: str) -> int:
+        return len(self._waiting(session_id))
 
     def _pull(self, session_id: str, owner: str) -> list[dict[str, Any]]:
         self._holder(session_id, owner, running=True)
         return [_inbox_item(item.id, item.kind, item.raw, item.posted_at) for item in self._waiting(session_id)]
 
-    async def ack_inbox(self, session_id: str, owner: str, ids: Collection[str]) -> None:
+    async def ack_inbox(self, session_id: str, owner: str, ids: Collection[str], *, forget: bool = False) -> None:
         self._holder(session_id, owner, running=False)
-        self._ack(session_id, ids)
+        self._ack(session_id, ids, forget=forget)
 
     async def acquire_lease(self, session_id: str, owner: str) -> None:
         row = self._rows.get(session_id)
@@ -795,13 +790,17 @@ def _transaction(conn: Any, fn: Any) -> Any:
     return result
 
 
-def _ack_rows(conn: Any, session_id: str, ids: Collection[str], now: float) -> None:
+def _ack_rows(conn: Any, session_id: str, ids: Collection[str], now: float, *, forget: bool = False) -> None:
     """Ack inbox items (inside the caller's transaction): an item without a key goes, one with a key stays as its
-    key alone (body emptied) for :data:`INBOX_KEY_KEPT_S`; the session's keys kept longer than that go too."""
+    key alone (body emptied) for :data:`INBOX_KEY_KEPT_S`, unless ``forget`` (refused: key and all go); the
+    session's keys kept longer than that go too."""
     ids = list(ids)
     for at in range(0, len(ids), _IDS_PER_STATEMENT):
         chunk = ids[at : at + _IDS_PER_STATEMENT]
         marks = ",".join("?" * len(chunk))
+        if forget:
+            conn.execute(f"DELETE FROM chat_inbox WHERE session_id = ? AND id IN ({marks})", (session_id, *chunk))
+            continue
         conn.execute(
             f"DELETE FROM chat_inbox WHERE session_id = ? AND acked_at IS NULL AND idempotency_key IS NULL "
             f"AND id IN ({marks})",
@@ -1081,26 +1080,15 @@ class SqliteChatSessionStore(ChatSessionStore):
         row = await self._run(query)
         return (row[0], row[1] is not None) if row is not None else None
 
-    async def keep_inbox_key(self, session_id: str, key: str, item_id: str) -> None:
-        def write(conn):
-            def keep():
-                now = time.time()
-                row = conn.execute("SELECT snapshot FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone()
-                if row is None or _closed(row[0]):
-                    return
-                conn.execute(
-                    "DELETE FROM chat_inbox WHERE session_id = ? AND idempotency_key = ? AND acked_at < ?",
-                    (session_id, key, now - INBOX_KEY_KEPT_S),
-                )
-                conn.execute(
-                    "INSERT OR IGNORE INTO chat_inbox (id, session_id, kind, body, idempotency_key, posted_at, acked_at) "
-                    "VALUES (?, ?, 'agent_message', '{}', ?, ?, ?)",
-                    (item_id, session_id, key, now, now),
-                )
+    async def inbox_waiting(self, session_id: str) -> int:
+        def query(conn):
+            return (
+                _settled(conn)
+                .execute("SELECT count(*) FROM chat_inbox WHERE session_id = ? AND acked_at IS NULL", (session_id,))
+                .fetchone()[0]
+            )
 
-            _transaction(conn, keep)
-
-        await self._run(write)
+        return await self._run(query)
 
     def _sessions_with_items(self, session_ids: list[str]) -> set[str]:
         """For the watch's thread: which of ``session_ids`` have items waiting."""
@@ -1109,7 +1097,7 @@ class SqliteChatSessionStore(ChatSessionStore):
             found = {row[0] for row in _settled(db.conn).execute(_WAITING_SESSIONS_SQL).fetchall()}
         return found.intersection(session_ids)
 
-    async def ack_inbox(self, session_id: str, owner: str, ids: Collection[str]) -> None:
+    async def ack_inbox(self, session_id: str, owner: str, ids: Collection[str], *, forget: bool = False) -> None:
         ids = list(ids)
 
         def write(conn):
@@ -1122,7 +1110,7 @@ class SqliteChatSessionStore(ChatSessionStore):
                 if held[0] != owner:
                     # The items are the new owner's to apply now; what this one stored says it applied them.
                     raise SessionLeased(f"session {session_id} is not leased to {owner}")
-                _ack_rows(conn, session_id, ids, time.time())
+                _ack_rows(conn, session_id, ids, time.time(), forget=forget)
 
             _transaction(conn, ack)
 

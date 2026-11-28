@@ -478,29 +478,23 @@ class TestTheAgentAndTheKeysAWorkerAsksAbout:
         monkeypatch.setattr(time, "time", lambda: later)
         assert await store.find_inbox_key("s1", "k") is None
 
-    async def test_a_key_kept_for_a_request_taken_directly_is_that_item(self, store):
-        store.max_inbox_items = 1
-        await stored(store)
-        await store.keep_inbox_key("s1", "k", "ev_direct")
-        assert await store.find_inbox_key("s1", "k") == ("ev_direct", True)
-        assert await store.post_inbox("s1", "message", message("x"), idempotency_key="k") == "ev_direct"
-        assert await store.pull_inbox("s1", OWNER) == []  # nothing queued for it
-        await store.post_inbox("s1", "message", message("y"))  # and it takes no place under the cap
-        assert await waiting(store) == ["y"]
-
-    async def test_keeping_a_key_that_names_an_item_changes_nothing(self, store):
+    async def test_an_item_acked_as_refused_takes_its_key_with_it(self, store):
+        """A retry of a refused item is screened again: its key does not name the item any more."""
         await stored(store)
         item = await store.post_inbox("s1", "message", message("x"), idempotency_key="k")
-        await store.keep_inbox_key("s1", "k", "ev_other")
-        assert await store.find_inbox_key("s1", "k") == (item, False)
-        assert await waiting(store) == ["x"]
-
-    async def test_no_key_is_kept_for_a_session_not_stored_or_closed(self, store):
-        await store.keep_inbox_key("nobody", "k", "ev_1")
-        assert await store.find_inbox_key("nobody", "k") is None
-        version = await stored(store)
-        await store.save(
-            SessionSnapshot(session_id="s1", agent="agent", closed=True), expect_version=version, owner=OWNER
-        )
-        await store.keep_inbox_key("s1", "k", "ev_1")
+        await store.ack_inbox("s1", OWNER, [item], forget=True)
         assert await store.find_inbox_key("s1", "k") is None
+        again = await store.post_inbox("s1", "message", message("x"), idempotency_key="k")
+        assert again != item and await waiting(store) == ["x"]
+
+    async def test_how_many_items_wait_needs_no_lease(self, store):
+        await stored(store)
+        assert await store.inbox_waiting("s1") == 0
+        first = await store.post_inbox("s1", "message", message("1"), idempotency_key="k")
+        await store.post_inbox("s1", "message", message("2"))
+        await store.release_lease("s1", OWNER)
+        assert await store.inbox_waiting("s1") == 2
+        await store.acquire_lease("s1", OWNER)
+        await store.ack_inbox("s1", OWNER, [first])
+        assert await store.inbox_waiting("s1") == 1  # the key kept after the ack does not count
+        assert await store.inbox_waiting("nobody") == 0
