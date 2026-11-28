@@ -13,8 +13,30 @@ def pytest_configure(config):
     """Configure pytest with global settings."""
     # Load environment variables
     load_dotenv(override=True)
+    _plain_tracebacks()
     if os.environ.get("TIMBAL_TEST_SLOW_IO"):
         _slow_storage(float(os.environ["TIMBAL_TEST_SLOW_IO"]))
+
+
+def _plain_tracebacks() -> None:
+    """Log exceptions as plain tracebacks, not structlog's default rich ones.
+
+    The default renderer draws an exception with rich, every frame's locals included
+    (``RichTracebackFormatter(show_locals=True)``). It does so synchronously, on the thread that logs: 1.2 s per
+    call on a fast laptop, more on a CI runner, with the test's event loop stopped meanwhile. A voice test whose
+    rescue logs one warning with ``exc_info`` took up to 6.8 s on CI against its 5 s guard
+    (``test_hung_tts_cannot_hang_the_timeout_rescue``). The time also depended on the order tests ran in: a
+    process that ran a test calling ``create_app`` (which calls ``setup_logging()``) logged JSON with plain
+    tracebacks from then on, and one that had not drew rich ones. Everything else about the default
+    configuration is kept."""
+    import structlog
+
+    plain = structlog.dev.ConsoleRenderer(exception_formatter=structlog.dev.plain_traceback)
+    processors = [
+        plain if isinstance(processor, structlog.dev.ConsoleRenderer) else processor
+        for processor in structlog.get_config()["processors"]
+    ]
+    structlog.configure(processors=processors)
 
 
 def _slow_storage(delay: float) -> None:

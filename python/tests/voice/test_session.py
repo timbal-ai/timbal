@@ -724,10 +724,12 @@ class TestTurnTimeout:
             await stt.inject(TranscriptEvent(type="committed", text="Hello?"))
             while not any(isinstance(e, SessionError) for e in events):
                 await asyncio.sleep(0.01)
-            # The bounded rescue expires after min(turn_timeout_secs, 10s).
             while not tts.synthesize_calls:
                 await asyncio.sleep(0.01)
-            await asyncio.sleep(0.3)
+            # The bounded rescue expires after min(turn_timeout_secs, 10s), and the turn then ends on its own: wait
+            # for that, not for a time it usually takes.
+            while session._current_turn_task is not None and not session._current_turn_task.done():
+                await asyncio.sleep(0.01)
             await stt.finish()
 
         async def _run() -> None:
@@ -737,7 +739,7 @@ class TestTurnTimeout:
                     events.append(ev)
                 await driver
 
-        await asyncio.wait_for(_run(), timeout=5)
+        await asyncio.wait_for(_run(), timeout=10)  # a hang guard: the turn takes about 0.2 s
 
         assert any(isinstance(e, SessionError) and "timed out" in e.message for e in events)
         assert tts.synthesize_calls  # rescue was attempted against the dead TTS
