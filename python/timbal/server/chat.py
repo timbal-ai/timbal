@@ -371,16 +371,17 @@ def _watch_done(watches: dict[str, asyncio.Task], session_id: str, task: asyncio
         task.exception()  # retrieved (it logs what it meets)
 
 
-async def _apply_queued(session: ChatSession) -> None:
+async def _apply_queued(session: ChatSession) -> bool:
     """What other workers queued for the session, applied before the route takes its own request
     (:meth:`ChatSession.apply_queued`), within the routes' store bound. When that cannot be read the request is
     not taken (taken, it would go ahead of work another worker accepted first): ``503`` with ``Retry-After``, since
-    nothing of it was accepted."""
+    nothing of it was accepted. False: the store says another process holds the session now (this copy has let
+    it go), and the route queues the request for that one, as for any session another worker serves."""
     timeout = _store_timeout()
     try:
         await asyncio.wait_for(session.apply_queued(), timeout)
-    except SessionLeased as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+    except SessionLeased:
+        return False
     except Exception as e:
         # A timeout may be the store, or a batch the drain is applying (another agent's message being screened):
         # either way the request would go ahead of it.
@@ -393,6 +394,7 @@ async def _apply_queued(session: ChatSession) -> None:
             "accepted: retry.",
             headers=_RETRY,
         ) from e
+    return True
 
 
 def _app_sessions(app: Any) -> dict[str, ChatSession]:
@@ -896,6 +898,10 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
     the same message whichever worker it reaches."""
     session, held, key = await _session_or_held(request, session_id)
     text, mode = _message_fields(await _body(request))
+    if session is not None and key is None and not await _apply_queued(session):
+        # What other workers queued comes first; and a copy that finds its lease gone has let the session go: the
+        # request is queued for the process that holds it now.
+        session, held = None, _HeldElsewhere(session_id)
     if session is None or key is not None:
         if mode is not None and mode not in SEND_MODES:
             # What send() refuses there, refused here: the worker that applies it can tell nobody.
@@ -903,7 +909,6 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
         if not text.strip():
             raise HTTPException(status_code=400, detail="A session event needs non-empty text.")  # (as send())
         return await _queue(request, session_id, held, "message", {"text": text, "mode": mode}, key=key)
-    await _apply_queued(session)  # what other workers queued before this comes first
     busy = session.busy
     try:
         # The message is only queued here: 'now' and 'interrupt' cut the running turn once it is stored, so a
@@ -978,6 +983,10 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
     session, held, key = await _session_or_held(request, session_id)
     body = await _body(request)
     sender, text, hops = _agent_message_fields(body)
+    if session is not None and key is None and not await _apply_queued(session):
+        # What other workers queued comes first; and a copy that finds its lease gone has let the session go: the
+        # request is queued for the process that holds it now.
+        session, held = None, _HeldElsewhere(session_id)
     if session is None or key is not None:
         try:
             _, sender, message_id, _ = check_agent_message(
@@ -997,7 +1006,6 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
         item = {name: body.get(name) for name in ("from", "text", "message_id", "reply_to")}
         item.update(priority=body.get("priority") or "normal", hops=hops)
         return await _queue(request, session_id, held, "agent_message", item, key=key)
-    await _apply_queued(session)  # what other workers queued before this comes first
     # The message's key in the store, also here: queued before (to another worker, or to this one before a restore,
     # which forgets what the session held in memory), it is that item. Asked only when the session's own dedupe
     # does not know the message (which says how it stands), and never written here: a worker that never queues pays
@@ -1093,6 +1101,10 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
     session, held, key = await _session_or_held(request, session_id)
     body = await _body(request)
     text, policy, trigger = _wake_fields(body)
+    if session is not None and key is None and not await _apply_queued(session):
+        # What other workers queued comes first; and a copy that finds its lease gone has let the session go: the
+        # request is queued for the process that holds it now.
+        session, held = None, _HeldElsewhere(session_id)
     if session is None or key is not None:
         try:
             check_wake(text, key=body.get("key"), tool_policy=policy, trigger=trigger)
@@ -1106,7 +1118,6 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
             "trigger": trigger,
         }
         return await _queue(request, session_id, held, "wake", item, key=key)
-    await _apply_queued(session)  # what other workers queued before this comes first
     try:
         wake_id = session.wake(
             text,

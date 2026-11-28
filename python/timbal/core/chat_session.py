@@ -2891,11 +2891,18 @@ class ChatSession:
         had its ``202``) comes before it, also when the drain has not seen it yet (another process's post reaches
         a waiting pull at the watch's next look). Nothing to do without a store that has an inbox, or the lease.
         A pull that fails raises: a route then answers ``503`` and takes nothing (taken now, the request would go
-        ahead of work another worker accepted first). Its caller bounds the wait (``server/chat.py``)."""
+        ahead of work another worker accepted first). Its caller bounds the wait (``server/chat.py``). One that finds
+        the lease gone (:class:`~timbal.state.chat_store.SessionLeased`) lets the session go first."""
         store = self._session_store
         if store is None or not store.supports_inbox or not self._leased or self.closed or self._lost:
             return
-        items = await store.pull_inbox(self.id, process_owner())
+        try:
+            items = await store.pull_inbox(self.id, process_owner())
+        except SessionLeased as e:
+            # Another process took the session: let go of it now (as the drain does), not at the drain's next
+            # pull, which may be a long poll away; requests meanwhile would find this copy and be refused.
+            self._lose(str(e))
+            raise
         if not items:
             return
         async with self._inbox_lock:

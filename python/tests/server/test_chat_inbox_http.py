@@ -716,3 +716,19 @@ class TestReviewRound2On341:
             time.sleep(0.02)
         assert order[:2] == ["closed", "restore"], order
         assert sessions[session_id] is not session and sessions[session_id].turns == 1
+
+
+class TestBugbotOn341:
+    def test_a_session_whose_lease_was_taken_queues_for_its_new_owner(self, client):
+        """The read of what is queued finds the lease gone (another process took the session): the request is
+        queued for that one, and so is the next. It was a 409, again and again, until the drain's next pull
+        (after its long poll) let the session go."""
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        store = client.app.state.chat_store
+        client.portal.call(store.release_lease, session_id, process_owner())
+        client.portal.call(store.acquire_lease, session_id, ELSEWHERE)  # taken; this copy does not know yet
+        for text in ("first", "second"):
+            response = post(client, session_id, "messages", {"text": text})
+            assert response.status_code == 202 and response.json()["queued"] == "inbox", response.text
+        assert [i["body"]["text"] for i in waiting(client, session_id)] == ["first", "second"]
+        assert client.app.state.chat_sessions.get(session_id) is None or client.app.state.chat_sessions[session_id].lost
