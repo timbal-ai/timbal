@@ -1742,12 +1742,52 @@ class TestCloseOnAnotherLoop:
 
             with pytest.raises(RuntimeError, match=self.OWNS) as refused:
                 asyncio.run(asyncio.wait_for(end_the_run(), 10))
-            assert "closes on its own loop once idle (60 s after its last call)" in str(refused.value)
+            assert "closes on its own loop once idle (60 s after its last call or a close that failed)" in str(
+                refused.value
+            )
             assert service._run_connections == {"run": entry} and not entry.ended and entry.close_task is None
             assert not service._close_tasks and closed == []
             assert "run" not in service._run_hooked  # the hook ran, once
             asyncio.run_coroutine_threadsafe(service.close(), owner_loop).result(10)
             assert closed == [True] and not service._run_connections
+        finally:
+            stop()
+
+    def test_a_runs_cut_connection_is_closed_on_its_loop_when_its_end_is_refused(self, monkeypatch):
+        """A run's connection whose close failed is kept, out of the pool, for another try. The run's end on another
+        loop is refused and does nothing, so that try is the connection's own: on its loop, once idle, as a pooled
+        connection's idle close. Before, nothing but a close() on that loop closed it (Bugbot on #334)."""
+        from timbal.core import mcp as mcp_module
+        from timbal.core.mcp import _RunConnection
+
+        monkeypatch.setattr(mcp_module, "_RUN_CONNECTION_IDLE_S", 0.2)
+        owner_loop, stop = self.owner_thread()
+        closes = []
+
+        class FailsOnce:
+            async def close(self):
+                closes.append(True)
+                if len(closes) == 1:
+                    raise RuntimeError("its session is still shutting down")
+
+        service = MCPServer(transport="http", service="api")
+        try:
+
+            async def fail_its_close():  # a credential change there, whose close failed
+                service._run_connections["run"] = _RunConnection(FailsOnce(), "fingerprint", owner_loop)
+                await asyncio.wait({service._retire_run_connection("run")})
+                await until(lambda: service._unclosed)  # kept, out of the pool
+
+            asyncio.run_coroutine_threadsafe(fail_its_close(), owner_loop).result(10)
+            service._run_hooked["run"] = owner_loop
+
+            async def end_the_run():
+                return service._run_ended("run")
+
+            with pytest.raises(RuntimeError, match=self.OWNS):
+                asyncio.run(asyncio.wait_for(end_the_run(), 10))
+            # No close() anywhere: closed on its own loop, once idle.
+            asyncio.run(until(lambda: len(closes) == 2 and not service._unclosed and not service._close_tasks, 10))
         finally:
             stop()
 

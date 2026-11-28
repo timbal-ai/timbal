@@ -942,8 +942,8 @@ class MCPServer(ToolSet):
     # Closes of run connections still going (``close()`` waits for them), and those of each run's (its end waits).
     _close_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
     _run_closes: dict[str, set[asyncio.Task]] = PrivateAttr(default_factory=dict)
-    # Run connections whose close was cut before the session had closed: out of the pool (no call reuses them),
-    # closed again by the next close() on their loop or the end of their run.
+    # Run connections whose close was cut or failed before the session had closed: out of the pool (no call reuses
+    # them), closed again by the next close() on their loop, the end of their run, or once idle (_retry_unclosed).
     # By id(entry), taken with an atomic pop: close() on two threads may both forget those of a loop that closed.
     _unclosed: dict[int, tuple[str, "_RunConnection"]] = PrivateAttr(default_factory=dict)
     # Runs whose end hook is registered, with the run's loop: one hook per run, which finds the run's connection
@@ -1085,7 +1085,8 @@ class MCPServer(ToolSet):
 
         Only on the run's loop, which owns the sessions. A run's loop that has closed took them with it: they are
         forgotten. Another loop (a stream closed from there) closes nothing: ``RuntimeError``, which the run logs
-        (``run_end_hook_failed``); the connection is closed by its idle close or a ``close()`` on its loop."""
+        (``run_end_hook_failed``); its connections are closed by their idle close (a cut one's too, ``_retry_unclosed``)
+        or a ``close()`` on their loop."""
         owner = self._run_hooked.pop(key, None)  # the hook runs once, whatever it finds
         loop = asyncio.get_running_loop()
         if owner is None or owner is loop:
@@ -1096,7 +1097,7 @@ class MCPServer(ToolSet):
         raise RuntimeError(
             f"MCP server {self._label!r}: the platform connection of a run that ended belongs to another event loop "
             "than the one ending the run, so it was not closed here. It closes on its own loop once idle "
-            f"({_RUN_CONNECTION_IDLE_S:g} s after its last call). {_CLOSE_ON_OWNER}"
+            f"({_RUN_CONNECTION_IDLE_S:g} s after its last call or a close that failed). {_CLOSE_ON_OWNER}"
         )
 
     def _end_run_here(self, key: str) -> Awaitable[None] | None:
@@ -1169,10 +1170,20 @@ class MCPServer(ToolSet):
         if (task.cancelled() or task.exception() is not None) and not task.get_loop().is_closed():
             # Cut, or failed (the server's close() raised: what it could not close is still open), before the session
             # had closed: it may still be open. Kept out of the pool (a later call of the run must not reuse it and
-            # open a second session on its server) for the next close() or end of the run.
+            # open a second session on its server) for the next close() or end of the run, and closed again once
+            # idle, as a pooled one is: a run's end on another loop is refused and closes nothing of it.
             entry.close_task = None
             entry.ended = True
             self._unclosed[id(entry)] = (key, entry)
+            entry.cancel_idle()
+            entry.idle = task.get_loop().call_later(_RUN_CONNECTION_IDLE_S, self._retry_unclosed, key, entry)
+
+    def _retry_unclosed(self, key: str, entry: "_RunConnection") -> None:
+        """A cut connection's idle close, on its loop: closed again unless a close() or its run's end took it first
+        (they cancel this when they do)."""
+        entry.idle = None
+        if self._unclosed.pop(id(entry), None) is not None:
+            self._retire_run_connection(key, entry)
 
     # ------------------------------------------------------------------ session
 
