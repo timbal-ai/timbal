@@ -101,8 +101,9 @@ jobs:
       - name: Audit models.yaml (offline)
         run: uv run python scripts/audit_models.py --offline
 
-      # Everything in parallel, then the tests marked `serial` (none today) one at a time. Both passes
-      # always run; either failing fails the step. One cell of the full lane measures coverage, over both.
+      # Everything in parallel, then the tests marked `serial` one at a time (today `python/tests/test_isolation.py`,
+      # whose two tests must run in order in one process). Both passes always run; either failing fails the step.
+      # One cell of the full lane measures coverage, over both.
       # - Workers: one per core minus one. With every core busy, the event loop, SQLite threads and background
       #   uploads starve, and that is when rare stalls showed up; a free core costs little.
       # - A failed test is retried once (pytest-rerunfailures): a rare flake does not fail the job, a real
@@ -119,7 +120,7 @@ jobs:
           retry="--reruns 1 --reruns-delay 1"
           rc=0
           uv run pytest -n "$workers" --dist worksteal -m "not integration and not serial" $retry $cov 2>&1 | tee pytest.log || rc=$?
-          # Exit 5: no test is marked `serial` (none needs it today); the step does not fail for that.
+          # Exit 5: no test marked `serial` was collected; the step does not fail for that.
           uv run pytest -m "serial and not integration" $retry $cov ${cov:+--cov-append} 2>&1 | tee -a pytest.log \
             || { s=$?; [ "$s" -eq 5 ] || rc=$s; }
           flaky=$(uv run python scripts/ci_flaky.py pytest.log)

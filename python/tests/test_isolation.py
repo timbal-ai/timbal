@@ -4,12 +4,15 @@ another test left set.
 Two tests, in this order. The first sets a run context and call ids the way a sync test or fixture does (on the
 main thread's context) and leaves them. The second is async: pytest-asyncio copies the main thread's context into
 it, and without the fixture its first top-level run took the leftover context as its own, with that context's
-tracing provider (none here), so the run was never stored. Run apart (on two xdist workers, or the second alone)
-the second passes without the fixture too: nothing was left for it.
+tracing provider (none here), so the run was never stored.
+
+Marked ``serial``: CI runs these after the parallel pass, in one process and in file order. Run apart (on two
+xdist workers, or the second alone) the second passes without the fixture too: nothing was left for it.
 """
 
 import asyncio
 
+import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
 from timbal.state import (
@@ -22,6 +25,8 @@ from timbal.state import (
 )
 from timbal.state.context import RunContext
 from timbal.state.tracing.providers import InMemoryTracingProvider
+
+pytestmark = pytest.mark.serial
 
 # A hang guard, not a timing check: the run takes milliseconds.
 DEADLINE_S = 30
