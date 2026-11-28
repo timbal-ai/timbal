@@ -2027,7 +2027,7 @@ class TestOwnerRoundTwoReview:
         served, ready = {}, threading.Event()
 
         def serve():
-            loop = asyncio.new_event_loop()
+            loop = served["loop"] = asyncio.new_event_loop()
 
             async def make():
                 session = ChatSession(make_agent("bob", lambda _: "NO_REPLY"))
@@ -2035,13 +2035,15 @@ class TestOwnerRoundTwoReview:
                 session._loop = loop
                 session._ensure_worker = loop.stop  # the stop lands in the step that posts
                 served["session"] = session
-                ready.set()
 
             loop.run_until_complete(make())
+            # Ready once the loop runs, not in make(): between run_until_complete() and run_forever() the loop is
+            # not running, and a sender that came then (on Windows CI) was refused as "not being served".
+            loop.call_soon(ready.set)
             loop.run_forever()
             loop.close()
 
-        thread = threading.Thread(target=serve)
+        thread = threading.Thread(target=serve, daemon=True)
         thread.start()
 
         async def sender():
@@ -2052,6 +2054,10 @@ class TestOwnerRoundTwoReview:
             with caplog.at_level("ERROR"):
                 receipt = asyncio.run(sender())
         finally:
+            # A receive that never reached the loop never stopped it: stop it here, or join() waits it out.
+            if thread.is_alive() and "loop" in served:
+                with contextlib.suppress(RuntimeError):  # (closed meanwhile)
+                    served["loop"].call_soon_threadsafe(served["loop"].stop)
             thread.join(10)
         assert not [record for record in caplog.records if record.levelname == "ERROR"]
         assert receipt["duplicate"] is False
