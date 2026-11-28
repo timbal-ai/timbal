@@ -1378,6 +1378,14 @@ class TestCloseOnAnotherLoop:
         )
 
     @staticmethod
+    def call_on(loop):
+        """The record of a tools/call in flight on ``loop``, as ``_begin_call`` leaves it (its abort future is made
+        there)."""
+        from types import SimpleNamespace
+
+        return SimpleNamespace(abort=loop.create_future())
+
+    @staticmethod
     def open_session(monkeypatch):
         """A transport that connects at once and stays up until closed."""
 
@@ -1397,7 +1405,7 @@ class TestCloseOnAnotherLoop:
         try:
             asyncio.run_coroutine_threadsafe(server._connect(), owner_loop).result(10)
             server._tools_cache, server._tools_cache_run_id = ["the list"], "run"
-            server._inflight[1] = "a call in flight"
+            server._inflight[1] = self.call_on(owner_loop)
             before = self.state(server)
             with pytest.raises(RuntimeError, match=self.OWNS) as refused:
                 asyncio.run(asyncio.wait_for(server.close(), 10))
@@ -1556,7 +1564,7 @@ class TestCloseOnAnotherLoop:
 
         server, owner_loop, thread, end = self.ended_owner(monkeypatch, until_ended)
         try:
-            server._tools_cache, server._inflight[1] = ["the list"], "a call of that loop's"
+            server._tools_cache, server._inflight[1] = ["the list"], self.call_on(owner_loop)
             end()
             if owner == "paused":
                 thread.join(10)
@@ -1764,9 +1772,12 @@ class TestCloseOnAnotherLoop:
     @pytest.mark.asyncio
     async def test_a_session_whose_loop_closed_still_clears_the_caches(self, how):
         """The session's loop closed with it, nothing having cancelled its tasks: close() forgets the session and
-        clears the tool list and the calls in flight, as every close() does. A call left there would make every
-        later elicitation look ambiguous (answered ``cancel``)."""
-        loop = asyncio.new_event_loop()
+        clears the tool list and the records of the calls in flight that died with it, as every close() does (a call
+        left there would make every later elicitation look ambiguous, answered ``cancel``). A call that another loop,
+        still running, has begun (it is about to reconnect) keeps its record: cleared, an elicitation during it would
+        find no call to ask for, and the tool would complete without the question (Bugbot on #334)."""
+        loop, other = asyncio.new_event_loop(), asyncio.new_event_loop()
+        dead, theirs = self.call_on(loop), self.call_on(other)
         loop.close()
 
         class Owner:
@@ -1783,11 +1794,85 @@ class TestCloseOnAnotherLoop:
         if how == "published":
             server._session_task = server._owner_task  # as _open_session leaves them
         server._tools_cache, server._tools_cache_run_id, server._tools_stale = [object()], "run", True
-        server._inflight[1] = object()  # a call that died with its loop
-        await asyncio.wait_for(server.close(), 10)
-        assert server._session_task is None and server._owner_task is None
-        assert server._tools_cache is None and server._tools_cache_run_id is None and not server._tools_stale
-        assert not server._inflight
+        server._inflight[1], server._inflight[2] = dead, theirs
+        try:
+            await asyncio.wait_for(server.close(), 10)
+            assert server._session_task is None and server._owner_task is None
+            assert server._tools_cache is None and server._tools_cache_run_id is None and not server._tools_stale
+            assert server._inflight == {2: theirs}
+        finally:
+            other.close()
+
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason="Known gap (CLAUDE.md, MCPServer 'One loop only'): forgetting a closed loop's session reference is a "
+        "check and then a write, and a handshake another thread starts between the two loses its owner reference. "
+        "Closing it takes a lock shared by every publish of a session; the window is a few bytecodes.",
+    )
+    @pytest.mark.asyncio
+    async def test_a_handshake_another_thread_starts_as_close_forgets_a_closed_loops_owner_keeps_its_owner(self):
+        """The session's loop closed in its handshake. close() checks that the owner reference is still that one and
+        then lets go of it; a call on a loop running in another thread starts a handshake right after the check (its
+        owner reference recorded). That reference should stay: without it, close() on another loop no longer finds
+        the live handshake to refuse."""
+        loop, other = asyncio.new_event_loop(), asyncio.new_event_loop()
+        new = other.create_future()  # the other loop's handshake
+        loop.close()
+        reads = []
+
+        class Owner:
+            def get_loop(self):
+                return loop
+
+            def done(self):
+                return False
+
+        class Raced(MCPServer):
+            async def _close_own_session(self, loop):
+                reads.append(0)
+                try:
+                    return await super()._close_own_session(loop)
+                finally:
+                    reads.clear()
+
+            def __getattr__(self, name):
+                value = super().__getattr__(name)
+                if reads and name == "_owner_task":
+                    reads.append(name)
+                    if len(reads) == 3:  # the check, after close() read the owner once: a handshake starts now
+                        self.__pydantic_private__["_owner_task"] = new
+                return value
+
+        server = Raced(transport="stdio", command="unused")
+        server.__pydantic_private__["_owner_task"] = Owner()
+        try:
+            await asyncio.wait_for(server.close(), 10)
+            assert server._owner_task is new
+        finally:
+            other.close()
+
+    @pytest.mark.parametrize("how", ["nothing open", "its session open here"])
+    @pytest.mark.asyncio
+    async def test_close_drops_only_the_records_of_calls_whose_loop_closed(self, monkeypatch, how):
+        """close() on the loop that owns the session, or with nothing open, drops the records of the calls that died
+        with a loop that has closed. A call on a loop that has not closed, this one or another thread's, keeps its
+        record, which it removes as it ends (cleared, as before, an elicitation during it would find no call to ask
+        for)."""
+        self.open_session(monkeypatch)
+        server = MCPServer(transport="stdio", command="unused")
+        if how == "its session open here":
+            await server._connect()
+        gone, other = asyncio.new_event_loop(), asyncio.new_event_loop()
+        mine, dead, theirs = self.call_on(asyncio.get_running_loop()), self.call_on(gone), self.call_on(other)
+        gone.close()
+        server._inflight.update({1: mine, 2: dead, 3: theirs})
+        try:
+            await asyncio.wait_for(server.close(), 10)
+            assert server._session is None and server._owner_task is None and server._tools_cache is None
+            assert server._inflight == {1: mine, 3: theirs}
+        finally:
+            other.close()
 
     def test_what_a_closed_loop_held_is_forgotten(self):
         """A run's loop closed without running its cleanup, taking its sessions with it: close() from another loop
@@ -2101,6 +2186,177 @@ class TestCloseOnAnotherLoop:
         asyncio.run(asyncio.wait_for(service.close(), 10))
         other[0].join(10)
         assert not errors and not service._run_connections
+
+
+class TestInflightCallsPerLoop:
+    """The records of the ``tools/call``s in flight (``_inflight``), which the elicitation and sampling callbacks read
+    to find the call that asked: each belongs to its call's loop."""
+
+    QUESTION = {"message": "Which one?", "requestedSchema": {"type": "object", "properties": {}}}
+
+    @staticmethod
+    def left_behind(server):
+        """A call begun on a loop that then stopped without closing (an abandoned ``run_until_complete``): its record
+        stays, since a close() cannot tell that loop from an ``asyncio.Runner`` between two ``run()`` calls."""
+        import threading
+
+        stopped, begun = asyncio.new_event_loop(), []
+
+        async def begin():
+            begun.append(server._begin_call("left_behind"))
+
+        thread = threading.Thread(target=stopped.run_until_complete, args=(begin(),))
+        thread.start()
+        thread.join(10)
+        return stopped, begun[0]
+
+    @pytest.mark.asyncio
+    async def test_an_elicitation_counts_only_the_calls_on_its_loop(self):
+        """A record another loop left behind does not make the lone call here ambiguous: the question goes to that
+        call (outside a run it is declined), not answered ``cancel`` for two calls in flight."""
+        server = MCPServer(transport="stdio", command="unused")
+        stopped, left = self.left_behind(server)
+        try:
+            call = server._begin_call("ask")
+            result = await server._on_elicitation(None, mcp_types.ElicitRequestFormParams(**self.QUESTION))
+            assert result.action == "decline"
+            assert call.ambiguous_with == 0 and left.ambiguous_with == 0
+        finally:
+            stopped.close()
+
+    @pytest.mark.asyncio
+    async def test_a_sampling_request_counts_only_the_calls_on_its_loop(self, monkeypatch):
+        """With a record another loop left behind, sampling still runs in the lone call's context here (its span
+        under the tool), not outside the run."""
+        import contextvars
+
+        from timbal.core.test_model import TestModel
+
+        whose = contextvars.ContextVar("whose", default="nobody's")
+
+        async def sample(_self, _params):
+            return whose.get()
+
+        monkeypatch.setattr(MCPServer, "_sample", sample)
+        server = MCPServer(transport="stdio", command="unused", sampling_model=TestModel(responses=["unused"]))
+        stopped, _left = self.left_behind(server)
+        try:
+            token = whose.set("the call's")
+            server._begin_call("ask")  # its context is taken here
+            whose.reset(token)
+            params = mcp_types.CreateMessageRequestParams(messages=[], maxTokens=16)
+            result = await server._on_sampling(None, params)
+            assert result.content.text == "the call's"
+        finally:
+            stopped.close()
+
+    def test_a_call_another_thread_began_is_asked_after_close_from_another_loop(self):
+        """A call begun on a loop running in another thread, not connected yet: close() from this loop has nothing open
+        to refuse, and keeps that call's record. When the server's question arrives there, it reaches the call (its
+        payload recorded for the suspend), instead of finding no call and being answered ``cancel``."""
+        import threading
+        from types import SimpleNamespace
+
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever)
+        thread.start()
+        server = MCPServer(transport="stdio", command="unused")
+
+        async def begin():
+            call = server._begin_call("ask")
+            call.run_context = SimpleNamespace(_resume_values={}, _used_resume_ids=set())
+            call.path = "agent.ask"
+            return call
+
+        async def ask():
+            return await server._on_elicitation(None, mcp_types.ElicitRequestFormParams(**self.QUESTION))
+
+        try:
+            call = asyncio.run_coroutine_threadsafe(begin(), loop).result(10)
+            asyncio.run(asyncio.wait_for(server.close(), 10))
+            assert list(server._inflight.values()) == [call]
+            asyncio.run_coroutine_threadsafe(ask(), loop).result(10)
+            assert call.pending_payload is not None and call.pending_payload["message"] == "Which one?"
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(10)
+            loop.close()
+
+    @pytest.mark.asyncio
+    async def test_a_call_waiting_to_connect_while_close_shuts_down_is_still_asked(self, monkeypatch):
+        """One loop: close() is shutting the session down (it holds the session's lock) when a tool call begins and
+        waits for that lock; it then reconnects, and the server asks a question during it. The question reaches the
+        call, whose run stops for the answer (reason ``input_required``), instead of being answered ``cancel`` for no call in
+        flight while the tool returns as if nothing was asked: close() dropped the record of a call that went on
+        (review on #334)."""
+        shutting_down, finish, sessions = asyncio.Event(), asyncio.Event(), []
+        question = self.QUESTION
+
+        class Session:
+            async def call_tool(self, _name, **_request):
+                answer = await server._on_elicitation(None, mcp_types.ElicitRequestFormParams(**question))
+                return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=answer.action)])
+
+        async def run_session(_self, ready, closed):
+            sessions.append(True)
+            ready.set_result(Session())
+            await closed.wait()
+            if len(sessions) == 1:
+                shutting_down.set()
+                await finish.wait()  # a slow teardown, the lock held meanwhile
+
+        monkeypatch.setattr(MCPServer, "_run_session", run_session)
+        server = MCPServer(name="srv", transport="stdio", command="unused")
+        await server._connect()
+        tool = server._make_tool(mcp_types.Tool(name="ask", inputSchema={"type": "object"}))
+        try:
+            closing = asyncio.create_task(server.close())
+            await asyncio.wait_for(shutting_down.wait(), 10)
+            calling = asyncio.create_task(tool().collect())
+            await until(lambda: len(server._inflight) == 1)  # begun, waiting for the lock
+            finish.set()
+            await asyncio.wait_for(closing, 10)
+            result = await asyncio.wait_for(calling, 10)
+            assert len(sessions) == 2  # it reconnected
+            assert result.status.reason == "input_required", (result.status, result.output)
+            assert result.output["kind"] == "mcp_elicitation" and result.output["payload"]["message"] == "Which one?"
+        finally:
+            finish.set()
+            await server.close()
+
+    @pytest.mark.asyncio
+    async def test_calls_begun_at_once_get_keys_of_their_own(self):
+        """Another thread begins a call just as this one takes its key: each gets its own, wherever in ``_begin_call``
+        the other call starts (an instance counter's ``+= 1``, read and then written, handed both the same key, so one
+        record replaced the other and the first call's end removed the second's). Tried at every attribute of the
+        server that ``_begin_call`` reads."""
+        state = {"at": 0, "reads": -1, "nested": []}  # reads < 0: not counting
+
+        class Raced(MCPServer):
+            def __getattr__(self, name):
+                value = super().__getattr__(name)
+                if state["reads"] >= 0 and name.startswith("_"):
+                    state["reads"] += 1
+                    if state["reads"] == state["at"]:  # another thread begins a call here
+                        state["reads"] = -1
+                        state["nested"].append(self._begin_call("theirs"))
+                return value
+
+        tried = 0
+        while True:
+            server = Raced(transport="stdio", command="unused")
+            state.update(at=tried + 1, reads=0, nested=[])  # count only what _begin_call reads
+            mine = server._begin_call("mine")
+            state["reads"] = -1
+            if not state["nested"]:
+                break  # _begin_call reads fewer attributes than that: every point was tried
+            theirs = state["nested"][0]
+            assert mine.key != theirs.key, f"at read {state['at']}"
+            assert server._inflight == {mine.key: mine, theirs.key: theirs}
+            server._end_call(mine)
+            assert server._inflight == {theirs.key: theirs}
+            tried += 1
+        assert tried >= 1
 
 
 class TestPlatformConnectionOutsideARun:
