@@ -142,6 +142,28 @@ def clear_in_memory_tracing_storage():
     clear()
 
 
+@pytest.fixture(autouse=True)
+def outside_any_run():
+    """Every test starts outside any run: no ambient run context, no call ids. Put back at teardown, so what a
+    test (or its fixtures) set ends with it.
+
+    A sync test or fixture that calls ``set_run_context`` / ``set_call_id`` sets them on the main thread's
+    context, which outlives the test, and pytest-asyncio copies that context into every async test after it.
+    There the first top-level run took the leftover as its own (``Runnable._stream`` keeps a context whose trace
+    is still empty), tracing provider included: after ``platform/test_platform_utils.py``, whose
+    ``RunContext(tracing_provider=None)`` stays set, the next agent run in that worker stored no trace at all
+    (``test_interrupted_between_steps.py`` read back ``None`` on macOS in the merge queue, and passed on retry:
+    from then on the leftover has a finished root, and runs only chain onto it). Set here, before the test's own
+    fixtures: pytest runs a conftest's autouse fixtures first, and pytest-asyncio copies the context after all of
+    them."""
+    from timbal.state import _call_id, _parent_call_id, _run_context_var
+
+    tokens = [(var, var.set(None)) for var in (_run_context_var, _call_id, _parent_call_id)]
+    yield
+    for var, token in reversed(tokens):
+        var.reset(token)
+
+
 # How long the event loop may run no callback before loop_watchdog reports it (TIMBAL_TEST_LOOP_STALL_S).
 LOOP_STALL_S = float(os.environ.get("TIMBAL_TEST_LOOP_STALL_S", "10"))
 
