@@ -9,7 +9,7 @@ from datetime import datetime
 import pytest
 from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
-from timbal.state import get_run_context
+from timbal.state import get_call_id, get_run_context
 from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.file import File
 from timbal.types.message import Message
@@ -1778,3 +1778,391 @@ class TestTraceDumpedVersions:
                 if "complex nesting" in dump_content:
                     assert "[OUTER-PRE]" not in dump_content
                     assert "[INNER-PRE]" not in dump_content
+
+async def until(condition, timeout=30.0):
+    """Wait for ``condition()``. The budget is for a slow machine: one where it never holds fails here."""
+
+    async def poll():
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
+def race_at_the_hook_list(monkeypatch, other):
+    """A run context where this thread's first look at its end-hook list runs ``other(context)`` on a thread of its
+    own, going on once that has finished or waits on the end-hook lock this thread holds: where another thread of the
+    run would land. Returns the context and a list that holds that thread once it started."""
+    import threading
+
+    from timbal.state import context as context_module
+    from timbal.state.context import RunContext
+
+    class ObservedLock:
+        """The end-hook lock, saying when a second taker waits on it."""
+
+        def __init__(self):
+            self.lock, self.waited = threading.Lock(), threading.Event()
+
+        def __enter__(self):
+            if not self.lock.acquire(blocking=False):
+                self.waited.set()
+                self.lock.acquire()
+            return self
+
+        def __exit__(self, *_):
+            self.lock.release()
+
+    lock, armed, started = ObservedLock(), [], []
+
+    class Raced(RunContext):
+        def __getattribute__(self, name):
+            value = super().__getattribute__(name)
+            # Its first look at the hook list, through the attribute or the dict that holds it.
+            if name in ("_end_hooks", "__dict__") and armed and threading.current_thread() is threading.main_thread():
+                armed.clear()  # this thread has looked; the other one goes now
+                started.append(threading.Thread(target=other, args=(self,)))
+                started[0].start()
+                for _ in range(1000):  # until it is done, or waits on the lock this thread holds
+                    if not started[0].is_alive() or lock.waited.wait(0.01):
+                        break
+            return value
+
+    monkeypatch.setattr(context_module, "_END_HOOKS_LOCK", lock, raising=False)
+    context = Raced()
+    armed.append(True)  # from here on: the context is built
+    return context, started
+
+
+class TestRunEndHooks:
+    def test_two_threads_registering_at_once_both_have_their_hook_run(self, monkeypatch):
+        """Two threads of one run (a handler's workers) register end hooks at the same moment, before the run has a
+        list: each hook accepted runs at the end. Each thread used to install a list of its own, and one was lost."""
+        ran, accepted = [], []
+        context, other = race_at_the_hook_list(
+            monkeypatch, lambda ctx: accepted.append(ctx.on_end(lambda: ran.append("other")))
+        )
+        assert context.on_end(lambda: ran.append("this"))
+        other[0].join(10)
+        assert accepted == [True]
+        asyncio.run(asyncio.wait_for(context._run_end_hooks(), 10))
+        assert sorted(ran) == ["other", "this"]
+
+    def test_a_hook_registered_as_the_run_ends_runs_or_is_refused(self, monkeypatch):
+        """A thread registers an end hook just as the run's end takes the list: the hook runs, or on_end says it will
+        not (False). It used to be accepted into a list the end had already taken, so it never ran, and that list
+        reopened registration for good."""
+        ran = []
+        context, other = race_at_the_hook_list(
+            monkeypatch, lambda ctx: asyncio.run(asyncio.wait_for(ctx._run_end_hooks(), 10))
+        )
+        accepted = context.on_end(lambda: ran.append("hook"))
+        other[0].join(10)
+        assert accepted == (ran == ["hook"])
+        assert context._end_hooks == () and not context.on_end(lambda: None)  # registration stays closed
+
+    async def test_a_cut_while_one_waits_calls_every_hook_and_lets_each_finish(self):
+        """A run cancelled as it ends: the hooks after the one being waited for still run (a per-run MCP
+        connection left after a credential change is one), and the cut ends the wait, not the hooks' work."""
+        from timbal.state.context import RunContext
+
+        release = asyncio.Event()
+        called, finished = [], []
+
+        def hook(name, wait):
+            async def work():
+                if wait:
+                    await release.wait()
+                finished.append(name)
+
+            def start():
+                called.append(name)
+                return work()
+
+            return start
+
+        context = RunContext()
+        context.on_end(hook("slow", wait=True))
+        context.on_end(hook("next", wait=False))
+        task = asyncio.ensure_future(context._run_end_hooks())
+        await until(lambda: called)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 30)
+        assert called == ["slow", "next"]
+        release.set()
+        await until(lambda: sorted(finished) == ["next", "slow"])
+
+    async def test_a_root_that_ended_with_no_hooks_keeps_none_added_later(self):
+        contexts = []
+
+        def tool() -> str:
+            contexts.append(get_run_context())
+            return "ok"
+
+        model = TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="t1", name="tool", input={})], stop_reason="tool_use"),
+                "done",
+            ]
+        )
+        out = await Agent(name="agent", model=model, tools=[tool])(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        assert contexts[0].on_end(lambda: None) is False  # a background child's late hook would never run
+        assert not contexts[0]._end_hooks
+
+    async def test_a_cut_while_the_hooks_wait_gives_the_caller_its_context_back(self):
+        """A run started inside a call, iterated in the caller's task, cut while its end hooks are waited for: the
+        caller that catches the cut goes on with its own run context and call id, not the finished run's."""
+        release = asyncio.Event()
+        seen = {}
+
+        async def outer() -> str:
+            me = asyncio.current_task()
+
+            async def wait():
+                me.cancel()  # the cut lands while _run_end_hooks waits for this
+                await release.wait()
+
+            def register() -> str:
+                get_run_context().on_end(wait)
+                return "ok"
+
+            inner = Agent(
+                name="inner",
+                model=TestModel(
+                    responses=[
+                        Message(
+                            role="assistant",
+                            content=[ToolUseContent(id="r1", name="register", input={})],
+                            stop_reason="tool_use",
+                        ),
+                        "done",
+                    ]
+                ),
+                tools=[register],
+            )
+            before = (get_run_context(), get_call_id())
+            try:
+                await inner(prompt="x").collect()
+            except asyncio.CancelledError:
+                me.uncancel()
+            seen["same"] = (get_run_context(), get_call_id()) == before
+            return "ok"
+
+        model = TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="o1", name="outer", input={})], stop_reason="tool_use"),
+                "done",
+            ]
+        )
+        try:
+            out = await Agent(name="agent", model=model, tools=[outer])(prompt="go").collect()
+        finally:
+            release.set()
+        assert out.status.code == "success", out.error
+        assert seen == {"same": True}
+
+    async def test_hooks_run_in_the_finishing_runs_context(self):
+        """A run started inside a call: its hooks see its own run context and call id (a hook may read its
+        credentials or record on its trace), and the caller has its own back afterwards."""
+        seen = {}
+
+        async def outer() -> str:
+            def register() -> str:
+                context = get_run_context()
+                seen["run"] = context
+                context.on_end(lambda: seen.update(hook=(get_run_context(), get_call_id())))
+                return "ok"
+
+            inner = Agent(
+                name="inner",
+                model=TestModel(
+                    responses=[
+                        Message(
+                            role="assistant",
+                            content=[ToolUseContent(id="r1", name="register", input={})],
+                            stop_reason="tool_use",
+                        ),
+                        "done",
+                    ]
+                ),
+                tools=[register],
+            )
+            before = (get_run_context(), get_call_id())
+            await inner(prompt="x").collect()
+            seen["after"] = (get_run_context(), get_call_id()) == before
+            return "ok"
+
+        model = TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="o1", name="outer", input={})], stop_reason="tool_use"),
+                "done",
+            ]
+        )
+        out = await Agent(name="agent", model=model, tools=[outer])(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        hook_context, hook_call_id = seen["hook"]
+        assert hook_context is seen["run"]
+        assert hook_call_id == seen["run"].root_span().call_id
+        assert seen["after"] is True
+
+    async def test_a_sync_hook_raising_cancelled_error_stops_neither_the_rest_nor_the_run(self):
+        """``.result()`` of a cancelled future raises CancelledError inside the hook: the hook's own error."""
+        ran = []
+
+        def tool() -> str:
+            cancelled = asyncio.get_running_loop().create_future()
+            cancelled.cancel()
+            context = get_run_context()
+            context.on_end(cancelled.result)
+            context.on_end(lambda: ran.append("cleanup"))
+            return "ok"
+
+        model = TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="t1", name="tool", input={})], stop_reason="tool_use"),
+                "done",
+            ]
+        )
+        out = await Agent(name="agent", model=model, tools=[tool])(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        assert ran == ["cleanup"]
+
+    async def test_a_stream_closed_by_another_task_runs_its_hooks_in_its_own_context(self):
+        """One task reads the first delta, another closes the stream: the hooks still see the run's context and
+        root call id, and the closing task keeps its own."""
+        seen = {}
+
+        async def streamer():
+            context = get_run_context()
+            seen["run"] = context
+            context.on_end(lambda: seen.update(hook=(get_run_context(), get_call_id())))
+            yield "first"
+            await asyncio.Event().wait()
+            yield "never"
+
+        stream = Tool(name="streamer", handler=streamer)._stream()
+
+        async def read_first():
+            async for event in stream:
+                if event.type == "DELTA":
+                    return
+
+        async def close_it():
+            await stream.aclose()
+            return (get_run_context(), get_call_id())
+
+        await asyncio.wait_for(asyncio.ensure_future(read_first()), 30)
+        closer_after = await asyncio.wait_for(asyncio.ensure_future(close_it()), 30)
+        hook_context, hook_call_id = seen["hook"]
+        assert hook_context is seen["run"]
+        assert hook_call_id == seen["run"].root_span().call_id
+        assert closer_after == (None, None)
+
+    async def test_unhashable_awaitables_from_hooks_are_awaited(self):
+        """A hook may return any awaitable: a dataclass implementing ``__await__`` is not hashable."""
+        from dataclasses import dataclass
+
+        from timbal.state.context import RunContext
+
+        ran = []
+
+        @dataclass
+        class Later:
+            name: str
+
+            def __await__(self):
+                async def go():
+                    ran.append(self.name)
+
+                return go().__await__()
+
+        context = RunContext()
+        context.on_end(lambda: Later("first"))
+        context.on_end(lambda: Later("second"))
+        await context._run_end_hooks()
+        assert sorted(ran) == ["first", "second"]
+
+    async def test_a_hook_returning_another_loops_task_is_awaited_on_that_loop(self):
+        """A producer's pending flush, a task of its own loop, returned by a hook while another loop ends the run: the
+        end waits for it there instead of failing on 'attached to a different loop'."""
+        import threading
+
+        from timbal.state.context import RunContext
+
+        owner = asyncio.new_event_loop()
+        thread = threading.Thread(target=owner.run_forever)
+        thread.start()
+        try:
+
+            async def make():
+                release = asyncio.Event()
+
+                async def flush():
+                    await release.wait()
+                    return "flushed"
+
+                return release, asyncio.ensure_future(flush())
+
+            release, flush = asyncio.run_coroutine_threadsafe(make(), owner).result(10)
+            context = RunContext()
+            context.on_end(lambda: flush)
+            hooks = asyncio.ensure_future(context._run_end_hooks())
+            done, _ = await asyncio.wait({hooks}, timeout=0.3)
+            assert not done  # waiting for the flush, on its loop
+            owner.call_soon_threadsafe(release.set)
+            await asyncio.wait_for(hooks, 10)
+            assert flush.done() and flush.result() == "flushed"
+        finally:
+            owner.call_soon_threadsafe(owner.stop)
+            thread.join(10)
+            owner.close()
+
+    async def test_a_hook_future_already_done_is_read_whatever_its_loop(self):
+        """A future that completed on a loop since closed: its outcome is read, not reported as a failure; a pending
+        one of such a loop fails without the future's repr (it can carry what it holds) in the message."""
+        from timbal.state.context import _awaited
+
+        gone = asyncio.new_event_loop()
+        done = gone.create_future()
+        done.set_result("secret value")
+        pending = gone.create_future()
+        gone.close()
+        assert await _awaited(done) == "secret value"
+        with pytest.raises(RuntimeError) as failure:
+            await _awaited(pending)
+        assert "pending" in str(failure.value) and "<" not in str(failure.value)
+
+    async def test_they_run_once_when_the_root_ends_and_none_is_kept_after(self):
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+        from timbal.state import get_run_context
+
+        ran, contexts = [], []
+
+        def tool() -> str:
+            context = get_run_context()
+            contexts.append(context)
+            assert context.on_end(lambda: ran.append("sync"))
+
+            async def later():
+                ran.append("async")
+
+            assert context.on_end(later)
+            return "ok"
+
+        model = TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="t1", name="tool", input={})], stop_reason="tool_use"),
+                "done",
+            ]
+        )
+        out = await Agent(name="agent", model=model, tools=[tool])(prompt="go").collect()
+        assert out.status.code == "success", out.error
+        assert ran == ["sync", "async"]
+        context = contexts[0]
+        assert context.on_end(lambda: ran.append("late")) is False  # the root has ended: it would never run
+        assert not context._end_hooks
+        await context._run_end_hooks()  # a second end runs nothing
+        assert ran == ["sync", "async"]

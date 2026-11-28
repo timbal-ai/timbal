@@ -1,10 +1,18 @@
 import asyncio
+import concurrent.futures
+import contextlib
 import contextvars
+import functools
+import hashlib
+import hmac
 import inspect
 import itertools
+import json
 import os
 import re
+import secrets
 import string
+import threading
 import types
 import unicodedata
 import weakref
@@ -13,6 +21,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import cached_property, partial
 from typing import Any, Literal, TypeVar
+from urllib.parse import urlsplit
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -31,6 +40,10 @@ from pydantic import BaseModel, Field, PrivateAttr, computed_field, model_valida
 
 from ..errors import RunCancelled
 from ..state import _suspension_id_for, get_call_id, get_run_context, suspend
+from ..state.background import current_background_task_id
+from ..state.loops import hand_to as _hand_to
+from ..state.loops import succeeded as _succeeded
+from ..state.loops import wait_on_owner as _wait_on_owner
 from ..types.approval import Cancel
 from ..types.content import FileContent, TextContent
 from ..types.file import File
@@ -388,6 +401,262 @@ class _InflightCall:
     ambiguous_with: int = 0
 
 
+PROVENANCE_SECRET_ENV = "TIMBAL_PROVENANCE_SECRET"
+_PROCESS_SECRET = secrets.token_bytes(32)
+
+
+def _pseudonym(origin: str, value: str) -> str:
+    """What a third-party server sees for one of our ids: stable for that server, unlinkable across servers.
+
+    Keyed by ``TIMBAL_PROVENANCE_SECRET`` (set it for pseudonyms that hold across processes), else by a
+    random per-process key."""
+    secret = os.environ.get(PROVENANCE_SECRET_ENV)
+    # surrogatepass: a command line read with surrogateescape still hashes, and the call never fails here.
+    key = secret.encode("utf-8", "surrogatepass") if secret else _PROCESS_SECRET
+    return hmac.new(key, f"{origin}\n{value}".encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()[:32]
+
+
+def _ambient_trace_context() -> dict[str, str]:
+    """``traceparent`` / ``tracestate`` of the caller's active OpenTelemetry span, when there is one."""
+    try:
+        from opentelemetry import trace
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+    except ImportError:
+        return {}
+    if not trace.get_current_span().get_span_context().is_valid:
+        return {}
+    carrier: dict[str, str] = {}
+    # The W3C format itself, not the global propagator: one configured for B3 writes no traceparent.
+    TraceContextTextMapPropagator().inject(carrier)
+    return {key: carrier[key] for key in ("traceparent", "tracestate") if carrier.get(key)}
+
+
+def _timbal_trace_context(run_id: str, call_id: str | None) -> dict[str, str]:
+    """A ``traceparent`` naming the tool's span in the trace ``OTelExporter`` exports for the run."""
+    if not call_id:
+        return {}
+    from ..state.tracing.exporters.otel import OTelExporter
+
+    try:
+        return {"traceparent": f"00-{OTelExporter._trace_id(run_id)}-{OTelExporter._span_id(call_id)}-01"}
+    except UnicodeError:  # a run id given with a lone surrogate (``context.id``): no trace, never a failed call
+        return {}
+
+
+# W3C Trace Context as the platform keeps it (monolith ``src/mcp/meta.rs``): it drops a ``traceparent`` of another
+# shape, with its ``tracestate``.
+_TRACEPARENT = re.compile(r"00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}")
+_TRACESTATE_MAX = 512
+
+
+def _trace_claims(context: Mapping[str, Any]) -> dict[str, str]:
+    """The ``traceparent`` / ``tracestate`` of ``context`` that are sent: a version-``00`` ``traceparent``, and with it
+    a ``tracestate`` of at most 512 printable ASCII characters (or tabs). Neither may look like a credential: the
+    platform answers a whole call with one anywhere in its ``_meta`` with 400 (``_looks_like_a_credential``)."""
+    traceparent = context.get("traceparent")
+    if not isinstance(traceparent, str) or not _TRACEPARENT.fullmatch(traceparent):
+        return {}
+    claims = {"traceparent": traceparent}
+    tracestate = context.get("tracestate")
+    if (
+        isinstance(tracestate, str)
+        and tracestate.strip()
+        and len(tracestate) <= _TRACESTATE_MAX
+        and all(c == "\t" or " " <= c <= "~" for c in tracestate)
+        and not _looks_like_a_credential(tracestate)
+    ):
+        claims["tracestate"] = tracestate
+    return claims
+
+
+# Taken around every write to a server's run-connection pool and close records (an insert, a remove-if-still-this-
+# one, a run's drop, a close's record): close() on two threads, or a run's end beside a close(), may both find one
+# to remove, and neither may remove a replacement put in meanwhile. One for the module, not one per server: a lock in
+# a server's state would stop an unopened server from being copied or pickled (a field default, model_copy(deep=True)).
+# The writes it guards are a few dict operations.
+_RUN_STATE_LOCK = threading.Lock()
+
+
+def _fresh_run_state_lock() -> None:
+    """A forked child's own lock: one another thread of the parent held at the fork would never be released there."""
+    global _RUN_STATE_LOCK
+    _RUN_STATE_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_fresh_run_state_lock)
+
+# A run's platform connection outlives its last call this long (background children after the run's end).
+_RUN_CONNECTION_IDLE_S = 60.0
+# The run's end waits this long at most for its connections to close (a session's teardown has no bound of its own:
+# a platform that never answers it would hold the run past its ``timeout``); the closes go on past it.
+_RUN_END_CLOSE_S = 10.0
+
+
+class _RunConnection:
+    """One run's ``service="api"`` connection (``MCPServer._project_connection``)."""
+
+    __slots__ = ("close_task", "ended", "fingerprint", "idle", "loop", "server", "users")
+
+    def __init__(self, server: "MCPServer", fingerprint: str, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        self.server = server
+        self.fingerprint = fingerprint
+        # The run's loop, which owns the session: it is closed there (MCPServer.close() may run on another).
+        self.loop = loop
+        self.users = 0
+        # The run ended (or ``MCPServer.close()`` let go of it): its last user closes it.
+        self.ended = False
+        self.close_task: asyncio.Task | None = None
+        self.idle: asyncio.TimerHandle | None = None
+
+    def cancel_idle(self) -> None:
+        if self.idle is not None:
+            self.idle.cancel()
+            self.idle = None
+
+
+def _log_close_failure(task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("MCP run connection close failed", error=str(task.exception()))
+
+
+_PAUSED_LOOP_WARNING = (
+    "MCP platform connection left on an event loop that is not running: call close() on that loop "
+    "(for example runner.run(server.close()) for an asyncio.Runner) to close it"
+)
+_HANDOFF_FAILED_WARNING = (
+    "MCP platform connection not closed on its event loop: the close there was cancelled or failed; "
+    "call close() to close it"
+)
+
+
+@dataclass
+class _Left:
+    """What ``MCPServer.close()`` could not close: on a loop that is not running (``paused``), cut before the
+    session closed (``cut``), session owners still shutting down on a loop that is not running (``owners``)."""
+
+    paused: int = 0
+    cut: int = 0
+    owners: int = 0
+    sessions: int = 0
+    closing: int = 0
+
+    def __add__(self, other: "_Left") -> "_Left":
+        return _Left(
+            self.paused + other.paused,
+            self.cut + other.cut,
+            self.owners + other.owners,
+            self.sessions + other.sessions,
+            self.closing + other.closing,
+        )
+
+    def raise_if_owed(self, label: str, failed: list[BaseException]) -> None:
+        problems = []
+        if self.paused:
+            problems.append(
+                f"{self.paused} platform connection(s), open or closing, belong to an event loop that is not running, "
+                "so they cannot be closed from this one. Call close() on that loop (for example "
+                "runner.run(server.close()) for an asyncio.Runner) to close them."
+            )
+        if self.owners:
+            problems.append(
+                f"{self.owners} session(s) of this server are still shutting down on an event loop that is not "
+                "running. Call close() on that loop to wait for them."
+            )
+        cause = next((getattr(f, "cause", f) for f in failed), None)
+        why = f" ({cause!r})" if cause is not None else ""
+        # A connection handoff that failed is judged by the state close() ends in (its closes settled, or counted
+        # above); a failure closing the server's own session, or any other, no count covers: said as it is.
+        uncounted = [f for f in failed if not isinstance(f, _HandoffFailed) or isinstance(f, _SessionCloseFailed)]
+        if uncounted and not (self.owners or self.sessions or self.closing):
+            cause = getattr(uncounted[0], "cause", uncounted[0])
+            problems.append(
+                f"Closing the server's session on the event loop that owns it failed ({cause!r}). Call close() again."
+            )
+        if self.cut:
+            problems.append(
+                f"{self.cut} platform connection(s) are still open: their close was cancelled or failed{why}. "
+                "Call close() again."
+            )
+        if self.closing:
+            problems.append(
+                f"{self.closing} platform connection(s) are still closing: the wait for them was cancelled{why}. "
+                "Call close() again."
+            )
+        if self.sessions:
+            problems.append(
+                f"{self.sessions} session(s) of this server are still open or shutting down: their close was "
+                f"cancelled or failed{why}. Call close() again."
+            )
+        if problems:
+            raise RuntimeError(f"MCP server {label!r}: " + " ".join(problems)) from next(
+                (getattr(f, "cause", f) for f in failed), None
+            )
+
+
+def _reachable(owner: asyncio.AbstractEventLoop | None, loop: asyncio.AbstractEventLoop) -> bool:
+    """Whether ``close()`` on ``loop`` can close what ``owner`` holds: its own loop, or another that runs."""
+    owner = owner or loop
+    return owner is loop or (not owner.is_closed() and owner.is_running())
+
+
+# How many times close() comes back to wait for closes still running before it counts what is owed.
+_SETTLE_ROUNDS = 3
+
+
+async def _wait_for_task(task: asyncio.Task) -> None:
+    await asyncio.wait({task})
+
+
+class _HandoffFailed(Exception):
+    """Work ``close()`` handed to another loop ended there without doing its part (cancelled, or it raised)."""
+
+    def __init__(self, count: int, cause: BaseException) -> None:
+        super().__init__(f"{count} connection(s): {cause!r}")
+        self.count = count
+        self.cause = cause
+
+
+class _SessionCloseFailed(_HandoffFailed):
+    """The server's own session's close, handed to the loop that owns it, ended there cancelled or failed."""
+
+
+async def _wait_all_closed(tasks: set[asyncio.Task], label: str, timeout: float | None = None) -> None:
+    """``_wait_closed`` for several closes at once, for at most ``timeout`` seconds: the closes go on after it."""
+    waiting = asyncio.gather(*tasks, return_exceptions=True)
+    # wait(), not wait_for(): neither its timeout nor a cut of this wait cancels the closes.
+    done, _ = await asyncio.wait({waiting}, timeout=timeout)
+    if not done:
+        logger.warning("MCP run connection close still running at the run's end", server=label, seconds=timeout)
+
+
+async def _wait_closed(task: asyncio.Task) -> None:
+    """Wait for a connection's close; a cut ends the wait, not the close, and a failed close (logged by
+    ``_log_close_failure``) does not fail the run or the call that waited."""
+    with contextlib.suppress(Exception):
+        await asyncio.shield(task)
+
+
+def _run_connection_key(run_context: Any) -> str | None:
+    """The run a platform connection is kept for, while one goes on in ``run_context`` and the caller is on its
+    loop: its root call id, unique to the run (a caller may give two concurrent runs one ``context.id``).
+
+    None (a call opens and closes its own connection, as outside a run) for no context, a context no run started
+    (the platform resolver creates one when there is none), a run that has ended (unless the caller is one of its
+    background children), and a call on another event loop than the run's: a handler offloaded to a thread that
+    runs ``asyncio.run`` carries the run's context, and a session the run's loop owns cannot serve it."""
+    if run_context is None:
+        return None
+    root = run_context.root_span()
+    if root is None:
+        return None
+    if root.t1 is not None and current_background_task_id() is None:
+        return None
+    if run_context._loop is not asyncio.get_running_loop():
+        return None
+    return root.call_id
+
+
 class MCPTool(Tool):
     """A Tool whose parameter schema comes from an MCP server instead of handler introspection.
 
@@ -624,10 +893,11 @@ class MCPServer(ToolSet):
     """Resolve the project's API MCP endpoint with the current run's identity.
 
     ``MCPServer(transport="http", service="api")`` uses the same service routing
-    as platform requests: local API port or deployed origin + /api/mcp. Each
-    discovery/call owns a short-lived connection; credentials and tool lists
-    are never cached across callers. ``url`` and custom headers are not used
-    in this mode. External MCP servers continue to use an explicit ``url``.
+    as platform requests: local API port or deployed origin + /api/mcp. Each run
+    gets its own connection, opened on its first call, reused by its other calls
+    (and ``tools/list``), closed when the run ends; credentials and connections
+    are never shared across runs. ``url`` and custom headers are not used in this
+    mode. External MCP servers continue to use an explicit ``url``.
     """
 
     url: str | None = None
@@ -694,7 +964,15 @@ class MCPServer(ToolSet):
     Also ``timbal.ai/parent_run_id`` and ``timbal.ai/session_id`` when known; for the platform's
     server only, ``timbal.ai/app_id`` (a JSON integer), ``timbal.ai/rev`` (``platform_config.subject``)
     and ``timbal.ai/path`` (the tool span's). A value the platform would refuse is left out, never
-    sent, so a call never fails because of its provenance (see ``_claim_id``)."""
+    sent, so a call never fails because of its provenance (see ``_claim_id``).
+
+    Also W3C ``traceparent`` / ``tracestate``: the caller's active OpenTelemetry span when there is
+    one; for the platform, otherwise the tool's span as ``OTelExporter`` exports it (see
+    ``_trace_claims``). A third-party server that opts in (``True``) gets per-origin pseudonyms (HMAC,
+    keyed by ``TIMBAL_PROVENANCE_SECRET`` or a per-process key) instead of our ids, and only an
+    ambient trace context. It can correlate its own calls; our ids do not link them across servers
+    (an ambient ``traceparent`` does, as any OpenTelemetry-instrumented request's headers would).
+    Never any credential."""
 
     interruption_mode: InterruptionMode = "allow"
     """Barge-in policy copied onto every tool this server exposes.
@@ -714,6 +992,14 @@ class MCPServer(ToolSet):
     # The per-run connection a ``service="api"`` server opens to the platform: it sends the platform's claims.
     _first_party: bool = PrivateAttr(default=False)
     _session_task: asyncio.Task | None = PrivateAttr(default=None)
+    # The session's owner task, from the start of its handshake until the session is forgotten (a failed handshake,
+    # close(), a reset, its owner ending): the one reference close() reads for it, closing it on its loop or saying
+    # so when that loop is not running. Not one field for the handshake and another once published: a close() on
+    # another thread could read the first before the publish and the second after the other was cleared.
+    _owner_task: asyncio.Task | None = PrivateAttr(default=None)
+    # Owner tasks a close() signalled to shut down and has not seen end (it was cut while waiting): the next close()
+    # waits for them, its session refs being gone by then.
+    _owners_closing: set[asyncio.Task] = PrivateAttr(default_factory=set)
     _session_closed: asyncio.Event | None = PrivateAttr(default=None)
     _get_session_id: Callable[[], str | None] | None = PrivateAttr(default=None)
     _tools_cache: list[Runnable] | None = PrivateAttr(default=None)
@@ -723,6 +1009,23 @@ class MCPServer(ToolSet):
     _tools_lock: asyncio.Lock | None = PrivateAttr(default=None)
     _inflight: dict[int, _InflightCall] = PrivateAttr(default_factory=dict)
     _inflight_seq: int = PrivateAttr(default=0)
+    # service="api": a run's root call id -> that run's platform connection (see _project_connection).
+    _run_connections: dict[str, "_RunConnection"] = PrivateAttr(default_factory=dict)
+    # Closes of run connections still going (``close()`` waits for them), and those of each run's (its end waits).
+    _close_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
+    _run_closes: dict[str, set[asyncio.Task]] = PrivateAttr(default_factory=dict)
+    # Run connections whose close was cut before the session had closed: out of the pool (no call reuses them),
+    # closed again by the next close() or the end of their run.
+    # By id(entry): taken with an atomic pop, so the run's end and a close() on another loop never both take one,
+    # nor fail on one the other took.
+    _unclosed: dict[int, tuple[str, "_RunConnection"]] = PrivateAttr(default_factory=dict)
+    # close()'s handoffs to other loops still going, by id: a close() running beside it waits for them too.
+    _handoffs: dict[int, tuple["concurrent.futures.Future[Any]", asyncio.AbstractEventLoop]] = PrivateAttr(
+        default_factory=dict
+    )
+    # Runs whose end hook is registered, with the run's loop: one hook per run, which finds the run's connection
+    # when the run ends (a connection let go of earlier is not kept alive by it), on that loop.
+    _run_hooked: dict[str, asyncio.AbstractEventLoop] = PrivateAttr(default_factory=dict)
 
     def _provider_identity(self) -> tuple:
         # Its name, where it is reached and who it is reached as (headers, env, auth: two tenants of one endpoint are
@@ -775,15 +1078,7 @@ class MCPServer(ToolSet):
                 raise ValueError("'url' is required for http transport unless service='api'")
         return self
 
-    @asynccontextmanager
-    async def _project_connection(self):
-        # Resolve BEFORE opening the transport's fresh-context owner task. It
-        # must inherit the caller's identity, never a process service secret.
-        # Never pool these across runs: the platform takes each call's principal and party from this
-        # connection's credential (monolith#565), so a shared connection would act as the wrong caller.
-        from ..platform.utils import _resolve_url_and_headers
-
-        url, headers = _resolve_url_and_headers("api", "mcp", {})
+    def _new_project_server(self, url: str, headers: dict[str, str]) -> "MCPServer":
         server = MCPServer(
             name=self.name,
             transport="http",
@@ -797,10 +1092,278 @@ class MCPServer(ToolSet):
             provenance=self._sends_provenance(),
         )
         server._first_party = True
+        return server
+
+    @asynccontextmanager
+    async def _project_connection(self):
+        """The platform connection of the calling run: opened on its first call, reused by the rest, closed when
+        the run ends, or ``_RUN_CONNECTION_IDLE_S`` after a call when no other follows (between two calls of a run,
+        or for background children that outlive it). Never shared across runs: the platform takes each call's
+        principal and party from this connection's credential (monolith#565), so another run on it would act as
+        the wrong caller. A run whose credential changes (a refreshed token) gets a new connection. A call outside
+        a run that goes on, or on another loop than the run's (``_run_connection_key``), opens and closes its own."""
+        # Read before resolving: the resolver creates and sets a run context when there is none.
+        run_context = get_run_context()
+        key = _run_connection_key(run_context)
+        # Resolve BEFORE opening the transport's fresh-context owner task. It
+        # must inherit the caller's identity, never a process service secret.
+        from ..platform.utils import _resolve_url_and_headers
+
+        url, headers = _resolve_url_and_headers("api", "mcp", {})
+        if key is None:
+            server = self._new_project_server(url, headers)
+            try:
+                yield server
+            finally:
+                await server.close()
+            return
+        fingerprint = hashlib.sha256(json.dumps([url, sorted(headers.items())]).encode()).hexdigest()
+        entry = self._run_connections.get(key)
+        if entry is not None and entry.fingerprint != fingerprint:
+            self._retire_run_connection(key)
+            entry = None
+        if entry is None:
+            entry = _RunConnection(self._new_project_server(url, headers), fingerprint, asyncio.get_running_loop())
+            with _RUN_STATE_LOCK:
+                self._run_connections[key] = entry
+            # Refused once the run's root has ended (a background child's call): the idle close closes it then.
+            if key not in self._run_hooked and run_context.on_end(functools.partial(self._run_ended, key)):
+                self._run_hooked[key] = entry.loop
+        entry.users += 1
+        entry.cancel_idle()
         try:
-            yield server
+            yield entry.server
         finally:
-            await server.close()
+            entry.users -= 1
+            if entry.users == 0:
+                if entry.ended or self._run_connections.get(key) is not entry:
+                    # Its run ended, or it was replaced or let go of: closed now, as a call outside a run closes.
+                    task = self._retire_run_connection(key, entry)
+                    if task is not None:
+                        await _wait_closed(task)
+                else:
+                    entry.idle = asyncio.get_running_loop().call_later(
+                        _RUN_CONNECTION_IDLE_S, self._retire_run_connection, key, entry
+                    )
+
+    def _hand_close(
+        self,
+        entries: list[tuple[str, "_RunConnection"]],
+        owner: asyncio.AbstractEventLoop,
+        ledger: set[asyncio.Task] | None = None,
+    ) -> "concurrent.futures.Future[Any] | None":
+        """``close()``'s part on another, running loop, handed to it and registered (``_handoffs``) at once, so a
+        close() running beside this one waits for it too."""
+        handed = _hand_to(owner, self._close_run_connections(entries, ledger))
+        if handed is not None:
+            self._handoffs[id(handed)] = (handed, owner)
+        return handed
+
+    async def _finish_handoff(
+        self,
+        handed: "concurrent.futures.Future[Any] | None",
+        owner: asyncio.AbstractEventLoop,
+        entries: list[tuple[str, "_RunConnection"]],
+    ) -> "_Left":
+        """Wait for a ``_hand_close`` handoff while its loop runs. What is left: those cut there, or all of them
+        when the loop stops before finishing (they are closed once it runs again)."""
+        try:
+            finished = handed is not None and await _wait_on_owner(handed, owner)
+        finally:
+            if handed is not None:
+                self._handoffs.pop(id(handed), None)
+        if finished and _succeeded(handed):
+            return handed.result()
+        if owner.is_closed():  # closed meanwhile, before or after the handoff: its sessions went with it
+            for key, entry in entries:
+                self._unpool(key, entry)
+            for ident, (_, entry) in list(self._unclosed.items()):  # its cut ones too, credential headers included
+                if entry.loop is owner:
+                    self._unclosed.pop(ident, None)
+            for task in [task for task in list(self._close_tasks) if task.get_loop() is owner]:
+                self._forget_close(task)
+            return _Left()
+        self._keep_unclosed(entries)  # what was not closed there waits for a later close()
+        if finished:  # cancelled or failed there (the loop cancelled its tasks): the sessions are still open
+            raise _HandoffFailed(
+                max(len(entries), 1), asyncio.CancelledError() if handed.cancelled() else handed.exception()
+            )
+        return _Left(paused=max(len(entries), 1))
+
+    async def _wait_handoff(
+        self, handed: "concurrent.futures.Future[Any]", owner: asyncio.AbstractEventLoop
+    ) -> "_Left":
+        """Another close()'s handoff still going: waited for too, and how it ended is this close()'s as well."""
+        if await _wait_on_owner(handed, owner):
+            if _succeeded(handed):
+                return handed.result()
+            raise _HandoffFailed(1, asyncio.CancelledError() if handed.cancelled() else handed.exception())
+        return _Left() if owner.is_closed() else _Left(paused=1)
+
+    async def _close_run_connections(
+        self, entries: list[tuple[str, "_RunConnection"]], ledger: set[asyncio.Task] | None = None
+    ) -> "_Left":
+        """On the loop that owns ``entries``: let go of them (``_retire_run_connection``) and wait for every close
+        of this loop still going, theirs and earlier ones. The closes it starts go in ``ledger`` (close()'s)."""
+        self._retire_all(entries, ledger)
+        return await self._wait_loop_closes()
+
+    async def _wait_loop_closes(self) -> "_Left":
+        """Wait for every close of this loop still going; how many were cut before their session closed (each kept
+        for a later close(), ``_close_done``). Shielded: a cut of this wait (the owner cancelling the handed work)
+        must not cut the closes, which would leave sessions open with nothing left to close them."""
+        loop = asyncio.get_running_loop()
+        # A copy first: another loop's thread adds and drops closes (iterating the set itself can raise).
+        closing = [task for task in list(self._close_tasks) if task.get_loop() is loop]
+        if not closing:
+            return _Left()
+        results = await asyncio.shield(asyncio.gather(*closing, return_exceptions=True))
+        return _Left(cut=sum(1 for result in results if isinstance(result, BaseException)))
+
+    def _run_ended(self, key: str) -> Awaitable[None] | None:
+        """The run's end hook (one per run): its connection is let go of, and the run waits for every close of its
+        connections still going, earlier ones included, so they are closed before the run returns (a loop that
+        ends with the run, as under ``asyncio.run``, would cancel a close left to the background). One still in
+        use is closed by its last user.
+
+        On the run's loop, which owns the sessions: a stream closed from another loop ends the run there, and
+        the work is handed to the run's loop. A run's loop that has closed took its sessions with it; one that is
+        not running (an ``asyncio.Runner`` between two ``run()`` calls) keeps the connection for a ``close()``
+        on it, said in a warning."""
+        owner = self._run_hooked.pop(key, None)
+        loop = asyncio.get_running_loop()
+        if owner is None or owner is loop:
+            return self._end_run_here(key)
+        if owner.is_closed():
+            self._drop_run(key)
+            return None
+        if not owner.is_running():
+            entry = self._run_connections.get(key)
+            if entry is not None:
+                entry.ended = True
+            logger.warning(_PAUSED_LOOP_WARNING, server=self._label)
+            return None
+        return self._end_run_elsewhere(key, owner)
+
+    async def _end_run_elsewhere(self, key: str, owner: asyncio.AbstractEventLoop) -> None:
+        handed = _hand_to(owner, self._end_run_on_owner(key))
+        # Bounded here, on the calling loop: a busy owner loop (a callback that does not yield) has not started the
+        # work, nor the bound the work keeps there. Past it the work stays queued for the owner, which still does it.
+        finished = handed is not None and await _wait_on_owner(handed, owner, _RUN_END_CLOSE_S)
+        if finished and _succeeded(handed):
+            return
+        if owner.is_closed():  # closed meanwhile, before or after the handoff: it took the run's sessions with it
+            self._drop_run(key)
+            return
+        entry = self._run_connections.get(key)
+        if entry is not None:
+            entry.ended = True  # for a close() later
+        if finished:  # cancelled or failed there: the close never happened
+            cause = "cancelled" if handed.cancelled() else repr(handed.exception())
+            logger.warning(_HANDOFF_FAILED_WARNING, server=self._label, error=cause)
+        elif owner.is_running():  # the time is up, the owner busy: the close is queued there
+            logger.warning(
+                "MCP run connection close still running at the run's end", server=self._label, seconds=_RUN_END_CLOSE_S
+            )
+        else:
+            logger.warning(_PAUSED_LOOP_WARNING, server=self._label)
+
+    async def _end_run_on_owner(self, key: str) -> None:
+        waiting = self._end_run_here(key)
+        if waiting is not None:
+            await waiting
+
+    def _end_run_here(self, key: str) -> Awaitable[None] | None:
+        entry = self._run_connections.get(key)
+        if entry is not None:
+            entry.ended = True
+            self._retire_run_connection(key, entry)
+        for ident, (kept_key, _) in list(self._unclosed.items()):
+            if kept_key == key and (pair := self._unclosed.pop(ident, None)) is not None:
+                self._retire_run_connection(*pair)
+        with _RUN_STATE_LOCK:
+            closes = self._run_closes.pop(key, None)
+        return _wait_all_closed(closes, self._label, _RUN_END_CLOSE_S) if closes else None
+
+    def _retire_run_connection(self, key: str, entry: "_RunConnection | None" = None) -> asyncio.Task | None:
+        """Forget a run's connection and, if nothing uses it, start closing it (``close()`` waits for the close;
+        a caller that can wait gets the task). One still in use is closed by its last user."""
+        if entry is None:
+            entry = self._run_connections.get(key)
+        if entry is None:
+            return None
+        self._unpool(key, entry)
+        entry.cancel_idle()
+        if entry.users:
+            entry.ended = True
+            return None
+        if entry.close_task is None:
+            entry.close_task = task = asyncio.get_running_loop().create_task(entry.server.close())
+            self._close_tasks.add(task)
+            with _RUN_STATE_LOCK:
+                self._run_closes.setdefault(key, set()).add(task)
+            task.add_done_callback(functools.partial(self._close_done, key, entry))
+            task.add_done_callback(_log_close_failure)
+        return entry.close_task
+
+    def _unpool(self, key: str, entry: "_RunConnection") -> bool:
+        """Take ``entry`` out of the pool if it is still the one under ``key``. Atomic: close() on another thread
+        doing the same cannot pass the check too and then fail on the delete, and a replacement put in meanwhile
+        (a pool insert takes the same lock) is never the one removed."""
+        with _RUN_STATE_LOCK:
+            if self._run_connections.get(key) is not entry:
+                return False
+            del self._run_connections[key]
+            return True
+
+    def _drop_run(self, key: str) -> None:
+        """Forget everything of the run ``key`` (its loop closed, taking its sessions): its connection, its closes,
+        and its cut connections, which hold their credential headers."""
+        with _RUN_STATE_LOCK:  # as every write to the pool: an _unpool on another thread checks, then deletes
+            self._run_connections.pop(key, None)
+            self._run_closes.pop(key, None)
+        for ident, (kept_key, _) in list(self._unclosed.items()):
+            if kept_key == key:
+                self._unclosed.pop(ident, None)
+
+    def _keep_unclosed(self, entries: list[tuple[str, "_RunConnection"]]) -> None:
+        """Keep, for a later close(), the cut ones among ``entries``: not pooled (the pool keeps its own), not closing,
+        and not closed (a close that succeeded there before the handoff ended)."""
+        for key, entry in entries:
+            if self._run_connections.get(key) is entry or (
+                entry.close_task is not None and (not entry.close_task.done() or _succeeded(entry.close_task))
+            ):
+                continue
+            self._unclosed.setdefault(id(entry), (key, entry))
+
+    def _forget_close(self, task: asyncio.Task) -> None:
+        """Drop a close (its loop closed) from both collections, ``_close_done``'s callback never having run."""
+        self._close_tasks.discard(task)
+        for key in [key for key, closes in list(self._run_closes.items()) if task in closes]:
+            self._discard_close(key, task)
+
+    def _discard_close(self, key: str, task: asyncio.Task) -> None:
+        """Take ``task`` off the run ``key``'s close records, and the record once empty. Under the lock: close() on
+        another thread may be doing the same, and find the record gone (it took it), and a run's loop may be adding
+        a close to it."""
+        with _RUN_STATE_LOCK:
+            closes = self._run_closes.get(key)
+            if closes is None:
+                return
+            closes.discard(task)
+            if not closes:
+                del self._run_closes[key]
+
+    def _close_done(self, key: str, entry: "_RunConnection", task: asyncio.Task) -> None:
+        self._close_tasks.discard(task)
+        self._discard_close(key, task)
+        if (task.cancelled() or task.exception() is not None) and not task.get_loop().is_closed():
+            # Cut, or failed (the server's close() raised: what it could not close is still open), before the session
+            # had closed: it may still be open. Kept out of the pool (a later call of the run must not reuse it and
+            # open a second session on its server) for the next close() or end of the run.
+            entry.close_task = None
+            entry.ended = True
+            self._unclosed[id(entry)] = (key, entry)
 
     # ------------------------------------------------------------------ session
 
@@ -919,12 +1482,18 @@ class MCPServer(ToolSet):
                 return
             raise
 
-    def _forget_session(self) -> None:
-        """Drop references to the current session without closing anything (the owner is already done)."""
+    def _forget_session(self, owner: asyncio.Task | None = None) -> None:
+        """Drop references to the current session without closing anything (the owner is already done, or its
+        shutdown is the caller's, which recorded it in ``_owners_closing`` first). ``owner``: the owner task let go
+        of, when it is not the published session's (a handshake on a loop that closed). The owner reference goes
+        only if it is that one: a handshake started since keeps its own."""
+        owner = owner or self._session_task
         self._session = None
         self._session_task = None
         self._session_closed = None
         self._get_session_id = None
+        if owner is not None and self._owner_task is owner:
+            self._owner_task = None
 
     def _on_session_task_done(self, task: asyncio.Task) -> None:
         """Forget a session whose owner task ended on its own (transport died).
@@ -964,6 +1533,8 @@ class MCPServer(ToolSet):
             if task is None or self._session_task is not task:
                 return  # somebody else already replaced or dropped it
             closed = self._session_closed
+            self._owners_closing.add(task)  # before the refs go, as in close()
+            task.add_done_callback(self._owners_closing.discard)
             self._forget_session()
             if closed is not None:
                 await self._shutdown_owner(task, closed)
@@ -981,6 +1552,7 @@ class MCPServer(ToolSet):
             name=f"mcp-session:{self.name or self.transport}",
             context=contextvars.Context(),
         )
+        self._owner_task = task
         try:
             if self.connect_timeout is not None:
                 done, _ = await asyncio.wait({ready}, timeout=self.connect_timeout)
@@ -995,8 +1567,16 @@ class MCPServer(ToolSet):
             session = await ready
         except BaseException:
             closed.set()
-            await asyncio.wait({task})
+            try:
+                await asyncio.wait({task})
+            finally:  # also when this wait is cut too (a connect cancelled twice)
+                if not task.done():  # signalled and still shutting down: the next close() waits for it
+                    self._owners_closing.add(task)
+                    task.add_done_callback(self._owners_closing.discard)
+                if self._owner_task is task:
+                    self._owner_task = None
             raise
+        # The owner reference stays as it was: the same task from the handshake on.
         self._session = session
         self._session_task = task
         self._session_closed = closed
@@ -1357,15 +1937,45 @@ class MCPServer(ToolSet):
         if run_context is None:
             return None
         call_id = get_call_id()
-        claims = {
-            PROVENANCE_RUN_KEY: _claim_id(run_context.id),
-            PROVENANCE_CALL_KEY: _claim_id(call_id),
-            PROVENANCE_PARENT_KEY: _claim_id(run_context.parent_id),
-            PROVENANCE_SESSION_KEY: _claim_id(getattr(run_context, "_session_id", None)),
+        ids = {
+            PROVENANCE_RUN_KEY: run_context.id,
+            PROVENANCE_CALL_KEY: call_id,
+            PROVENANCE_PARENT_KEY: run_context.parent_id,
+            PROVENANCE_SESSION_KEY: getattr(run_context, "_session_id", None),
         }
         if self._first_party or self.service == "api":
+            claims = {key: _claim_id(value) for key, value in ids.items()}
             claims.update(_platform_claims(run_context, call_id))
+            # The caller's span when it is one the platform keeps, else the tool's own.
+            claims.update(
+                _trace_claims(_ambient_trace_context()) or _trace_claims(_timbal_trace_context(run_context.id, call_id))
+            )
+        else:
+            # A third party that opted in: ids it can correlate among its own calls, but not across servers.
+            origin = self._origin()
+            # Only ids the claims would carry (``_claim_id``), as for the platform: the same keys either way.
+            claims = {key: _pseudonym(origin, value) for key, value in ids.items() if _claim_id(value) is not None}
+            claims.update(_trace_claims(_ambient_trace_context()))
         return {key: value for key, value in claims.items() if value is not None} or None
+
+    def _origin(self) -> str:
+        """What a pseudonym is keyed to: ``scheme://host:port`` (default port filled in, credentials in the URL
+        left out, so one server gets one set of pseudonyms however its URL is written), or for stdio the command,
+        its arguments and its environment, encoded exactly."""
+        if self.transport == "http" and self.url:
+            parts = urlsplit(self.url)
+            scheme = parts.scheme.lower()
+            try:
+                port = parts.port
+            except ValueError:
+                port = None
+            port = port or {"http": 80, "https": 443}.get(scheme)
+            host = parts.hostname or ""
+            host = f"[{host}]" if ":" in host else host
+            return f"{scheme}://{host}:{port}" if port else f"{scheme}://{host}"
+        # Exact (an argument with a space is not two), and with the environment: one command reaching two
+        # upstreams through env is two servers. Never sent: only ever hashed with the key (_pseudonym).
+        return "stdio:" + json.dumps([self.command or "", list(self.args), sorted((self.env or {}).items())])
 
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
         # Bare name for the wire call; qualified name for the agent registry.
@@ -1512,16 +2122,230 @@ class MCPServer(ToolSet):
             return tools
 
     async def close(self) -> None:
-        """Close the MCP server connection. Safe from any task, in any order."""
+        """Close the MCP server connection. Safe from any task, in any order.
+
+        Run connections: closed now when idle; one a call still uses is closed by that call's end, as a call's own
+        connection was (a call in flight is not cut). Each on the loop that owns its session: this loop's are let go
+        of before any wait, so a close() running beside this one waits for their closes too; another running loop's
+        are handed to it, and stay visible to such a close() until done (``_handoffs``). Then every close still
+        going, earlier ones included, and the owner tasks an earlier close() signalled and was cut waiting for.
+
+        Raises RuntimeError once it has done what it can, when something is still open: on a loop that is not
+        running (an ``asyncio.Runner`` between two ``run()`` calls: call close() on that loop), or because a close
+        was cancelled or failed (call close() again). One whose loop has closed went with it."""
+        loop = asyncio.get_running_loop()
+        # The server's session's owner task, at whichever stage it is (handshake or published): one read.
+        session = self._owner_task
+        failed: list[BaseException] = []
+        # The closes this close() waits for: those going when it began, and those it starts (here or handed over).
+        # One still going after its waits is owed; one a call starts later is that call's.
+        ledger = {task for task in list(self._close_tasks) if not task.done()}
+        by_loop = self._take_run_connections(loop, _Left())
+        # The entries themselves, not only their ids: one freed meanwhile could leave its id to a new connection.
+        taken = {id(entry): entry for entries in by_loop.values() for _, entry in entries}
+        # Before any wait, so a close() running beside this one sees all of it: this loop's connections let go
+        # of, the other loops' handed over and registered (_handoffs).
+        self._retire_all(by_loop.pop(loop, []), ledger)
+        earlier = list(self._handoffs.values())
+        mine = [(self._hand_close(entries, owner, ledger), owner, entries) for owner, entries in by_loop.items()]
+        waits = [self._wait_loop_closes()]
+        waits += [self._finish_handoff(handed, owner, entries) for handed, owner, entries in mine]
+        waits += [self._wait_handoff(handed, owner) for handed, owner in earlier]
+        waits.append(self._close_own_session(loop))
+        # Shielded: a close() that is cancelled stops waiting, the closes go on (gather would cancel them).
+        for result in await asyncio.shield(asyncio.gather(*waits, return_exceptions=True)):
+            if isinstance(result, BaseException):
+                failed.append(result)  # its cause is said; what it left is counted below, once
+        # Closes a cut handoff started there (it let go of the connections, then was cancelled) go on: waited for
+        # here too, as the ones this close() started, so it never returns while they are open.
+        await self._settle_closes(loop)
+        await self._wait_owners_closing(loop)
+        self._owed(loop, taken, session, ledger).raise_if_owed(self._label, failed)
+
+    async def _settle_closes(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Wait for every close still going on a loop this close() can reach: this one's directly, another running
+        loop's handed to it (and waited for while it runs). Shielded where they are waited for."""
+        for _ in range(_SETTLE_ROUNDS):  # again while closes are running: one may have started during a wait
+            live = {task.get_loop() for task in list(self._close_tasks) if not task.done()}
+            live = {owner for owner in live if _reachable(owner, loop)}
+            if not live:
+                return
+            for owner in live:
+                if owner is loop:
+                    await self._wait_loop_closes()
+                    continue
+                handed = _hand_to(owner, self._wait_loop_closes())
+                if handed is not None:
+                    await _wait_on_owner(handed, owner)
+
+    def _owed(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        taken: "dict[int, _RunConnection]",
+        session: asyncio.Task | None,
+        ledger: set[asyncio.Task],
+    ) -> "_Left":
+        """What is still owed once close() has done what it could, from the state it ends in: each connection,
+        close or session once, whichever step left it. ``taken``: the connections this close() set out to close;
+        ``session``: the server's own session when it began (not one a call opened since)."""
+        left = _Left()
+
+        def paused(owner: asyncio.AbstractEventLoop | None) -> bool:
+            owner = owner or loop
+            return not owner.is_closed() and owner is not loop and not owner.is_running()
+
+        for entry in list(self._run_connections.values()):
+            if paused(entry.loop):
+                left.paused += 1
+            elif taken.get(id(entry)) is entry and not (entry.loop or loop).is_closed():
+                left.cut += 1  # set out to close it, and it is still there (its handoff ended without doing it)
+        for _, entry in list(self._unclosed.values()):
+            if paused(entry.loop):
+                left.paused += 1
+            elif not (entry.loop or loop).is_closed():
+                left.cut += 1
+        for task in set(self._close_tasks) | ledger:
+            if task.done() or task.get_loop().is_closed():
+                continue
+            if paused(task.get_loop()):
+                left.paused += 1
+            elif task in ledger:
+                left.closing += 1  # one this close() waited for, still going: its waits were cut
+        # Any other close still running on a reachable loop is not owed: one a call started since (a connection in
+        # use is left to its call) or another close()'s.
+        # The session close() began with, while it is still the server's (its close, or handshake, did not happen),
+        # and the owners a close() signalled that are still shutting down (the wait for them was cut). The owner
+        # reference is read first: a close moves the owner to _owners_closing before it lets go of the reference,
+        # so one of the two reads finds it; each counted once. A handshake started since is a new connection (a call
+        # reconnecting after this close() let go of the old one), not this close()'s to report.
+        still = {session} if session is not None and session is self._owner_task else set()
+        still.update(list(self._owners_closing))
+        for owner in still:
+            if owner.done() or owner.get_loop().is_closed():
+                continue
+            if paused(owner.get_loop()):
+                left.owners += 1  # its close (or handshake) waits for that loop: close() has to happen there
+            else:
+                left.sessions += 1
+        return left
+
+    async def _close_own_session(self, loop: asyncio.AbstractEventLoop) -> "_Left":
+        """The server's own session (a standalone server's), closed on the loop that owns it: its locks and owner
+        task belong there (a retry from another loop hit them). Handed over while that loop runs; counted when it
+        does not. One whose loop has closed went with it: only the references are dropped."""
+        task = self._owner_task  # (a handshake under way, or the published session: one read)
+        if task is None:
+            # Its refs gone (an earlier close() forgot them and is still shutting it down, holding the locks): the
+            # loop of the owner it signalled.
+            closing = [owner for owner in list(self._owners_closing) if not owner.done()]
+            task = closing[0] if closing else None
+        # Nothing open nor opening: closed where close() runs, which clears the caches, as before this was per loop.
+        owner = task.get_loop() if task is not None else loop
+        if owner is loop:
+            await self._close_session_here()
+            return _Left()
+        if owner.is_closed():  # its calls in flight died with it: the caches go too, as in _close_session_here
+            self._forget_session(task)
+            self._drop_caches()
+            return _Left()
+        handed = _hand_to(owner, self._close_session_here()) if owner.is_running() else None
+        if handed is not None and await _wait_on_owner(handed, owner):
+            if _succeeded(handed):
+                return _Left()
+            raise _SessionCloseFailed(1, asyncio.CancelledError() if handed.cancelled() else handed.exception())
+        if owner.is_closed():
+            self._forget_session(task)
+            self._drop_caches()
+        return _Left()  # what is left is counted by _owed, once
+
+    async def _close_session_here(self) -> None:
         async with self._get_tools_lock(), self._get_lock():
             task, closed = self._session_task, self._session_closed
+            if task is not None:
+                # Recorded before the refs go: a close() on another thread sees the session or its owner, never
+                # neither (it would take the locks on its own loop).
+                self._owners_closing.add(task)
+                task.add_done_callback(self._owners_closing.discard)
             self._forget_session()
             if task is not None and closed is not None:
                 await self._shutdown_owner(task, closed)
-            self._tools_cache = None
-            self._tools_cache_run_id = None
-            self._tools_stale = False
-            self._inflight.clear()
+            self._drop_caches()
+
+    def _drop_caches(self) -> None:
+        """What every close() clears with the session: the tool list and the calls in flight on it."""
+        self._tools_cache = None
+        self._tools_cache_run_id = None
+        self._tools_stale = False
+        self._inflight.clear()
+
+    def _take_run_connections(
+        self, loop: asyncio.AbstractEventLoop, left: "_Left"
+    ) -> dict[asyncio.AbstractEventLoop, list[tuple[str, "_RunConnection"]]]:
+        """Every run connection, pooled or cut, by the loop that owns it; ``left`` counts those that cannot be
+        closed from here (their loop is not running), which stay. Those of a closed loop went with it."""
+        by_loop: dict[asyncio.AbstractEventLoop, list[tuple[str, _RunConnection]]] = {}
+        for key, entry in list(self._run_connections.items()):
+            owner = entry.loop or loop
+            if owner.is_closed():
+                self._unpool(key, entry)  # (another close() on another thread may be taking it too)
+                continue
+            if owner is not loop and not owner.is_running():
+                left.paused += 1
+                continue
+            by_loop.setdefault(owner, []).append((key, entry))
+        # Cut ones: this loop's taken now (let go of at once by close()); another loop's left in _unclosed until
+        # that loop takes them (_retire_all there), so its run's end hook can still find and wait for them.
+        for ident, (key, entry) in list(self._unclosed.items()):
+            owner = entry.loop or loop
+            if owner.is_closed():
+                self._unclosed.pop(ident, None)
+            elif owner is loop:
+                if self._unclosed.pop(ident, None) is not None:
+                    by_loop.setdefault(loop, []).append((key, entry))
+            elif owner.is_running():
+                by_loop.setdefault(owner, []).append((key, entry))
+            else:
+                left.paused += 1
+        for task in list(self._close_tasks):
+            owner = task.get_loop()
+            if owner.is_closed():
+                self._forget_close(task)
+            elif owner is loop or owner.is_running():
+                by_loop.setdefault(owner, [])
+            elif not task.done():
+                left.paused += 1  # a close already started there (an idle close, a credential change)
+        return by_loop
+
+    def _retire_all(self, entries: list[tuple[str, "_RunConnection"]], ledger: set[asyncio.Task] | None = None) -> None:
+        for key, entry in entries:
+            if self._run_connections.get(key) is not entry and entry.close_task is None:
+                # A cut one left in _unclosed for this loop: taken here, unless another taker (the run's end) did.
+                if id(entry) in self._unclosed and self._unclosed.pop(id(entry), None) is None:
+                    continue
+            task = self._retire_run_connection(key, entry)
+            if task is not None and ledger is not None:
+                ledger.add(task)
+
+    async def _wait_owners_closing(self, loop: asyncio.AbstractEventLoop) -> "_Left":
+        """Wait for the session owner tasks an earlier close() signalled and was cut waiting for (their refs are
+        gone): on their own loop while it runs. Those on a loop that is not running are left, and counted."""
+        left, here = _Left(), []
+        for owner in [owner for owner in list(self._owners_closing) if not owner.done()]:
+            owner_loop = owner.get_loop()
+            if owner_loop is loop:
+                here.append(owner)
+                continue
+            if not owner_loop.is_closed() and owner_loop.is_running():
+                handed = _hand_to(owner_loop, _wait_for_task(owner))
+                if handed is not None and await _wait_on_owner(handed, owner_loop) and owner.done():
+                    continue  # (a wait cut there finishes the handoff with the owner still running: owed)
+            if owner_loop.is_closed():
+                self._owners_closing.discard(owner)
+            else:
+                left.owners += 1
+        if here:
+            await asyncio.wait(here)
+        return left
 
     def __del__(self):
         session = getattr(self, "_session", None)

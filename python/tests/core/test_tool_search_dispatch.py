@@ -1,5 +1,6 @@
 """tool_search="dispatch": a fixed tool list (cache-friendly), schemas in search results, call_tool runs them."""
 
+import ast
 import json
 
 import pytest
@@ -158,6 +159,189 @@ class TestDispatch:
         out = await agent(TestModel(responses=[asked, "ok"]), tools, tool_search="dispatch")(prompt="x").collect()
         assert out.status.code == "success", out.error
         assert ran == [100]
+
+    @pytest.mark.parametrize(("mode", "by"), [("dispatch", "call_tool"), ("dispatch", "name"), ("client", "name")])
+    async def test_bad_arguments_without_the_schema_come_back_with_it(self, mode, by):
+        seen = []
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                seen.append(messages[-1].content[0].content[0].text)
+                return "Oops."
+            if by == "call_tool":
+                return dispatch("get_weather", arguments={"town": "Rome"})
+            return call("get_weather", town="Rome")
+
+        out = await agent(TestModel(handler=handler), tool_search=mode)(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        result = ast.literal_eval(seen[0])  # a tool error reaches the model as its repr
+        assert result["type"] == "ValidationError" and "without its schema" in result["hint"]
+        assert "city" in result["parameters"]["properties"]
+
+    async def test_a_second_bad_call_once_loaded_gets_no_schema_back(self):
+        """Loaded by the first call, the tool's schema goes with the next request: the hint is for the first only."""
+        seen = []
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                seen.append(messages[-1].content[0].content[0].text)
+            if len(seen) < 2:
+                return call("get_weather", f"c{len(seen)}", town="Rome")
+            return "Oops."
+
+        out = await agent(TestModel(handler=handler), tool_search="client")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        first, second = (ast.literal_eval(text) for text in seen)
+        assert "parameters" in first and "parameters" not in second
+
+    @pytest.mark.parametrize("result", ["[1, 2]", "null", "3", '{"found": 5}', '{"found": [1, {"name": 2}]}'])
+    async def test_an_own_tool_named_like_the_search_does_not_break_the_run(self, result):
+        """An agent's own ``search_tools`` (an unprefixed MCP server's) may answer any JSON."""
+        ran = []
+
+        def search_tools(query: str) -> str:  # noqa: ARG001 (the model calls it by this name)
+            return result
+
+        def convert(amount: int) -> str:
+            ran.append(amount)
+            return "ok"
+
+        tools = [
+            Tool(name="search_tools", handler=search_tools),
+            Tool(name="convert", description="Convert currency.", handler=convert, defer_loading=True),
+        ]
+        responses = iter([call("search_tools", query="docs"), dispatch("convert", "c2", arguments={"amount": 3})])
+        model = TestModel(handler=lambda _messages: next(responses, "done"))
+        out = await agent(model, tools, tool_search="dispatch")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        assert ran == [3]
+
+    async def test_a_validation_error_of_the_handler_suggests_no_retry(self):
+        """The arguments were valid and the handler ran (it wrote, then failed parsing a receipt): calling it again
+        would write twice, so the error comes back as it is."""
+        from pydantic import BaseModel
+
+        class Receipt(BaseModel):
+            order_id: int
+
+        writes = []
+
+        def create_order(item: str) -> str:
+            writes.append(item)
+            Receipt.model_validate({"order_id": "not a number"})
+            return "ok"
+
+        tools = [Tool(name="create_order", description="Create an order.", handler=create_order, defer_loading=True)]
+        seen = []
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                seen.append(messages[-1].content[0].content[0].text)
+                return "Sorry."
+            return call("create_order", item="book")
+
+        out = await agent(TestModel(handler=handler), tools, tool_search="client")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        result = ast.literal_eval(seen[0])
+        assert result["type"] == "ValidationError" and "parameters" not in result and "hint" not in result
+        assert writes == ["book"]
+
+    async def test_arguments_valid_when_checked_get_no_hint_once_the_handler_changed_them(self, tmp_path):
+        """Checked before the handler ran, and marked there: a ``FilePath`` the handler then moved would fail a
+        check made afterwards, and the move succeeded. The handler's own ValidationError suggests no retry."""
+        from pydantic import BaseModel, FilePath
+
+        class Receipt(BaseModel):
+            moved_to: int
+
+        source = tmp_path / "report.txt"
+        source.write_text("x")
+
+        def archive(path: FilePath) -> str:
+            path.rename(tmp_path / "archived.txt")
+            Receipt.model_validate({"moved_to": "not a number"})
+            return "ok"
+
+        tools = [Tool(name="archive", description="Archive a file.", handler=archive, defer_loading=True)]
+        seen = []
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                seen.append(messages[-1].content[0].content[0].text)
+                return "Sorry."
+            return call("archive", path=str(source))
+
+        out = await agent(TestModel(handler=handler), tools, tool_search="client")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        result = ast.literal_eval(seen[0])
+        assert result["type"] == "ValidationError" and "parameters" not in result
+        assert not source.exists() and (tmp_path / "archived.txt").exists()
+
+    async def test_an_own_search_tool_listing_names_shows_no_schema(self):
+        """The agent's own ``search_tools`` (the built-in one is renamed) lists a name without its schema: a later
+        bad call to that tool still gets its parameters back."""
+        seen = []
+
+        def search_tools(query: str) -> str:  # noqa: ARG001 (the model calls it by this name)
+            return '{"found": [{"name": "convert"}]}'
+
+        def convert(amount: int) -> str:
+            return f"{amount}"
+
+        tools = [
+            Tool(name="search_tools", handler=search_tools),
+            Tool(name="convert", description="Convert currency.", handler=convert, defer_loading=True),
+        ]
+        responses = iter([call("search_tools", query="money"), dispatch("convert", "c2", arguments={"amount": "lots"})])
+
+        def handler(messages):
+            if messages[-1].role == "tool" and len(seen) < 2:
+                seen.append(messages[-1].content[0].content[0].text)
+            return next(responses, "Oops.")
+
+        out = await agent(TestModel(handler=handler), tools, tool_search="dispatch")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        result = ast.literal_eval(seen[1])
+        assert result["type"] == "ValidationError" and "amount" in result["parameters"]["properties"]
+
+    async def test_bad_arguments_after_a_search_get_no_schema_back(self):
+        seen = []
+        responses = iter(
+            [call(SEARCH_TOOLS_NAME, query="weather"), dispatch("get_weather", "c2", arguments={"town": "Rome"})]
+        )
+
+        def handler(messages):
+            if messages[-1].role == "tool" and len(seen) < 2:
+                seen.append(messages[-1].content[0].content[0].text)
+            return next(responses, "Oops.")
+
+        out = await agent(TestModel(handler=handler), tool_search="dispatch")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        result = ast.literal_eval(seen[1])  # a tool error reaches the model as its repr
+        assert result["type"] == "ValidationError" and "parameters" not in result  # it was in the search result
+
+    async def test_a_numbered_search_counts_as_the_search(self):
+        """The agent's own tools hold every usual search name: the search is ``search_tools_2`` (``_unused_name``),
+        and what it showed is shown all the same."""
+        seen = []
+        own = [
+            Tool(name=name, handler=lambda q="": "mine")  # noqa: ARG005 (a parameter for the schema)
+            for name in (SEARCH_TOOLS_NAME, "find_tools", "load_tools", "search_deferred_tools")
+        ]
+        responses = iter(
+            [call(f"{SEARCH_TOOLS_NAME}_2", query="weather"), dispatch("get_weather", "c2", arguments={"town": "Rome"})]
+        )
+
+        def handler(messages):
+            if messages[-1].role == "tool" and len(seen) < 2:
+                seen.append(messages[-1].content[0].content[0].text)
+            return next(responses, "Oops.")
+
+        out = await agent(TestModel(handler=handler), [*catalog(), *own], tool_search="dispatch")(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        assert "get_weather" in seen[0]  # the numbered search ran and found it
+        result = ast.literal_eval(seen[1])
+        assert result["type"] == "ValidationError" and "parameters" not in result
 
     async def test_a_found_tool_called_by_its_own_name_runs_too(self):
         calls = []

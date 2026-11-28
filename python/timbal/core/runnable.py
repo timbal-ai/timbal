@@ -20,6 +20,7 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     computed_field,
     field_validator,
     model_serializer,
@@ -48,6 +49,7 @@ from ..state import (
 )
 from ..state.context import (  # noqa: F401  (_own_copy: chat_session imports it from here)
     _DETACHED_CALLS,
+    _HOOKS_CLOSED,
     _LIVE_CALLS,
     RunContext,
     _EmitSink,
@@ -165,6 +167,12 @@ async def _relay_until(agen: Any, deadline: float, path: str, timeout: float) ->
         if cm.expired():
             await agen.aclose()
             raise RunTimeout(path, timeout)
+
+
+def _left_of(deadline: float | None, loop: asyncio.AbstractEventLoop | None) -> float | None:
+    """Seconds left before ``deadline``, a time of ``loop``'s clock (the loop that set it: a stream closed from another
+    loop ends there, and that loop's clock may have another origin); 0 once it has passed; None for no deadline."""
+    return None if deadline is None or loop is None else max(0.0, deadline - loop.time())
 
 
 async def _await_until(awaitable: Coroutine[Any, Any, Any], deadline: float, path: str, timeout: float) -> Any:
@@ -2444,6 +2452,10 @@ class Runnable(ABC, BaseModel):
         # first so finally closes *this* object, not the child's.
         emit_sink = None
         spawned_background = False
+        # The foreground deadline, once the handler's budget starts (below), and the loop whose clock it is on: the
+        # end hooks get what is left of it.
+        deadline: float | None = None
+        deadline_loop: asyncio.AbstractEventLoop | None = None
         # Installed last, with nothing that can raise before the ``try`` whose ``finally`` takes them
         # back off: a call that fails while it is being set up leaves neither on the context.
         previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
@@ -2512,7 +2524,12 @@ class Runnable(ABC, BaseModel):
             span._input_dump = await dump(input)
 
             # Pydantic model_validate() does not mutate the input dict
-            validated_input = dict(self.params_model.model_validate(input))
+            try:
+                validated_input = dict(self.params_model.model_validate(input))
+            except ValidationError:
+                # The arguments failed, so the handler never ran: Agent's schema hint may suggest a retry.
+                object.__setattr__(span, "_arguments_invalid", True)
+                raise
 
             # tool_args guardrails: after validation, before the approval gate — so an
             # escalate verdict can force that gate, and a block spends nothing.
@@ -2567,7 +2584,9 @@ class Runnable(ABC, BaseModel):
             run_timeout = self.timeout if self.timeout is not None and self.timeout > 0 else None
             if run_in_background:
                 run_timeout = None
-            deadline = None if run_timeout is None else asyncio.get_running_loop().time() + run_timeout
+            if run_timeout is not None:
+                deadline_loop = asyncio.get_running_loop()
+                deadline = deadline_loop.time() + run_timeout
 
             # pre_hook runs only when we're actually going to execute the
             # handler. We deliberately defer it past the approval gate so
@@ -2971,6 +2990,7 @@ class Runnable(ABC, BaseModel):
                 )
             output_event._input_dump = span._input_dump
             output_event._output_dump = await dump(handoff_result) if handed_off else span._output_dump
+            end_cut = False
             try:
                 if handoff_start is None:
                     # The end of the root run is stored before the caller goes on, even with background work
@@ -3001,6 +3021,7 @@ class Runnable(ABC, BaseModel):
                             else:
                                 handoff_control.complete(span.call_id, handoff_result)
             except BaseException:
+                end_cut = True
                 if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
                     # The save was cut (a turn interrupted as it ended). Once more before the session
                     # lets the next turn in, which reads this run. Shielded: a second cut ends the
@@ -3015,6 +3036,24 @@ class Runnable(ABC, BaseModel):
                 if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
                     scheduler, run_context._foreign_turn_of = run_context._foreign_turn_of, None
                     scheduler.foreign_finished(run_context.id, span.status)
+                if end_cut:
+                    # Cut as it ended. The run is over all the same: its end hooks run (each is called before
+                    # any is waited for, so a second cut ends only the wait), and the caller gets its context
+                    # back before the cut goes on, as below, or it would go on as the finished run.
+                    if (
+                        _new_parent_call_id is None
+                        and run_context.__dict__.setdefault("_end_hooks", _HOOKS_CLOSED) is not _HOOKS_CLOSED
+                        and (hooks := run_context._take_end_hooks())
+                    ):
+                        with contextlib.suppress(BaseException):
+                            await run_context._run_end_hooks(_new_call_id, _left_of(deadline, deadline_loop), hooks)
+                    set_parent_call_id(_parent_call_id)
+                    set_call_id(_call_id)
+                    if _entry_call_id is not None:
+                        set_run_context(_entry_run_context)
+                        if _call_id is None and run_context.__dict__.get("_invoker") is not None:
+                            set_parent_call_id(_entry_parent_call_id)
+                            set_call_id(_entry_call_id)
             # Warn about resume values that didn't match any gate or suspend()
             # so callers find typos / stale IDs instead of silently dropping
             # them. Only check the IDs introduced by THIS call; nested children
@@ -3039,26 +3078,40 @@ class Runnable(ABC, BaseModel):
                         del run_context._background_handoff_control
                 else:
                     run_context._background_handoff_control = previous_handoff_control
-            set_parent_call_id(_parent_call_id)
-            set_call_id(_call_id)
-            if _entry_call_id is not None:
-                # Nested invocation: restore the caller's run context. A
-                # top-level runnable invoked from a handler may have swapped in
-                # a fresh RunContext above; with direct in-task iteration
-                # (agent tool fast path, linear workflow steps) that swap would
-                # otherwise leak into the caller's run. Top-level invocations
-                # (entry call id None) deliberately leave their context set so
-                # sequential same-task runs chain sessions implicitly.
-                set_run_context(_entry_run_context)
-                if _call_id is None and run_context.__dict__.get("_invoker") is not None:
-                    # This was a run of its own, started by a call's code, and that code goes on: it is
-                    # still inside its call. Without its ids back, the next run it starts would look like
-                    # one nobody's code started (no link, no tool policy inherited, and an approval
-                    # reviewer reading its prompt as a person's). The context set may be one the handler
-                    # swapped in, which these ids are not from: as it was before this run started
-                    # (``RunContext.update_usage`` records on that context's root then).
-                    set_parent_call_id(_entry_parent_call_id)
-                    set_call_id(_entry_call_id)
+            try:
+                # Last: the run is over (a per-run MCP connection closes here). In the run's own context: a hook
+                # may read its credentials or record on its trace. The caller gets its context back in the finally,
+                # also when a cut ends the wait. Every finished root closes registration, hooks or not: one added
+                # later would never run. With none added, one atomic setdefault does it (on_end adds the list the
+                # same way, see _HOOKS_CLOSED); with some, _take_end_hooks takes them under the lock on_end takes.
+                if (
+                    _new_parent_call_id is None
+                    and run_context.__dict__.setdefault("_end_hooks", _HOOKS_CLOSED) is not _HOOKS_CLOSED
+                    and (hooks := run_context._take_end_hooks())
+                ):
+                    # Within what is left of the runnable's timeout (none left: not waited for at all).
+                    await run_context._run_end_hooks(_new_call_id, _left_of(deadline, deadline_loop), hooks)
+            finally:
+                set_parent_call_id(_parent_call_id)
+                set_call_id(_call_id)
+                if _entry_call_id is not None:
+                    # Nested invocation: restore the caller's run context. A
+                    # top-level runnable invoked from a handler may have swapped in
+                    # a fresh RunContext above; with direct in-task iteration
+                    # (agent tool fast path, linear workflow steps) that swap would
+                    # otherwise leak into the caller's run. Top-level invocations
+                    # (entry call id None) deliberately leave their context set so
+                    # sequential same-task runs chain sessions implicitly.
+                    set_run_context(_entry_run_context)
+                    if _call_id is None and run_context.__dict__.get("_invoker") is not None:
+                        # This was a run of its own, started by a call's code, and that code goes on: it is
+                        # still inside its call. Without its ids back, the next run it starts would look like
+                        # one nobody's code started (no link, no tool policy inherited, and an approval
+                        # reviewer reading its prompt as a person's). The context set may be one the handler
+                        # swapped in, which these ids are not from: as it was before this run started
+                        # (``RunContext.update_usage`` records on that context's root then).
+                        set_parent_call_id(_entry_parent_call_id)
+                        set_call_id(_entry_call_id)
             # Flush any still-buffered RunContext.emit() events (post_hook,
             # error paths, plain handlers) so every emission is ordered
             # before this call's OUTPUT. Close first: a racing off-loop emit

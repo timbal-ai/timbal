@@ -1,6 +1,8 @@
 import asyncio
 import copy
+import inspect
 import os
+import threading
 import time
 import weakref
 from collections import deque
@@ -232,6 +234,51 @@ def _own_copy(value: Any) -> Any:
         if type(value) is tuple:
             return tuple(_own_copy(item) for item in value)
         return value
+
+
+# Taken by ``RunContext.on_end`` and by the step that takes a run's hooks at its end (``_take_end_hooks``): threads
+# of one run (a handler's workers) may register at once, and each hook accepted must be in the list that is run. One
+# for the module, not one per context: a lock in a context's state would not copy or pickle. A forked child gets its
+# own (one held by another thread of the parent at the fork would never be released there).
+_END_HOOKS_LOCK = threading.Lock()
+# A run's end-hook list once its root has ended (``_end_hooks``: absent until a hook is added, then a list): on_end
+# refuses new hooks. A root that ended with none closes registration with one atomic ``setdefault`` (Runnable._stream),
+# no lock: on_end creates the list with ``setdefault`` too, so whichever comes first wins and the other sees it.
+_HOOKS_CLOSED: tuple = ()
+
+
+def _fresh_end_hooks_lock() -> None:
+    global _END_HOOKS_LOCK
+    _END_HOOKS_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_fresh_end_hooks_lock)
+
+
+async def _awaited(awaitable: Any) -> Any:
+    """Await what an end hook returned. A future or task of another loop (a producer's pending flush, the run ended
+    by a stream closed from elsewhere) is awaited on that loop while it runs; one whose loop is not running cannot
+    finish from here, which is raised (and logged as the hook's failure)."""
+    if asyncio.isfuture(awaitable):
+        if awaitable.done():  # its outcome is there already, whatever its loop does now
+            return awaitable.result()
+        owner = awaitable.get_loop()
+        if owner is not asyncio.get_running_loop():
+            from .loops import hand_to, wait_on_owner
+
+            handed = None if owner.is_closed() or not owner.is_running() else hand_to(owner, _settle(awaitable))
+            if handed is None or not await wait_on_owner(handed, owner):
+                # Not the future itself: its repr can carry what it holds.
+                raise RuntimeError(
+                    f"an end hook returned a pending {type(awaitable).__name__} of an event loop that is not running"
+                )
+            return handed.result()
+    return await awaitable
+
+
+async def _settle(future: Any) -> Any:
+    return await future
 
 
 class RunContext(BaseModel):
@@ -903,6 +950,76 @@ class RunContext(BaseModel):
         sink = _EmitSink(loop)
         span._emit_sink = sink
         return sink
+
+    def on_end(self, hook: Callable[[], Any]) -> bool:
+        """Call ``hook()`` (sync, or returning an awaitable, which is awaited) once the run's root has ended, after
+        its end was saved or the save failed. Background children may still be running then.
+
+        False, and the hook is not kept, once the root has ended: it would never run. Safe from any thread of the
+        run: a hook it accepts is one the run's end takes (``_take_end_hooks``, under the same lock).
+        """
+        with _END_HOOKS_LOCK:
+            # Absent until a hook is added (see _HOOKS_CLOSED): created in one step, as the run's end closes it.
+            hooks = self.__dict__.setdefault("_end_hooks", [])
+            if hooks is _HOOKS_CLOSED:
+                return False
+            hooks.append(hook)
+            return True
+
+    def _take_end_hooks(self) -> list[Callable[[], Any]] | None:
+        """The hooks to run at the root's end, registration closed in the same step (``()`` from then on: on_end
+        refuses new hooks). Every finished root calls it, hooks or not: one added later would never run."""
+        with _END_HOOKS_LOCK:
+            hooks = self.__dict__.get("_end_hooks")
+            self.__dict__["_end_hooks"] = _HOOKS_CLOSED
+        return hooks or None
+
+    async def _run_end_hooks(
+        self, call_id: str | None = None, timeout: float | None = None, hooks: list[Callable[[], Any]] | None = None
+    ) -> None:
+        """Run the end hooks (``on_end``) in this run's own context, ``call_id`` being its root call's, whichever
+        task ends it: a stream another task closes runs this in that task. That task's context is put back after.
+        ``timeout``: how long the run waits for them (what is left of its root's timeout), None for no bound.
+        ``hooks``: those ``_take_end_hooks`` took (taken here when not given)."""
+        from . import _call_id, _parent_call_id, _run_context_var
+
+        tokens = (_run_context_var.set(self), _call_id.set(call_id), _parent_call_id.set(None))
+        try:
+            await self._call_end_hooks(timeout, hooks)
+        finally:
+            _parent_call_id.reset(tokens[2])
+            _call_id.reset(tokens[1])
+            _run_context_var.reset(tokens[0])
+
+    async def _call_end_hooks(self, timeout: float | None = None, hooks: list[Callable[[], Any]] | None = None) -> None:
+        if hooks is None:
+            hooks = self._take_end_hooks()
+        waits = []
+        for hook in hooks or ():
+            try:
+                result = hook()
+            except (Exception, asyncio.CancelledError):
+                # A sync call cannot be cut: a CancelledError here is the hook's own (a cancelled future's result).
+                _get_logger().exception("run_end_hook_failed", run_id=self.id)
+                continue
+            if inspect.isawaitable(result):
+                waits.append(result)
+        if not waits:
+            return
+        # Every hook is called before any is waited for, and the wait never cuts them: a cut while waiting (the
+        # run cancelled as it ends), or ``timeout`` passing (the run's deadline), ends the wait, never a hook's work,
+        # and no hook is left uncalled. wait(), not wait_for() nor a bare await, which would cancel them.
+        # Each in a task first: gather hashes what it is given, and an awaitable a hook returns need not be hashable.
+        waiting = asyncio.gather(*(asyncio.ensure_future(_awaited(w)) for w in waits), return_exceptions=True)
+        waiting.add_done_callback(self._log_end_hook_failures)
+        await asyncio.wait({waiting}, timeout=timeout)
+
+    def _log_end_hook_failures(self, waiting: "asyncio.Future[list[Any]]") -> None:
+        if waiting.cancelled():
+            return
+        for result in waiting.result():
+            if isinstance(result, BaseException):
+                _get_logger().error("run_end_hook_failed", run_id=self.id, error=repr(result))
 
     def update_usage(self, key: str, value: int) -> None:
         """Update usage statistics for the current call and all parent calls.
