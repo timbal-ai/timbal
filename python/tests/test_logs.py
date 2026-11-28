@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import sys
+from unittest import mock
 
 import pytest
 import structlog
@@ -87,3 +88,16 @@ class TestSetupLoggingTwice:
         assert len(_added(root, before)) == 2  # the application's, and one of timbal's
         logging.getLogger("timbal.tests.logs").warning("to both")
         assert theirs.getvalue().splitlines() == ["to both"]
+
+    def test_leaves_a_handler_that_answers_any_attribute(self, root_logging, monkeypatch):
+        """A mock has every attribute, the mark included: it is still not one of timbal's."""
+        root, before = root_logging
+        monkeypatch.setattr(sys, "stderr", io.StringIO())
+        theirs = mock.MagicMock()
+        root.addHandler(theirs)
+
+        setup_logging()
+        setup_logging()
+
+        assert theirs in root.handlers
+        assert len(_added(root, before)) == 2

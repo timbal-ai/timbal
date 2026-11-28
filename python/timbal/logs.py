@@ -85,9 +85,9 @@ def setup_logging() -> None:
 
     # Called again (every `create_app()` calls it, so a test process does many times), replace the handler an
     # earlier call added: adding one per call wrote every record once per call. Handlers the application added
-    # are left as they are.
+    # are left as they are (`is True`: an object that answers any attribute, a mock, is not taken for ours).
     root = logging.getLogger()
-    for earlier in [h for h in root.handlers if getattr(h, _HANDLER_MARK, False)]:
+    for earlier in [h for h in root.handlers if getattr(h, _HANDLER_MARK, None) is True]:
         root.removeHandler(earlier)
         earlier.close()
     root.addHandler(handler)
