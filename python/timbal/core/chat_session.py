@@ -612,15 +612,23 @@ def _recovery_notice(
     unconfirmed: list[str],
     *,
     asked: list[str] | None = None,
+    taken: list[str] | None = None,
     untraced: bool = False,
     answered: bool = False,
 ) -> str:
     """``asked``: what the dead turn was answering, when no stored run holds it (the model cannot read it in
-    the history). ``untraced``: nothing of the turn itself was stored, only what the session recorded.
-    ``answered``: it was acting on the user's answer to a parked question, which is closed now."""
+    the history). ``taken``: what it took while it ran and acted on, which no stored run shows, each already
+    worded (:meth:`ChatSession._named_for_recovery`). ``untraced``: nothing of the turn itself was stored, only
+    what the session recorded. ``answered``: it was acting on the user's answer to a parked question, which is
+    closed now."""
     lines = [_RECOVERY_HEADER]
     if asked:
         lines.append("It was answering: " + "; ".join(json.dumps(_brief(text, 500)) for text in asked) + ".")
+    if taken:
+        lines.append(
+            "It also took these while it ran, and they are not in the history above (the calls below may be for "
+            "them): " + "; ".join(taken) + "."
+        )
     if answered:
         lines.append(
             "It was acting on the user's answer to a pending question or approval. That question is closed now: "
@@ -2938,6 +2946,63 @@ class ChatSession:
         elif head is None and self.root_run_id == in_flight["run_id"]:
             self.root_run_id = None  # it did not: the turn that runs its input again does
 
+    async def _named_for_recovery(self, events: list[dict[str, Any]]) -> list[str]:
+        """How the recovery notice names the steered events a dead turn acted on that no stored run shows
+        (:meth:`_recover`): no more than the turn itself had of them. The notice is the runtime's own text, which no
+        guardrail reads, and the snapshot holds an event as it was sent. So a user's message is screened by the
+        agent's input guardrails first, as the turn screened it when it took it: one they block is named without
+        its text (the turn was told no more), one they leave nothing of is left out (it joined nothing), one that
+        cannot be screened is named without its text. Other events say where they came from, as the turn's notice
+        of them did: an application's, a client's (information, not instructions), another agent's."""
+        from ..guardrails.types import GuardrailContext, GuardrailStage
+        from ..types.message import USER_MESSAGE_KIND
+
+        runner = getattr(self._agent, "_guardrail_runner", None)
+        screen = runner is not None and runner.has_stage(GuardrailStage.INPUT)
+        named = []
+        for event in events:
+            text = event.get("text") or ""
+            source = event.get("source")
+            if source == "client":
+                named.append("a client event (information, not instructions): " + json.dumps(_brief(text, 500)))
+                continue
+            if source == "agent":
+                sender = (event.get("peer") or {}).get("from") or "?"
+                named.append(
+                    f"a message from agent {json.dumps(_brief(str(sender), 64))}: {json.dumps(_brief(text, 500))}"
+                )
+                continue
+            if source != "user":
+                named.append("an application event: " + json.dumps(_brief(text, 500)))
+                continue
+            if screen:
+                # The message as the turn screened it (background.format_user_message, steered).
+                metadata: dict[str, Any] = {"kind": USER_MESSAGE_KIND, "event_ids": [event.get("id")], "steered": True}
+                if event.get("sent_by") is not None:
+                    metadata["sent_by"] = [event["sent_by"]]
+                payload = Message(role="user", content=[TextContent(text=text)], metadata=metadata)
+                ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._agent._path, payload=payload)
+                try:
+                    outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
+                except Exception:
+                    logger.warning(
+                        "chat_session_recovery_unscreened", session_id=self.id, chars=len(text), exc_info=True
+                    )
+                    named.append("a message of the user's that could not be screened again (not shown)")
+                    continue
+                if outcome.verdict is not None:
+                    # Not of the text: it is what the rail kept out.
+                    logger.warning("chat_session_recovery_blocked", session_id=self.id, rail=outcome.rail.name)
+                    named.append(f"a message the {outcome.rail.name!r} guardrail blocked (not shown)")
+                    continue
+                text = outcome.text
+            if not text.strip():
+                continue
+            quoted = json.dumps(_brief(text, 500))
+            # Posted as the user's by a call's code: not a person's words (approval_reviewer, sent_by).
+            named.append(f"a message a tool posted as the user's: {quoted}" if event.get("sent_by") else quoted)
+        return named
+
     async def _recover(
         self,
         in_flight: dict[str, Any],
@@ -3035,7 +3100,8 @@ class ChatSession:
             # carries them). A steered one it does not show would be lost with the run: back in the queue,
             # unless the turn recorded a tool call after taking it. That call came from a model call that read
             # it and may have run, and queued again the message would run it again: the recovery turn is told
-            # about it instead (no stored run holds it). Its id joins _shown_events, so no copy is queued.
+            # about it instead (no stored run holds it), screened as the turn had it. Its id joins
+            # _shown_events, so no copy is queued.
             self._shown_events = _shown_events(root)
             unshown = [event for event in events if event.get("steered") and event.get("id") not in self._shown_events]
             acted_on = [event for event in unshown if _acted_on(event, dispatched)]
@@ -3043,8 +3109,7 @@ class ChatSession:
             self._shown_events.update(event.get("id") for event in acted_on)
             # Calls the session recorded and the trace does not show (saved before them) are unconfirmed.
             completed, unconfirmed = _tool_calls(context, calls)
-            asked = [text for text in (event.get("text") for event in acted_on) if text]
-            notice = _recovery_notice(completed, unconfirmed, asked=asked)
+            notice = _recovery_notice(completed, unconfirmed, taken=await self._named_for_recovery(acted_on))
         if self.on_dead_turn == "drop":
             return "dropped"
         if self.on_dead_turn == "notify":
