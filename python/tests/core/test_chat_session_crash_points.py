@@ -44,6 +44,8 @@ from timbal.types.content import ToolUseContent
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
+from ..conftest import close_sqlite_databases
+
 # A test that times out because nothing in its process ran, or because something blocked the event loop, says
 # so, with the stacks (conftest.py `loop_watchdog`): on loaded CI runners a test process has stood still for
 # 70-260 s, and the sessions it was waiting for looked stuck.
@@ -276,18 +278,11 @@ async def take_over(store, session_id) -> int | None:
 
 
 def release(path) -> None:
-    """Close a test's database and delete it: the provider keeps one connection per file for the life of the
-    process, and a worker runs hundreds of these tests."""
+    """Close a test's database and delete it: a worker runs hundreds of these tests, each with a file of its own."""
     from pathlib import Path
 
-    from timbal.state.tracing.providers import sqlite
-
+    close_sqlite_databases(path)
     resolved = str(Path(path).resolve())
-    with sqlite._DATABASES_LOCK:
-        for key in [key for key in sqlite._DATABASES if key[0] == resolved]:
-            db = sqlite._DATABASES.pop(key)
-            with db.lock:
-                db.conn.close()
     for suffix in ("", "-wal", "-shm"):
         Path(resolved + suffix).unlink(missing_ok=True)
 

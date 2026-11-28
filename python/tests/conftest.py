@@ -13,8 +13,30 @@ def pytest_configure(config):
     """Configure pytest with global settings."""
     # Load environment variables
     load_dotenv(override=True)
+    _plain_tracebacks()
     if os.environ.get("TIMBAL_TEST_SLOW_IO"):
         _slow_storage(float(os.environ["TIMBAL_TEST_SLOW_IO"]))
+
+
+def _plain_tracebacks() -> None:
+    """Log exceptions as plain tracebacks, not structlog's default rich ones.
+
+    The default renderer draws an exception with rich, every frame's locals included
+    (``RichTracebackFormatter(show_locals=True)``). It does so synchronously, on the thread that logs: 1.2 s per
+    call on a fast laptop, more on a CI runner, with the test's event loop stopped meanwhile. A voice test whose
+    rescue logs one warning with ``exc_info`` took up to 6.8 s on CI against its 5 s guard
+    (``test_hung_tts_cannot_hang_the_timeout_rescue``). The time also depended on the order tests ran in: a
+    process that ran a test calling ``create_app`` (which calls ``setup_logging()``) logged JSON with plain
+    tracebacks from then on, and one that had not drew rich ones. Everything else about the default
+    configuration is kept."""
+    import structlog
+
+    plain = structlog.dev.ConsoleRenderer(exception_formatter=structlog.dev.plain_traceback)
+    processors = [
+        plain if isinstance(processor, structlog.dev.ConsoleRenderer) else processor
+        for processor in structlog.get_config()["processors"]
+    ]
+    structlog.configure(processors=processors)
 
 
 def _slow_storage(delay: float) -> None:
@@ -140,6 +162,65 @@ def clear_in_memory_tracing_storage():
     clear()
     yield
     clear()
+
+
+def close_sqlite_databases(path) -> int:
+    """Close this process's connections to the SQLite file at ``path``, or to every file under it when it is a
+    directory, and forget them. Returns how many were closed.
+
+    The provider and the chat-session store keep one connection per file for the life of the process
+    (``timbal.state.tracing.providers.sqlite._DATABASES``), and both look it up on every call: the next use of a
+    file opens it again. Closed under the connection's own lock, which every read and write holds.
+    """
+    from pathlib import Path
+
+    from timbal.state.tracing.providers import sqlite
+
+    root = Path(path).resolve()
+    with sqlite._DATABASES_LOCK:
+        keys = [key for key in sqlite._DATABASES if (found := Path(key[0])) == root or root in found.parents]
+        closing = [sqlite._DATABASES.pop(key) for key in keys]
+    for db in closing:
+        with db.lock:
+            db.conn.close()
+    return len(closing)
+
+
+@pytest.fixture(autouse=True)
+def close_test_databases(tmp_path_factory):
+    """Each test's SQLite files are closed when it ends: the provider would keep their connections open for the
+    rest of the worker's run, a file descriptor or three per file and its page cache. A worker of the suite runs
+    thousands of tests, and ``python/tests/core`` alone left 1,160 database files open in one process (over
+    1,024, ``select()`` refuses the descriptors any later test opens). Everything under the session's base
+    temporary directory, where every ``tmp_path`` lives: no fixture wider than a test keeps a database there.
+
+    Torn down after pytest-asyncio has closed the test's event loop and waited for its executor, so no write of
+    the test is still on its way; a chat-session store thread still at a call holds the connection's lock, which
+    the close waits for."""
+    yield
+    close_sqlite_databases(tmp_path_factory.getbasetemp())
+
+
+@pytest.fixture(autouse=True)
+def outside_any_run():
+    """Every test starts outside any run: no ambient run context, no call ids. Put back at teardown, so what a
+    test (or its fixtures) set ends with it.
+
+    A sync test or fixture that calls ``set_run_context`` / ``set_call_id`` sets them on the main thread's
+    context, which outlives the test, and pytest-asyncio copies that context into every async test after it.
+    There the first top-level run took the leftover as its own (``Runnable._stream`` keeps a context whose trace
+    is still empty), tracing provider included: after ``platform/test_platform_utils.py``, whose
+    ``RunContext(tracing_provider=None)`` stays set, the next agent run in that worker stored no trace at all
+    (``test_interrupted_between_steps.py`` read back ``None`` on macOS in the merge queue, and passed on retry:
+    from then on the leftover has a finished root, and runs only chain onto it). Set here, before the test's own
+    fixtures: pytest runs a conftest's autouse fixtures first, and pytest-asyncio copies the context after all of
+    them."""
+    from timbal.state import _call_id, _parent_call_id, _run_context_var
+
+    tokens = [(var, var.set(None)) for var in (_run_context_var, _call_id, _parent_call_id)]
+    yield
+    for var, token in reversed(tokens):
+        var.reset(token)
 
 
 # How long the event loop may run no callback before loop_watchdog reports it (TIMBAL_TEST_LOOP_STALL_S).
