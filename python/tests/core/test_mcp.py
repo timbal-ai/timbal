@@ -2021,11 +2021,22 @@ class TestCloseOnAnotherLoop:
         finally:
             stop()
 
-    @pytest.mark.parametrize("left", ["nothing", "a cut connection", "a close still going"])
+    @pytest.mark.parametrize(
+        "left",
+        [
+            "nothing",
+            "a cut connection",
+            "a close still going",
+            "a close that failed, not yet recorded",
+            "a close that was cut, not yet recorded",
+        ],
+    )
     def test_a_runs_end_on_another_loop_refuses_only_while_the_run_has_something_to_close(self, left):
         """The run's end on another loop than the run's: with nothing of the run's left (a close() on its loop closed it
         all), it returns, so the run logs no failure (review on #334); with a connection whose close was cut, or a
-        close still going there, it raises as when the connection is pooled."""
+        close still going there, it raises as when the connection is pooled. So it does for a close that ended cut
+        or failed while its loop paused before ``_close_done`` recorded it as cut: the session is still open (it
+        returned quietly; review on #334)."""
         from timbal.core.mcp import _RunConnection
 
         owner_loop, stop = self.owner_thread()
@@ -2036,6 +2047,15 @@ class TestCloseOnAnotherLoop:
                 service._unclosed[id(cut)] = ("run", cut)
             elif left == "a close still going":
                 service._run_closes["run"] = {owner_loop.create_future()}
+            elif left.startswith("a close that"):
+                ended = owner_loop.create_future()
+                if "failed" in left:
+                    owner_loop.call_soon_threadsafe(ended.set_exception, RuntimeError("the server's close() raised"))
+                else:
+                    owner_loop.call_soon_threadsafe(ended.cancel)
+                asyncio.run_coroutine_threadsafe(asyncio.sleep(0), owner_loop).result(10)
+                assert ended.done()
+                service._run_closes["run"] = {ended}  # its done callback, _close_done, has not run
             elif left == "nothing":
                 done = owner_loop.create_future()
                 owner_loop.call_soon_threadsafe(done.set_result, None)
@@ -2054,6 +2074,80 @@ class TestCloseOnAnotherLoop:
             assert "run" not in service._run_hooked
         finally:
             stop()
+
+    @pytest.mark.parametrize("then", ["its idle retry", "close()"])
+    @pytest.mark.asyncio
+    async def test_a_connection_being_closed_is_seen_by_the_runs_end_at_every_step(self, then):
+        """A run's connection on its way out, on its loop: retired from the pool, its close failing (it is kept as cut),
+        then closed again by its idle retry or by close(). A run's end on another thread may read at any step: at
+        each one (every write to the pool, the cut list and the close records) the connection is still found, until
+        a close has succeeded. Each was taken out of one place before its next was recorded, so a read in between
+        returned quietly with the session open (review on #334)."""
+        from timbal.core.mcp import _RunConnection
+
+        service = MCPServer(transport="http", service="api")
+        closes, closed, seen = [], [], []
+
+        def look(step):
+            seen.append((step, bool(closed) or service._run_holds("run")))
+
+        class Watched(dict):
+            def __init__(self, name):
+                super().__init__()
+                self.name = name
+
+            def __setitem__(self, key, value):
+                super().__setitem__(key, value)
+                look(f"{self.name}[{key!r}] =")
+
+            def pop(self, key, *default):
+                value = super().pop(key, *default)
+                look(f"{self.name}.pop")
+                return value
+
+        class WatchedSet(set):
+            def add(self, item):
+                super().add(item)
+                look("close recorded")
+
+            def discard(self, item):
+                super().discard(item)
+                look("close discarded")
+
+        class Closes(Watched):
+            def setdefault(self, key, _default=None):  # each run's close records watched too
+                return super().setdefault(key, WatchedSet())
+
+        class Server:
+            async def close(self):
+                closes.append(True)
+                if len(closes) == 1:
+                    raise RuntimeError("the server's close() raised")
+                closed.append(True)  # what follows may say the run holds nothing: it closed
+
+        private = service.__pydantic_private__
+        private["_run_connections"], private["_unclosed"], private["_run_closes"] = (
+            Watched("pool"),
+            Watched("cut"),
+            Closes("closes"),
+        )
+        entry = _RunConnection(Server(), "fingerprint", asyncio.get_running_loop())
+        service._run_connections["run"] = entry
+        first = service._retire_run_connection("run", entry)
+        await asyncio.wait({first})
+        await asyncio.sleep(0)  # its done callbacks
+        assert service._unclosed  # kept as cut
+        if then == "its idle retry":
+            entry.cancel_idle()
+            service._retry_unclosed("run", entry)
+            second = entry.close_task
+            await asyncio.wait({second})
+            await asyncio.sleep(0)
+        else:
+            await asyncio.wait_for(service.close(), 10)
+        assert closes == [True, True] and closed == [True]
+        assert not service._run_connections and not service._unclosed and not service._run_closes
+        assert [step for step, holds in seen if not holds] == [], seen
 
     def test_a_run_ended_elsewhere_as_its_first_call_registers_the_hook_is_refused(self, monkeypatch):
         """Another loop closes the run's stream right after the run's first call registered the end hook, before that
