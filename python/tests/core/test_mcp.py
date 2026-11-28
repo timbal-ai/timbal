@@ -720,9 +720,9 @@ class TestPlatformConnectionPerRun:
         service = MCPServer(transport="http", service="api")
         ended, raised = MCPServer._run_ended, []
 
-        def recording(self, key):
+        def recording(self, key, owner):
             try:
-                return ended(self, key)
+                return ended(self, key, owner)
             except RuntimeError as error:
                 raised.append(str(error))
                 raise
@@ -919,7 +919,7 @@ class TestPlatformConnectionLifetime:
         gone.close()
         await self.cut(service, "run", _RunConnection(Server(), "fingerprint", gone))
         service._run_hooked["run"] = gone
-        assert service._run_ended("run") is None
+        assert service._run_ended("run", gone) is None
         assert not service._unclosed and "run" not in service._run_hooked
 
     @pytest.mark.asyncio
@@ -1887,7 +1887,7 @@ class TestCloseOnAnotherLoop:
             service._run_hooked["run"] = owner_loop
 
             async def end_the_run():
-                return service._run_ended("run")
+                return service._run_ended("run", owner_loop)
 
             with pytest.raises(RuntimeError, match=self.OWNS) as refused:
                 asyncio.run(asyncio.wait_for(end_the_run(), 10))
@@ -1901,6 +1901,56 @@ class TestCloseOnAnotherLoop:
             assert closed == [True] and not service._run_connections
         finally:
             stop()
+
+    def test_a_run_ended_elsewhere_as_its_first_call_registers_the_hook_is_refused(self, monkeypatch):
+        """Another loop closes the run's stream right after the run's first call registered the end hook, before that
+        call went on. The hook knows the run's loop from its registration: it is refused there, the connection is
+        closed on its own loop once idle, never on the loop that ended the run, and no record of the hook is left
+        behind. With the loop looked up after the registration, the end found none, took the run's connection on the
+        wrong loop, and its teardown failed there (review on #334)."""
+        import threading
+
+        from timbal.core import mcp as mcp_module
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+
+        closed_on = []
+
+        class Server:
+            async def close(self):
+                closed_on.append(asyncio.get_running_loop())
+
+        monkeypatch.setattr("timbal.platform.utils._resolve_url_and_headers", lambda *_: ("https://x.test/mcp", {}))
+        monkeypatch.setattr(MCPServer, "_new_project_server", lambda _self, _url, _headers: Server())
+        monkeypatch.setattr(mcp_module, "_run_connection_key", lambda _context: "run")
+        monkeypatch.setattr(mcp_module, "_RUN_CONNECTION_IDLE_S", 0.2)
+        on_end, ended = RunContext.on_end, []
+
+        def end_elsewhere_once_accepted(self, hook):
+            accepted = on_end(self, hook)
+            if accepted and not ended:  # another loop closes the run's stream, now
+                ended.append(True)
+                thread = threading.Thread(target=lambda: asyncio.run(self._run_end_hooks()))
+                thread.start()
+                thread.join(10)
+            return accepted
+
+        monkeypatch.setattr(RunContext, "on_end", end_elsewhere_once_accepted)
+        service = MCPServer(transport="http", service="api")
+
+        async def first_call():
+            set_run_context(RunContext())
+            try:
+                async with service._project_connection():
+                    pass
+                await until(lambda: closed_on, 10)  # closed once idle
+                return asyncio.get_running_loop()
+            finally:
+                set_run_context(None)
+
+        run_loop = asyncio.run(first_call())
+        assert ended and closed_on == [run_loop]
+        assert not service._run_hooked and not service._run_connections
 
     def test_a_runs_cut_connection_is_closed_on_its_loop_when_its_end_is_refused(self, monkeypatch):
         """A run's connection whose close failed is kept, out of the pool, for another try. The run's end on another
@@ -1931,7 +1981,7 @@ class TestCloseOnAnotherLoop:
             service._run_hooked["run"] = owner_loop
 
             async def end_the_run():
-                return service._run_ended("run")
+                return service._run_ended("run", owner_loop)
 
             with pytest.raises(RuntimeError, match=self.OWNS):
                 asyncio.run(asyncio.wait_for(end_the_run(), 10))

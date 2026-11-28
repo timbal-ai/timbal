@@ -947,7 +947,7 @@ class MCPServer(ToolSet):
     # By id(entry), taken with an atomic pop: close() on two threads may both forget those of a loop that closed.
     _unclosed: dict[int, tuple[str, "_RunConnection"]] = PrivateAttr(default_factory=dict)
     # Runs whose end hook is registered, with the run's loop: one hook per run, which finds the run's connection
-    # when the run ends (a connection let go of earlier is not kept alive by it), on that loop.
+    # when the run ends (a connection let go of earlier is not kept alive by it). The hook carries the loop itself.
     _run_hooked: dict[str, asyncio.AbstractEventLoop] = PrivateAttr(default_factory=dict)
 
     def _provider_identity(self) -> tuple:
@@ -1048,9 +1048,13 @@ class MCPServer(ToolSet):
         if entry is None:
             entry = _RunConnection(self._new_project_server(url, headers), fingerprint, asyncio.get_running_loop())
             self._run_connections[key] = entry
-            # Refused once the run's root has ended (a background child's call): the idle close closes it then.
-            if key not in self._run_hooked and run_context.on_end(functools.partial(self._run_ended, key)):
+            if key not in self._run_hooked:
+                # The hook carries the run's loop: another loop may end the run as soon as on_end has accepted it, so
+                # nothing it needs may be written after. The record is made first for the same reason, and taken back
+                # if on_end refuses (the run's root has ended, a background child's call: the idle close closes it).
                 self._run_hooked[key] = entry.loop
+                if not run_context.on_end(functools.partial(self._run_ended, key, entry.loop)):
+                    self._run_hooked.pop(key, None)
         entry.users += 1
         entry.cancel_idle()
         try:
@@ -1077,7 +1081,7 @@ class MCPServer(ToolSet):
         if closing:
             await asyncio.shield(asyncio.gather(*closing, return_exceptions=True))
 
-    def _run_ended(self, key: str) -> Awaitable[None] | None:
+    def _run_ended(self, key: str, owner: asyncio.AbstractEventLoop) -> Awaitable[None] | None:
         """The run's end hook (one per run): its connection is let go of, and the run waits for every close of its
         connections still going, earlier ones included, so they are closed before the run returns (a loop that
         ends with the run, as under ``asyncio.run``, would cancel a close left to the background). One still in
@@ -1086,10 +1090,10 @@ class MCPServer(ToolSet):
         Only on the run's loop, which owns the sessions. A run's loop that has closed took them with it: they are
         forgotten. Another loop (a stream closed from there) closes nothing: ``RuntimeError``, which the run logs
         (``run_end_hook_failed``); its connections are closed by their idle close (a cut one's too, ``_retry_unclosed``)
-        or a ``close()`` on their loop."""
-        owner = self._run_hooked.pop(key, None)  # the hook runs once, whatever it finds
+        or a ``close()`` on their loop. ``owner``: the run's loop, bound when the hook was registered."""
+        self._run_hooked.pop(key, None)  # the hook runs once, whatever it finds
         loop = asyncio.get_running_loop()
-        if owner is None or owner is loop:
+        if owner is loop:
             return self._end_run_here(key)
         if owner.is_closed():
             self._drop_run(key)
