@@ -1,9 +1,10 @@
 name: CI
 
 # Two lanes, decided by the `plan` job (scripts/ci_plan.py):
-# - full: every OS x Python, tests in parallel. The merge queue, manual runs, and pull requests while
-#   the merge queue is not on. It is what has to pass before anything lands.
-# - fast: Ubuntu + the lowest supported Python, tests in parallel. Pull requests into main once the repo
+# - full: every Python on Ubuntu 26.04, macOS and Windows, plus the lowest on Ubuntu 24.04; tests in parallel.
+#   The merge queue, manual runs, and pull requests while the merge queue is not on. It is what has to pass
+#   before anything lands.
+# - fast: Ubuntu 26.04 + the lowest supported Python, tests in parallel. Pull requests into main once the repo
 #   variable CI_MERGE_QUEUE=true (the merge queue then runs the full lane on what is about to land).
 #   Pull requests into release/** always run the full lane: GitHub has no merge queue for a branch pattern.
 # A pull request, or a merge queue group, that touches nothing the tests read runs no tests.
@@ -23,7 +24,8 @@ on:
         type: choice
         options:
           - all
-          - ubuntu-24.04  # scripts/ci_plan.py LINUX
+          - ubuntu-26.04  # scripts/ci_plan.py FULL
+          - ubuntu-24.04
           - macos-latest
           - windows-latest
 

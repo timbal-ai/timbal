@@ -3,9 +3,11 @@
 
 Run by the `plan` job of `.github/workflows/ci.yml`; prints `lane=` and `matrix=` for `$GITHUB_OUTPUT`.
 
-- **full**: every OS x Python. The merge queue (`merge_group`), manual runs (`workflow_dispatch`, narrowed
-  by its `os` input), and pull requests while the merge queue is not on (`CI_MERGE_QUEUE` repo variable unset).
-- **fast**: Ubuntu with the lowest supported Python (what a newer local Python hides most often). Pull
+- **full**: every Python on Ubuntu 26.04 (what production runs), macOS and Windows, and the lowest Python on
+  Ubuntu 24.04 (`FULL`). The merge queue (`merge_group`), manual runs (`workflow_dispatch`; its `os` input
+  narrows the lane to that OS's jobs in it, so `ubuntu-24.04` alone is one job), and pull requests while the
+  merge queue is not on (`CI_MERGE_QUEUE` repo variable unset).
+- **fast**: Ubuntu 26.04 with the lowest supported Python (what a newer local Python hides most often). Pull
   requests into main once `CI_MERGE_QUEUE=true`: the merge queue then runs the full matrix before anything
   lands. Not pull requests into `release/*`: GitHub has no merge queue for a branch pattern, so nothing would
   run the full matrix before a backport lands. They run it on every push.
@@ -26,13 +28,18 @@ import re
 import subprocess
 import sys
 
-# Linux on ubuntu-24.04, not ubuntu-latest (ubuntu-26.04 since November 2026): on image 20261122 the hosted
-# runner was shut down near the end of a full run, 3 of its 86 test jobs ("The runner has received a shutdown
-# signal", exit 143, no test failed), and none of the 320 on earlier 26.04 images. actions/runner-images#15179
-# reports the same shutdowns on 26.04 only. Move on once 26.04 runs our suite to the end.
-LINUX = "ubuntu-24.04"
-OSES = [LINUX, "macos-latest", "windows-latest"]
+# Linux: every Python on ubuntu-26.04, the Ubuntu production runs, and the lowest on ubuntu-24.04, the older
+# Ubuntu still supported. Versions by name, not ubuntu-latest: moving to the next Ubuntu is a change made here,
+# not one the runner images make for us (ubuntu-latest became 26.04 in November 2026).
+# GitHub's 26.04 image 20261122 shut runners down near the end of a full run in 3 of its 86 test jobs ("The
+# runner has received a shutdown signal", exit 143, no test failed; actions/runner-images#15179), and none of
+# the 320 on earlier 26.04 images. That is their infrastructure: if it comes back, look at the runner's memory
+# and disk, or run fewer workers, rather than leave the OS production runs.
+LINUX = "ubuntu-26.04"
+OLDER_LINUX = "ubuntu-24.04"
 PYTHONS = ["3.11", "3.12", "3.13"]
+# The full lane: each OS with the Pythons it runs.
+FULL = {LINUX: PYTHONS, OLDER_LINUX: PYTHONS[:1], "macos-latest": PYTHONS, "windows-latest": PYTHONS}
 FAST = {"os": LINUX, "python": "3.11"}
 COVERAGE = {"os": LINUX, "python": "3.13"}  # one cell of the full matrix measures coverage
 
@@ -83,8 +90,8 @@ def plan(
     if lane == "fast":
         cells = [FAST]
     else:
-        oses = [os_input] if os_input and os_input != "all" else OSES
-        cells = [{"os": o, "python": p} for o in oses for p in PYTHONS]
+        oses = [os_input] if os_input and os_input != "all" else list(FULL)
+        cells = [{"os": o, "python": p} for o in oses for p in FULL.get(o, PYTHONS)]
     return lane, [{**c, "coverage": c == COVERAGE} for c in cells]
 
 
