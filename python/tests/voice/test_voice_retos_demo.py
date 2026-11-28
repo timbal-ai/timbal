@@ -175,6 +175,31 @@ async def test_reclamacion_lleva_referencia() -> None:
     assert "referencia R 1" in await demo.confirmar_cambio()
 
 
+async def test_pasar_a_persona_termina_la_llamada_sin_esperar_al_modelo() -> None:
+    """El modelo colgaba un turno después con end_call, que se niega si el cliente solo ha dicho «vale»."""
+    from timbal.voice.session import _current_voice_session
+
+    colgados: list[bool] = []
+
+    class _Session:
+        session_id = "llamada-3"
+
+        def end_call(self) -> None:
+            colgados.append(True)
+
+    token = _current_voice_session.set(_Session())
+    try:
+        dicho = await demo.pasar_a_persona("contador a cero")
+    finally:
+        _current_voice_session.reset(token)
+    assert colgados == [True]
+    assert "no llames a end_call" in dicho
+
+
+async def test_pasar_a_persona_sin_llamada_no_falla() -> None:
+    assert "Transferencia simulada" in await demo.pasar_a_persona("contador a cero")
+
+
 def test_la_config_de_voz_es_valida_y_pone_a_pablo() -> None:
     cfg = demo.retos_voice_config()
     assert cfg["voice"] == demo._PABLO
