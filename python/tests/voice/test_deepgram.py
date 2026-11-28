@@ -123,6 +123,19 @@ class TestFluxEventMapping:
         events = _drain(stt)
         assert [(e.type, e.text) for e in events] == [("committed", "tell me a story.")]
 
+    async def test_end_of_turn_carries_the_language_flux_multi_heard(self) -> None:
+        """``languages`` as ``flux-general-multi`` sent it on 2026-11-28. English-only Flux sends none."""
+        stt = DeepgramFluxSTT()
+        heard = {"languages": ["es"], "languages_hinted": []}
+        await stt._handle_message(_flux_turn_info("Update", "Hola, buenos", **heard))
+        await stt._handle_message(_flux_turn_info("EndOfTurn", "Hola, buenos días.", **heard))
+        await stt._handle_message(_flux_turn_info("EndOfTurn", "Hello there."))
+        assert [(e.type, e.language) for e in _drain(stt)] == [
+            ("partial", None),
+            ("committed", "es"),
+            ("committed", None),
+        ]
+
     async def test_eager_events_are_predictions_not_commits(self) -> None:
         stt = DeepgramFluxSTT()
         await stt._handle_message(_flux_turn_info("EagerEndOfTurn", "tell me a story"))
@@ -542,6 +555,24 @@ class TestNovaEventMapping:
             ("committed", "yeah so my credit card number is two two two two three three three three")
         ]
         assert stt._segments == []
+
+    async def test_an_utterance_takes_the_language_of_its_longest_segment(self) -> None:
+        """Nova-3 with ``language="multi"`` names a language per final segment (2026-11-28: a Catalan sentence came
+        as «bon día» ``["es"]``, then the rest ``["ca"]``)."""
+        stt = DeepgramNovaSTT()
+
+        def segment(text: str, languages: list[str], **kw) -> dict:
+            message = self._results(text, is_final=True, **kw)
+            message["channel"]["alternatives"][0]["languages"] = languages
+            return message
+
+        await stt._handle_message(segment("bon día", ["es"]))
+        await stt._handle_message(segment("truco perquè tinc una roda punxada", ["ca"], speech_final=True))
+        await stt._handle_message(self._results("no language reported", is_final=True, speech_final=True))
+        assert [(e.text, e.language) for e in _drain(stt)] == [
+            ("bon día truco perquè tinc una roda punxada", "ca"),
+            ("no language reported", None),
+        ]
 
     async def test_partial_includes_buffered_segments(self) -> None:
         stt = DeepgramNovaSTT()

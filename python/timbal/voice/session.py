@@ -36,11 +36,11 @@ import re
 import time
 import unicodedata
 from collections import deque
-from collections.abc import AsyncIterable, AsyncIterator, Collection, Coroutine
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Collection, Coroutine
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 import structlog
@@ -466,6 +466,10 @@ def _extra_float(extra: dict, key: str, default: float | None) -> float | None:
     if not math.isfinite(value):
         return default
     return value
+
+
+#: How a :meth:`VoiceSession.transfer_call` went.
+CallTransferOutcome = Literal["transferred", "failed", "cancelled", "closed"]
 
 
 def current_voice_session() -> VoiceSession | None:
@@ -1348,6 +1352,10 @@ class VoiceSession:
         # Unset keeps the reply pin on ``audio_input.language``. ``"follow"``
         # or a tag is explicit and does not move the STT hint.
         self.reply_language = parse_reply_language(reply_language)
+        # The language the caller speaks: what the application said (``set_spoken_language``), and what the
+        # transcriber reported for an utterance long enough to tell. See ``spoken_language``.
+        self._spoken_language_set: str | None = None
+        self._spoken_language_heard: str | None = None
         self._unheard_tail = ""
         # True only when the tail is the unplayed end of a reply the model
         # finished. A cancel mid-generation is a fragment, not a script.
@@ -1622,6 +1630,17 @@ class VoiceSession:
         self._end_call_task: asyncio.Task[None] | None = None
         self._end_call_commit_at: float = 0.0
         self._end_call_grace_secs: float = 0.0
+        #: Hands this call to another number: ``await call_transferer(to)``, raising when the provider refuses.
+        #: Set by the transport that can (the telephony bridge, with the provider's credentials in the
+        #: environment); a host with its own credentials sets its own. ``None``: the call cannot be transferred.
+        self.call_transferer: Callable[[str], Awaitable[None]] | None = None
+        # ``transfer_call()``: where to, and the future that says how it went. The wait is ``end_call``'s.
+        self._transfer_to: str | None = None
+        self._transfer_outcome: asyncio.Future[CallTransferOutcome] | None = None
+        # ``on_close()``: each callback with the context it was registered in.
+        self._close_callbacks: list[tuple[Callable[[], Any], contextvars.Context]] = []
+        self._close_callbacks_due = False
+        self._close_callback_tasks: set[asyncio.Task[None]] = set()
         # commit_hangup is in flight (or teardown was requested and not retracted).
         # An acknowledgement during that window is not a new request.
         self._hangup_open = False
@@ -2007,8 +2026,10 @@ class VoiceSession:
         if (
             self._end_call_task is not None
             and not self._end_call_task.done()
-            and self._last_commit_at <= self._end_call_commit_at
+            and (self._last_commit_at <= self._end_call_commit_at or self._transfer_to is not None)
         ):
+            # Also while a transfer waits: the caller was told they are being put through, and a model
+            # that answers their "thanks, bye" with a hangup tool must not drop them instead.
             return
         # Resolve before touching the in-flight task so a bad override leaves it alone.
         grace = self.hangup_grace_secs if grace_secs is None else normalize_hangup_grace_secs(grace_secs)
@@ -2021,6 +2042,128 @@ class VoiceSession:
             self._end_call_when_heard(baseline, committed=self._hangup_committed),
             name="voice-end-call",
         )
+
+    @property
+    def can_transfer(self) -> bool:
+        """Whether :meth:`transfer_call` can hand this call to another number.
+
+        True on a phone call whose transport knows how (``call_transferer``):
+        the telephony bridge sets it when the provider's API credentials are
+        in the environment. False on a web call.
+        """
+        return self.call_transferer is not None and not self._closed
+
+    def transfer_call(self, to: str) -> asyncio.Future[CallTransferOutcome]:
+        """Hand the call to another number once what the agent is saying has been heard.
+
+        For an agent that passes the caller on to a person, from the tool it
+        calls with its "I'll put you through". As with :meth:`end_call`, the
+        turn that asked finishes and its audio plays out. Then the call's
+        transport transfers it and the session closes. A new request from the
+        caller before that ("wait, one more thing") keeps the call with the
+        agent. A short acknowledgement or a goodbye does not, and neither does
+        :meth:`end_call`: the caller was told they are being put through.
+
+        ``to`` is what the provider dials: a phone number in E.164
+        (``"+34931234567"``) or a ``sip:`` address.
+
+        Returns at once. The future says how it went: ``"transferred"``;
+        ``"failed"``, the provider refused (logged as ``call_transfer_failed``)
+        and the call stays with the agent, who has said it would be put
+        through, so say otherwise or hang up; ``"cancelled"``, the caller asked
+        for something else first; ``"closed"``, the call ended first. Calling
+        it again while one waits changes the number and returns the same future.
+
+        Raises ``RuntimeError`` on a call that cannot be transferred
+        (:attr:`can_transfer`), and ``ValueError`` for an empty ``to``.
+        """
+        target = to.strip() if isinstance(to, str) else ""
+        if not target:
+            raise ValueError("transfer_call needs the number or SIP address to transfer to")
+        if self._closed:
+            done: asyncio.Future[CallTransferOutcome] = asyncio.get_running_loop().create_future()
+            done.set_result("closed")
+            return done
+        if self.call_transferer is None:
+            raise RuntimeError(
+                "This call cannot be transferred: its transport set no call_transferer. The telephony bridge "
+                "sets one when the provider's API credentials are in the environment (TELNYX_API_KEY; "
+                "TWILIO_AUTH_TOKEN with the account SID)."
+            )
+        if self._transfer_outcome is not None and self._end_call_task is not None and not self._end_call_task.done():
+            self._transfer_to = target
+            return self._transfer_outcome
+        self._stop_end_call()
+        outcome: asyncio.Future[CallTransferOutcome] = asyncio.get_running_loop().create_future()
+        self._transfer_to, self._transfer_outcome = target, outcome
+        self._end_call_commit_at = self._last_commit_at
+        # No quiet window of its own: a hangup's is there to catch "wait" after a goodbye, and that retraction
+        # is read from the caller's words here (``committed``), not from any sound in a window.
+        self._end_call_grace_secs = 0.0
+        baseline = max(self._last_commit_at, self._last_partial_at if self._turn_is_event else 0.0)
+        logger.info("call_transfer_requested", to=target)
+        self._end_call_task = self._spawn_session_task(
+            self._end_call_when_heard(baseline, committed=True),
+            name="voice-transfer-call",
+        )
+        return outcome
+
+    def _settle_transfer(self, outcome: CallTransferOutcome) -> None:
+        """Answer the pending transfer's future, once, and forget the transfer."""
+        future, self._transfer_to, self._transfer_outcome = self._transfer_outcome, None, None
+        if future is not None and not future.done():
+            future.set_result(outcome)
+
+    async def _hang_up_or_transfer(self) -> None:
+        """What ``end_call`` / ``transfer_call`` asked for, now that it has been heard."""
+        to, transferer = self._transfer_to, self.call_transferer
+        if to is None:
+            await self.close()
+            return
+        try:
+            if transferer is None:
+                raise RuntimeError("the transport no longer has a call_transferer")
+            await transferer(to)
+        except Exception as e:  # noqa: BLE001 - a refused transfer must not end the call
+            logger.warning("call_transfer_failed", to=to, error=str(e), error_type=type(e).__name__)
+            self._settle_transfer("failed")
+            return
+        logger.info("call_transferred", to=to)
+        self._settle_transfer("transferred")
+        # The agent's part is over. A provider that keeps the stream open after the transfer would
+        # otherwise have it listening to, and answering, the caller and the person who took the call.
+        await self.close()
+
+    async def wait_until_heard(self) -> bool:
+        """Wait until what the agent is saying has been heard.
+
+        The turn in flight finishes and its audio plays out; an opener or an
+        idle prompt counts as well. True then. False when the caller spoke
+        or cut it off first, when the call closed, or when the audio had not
+        drained after ``END_CALL_MAX_WAIT_SECS``.
+
+        Await it from a task of your own. A tool is part of the turn this
+        waits for: awaited inside one it can only return False, at the cap.
+        To hang up or transfer afterwards use :meth:`end_call` and
+        :meth:`transfer_call`, which wait the same way.
+        """
+        commit_at, interrupts = self._last_commit_at, self._interrupt_serial
+        give_up_at = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
+
+        def cut() -> bool:
+            return self._closed or self._last_commit_at > commit_at or self._interrupt_serial != interrupts
+
+        while not cut():
+            if self._end_call_output_busy():
+                if time.monotonic() >= give_up_at:
+                    return False
+                await asyncio.sleep(0.05)
+                continue
+            # The tracker estimates playback; the last words may still be on the wire.
+            await asyncio.sleep(self.END_CALL_TAIL_SECS)
+            if not self._end_call_output_busy():
+                return not cut()
+        return False
 
     def _hangup_audio_pending(self) -> bool:
         """Goodbye audio still going out. Ignores the turn task.
@@ -2247,6 +2390,8 @@ class VoiceSession:
             and self._end_call_task is not asyncio.current_task()
         ):
             self._end_call_task.cancel()
+            # Replaced or torn down before it ran its course. (Its own ``finally`` no longer owns the slot.)
+            self._settle_transfer("closed" if self._closed else "cancelled")
         self._end_call_task = None
 
     def _event_stamp(self) -> float:
@@ -2438,8 +2583,8 @@ class VoiceSession:
                     continue
                 if busy:
                     # Goodbye never drained. Do not open a confirmation window over audio still going out.
-                    logger.info("end_call_hangup", timed_out=True)
-                    await self.close()
+                    logger.info("end_call_hangup", timed_out=True, transfer=self._transfer_to is not None)
+                    await self._hang_up_or_transfer()
                     return
                 if await self._end_call_grace(commit_at):
                     return
@@ -2454,12 +2599,14 @@ class VoiceSession:
                 if caller_spoke():
                     logger.info("end_call_cancelled", reason="caller_spoke")
                     return
-                logger.info("end_call_hangup", timed_out=False)
-                await self.close()
+                logger.info("end_call_hangup", timed_out=False, transfer=self._transfer_to is not None)
+                await self._hang_up_or_transfer()
                 return
         finally:
             if self._end_call_task is asyncio.current_task():
                 self._end_call_task = None
+                # A transfer that did not happen: the caller asked for something else, or the call ended.
+                self._settle_transfer("closed" if self._closed else "cancelled")
 
     async def prepare(self) -> None:
         """Open the STT and TTS connections ahead of :meth:`run`.
@@ -2651,6 +2798,60 @@ class VoiceSession:
         """Tag the reply instruction uses. ``set_language`` does not move this when ``reply_language`` is set."""
         return resolve_reply_language(self.reply_language, self.audio_input.language)
 
+    #: Fewest words an utterance needs for the language its transcriber reported to count. Measured on one or two
+    #: words: Nova-3 ``multi`` heard Telugu in «Okey.», Scribe Turkish in «Sí.» and English in «No, no.»; Nova-3,
+    #: Flux and Scribe all named the language of a full Spanish or English sentence.
+    SPOKEN_LANGUAGE_MIN_WORDS = 4
+
+    @property
+    def spoken_language(self) -> str | None:
+        """The language the caller is speaking, or ``None`` when nothing says.
+
+        What the application set with :meth:`set_spoken_language`. Without
+        that, what the transcriber reported for the caller's latest utterance
+        of ``SPOKEN_LANGUAGE_MIN_WORDS`` words or more (a shorter one keeps the
+        language the call had), and only a language among ``stt_languages``
+        when that list is set. A filler is said in it when the reply is not
+        pinned to one language: it picks among ``FillerConfig.phrases`` and
+        is the language a generated one is asked for.
+        """
+        return self._spoken_language_set or self._spoken_language_heard
+
+    def set_spoken_language(self, language: str | None) -> None:
+        """Say which language the caller is speaking.
+
+        For an application that tells the language itself from what the
+        caller says: its transcriber reports none (one set to a single
+        language never does), or it knows better. It stays until it is set
+        again. ``None`` goes back to what the transcriber reports. Neither the
+        transcriber's hint (:meth:`set_language`) nor the reply instruction
+        changes: with ``reply_language="follow"`` the model still answers in
+        the language of the caller's latest message.
+        """
+        raw = None if language is None else str(language)
+        if raw is not None and raw.strip() and normalize_language_tag(raw) is None:
+            raise ValueError(f"language must be a BCP-47 tag, got {language!r}")
+        tag = normalize_language_tag(raw)
+        if tag != self._spoken_language_set:
+            logger.info("spoken_language_set", language=tag)
+        self._spoken_language_set = tag
+
+    def _note_heard_language(self, language: str | None, text: str) -> None:
+        """Take the language a transcriber reported for a caller utterance, when it can be believed."""
+        tag = normalize_language_tag(language)
+        if tag is None or len(text.split()) < self.SPOKEN_LANGUAGE_MIN_WORDS:
+            return
+        expected = {language_key(item) for item in self.audio_input.languages or ()}
+        if expected and language_key(tag) not in expected:
+            return
+        if language_key(tag) != language_key(self._spoken_language_heard):
+            logger.info("spoken_language_heard", language=tag, previous=self._spoken_language_heard)
+        self._spoken_language_heard = tag
+
+    def _filler_language(self) -> str | None:
+        """The language a filler is said in: the reply's when it is pinned, else the caller's, else the hint's."""
+        return self.effective_reply_language() or self.spoken_language or self.audio_input.language
+
     def _arm_flux_eager_query(self) -> None:
         """Put ``eager_eot_threshold`` on a Flux socket when speculation or prediction needs it.
 
@@ -2685,6 +2886,49 @@ class VoiceSession:
         before answering; a closed session must never be put on the air."""
         return self._closed
 
+    #: Longest one :meth:`on_close` callback may take. Past it the callback is cancelled and the close goes on.
+    ON_CLOSE_TIMEOUT_SECS = 10.0
+
+    def on_close(self, callback: Callable[[], Any]) -> None:
+        """Call ``callback`` when the call is over, once.
+
+        However it ends: the caller hung up, the agent did (:meth:`end_call`),
+        the call was transferred, or the session failed or was torn down.
+        ``callback`` takes no arguments and may be async. It runs after the
+        session has stopped speaking, in the context it was registered in
+        (from a tool, that tool's run context). :meth:`close` waits for it, up
+        to ``ON_CLOSE_TIMEOUT_SECS``. An exception in one is logged
+        (``voice_on_close_failed``) and the others still run. Registered on
+        a call that is already over, it runs straight away.
+        """
+        if not callable(callback):
+            raise TypeError("on_close needs a callable")
+        self._close_callbacks.append((callback, contextvars.copy_context()))
+        if self._close_callbacks_due:
+            task = asyncio.get_running_loop().create_task(self._run_close_callbacks())
+            self._close_callback_tasks.add(task)
+            task.add_done_callback(self._close_callback_tasks.discard)
+
+    async def _run_close_callbacks(self) -> None:
+        """Run the ``on_close`` callbacks not run yet. Called by ``close()`` and by ``run()`` as it ends."""
+        # One at a time off the list: a second caller finds only what is left, and a cancelled one
+        # leaves the rest for it.
+        self._close_callbacks_due = True
+        while self._close_callbacks:
+            callback, context = self._close_callbacks.pop(0)
+            name = getattr(callback, "__qualname__", None) or type(callback).__name__
+            try:
+                result = context.run(callback)
+                if inspect.iscoroutine(result):
+                    # A task, so the coroutine's own awaits see the registration context too.
+                    result = asyncio.get_running_loop().create_task(result, context=context)
+                if inspect.isawaitable(result):
+                    await asyncio.wait_for(result, timeout=self.ON_CLOSE_TIMEOUT_SECS)
+            except TimeoutError:
+                logger.warning("voice_on_close_timeout", callback=name, timeout_secs=self.ON_CLOSE_TIMEOUT_SECS)
+            except Exception as e:  # noqa: BLE001 - an observer must not break the teardown
+                logger.warning("voice_on_close_failed", callback=name, error=str(e), exc_info=True)
+
     async def _close_prepared_adapters(self) -> None:
         for closer in (self.stt.close, self.tts.close):
             try:
@@ -2700,6 +2944,7 @@ class VoiceSession:
 
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         """Main loop.  Yields events until the session is closed or errors out."""
+        abandoned = False
         try:
             self.started_at = time.time()
             self._current_session_token = _current_voice_session.set(self)
@@ -2753,6 +2998,12 @@ class VoiceSession:
                         task.cancel()
                 await asyncio.gather(*background, return_exceptions=True)
 
+        except GeneratorExit:
+            # The consumer stopped reading (it left its loop, or failed in it). Clean up below, but there
+            # is nobody to yield the last events to: a yield here is "async generator ignored GeneratorExit",
+            # raised in the consumer over whatever made it stop.
+            abandoned = True
+            raise
         except Exception as e:
             logger.error("voice_session_error", error=str(e), exc_info=True)
             yield SessionError(message=str(e))
@@ -2760,6 +3011,8 @@ class VoiceSession:
             try:
                 await self._cleanup()
             finally:
+                # A run that ended without ``close()`` (it failed, or its consumer stopped reading) is over too.
+                await self._run_close_callbacks()
                 self._remove_usage_listeners()
                 if self._current_session_token is not None:
                     # A generator finalized outside its consumer runs in another
@@ -2774,11 +3027,12 @@ class VoiceSession:
                     self._prompt_cache_token = None
             # Closing adapters can report incomplete operations after the stop
             # sentinel. Deliver their accounting before the terminal event.
-            while not self._event_queue.empty():
+            while not abandoned and not self._event_queue.empty():
                 event = self._event_queue.get_nowait()
                 if isinstance(event, VoiceUsageEvent):
                     yield event
-            yield SessionEnded()
+            if not abandoned:
+                yield SessionEnded()
 
     async def interrupt(self, *, truncate_completed: bool = True) -> None:
         """Cancel TTS playback and the current agent turn.
@@ -2953,12 +3207,15 @@ class VoiceSession:
         # (cancelling the flow propagates to its speak task).
         if self._greeting_task is not None and not self._greeting_task.done():
             self._greeting_task.cancel()
-        await self.interrupt(truncate_completed=False)
-        await self._emit(None)  # sentinel stops the run() iterator
-        if self._prepared and self.started_at is None:
-            # ``prepare()`` opened the provider sockets but ``run()`` never
-            # started, so its ``finally`` (``_cleanup``) will never close them.
-            await self._close_prepared_adapters()
+        try:
+            await self.interrupt(truncate_completed=False)
+            await self._emit(None)  # sentinel stops the run() iterator
+            if self._prepared and self.started_at is None:
+                # ``prepare()`` opened the provider sockets but ``run()`` never
+                # started, so its ``finally`` (``_cleanup``) will never close them.
+                await self._close_prepared_adapters()
+        finally:
+            await self._run_close_callbacks()
 
     # -- Internal: first-reply warmup -----------------------------------------
 
@@ -3857,9 +4114,12 @@ class VoiceSession:
                     elif self._predict_during_speech:
                         await self._handle_provider_prediction(event)
                 elif event.type == "committed" and event.text.strip():
+                    self._note_heard_language(event.language, event.text)
                     await self._handle_provider_commit(event.text.strip())
                 elif event.type == "committed":
                     await self._on_empty_commit()
+                elif event.type == "language":
+                    self._note_heard_language(event.language, event.text)
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -6721,7 +6981,7 @@ class VoiceSession:
     def _filler_phrase_options(self) -> list[str]:
         phrases = self.filler.phrases if self.filler is not None else None
         if isinstance(phrases, dict):
-            return phrases.get(language_key(self.audio_input.language)) or phrases.get("*") or []
+            return phrases.get(language_key(self._filler_language())) or phrases.get("*") or []
         return phrases or []
 
     def _instant_filler_phrase(self) -> str | None:
@@ -6788,7 +7048,6 @@ class VoiceSession:
                 await self._followup_fillers(spoken, covered_tool=False)
                 return
             phrase = self._instant_filler_phrase()
-            ready_made = phrase is not None
             gen: asyncio.Task[str | None] | None = None
             if phrase is None and self._turn_tool_seen_at is None and self.filler.think_delay_secs is not None:
                 # A tool arriving during the thinking wait should start
@@ -6807,6 +7066,10 @@ class VoiceSession:
                 await self._until_first_filler_due()
                 if not self._filler_ok_to_speak():
                     return
+                # Chosen again now that it is due: an application that tells the caller's language itself
+                # (``set_spoken_language``) does so with the turn, which started while this waited.
+                phrase = self._instant_filler_phrase()
+                ready_made = phrase is not None
                 if phrase is None:
                     if gen is None:
                         gen = asyncio.create_task(self._generate_filler(self._turn_tool_name, spoken))
@@ -7036,8 +7299,11 @@ class VoiceSession:
         try:
             if not await self._await_continuous_quiet(window):
                 return False
+            # Chosen again after the wait, as in ``_filler_flow``.
+            phrase, ready_made = self._static_progress_phrase(spoken)
             if phrase is None:
-                assert gen is not None
+                if gen is None:
+                    gen = asyncio.create_task(self._generate_filler(self._turn_tool_name, spoken))
                 try:
                     async with asyncio.timeout(self.filler.timeout_secs):
                         phrase = await asyncio.shield(gen)
@@ -7139,7 +7405,9 @@ class VoiceSession:
             )
         out = await self._filler_agent(
             prompt=prompt,
-            system_prompt=with_reply_language(self.filler.system_prompt, self.effective_reply_language()),
+            system_prompt=with_reply_language(
+                self.filler.system_prompt, self.effective_reply_language() or self.spoken_language
+            ),
         ).collect()
         if out.status.code != "success" or out.output is None:
             logger.debug("filler_generation_failed", status=out.status.code, error=out.error)

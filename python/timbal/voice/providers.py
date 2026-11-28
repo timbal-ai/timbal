@@ -89,7 +89,7 @@ class SpeakerSegment(BaseModel):
 class TranscriptEvent(BaseModel):
     """Single event from an STT provider."""
 
-    type: Literal["partial", "committed", "error", "eager", "resumed", "diarized"]
+    type: Literal["partial", "committed", "error", "eager", "resumed", "diarized", "language"]
     text: str = ""
     confidence: float | None = None
     """Provider end-of-turn confidence, set on ``eager`` / ``resumed``.
@@ -111,6 +111,29 @@ class TranscriptEvent(BaseModel):
     turn: :class:`~timbal.voice.VoiceSession` ignores it. Read it from
     :meth:`SpeechToText.events` in a custom pipeline.
     """
+    language: str | None = None
+    """The language the provider heard a ``committed`` utterance in, when it says.
+
+    Deepgram Nova-3 with ``language="multi"`` and Flux multilingual report one
+    per utterance; ElevenLabs Scribe does with ``include_language_detection``
+    in ``stt_extra``. ``None`` everywhere else. It is the provider's guess:
+    see :attr:`~timbal.voice.VoiceSession.spoken_language` for when the
+    session believes it.
+
+    A ``language`` event carries the same thing for the ``committed`` event
+    before it, repeating its text, when the provider names the language only
+    after the commit (Scribe with ``include_timestamps`` as well). It is never
+    a turn.
+    """
+
+
+def reported_language(value: Any) -> str | None:
+    """What a provider reported as an utterance's language: a tag, or the first of a list. None when it said nothing."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
 
 
 class SpeechToText(VoiceUsageEmitter, ABC):

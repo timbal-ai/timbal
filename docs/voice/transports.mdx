@@ -107,6 +107,13 @@ The webhook returns TwiML or TeXML connecting a bidirectional media stream to `/
 
 Set `TWILIO_AUTH_TOKEN` or `TELNYX_PUBLIC_KEY` to enable incoming-webhook signature verification. Without these variables, the webhook accepts requests with a development-mode warning. Configure your reverse proxy so the externally visible URL used by the carrier is the URL validated by the webhook.
 
+To let the agent transfer a call ([`session.transfer_call`](/voice/tools#transfer-the-call-to-a-person)), give the server the carrier's API credentials:
+
+- Twilio: `TWILIO_AUTH_TOKEN`. The account is the one the call arrived on (`TWILIO_ACCOUNT_SID` is read only when the stream does not name it).
+- Telnyx: `TELNYX_API_KEY`. The account is the one the webhook named (`TELNYX_ACCOUNT_SID` is read only for a stream started without the webhook above).
+
+Both carriers transfer the same way: the call's instructions are replaced with a `<Dial>` through the carrier's REST API, which ends the media stream. On Telnyx that is the TeXML API, not Call Control's `actions/transfer`: Telnyx advises against Call Control commands on a call that TeXML is running. A host that embeds the bridge with `serve_media_ws` and has its own credentials sets `session.call_transferer` in `on_session_built`.
+
 The routes answer and bridge calls. Placing an outbound call requires your carrier integration to originate it and connect the media stream. A host that knows the call direction can select `outbound_greeting`; setting the greeting alone does not originate a call.
 
 ## Approval and input requests

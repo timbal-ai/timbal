@@ -36,6 +36,7 @@ from .providers import (
     TextToSpeech,
     TranscriptEvent,
     TTSStream,
+    reported_language,
 )
 
 logger = structlog.get_logger("timbal.voice.elevenlabs")
@@ -240,6 +241,8 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         # Text of a ``committed_transcript`` whose timestamped twin has not
         # arrived yet. See ``_receive_loop``.
         self._untimed_commit: str | None = None
+        # Text of a timestamped commit passed on before its plain twin. Same reason, other order.
+        self._timed_commit: str | None = None
         # ``turn_commit_threshold``: see ``_maybe_commit_on_turn_probability``.
         self._turn_commit_threshold: float | None = None
         self._turn_commit_partials = 1
@@ -425,6 +428,8 @@ class ElevenLabsRealtimeSTT(SpeechToText):
                 elif mt == "partial_transcript":
                     text = msg.get("text", "")
                     if text:
+                        # New speech: a plain commit after it is not the twin of an earlier one.
+                        self._timed_commit = None
                         # Scribe v3 Live scores every partial. v2 sends no score.
                         probability = msg.get("turn_probability")
                         await self._queue.put(
@@ -439,20 +444,30 @@ class ElevenLabsRealtimeSTT(SpeechToText):
 
                 elif mt == "committed_transcript":
                     text = (msg.get("text") or "").strip()
-                    self._untimed_commit = text or None
+                    already_committed, self._timed_commit = self._timed_commit, None
+                    is_twin = bool(text) and text == already_committed
+                    self._untimed_commit = None if is_twin else (text or None)
                     self._committed_at = time.monotonic()
                     self._turn_commit_hits, self._turn_commit_text, self._turn_commit_sent = 0, "", False
-                    if text:
+                    if text and not is_twin:
                         await self._queue.put(TranscriptEvent(type="committed", text=text))
 
                 elif mt == "committed_transcript_with_timestamps":
                     # With ``include_timestamps`` the server sends the plain
                     # commit first and this one right after, same words.
-                    # Passing both on committed every utterance twice.
+                    # Passing both on committed every utterance twice. With
+                    # ``include_language_detection`` alone the order is the
+                    # other one (measured on scribe_v2_realtime): this message
+                    # first, with ``language_code``, then the plain commit.
                     text = (msg.get("text") or "").strip()
+                    language = reported_language(msg.get("language_code"))
                     already_committed, self._untimed_commit = self._untimed_commit, None
                     if text and text != already_committed:
-                        await self._queue.put(TranscriptEvent(type="committed", text=text))
+                        self._timed_commit = text
+                        await self._queue.put(TranscriptEvent(type="committed", text=text, language=language))
+                    elif text and language:
+                        # Both options on: the language is named after the commit went out.
+                        await self._queue.put(TranscriptEvent(type="language", text=text, language=language))
 
                 elif mt == "diarized_transcript":
                     # Follows the commit it labels (``diarize=true``, v3 Live).

@@ -26,6 +26,13 @@ Signature validation: set ``TWILIO_AUTH_TOKEN`` (HMAC-SHA1 of the webhook URL
 + params) and/or ``TELNYX_PUBLIC_KEY`` (Ed25519 over ``timestamp|body``) to
 enforce webhook authenticity; without them webhooks are accepted with a
 warning (dev mode).
+
+Transfers: with the provider's API credentials in the environment
+(``TWILIO_AUTH_TOKEN``; ``TELNYX_API_KEY``) the bridge gives the session a
+``call_transferer``, so ``session.transfer_call(number)`` hands the call on.
+Both calls are answered with ``<Connect><Stream>``, and both providers leave
+that the same way: the call's instructions are replaced with a ``<Dial>``
+through their REST API, which ends the stream.
 """
 
 from __future__ import annotations
@@ -41,9 +48,10 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from typing import Any
-from urllib.parse import parse_qsl
-from xml.sax.saxutils import quoteattr
+from urllib.parse import parse_qsl, quote
+from xml.sax.saxutils import escape, quoteattr
 
+import httpx
 import structlog
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 
@@ -106,11 +114,43 @@ def _identity_param_keys() -> tuple[str, ...]:
     keys = tuple(k.strip() for k in raw.split(",") if k.strip())
     return keys or _DEFAULT_IDENTITY_PARAM_KEYS
 
+
+# Start-frame parameters the bridge reads for itself (which account a transfer is asked of). Not the call's
+# identity: they stay out of ``session.call_context``.
+_BRIDGE_PARAM_KEYS = ("account_sid",)
+
 _ULAW_ENCODINGS = {"audio/x-mulaw", "pcmu"}
 
 # Telnyx rejects RTP media chunks under 20ms; Twilio takes any size. Batch
 # the downlink to >=20ms for both (fewer frames is also just cheaper).
 _MIN_MEDIA_BYTES = 160  # 20ms of mulaw @ 8kHz
+
+
+# ---------------------------------------------------------------------------
+# Transfers (replace the call's instructions with a <Dial>)
+# ---------------------------------------------------------------------------
+
+_TRANSFER_TIMEOUT_SECS = 10.0
+
+
+def _http_client() -> httpx.AsyncClient:
+    """The client a transfer is sent with: one per transfer, there is at most one in a call."""
+    return httpx.AsyncClient(timeout=_TRANSFER_TIMEOUT_SECS)
+
+
+def _dial_xml(to: str) -> str:
+    """TwiML/TeXML that dials ``to``: a phone number, or a ``sip:`` address."""
+    target = to.strip()
+    noun = "Sip" if target.lower().startswith(("sip:", "sips:")) else "Number"
+    return f'<?xml version="1.0" encoding="UTF-8"?><Response><Dial><{noun}>{escape(target)}</{noun}></Dial></Response>'
+
+
+async def _replace_call_instructions(provider: str, url: str, **request: Any) -> None:
+    """POST new instructions for a live call. Raises when the provider does not take them."""
+    async with _http_client() as client:
+        response = await client.post(url, **request)
+    if not response.is_success:
+        raise RuntimeError(f"{provider} refused the transfer: HTTP {response.status_code} {response.text[:300]}")
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +172,7 @@ class TwilioDialect:
         custom = start.get("customParameters") or {}
         return {
             "call_id": start.get("callSid"),
+            "account_id": start.get("accountSid"),
             # Twilio's start frame has no From/To; our TwiML forwards them
             # as custom parameters (see twilio_incoming).
             "from": custom.get("from"),
@@ -140,6 +181,25 @@ class TwilioDialect:
             "encoding": media_format.get("encoding"),
             "sample_rate": media_format.get("sampleRate"),
         }
+
+    def transferer(self, info: dict[str, Any]) -> Callable[[str], Awaitable[None]] | None:
+        """How to hand the call of ``info`` (:meth:`start_info`) to another number, or ``None``.
+
+        Needs ``TWILIO_AUTH_TOKEN``; the account is the start frame's (else
+        ``TWILIO_ACCOUNT_SID``). The transfer updates the call with
+        ``<Dial>`` TwiML, which is how a call leaves ``<Connect><Stream>``.
+        """
+        account = info.get("account_id") or os.environ.get("TWILIO_ACCOUNT_SID")
+        token = os.environ.get("TWILIO_AUTH_TOKEN")
+        call = info.get("call_id")
+        if not (account and token and call):
+            return None
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{quote(account, safe='')}/Calls/{quote(call, safe='')}.json"
+
+        async def transfer(to: str) -> None:
+            await _replace_call_instructions("Twilio", url, data={"Twiml": _dial_xml(to)}, auth=(account, token))
+
+        return transfer
 
     def media_bytes(self, frame: dict) -> bytes | None:
         media = frame.get("media") or {}
@@ -187,6 +247,33 @@ class TelnyxDialect:
             "encoding": media_format.get("encoding"),
             "sample_rate": media_format.get("sample_rate"),
         }
+
+    def transferer(self, info: dict[str, Any]) -> Callable[[str], Awaitable[None]] | None:
+        """How to hand the call of ``info`` (:meth:`start_info`) to another number, or ``None``.
+
+        Needs ``TELNYX_API_KEY``. The call was answered with TeXML, so it is
+        transferred the TeXML way, an update of the call with ``<Dial>``:
+        Telnyx warns against Call Control commands (``actions/transfer``) on
+        a call TeXML is running. That API names the call by the ``CallSid``
+        and ``AccountSid`` of the webhook, which ``telnyx_incoming`` passes
+        on as stream parameters. For a stream started some other way: the
+        call control id, and ``TELNYX_ACCOUNT_SID``.
+        """
+        custom = info.get("custom") or {}
+        account = custom.get("account_sid") or os.environ.get("TELNYX_ACCOUNT_SID")
+        key = os.environ.get("TELNYX_API_KEY")
+        call = custom.get("call_sid") or info.get("call_id")
+        if not (account and key and call):
+            return None
+        # The ``:`` of a ``v3:…`` id stays as Telnyx writes it in its own URIs.
+        url = f"https://api.telnyx.com/v2/texml/Accounts/{quote(account, safe='')}/Calls/{quote(call, safe=':')}"
+
+        async def transfer(to: str) -> None:
+            await _replace_call_instructions(
+                "Telnyx", url, data={"Texml": _dial_xml(to)}, headers={"Authorization": f"Bearer {key}"}
+            )
+
+        return transfer
 
     def media_bytes(self, frame: dict) -> bytes | None:
         media = frame.get("media") or {}
@@ -285,7 +372,7 @@ def _call_context_from_start(info: dict[str, Any], custom: dict[str, Any]) -> di
     """
     ctx: dict[str, str] = {}
     for k, v in custom.items():
-        if k in _CONFIG_PARAM_KEYS:
+        if k in _CONFIG_PARAM_KEYS or k in _BRIDGE_PARAM_KEYS:
             continue
         if isinstance(v, str) and v:
             ctx[k] = v
@@ -387,7 +474,13 @@ async def telnyx_incoming(request: Request) -> Response:
     logger.info("telnyx_incoming_call", call_sid=params.get("CallSid"), from_=params.get("From"), to=params.get("To"))
     xml = _stream_xml(
         _stream_ws_url(request, "/voice/telnyx/stream"),
-        _identity_params(request.query_params),
+        {
+            # What the TeXML REST API calls this call by: a transfer needs both, and the stream's start
+            # frame carries neither (it has the call control id and the user id).
+            "call_sid": params.get("CallSid", ""),
+            "account_sid": params.get("AccountSid", ""),
+            **_identity_params(request.query_params),
+        },
         telnyx=True,
     )
     return Response(content=xml, media_type="application/xml")
@@ -599,6 +692,10 @@ async def serve_media_ws(
         playback_tracker=tracker,
         call_context=call_context,
     )
+    # Before the hook: a host with its own credentials (or a Call Control application) sets its own there.
+    make_transferer = getattr(dialect, "transferer", None)
+    if make_transferer is not None:
+        session.call_transferer = make_transferer(info)
     meta = {
         "transport": dialect.name,
         "call_id": info.get("call_id"),

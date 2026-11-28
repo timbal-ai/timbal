@@ -269,8 +269,11 @@ class FillerConfig(BaseModel):
     exactly. A dict is keyed by the call's language (``"es"``, ``"en"``;
     region dropped on both sides, so ``"es-ES"`` is ``"es"``) with ``"*"``
     serving any other; a language with no entry falls back to generation.
-    The language is ``AudioInputConfig.language`` as configured, not one the
-    STT detects: with it unset (auto-detect) only ``"*"`` is ever used.
+    The language is the one the reply is pinned to (``reply_language``, else
+    ``language``). With ``reply_language="follow"``, or neither set, it is
+    the one the caller speaks (``VoiceSession.spoken_language``: what the
+    application set, else what the transcriber reported), and ``language``
+    until one is known.
     Follow-ups are always generated, with the request in hand, so they can
     say what the assistant is working on. The line said on the previous turn
     is avoided when there is another to choose."""

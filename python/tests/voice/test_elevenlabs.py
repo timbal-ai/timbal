@@ -189,10 +189,38 @@ class TestScribeRealtimeMessages:
                 {**twin, "text": "Only timestamps.", "words": []},
             ],
         )
-        assert [(e.type, e.text) for e in events] == [
-            ("committed", "Yes."),
-            ("committed", "Yes."),
-            ("committed", "Only timestamps."),
+        assert [(e.type, e.text, e.language) for e in events] == [
+            ("committed", "Yes.", None),
+            # The language named after the commit: its own event, never a second commit.
+            ("language", "Yes.", "en"),
+            ("committed", "Yes.", None),
+            ("language", "Yes.", "en"),
+            ("committed", "Only timestamps.", "en"),
+        ]
+
+    async def test_language_detection_sends_the_timestamped_commit_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``include_language_detection`` alone, as ``scribe_v2_realtime`` sent it on 2026-11-28: the timestamped
+        message first, with ``language_code``, then the plain commit with the same words. One commit."""
+        timed = {"message_type": "committed_transcript_with_timestamps", "language_code": "es", "words": []}
+        events = await _transcripts(
+            monkeypatch,
+            [
+                {**timed, "text": "Hola, buenos días."},
+                {"message_type": "committed_transcript", "text": "Hola, buenos días."},
+                # Said again: a commit of its own.
+                {**timed, "text": "Hola, buenos días."},
+                {"message_type": "committed_transcript", "text": "Hola, buenos días."},
+                # New speech in between: the plain commit is not the twin of the one before.
+                {**timed, "text": "Sí."},
+                {"message_type": "partial_transcript", "text": "Sí"},
+                {"message_type": "committed_transcript", "text": "Sí."},
+            ],
+        )
+        assert [(e.type, e.text, e.language) for e in events if e.type != "partial"] == [
+            ("committed", "Hola, buenos días.", "es"),
+            ("committed", "Hola, buenos días.", "es"),
+            ("committed", "Sí.", "es"),
+            ("committed", "Sí.", None),
         ]
 
     async def test_diarized_transcript_is_grouped_by_speaker_and_is_not_a_commit(

@@ -288,4 +288,92 @@ async def end_call() -> str:
 
 If the goodbye never finishes playing, the call ends after 20 seconds, without an extra wait. Calling `end_call` again changes nothing. For a bare `end_call()`, speech that cancels the close is any new transcript, or a partial that is not an echo of the goodbye, in whatever language the caller is speaking. After `commit_hangup()` returned True, a late acknowledgement or another goodbye does not cancel it; a real follow-up ("wait", a new request) still does. Audible speech counts too when local VAD endpointing is on. The assistant can call the tool again on a later turn. `session.end_call(grace_secs=1.5)` sets the window for that one call; `grace_secs=0` hangs up as soon as the goodbye has been heard, even when the session configured a window. Allowed values are from 0 to 30 seconds. A client hello may set `hangup_grace_secs` the same way it sets `tool_beat_secs`. Unset is the default. `commit_hangup()` still speaks a farewell when the reply has not, then calls `end_call()`. That is not the same as calling `end_call()` alone.
 
+## Transfer the call to a person
+
+On a phone call, `session.transfer_call(number)` hands the caller to another number. Call it from the tool the model uses with its "I'll put you through", in the same reply. It returns at once. The session lets that reply finish and its audio play out, asks the carrier to dial, and closes: the agent's part of the call is over.
+
+```python agent.py
+from timbal import Agent, Tool
+from timbal.voice import current_voice_session
+
+SUPPORT_LINE = "+34930000000"
+
+
+async def transfer_to_a_person() -> str:
+    """Put the caller through to a person. Say you are doing so in this same reply."""
+    session = current_voice_session()
+    if session is None or not session.can_transfer:
+        return "This call cannot be transferred. Offer to take a message instead."
+    session.transfer_call(SUPPORT_LINE)
+    return "The call is transferred once you have said so. Say it in one short sentence."
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-6.1-terra",
+    system_prompt="If the caller asks for a person, call transfer_to_a_person.",
+    tools=[Tool(handler=transfer_to_a_person)],
+)
+```
+
+`number` is what the carrier dials: a phone number in E.164, or a `sip:` address. `session.can_transfer` is true when the call's transport knows how to transfer it. The Twilio and Telnyx routes do when the carrier's API credentials are set (see [Transports](/voice/transports#twilio-and-telnyx)); a browser call never does, and there `transfer_call` raises `RuntimeError`.
+
+A new request from the caller before the transfer keeps the call with the agent ("wait, one more thing"). A short acknowledgement or a goodbye does not ("okay, thanks"), and neither does a later `end_call()`: the caller was told they are being put through. Calling `transfer_call` again while one waits changes the number.
+
+`transfer_call` returns a future with what became of it: `"transferred"`, `"cancelled"` (the caller asked for something else first), `"closed"` (the call ended first) or `"failed"` (the carrier refused; logged as `call_transfer_failed`). After a failure the call is still with the agent, which has said it would transfer it. Tell it so:
+
+```python agent.py
+import asyncio
+
+watching: set[asyncio.Task] = set()
+
+
+async def tell_if_it_failed(session, outcome) -> None:
+    if await outcome == "failed":
+        await session.notify("The transfer did not go through. Apologise and offer to take a message.")
+
+
+async def transfer_to_a_person() -> str:
+    """Put the caller through to a person. Say you are doing so in this same reply."""
+    session = current_voice_session()
+    if session is None or not session.can_transfer:
+        return "This call cannot be transferred. Offer to take a message instead."
+    task = asyncio.create_task(tell_if_it_failed(session, session.transfer_call(SUPPORT_LINE)))
+    watching.add(task)
+    task.add_done_callback(watching.discard)
+    return "The call is transferred once you have said so. Say it in one short sentence."
+```
+
+The carrier decides what the person who answers sees and what happens if nobody does. The transfer is a plain dial with the carrier's default caller ID and no fallback: if the number does not answer, the carrier ends the call. For anything else (a whisper, a queue, a callback when the dial fails) set your own `session.call_transferer`, an async function that takes the number and raises when the transfer is refused.
+
+## Run code when the call is over
+
+`session.on_close(callback)` runs `callback` once when the call ends, however it ends: the caller hung up, the agent did, the call was transferred, or the session failed. Use it to save what the call collected. The callback takes no arguments and may be async. It runs in the context it was registered in, so one registered from a tool can still read that run's context.
+
+```python agent.py
+from timbal.voice import current_voice_session
+
+orders: dict[str, list[str]] = {}
+
+
+async def save_order(call_id: str) -> None:
+    items = orders.pop(call_id, [])
+    ...  # write them wherever orders go
+
+
+async def take_order(item: str) -> str:
+    """Add an item to the caller's order."""
+    session = current_voice_session()
+    call_id = session.session_id
+    if call_id not in orders:
+        orders[call_id] = []
+        session.on_close(lambda: save_order(call_id))
+    orders[call_id].append(item)
+    return f"Added {item}."
+```
+
+`close()` waits for each callback for up to 10 seconds (`VoiceSession.ON_CLOSE_TIMEOUT_SECS`). A callback that raises is logged as `voice_on_close_failed` and the others still run. Registered on a call that is already over, the callback runs straight away.
+
+`await session.wait_until_heard()` is for a task of your own that must act after the agent's current reply has been heard: it returns true once the turn has finished and its audio has played out, and false if the caller spoke first or the call ended. Do not await it inside a tool. A tool is part of the turn it waits for, so there it can only give up after 20 seconds. To hang up or transfer after the reply, `end_call()` and `transfer_call()` already wait this way.
+
 Continue to [Thinking sounds](/voice/thinking-sounds).

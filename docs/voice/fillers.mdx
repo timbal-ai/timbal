@@ -95,9 +95,29 @@ agent.voice_config["filler"] = {
 
 The line said on the previous turn is avoided when there is another to choose. A language with no entry falls back to a generated first line. Regions are dropped on both sides, so an `"es-ES"` key serves a call configured as `"es"` and the other way round.
 
-The language is the session's configured `language`, not one the speech-to-text provider detects. With `language` unset (auto-detect), only the `"*"` lines are used, so set it per call when callers speak different languages.
+The language is the one the reply is pinned to: `reply_language`, else `language`. When neither pins it (`reply_language="follow"`, or both unset), it is the language the caller is speaking, and `language` until one is known.
 
-A generated filler uses the same reply-language policy as the conversation. A configured `language` pins the phrase. With `language` unset, the phrase follows the user's latest substantive message. See [Reply language](/voice/configuration#reply-language).
+A generated filler uses the same reply-language policy as the conversation. A pinned language pins the phrase. Otherwise the phrase is asked for in the language the caller is speaking, and follows the user's latest substantive message until one is known. See [Reply language](/voice/configuration#reply-language).
+
+### Callers in more than one language
+
+`session.spoken_language` is the language the caller is speaking. It comes from one of two places:
+
+- **The transcriber**, when it names the language of each utterance: Deepgram Nova-3 with `language: "multi"`, Deepgram Flux multilingual, and ElevenLabs Scribe with `stt_extra: {"include_language_detection": True}`. An utterance needs four words to count, and a shorter one keeps the language the call had: on one or two words the transcribers get it wrong (measured: Telugu for "Okey.", Turkish for "Sí."). With `stt_languages` set, a language outside the list is ignored.
+- **Your application**, with `session.set_spoken_language("es")`. Use it when the transcriber is set to one language (it then reports none) or when you tell the language better from what the caller says. It wins over the transcriber and stays until you set it again; `None` hands it back.
+
+```python
+from timbal.voice import current_voice_session
+
+
+def note_language(text: str) -> None:
+    """Call it with the turn: from the system prompt callable, or a tool."""
+    session = current_voice_session()
+    if session is not None:
+        session.set_spoken_language(my_detector(text))  # "es" | "ca"
+```
+
+Neither moves the transcriber's hint or the reply instruction: with `reply_language="follow"` the model still answers in the language of the caller's latest message. The ready-made line is chosen when it is due, not when the turn starts, so a language set during the turn is the one spoken.
 
 Only the session agent's own reply is spoken. An agent it calls as a tool streams its text through the same run, and that text — working notes, a document being drafted — is never read aloud.
 

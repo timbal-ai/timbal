@@ -37,6 +37,7 @@ from .providers import (
     AudioInputConfig,
     SpeechToText,
     TranscriptEvent,
+    reported_language,
 )
 
 logger = structlog.get_logger("timbal.voice.deepgram")
@@ -706,7 +707,9 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
                     turn_index=msg.get("turn_index"),
                 )
                 if text:
-                    await self._queue.put(TranscriptEvent(type="committed", text=text))
+                    # ``languages`` is on every TurnInfo of flux-general-multi (English-only Flux sends none).
+                    language = reported_language(msg.get("languages"))
+                    await self._queue.put(TranscriptEvent(type="committed", text=text, language=language))
             elif event in ("Update", "StartOfTurn"):
                 if text:
                     await self._queue.put(TranscriptEvent(type="partial", text=text))
@@ -772,6 +775,9 @@ class DeepgramNovaSTT(_DeepgramSTTBase):
     def __init__(self, api_key: str | SecretStr | None = None) -> None:
         super().__init__(api_key)
         self._segments: list[str] = []
+        # ``(words, language)`` of the longest final segment of the utterance being put together. Nova reports
+        # a language per segment with ``language="multi"``, and a longer segment is the better guess.
+        self._segment_language: tuple[int, str] | None = None
         self._keepalive: asyncio.Task[None] | None = None
 
     def _build_uri(self, config: AudioInputConfig) -> str:
@@ -825,6 +831,12 @@ class DeepgramNovaSTT(_DeepgramSTTBase):
         except asyncio.CancelledError:
             raise
 
+    def _take_utterance(self) -> TranscriptEvent:
+        utterance = " ".join(self._segments)
+        language = self._segment_language[1] if self._segment_language else None
+        self._segments, self._segment_language = [], None
+        return TranscriptEvent(type="committed", text=utterance, language=language)
+
     async def commit(self) -> None:
         """Force-finalize whatever Deepgram is holding (VAD endpointing path)."""
         await self._flush_audio()
@@ -844,19 +856,19 @@ class DeepgramNovaSTT(_DeepgramSTTBase):
                 return
             if text:
                 self._segments.append(text)
+                language = reported_language(alternatives[0].get("languages"))
+                words = len(text.split())
+                if language and (self._segment_language is None or words > self._segment_language[0]):
+                    self._segment_language = (words, language)
             # speech_final only rides on is_final frames; a Finalize response
             # (from_finalize) also arrives as is_final and must flush too.
             if (speech_final or msg.get("from_finalize")) and self._segments:
-                utterance = " ".join(self._segments)
-                self._segments = []
-                await self._queue.put(TranscriptEvent(type="committed", text=utterance))
+                await self._queue.put(self._take_utterance())
             return
         if mt == "UtteranceEnd":
             # Only reachable when the caller opted into utterance_end_ms.
             if self._segments:
-                utterance = " ".join(self._segments)
-                self._segments = []
-                await self._queue.put(TranscriptEvent(type="committed", text=utterance))
+                await self._queue.put(self._take_utterance())
             return
         if mt == "Metadata":
             logger.info("dg_nova_session_started", request_id=msg.get("request_id"))
