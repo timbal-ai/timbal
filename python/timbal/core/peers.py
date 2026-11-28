@@ -158,6 +158,27 @@ def _receipt(body: Any) -> dict[str, Any] | None:
     return receipt
 
 
+def _queued(body: Any, envelope: dict[str, Any]) -> dict[str, Any] | None:
+    """What the route answers for a message it queued for the worker that serves the session (``{"queued":
+    "inbox", "inbox_id"}``): sent, and waiting there (``state="queued"``), with no event yet. Only the inbox id
+    comes from the answer (an id, as in :func:`_receipt`); the rest is the sender's own envelope. None: not that."""
+    if not isinstance(body, dict) or body.get("queued") != "inbox":
+        return None
+    inbox_id = body.get("inbox_id")
+    if not isinstance(inbox_id, str) or not _MESSAGE_ID.fullmatch(inbox_id):
+        return None
+    message_id = envelope.get("message_id")
+    return {
+        "event_id": None,
+        "key": None,
+        "state": "queued",
+        "run_id": None,
+        "message_id": message_id if isinstance(message_id, str) else None,
+        "inbox_id": inbox_id,
+        "duplicate": False,
+    }
+
+
 def _not_sent() -> tuple[type[BaseException], ...]:
     import httpx
 
@@ -222,7 +243,7 @@ class RemotePeer:
             raise PeerRejected("unconfirmed", _UNCONFIRMED)
         if not response.is_success:
             raise PeerRejected("unreachable", f"The agent's server answered {response.status_code}.")
-        receipt = _receipt(body)
+        receipt = _receipt(body) or _queued(body, envelope)
         if receipt is None:
             # Taken by something, and nothing in its answer says a message was queued, nor which.
             raise PeerRejected("unconfirmed", _UNCONFIRMED)

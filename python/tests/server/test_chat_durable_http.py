@@ -139,7 +139,9 @@ def test_a_session_another_process_serves_is_a_409(client):
 
 
 def test_a_session_this_process_lost_answers_409_then_comes_back(client):
-    """Losing the lease closes the session here: requests must not keep finding the closed object (404)."""
+    """Losing the lease closes the session here: requests must not keep finding the closed object (404). What
+    the session takes from another process meanwhile (a message) is queued for the one that serves it, and
+    applied by whichever process serves it next."""
     session_id = client.post("/chat/sessions", json={}).json()["session_id"]
     store = client.app.state.chat_store
     session = client.app.state.chat_sessions[session_id]
@@ -152,10 +154,22 @@ def test_a_session_this_process_lost_answers_409_then_comes_back(client):
     client.portal.call(lose)
     response = client.get(f"/chat/sessions/{session_id}")
     assert response.status_code == 409, response.text
-    assert client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi"}).status_code == 409
+    queued = client.post(f"/chat/sessions/{session_id}/messages", json={"text": "hi"})
+    assert queued.status_code == 202 and queued.json()["queued"] == "inbox", queued.text
     client.portal.call(store.release_lease, session_id, "elsewhere:1:x")  # the other process let it go
     assert client.get(f"/chat/sessions/{session_id}").status_code == 200
-    assert client.app.state.chat_sessions[session_id] is not session
+    restored = client.app.state.chat_sessions[session_id]
+    assert restored is not session
+
+    async def applied():
+        for _ in range(500):
+            log = restored.log.peek(restored.log.forgotten_through)[0]
+            if any(isinstance(e, dict) and e.get("inbox_id") == queued.json()["inbox_id"] for e in log):
+                return True
+            await asyncio.sleep(0.01)
+        return False
+
+    assert client.portal.call(applied), "the queued message was never applied"
 
 
 def test_a_session_still_closing_is_restored_only_once_its_close_is_done(client, monkeypatch):

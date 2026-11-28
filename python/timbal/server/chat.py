@@ -7,6 +7,10 @@ sessions go in the same file) or ``TIMBAL_CHAT_STORE`` names a store
 does not hold is restored on first use, those with work waiting at startup,
 and shutdown keeps them for the next process. Otherwise a request for a
 session another worker (or an earlier process) held is a 404.
+
+With several workers on one store, a message, wake or agent message for a
+session another worker serves is queued in the store's inbox for that worker
+(``202 {"queued": "inbox", "inbox_id"}``) instead of refused with a 409.
 """
 
 import asyncio
@@ -23,9 +27,16 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from ..core.chat_session import SEND_MODES, ChatSession
+from ..core.chat_session import SEND_MODES, ChatSession, check_agent_message, check_wake
 from ..state.background import BACKGROUND_LOG_GAPPED
-from ..state.chat_store import ChatSessionStore, SessionLeased, SessionNotStored, SqliteChatSessionStore
+from ..state.chat_store import (
+    MAX_INBOX_KEY_CHARS,
+    ChatSessionStore,
+    InboxFull,
+    SessionLeased,
+    SessionNotStored,
+    SqliteChatSessionStore,
+)
 from ..utils import json_response_carries
 
 logger = structlog.get_logger("timbal.server.chat")
@@ -200,13 +211,74 @@ async def _restore(request: Request, session_id: str) -> ChatSession | None:
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except SessionLeased as e:
-        raise HTTPException(status_code=409, detail=f"Chat session {session_id!r} is served by another process.") from e
+        raise _HeldElsewhere(session_id) from e
     except Exception as e:
         # The store or the run's trace could not be read: nothing was taken over, the stored state stays.
         logger.error("chat_session_restore_failed", session_id=session_id, error=str(e))
         raise HTTPException(
             status_code=503, detail=f"Chat session {session_id!r} could not be restored: {e}", headers=_RETRY
         ) from e
+
+
+class _HeldElsewhere(HTTPException):
+    """Another live process holds the session's lease: a 409, unless the route queues the request for it
+    (:func:`_queue`)."""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(status_code=409, detail=f"Chat session {session_id!r} is served by another process.")
+
+
+def _idempotency_key(request: Request) -> str | None:
+    """The request's ``Idempotency-Key`` header: a queued post repeated with it is the same item."""
+    key = request.headers.get("idempotency-key")
+    if key is None:
+        return None
+    if not 1 <= len(key) <= MAX_INBOX_KEY_CHARS:
+        raise HTTPException(status_code=400, detail=f"Idempotency-Key must be 1 to {MAX_INBOX_KEY_CHARS} characters.")
+    return key
+
+
+async def _queue(
+    request: Request,
+    session_id: str,
+    held: _HeldElsewhere,
+    kind: str,
+    item: dict[str, Any],
+    *,
+    key: str | None = None,
+) -> JSONResponse:
+    """``item`` (checked as the route checks it) queued in the store's inbox for the process that serves the
+    session: ``202 {"queued": "inbox", "inbox_id", "session_id"}``. That process applies it within moments and
+    stores it before it is acked. A store without an inbox: the ``409`` as before.
+
+    ``key`` (the ``Idempotency-Key`` header unless the route derives one): a repeat is the same item, for a day
+    after its ack too. A full inbox is a ``429``. A store that does not answer, or fails: ``503``, with
+    ``Retry-After`` only when a retry cannot queue it twice (it carries a key)."""
+    store = _store(request)
+    if store is None or not store.supports_inbox:
+        raise held
+    timeout = _store_timeout()
+    try:
+        inbox_id = await asyncio.wait_for(store.post_inbox(session_id, kind, item, idempotency_key=key), timeout)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=f"No chat session {session_id!r}.") from e
+    except InboxFull as e:
+        raise HTTPException(status_code=429, detail=str(e), headers=_RETRY) from e
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        hung = isinstance(e, TimeoutError)
+        why = f"The session store did not answer within {timeout:g} s" if hung else f"The session store failed: {e}"
+        logger.error("chat_session_inbox_post_failed", session_id=session_id, kind=kind, error=why)
+        if key is not None:
+            raise HTTPException(
+                status_code=503, detail=f"{why}. Retry with the same Idempotency-Key.", headers=_RETRY
+            ) from e
+        raise HTTPException(
+            status_code=503,
+            detail=f"{why}. It may have been queued: do not resend (send an Idempotency-Key to make a retry safe).",
+        ) from e
+    return _json({"queued": "inbox", "inbox_id": inbox_id, "session_id": session_id}, status_code=202)
 
 
 def _app_sessions(app: Any) -> dict[str, ChatSession]:
@@ -694,14 +766,23 @@ async def delete_session(request: Request, session_id: str) -> JSONResponse:
 
 @router.post("/sessions/{session_id}/messages")
 async def send_message(request: Request, session_id: str) -> JSONResponse:
-    """Send a user message: ``{"text", "mode"?}`` (``steer`` | ``followup`` | ``collect`` | ``interrupt``)."""
-    session = await _session(request, session_id)
-    body = await _body(request)
-    _answerable(body, "The message", ("text", "mode"))
-    text = body.get("text")
-    mode = body.get("mode") or None
-    if not isinstance(text, str):
-        raise HTTPException(status_code=400, detail="'text' must be a string.")
+    """Send a user message: ``{"text", "mode"?}`` (``steer`` | ``followup`` | ``collect`` | ``interrupt``).
+
+    For a session another worker serves: queued for it (``202 {"queued": "inbox", "inbox_id"}``, see
+    :func:`_queue`; ``Idempotency-Key`` makes a retry the same message)."""
+    try:
+        session = await _session(request, session_id)
+    except _HeldElsewhere as held:
+        text, mode = _message_fields(await _body(request))
+        if mode is not None and mode not in SEND_MODES:
+            # What send() refuses there, refused here: the worker that applies it can tell nobody.
+            raise HTTPException(
+                status_code=400, detail=f"mode must be one of {list(SEND_MODES)}, got {mode!r}"
+            ) from None
+        return await _queue(
+            request, session_id, held, "message", {"text": text, "mode": mode}, key=_idempotency_key(request)
+        )
+    text, mode = _message_fields(await _body(request))
     busy = session.busy
     try:
         # The message is only queued here: 'now' and 'interrupt' cut the running turn once it is stored, so a
@@ -720,6 +801,15 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
     )
 
 
+def _message_fields(body: dict[str, Any]) -> tuple[str, Any]:
+    _answerable(body, "The message", ("text", "mode"))
+    text = body.get("text")
+    mode = body.get("mode") or None
+    if not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="'text' must be a string.")
+    return text, mode
+
+
 _REJECTED_STATUS = {"not_accepted": 403, "blocked": 403, "closed": 409, "invalid": 422, "unknown": 404}
 
 
@@ -734,20 +824,41 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
     session's ``accepts`` refuses the sender (``not_accepted``) or its input
     guardrails block the text (``blocked``), 409 ``closed``, 422 ``invalid``.
     The 202 means it survives a restart (a durable session stored it).
+
+    For a session another worker serves: checked as here (the recipient's
+    ``accepts`` and guardrails are that worker's, and what they refuse there is
+    dropped with a log line), then queued for it: ``202 {"queued": "inbox",
+    "inbox_id"}``. A repeat of the same ``message_id`` from the same sender is
+    the same queued item (or ``Idempotency-Key``, which wins).
     """
     from ..core.peers import PeerRejected
 
-    session = await _session(request, session_id)
+    try:
+        session = await _session(request, session_id)
+    except _HeldElsewhere as held:
+        body = await _body(request)
+        sender, text, hops = _agent_message_fields(body)
+        try:
+            _, sender, message_id, _ = check_agent_message(
+                text,
+                sender=sender,
+                message_id=body.get("message_id"),
+                reply_to=body.get("reply_to"),
+                priority=body.get("priority") or "normal",
+                hops=hops,
+            )
+        except PeerRejected as e:
+            return JSONResponse(
+                status_code=_REJECTED_STATUS.get(e.reason, 422), content={"detail": str(e), "reason": e.reason}
+            )
+        key = _idempotency_key(request)
+        if key is None and message_id is not None:
+            key = f"agent_message:{sender}:{message_id}"  # (at most 207 characters: a name, an id)
+        item = {name: body.get(name) for name in ("from", "text", "message_id", "reply_to")}
+        item.update(priority=body.get("priority") or "normal", hops=hops)
+        return await _queue(request, session_id, held, "agent_message", item, key=key)
     body = await _body(request)
-    _answerable(body, "The message", ("from", "text", "message_id", "reply_to", "priority", "hops"))
-    sender, text, hops = body.get("from"), body.get("text"), body.get("hops", 0)
-    if not isinstance(sender, str) or not isinstance(text, str):
-        raise HTTPException(status_code=400, detail="'from' and 'text' must be strings.")
-    if not isinstance(hops, int) or isinstance(hops, bool):
-        raise HTTPException(status_code=400, detail="'hops' must be an integer.")
-    for name in ("message_id", "reply_to"):
-        if body.get(name) is not None and not isinstance(body[name], str):
-            raise HTTPException(status_code=400, detail=f"{name!r} must be a string.")
+    sender, text, hops = _agent_message_fields(body)
     try:
         receipt = await session.receive_agent_message(
             text,
@@ -768,6 +879,19 @@ async def agent_message(request: Request, session_id: str) -> JSONResponse:
     return _json(receipt, status_code=202)
 
 
+def _agent_message_fields(body: dict[str, Any]) -> tuple[str, str, int]:
+    _answerable(body, "The message", ("from", "text", "message_id", "reply_to", "priority", "hops"))
+    sender, text, hops = body.get("from"), body.get("text"), body.get("hops", 0)
+    if not isinstance(sender, str) or not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="'from' and 'text' must be strings.")
+    if not isinstance(hops, int) or isinstance(hops, bool):
+        raise HTTPException(status_code=400, detail="'hops' must be an integer.")
+    for name in ("message_id", "reply_to"):
+        if body.get(name) is not None and not isinstance(body[name], str):
+            raise HTTPException(status_code=400, detail=f"{name!r} must be a string.")
+    return sender, text, hops
+
+
 @router.post("/sessions/{session_id}/wake")
 async def wake_session(request: Request, session_id: str) -> JSONResponse:
     """Start a turn for the application: ``{"text", "key"?, "tool_policy"?, "silent_ok"?, "trigger"?}``.
@@ -776,21 +900,30 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
     tool, a list of names only those. The wake runs once the user has nothing
     pending, as a turn of its own, and may stay silent. ``trigger`` (an object)
     is merged into the turn's root ``metadata.trigger`` (a routine fire's ids).
+
+    For a session another worker serves: checked as the session would check it,
+    then queued for it (``202 {"queued": "inbox", "inbox_id"}``;
+    ``Idempotency-Key`` makes a retry the same wake).
     """
-    session = await _session(request, session_id)
+    try:
+        session = await _session(request, session_id)
+    except _HeldElsewhere as held:
+        body = await _body(request)
+        text, policy, trigger = _wake_fields(body)
+        try:
+            check_wake(text, key=body.get("key"), tool_policy=policy, trigger=trigger)
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        item = {
+            "text": text,
+            "key": body.get("key"),
+            "tool_policy": policy,
+            "silent_ok": bool(body.get("silent_ok", True)),
+            "trigger": trigger,
+        }
+        return await _queue(request, session_id, held, "wake", item, key=_idempotency_key(request))
     body = await _body(request)
-    _answerable(body, "The wake", ("text", "key", "tool_policy", "trigger"))  # (silent_ok: made a bool)
-    text = body.get("text")
-    if not isinstance(text, str):
-        raise HTTPException(status_code=400, detail="'text' must be a string.")
-    if body.get("key") is not None and not isinstance(body["key"], str):
-        raise HTTPException(status_code=400, detail="'key' must be a string or null.")
-    policy = body.get("tool_policy", "read_only")
-    if policy is not None and not (policy == "read_only" or isinstance(policy, list)):
-        raise HTTPException(status_code=400, detail="'tool_policy' must be 'read_only', a list of tool names, or null.")
-    trigger = body.get("trigger")
-    if trigger is not None and not isinstance(trigger, dict):
-        raise HTTPException(status_code=400, detail="'trigger' must be an object.")
+    text, policy, trigger = _wake_fields(body)
     try:
         wake_id = session.wake(
             text,
@@ -806,6 +939,22 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
         raise HTTPException(status_code=409, detail=str(e)) from e
     await _stored(session, session.mark(), lambda: session.withdraw(wake_id))
     return _json({"wake_id": wake_id, "busy": session.busy}, status_code=202)
+
+
+def _wake_fields(body: dict[str, Any]) -> tuple[str, Any, Any]:
+    _answerable(body, "The wake", ("text", "key", "tool_policy", "trigger"))  # (silent_ok: made a bool)
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="'text' must be a string.")
+    if body.get("key") is not None and not isinstance(body["key"], str):
+        raise HTTPException(status_code=400, detail="'key' must be a string or null.")
+    policy = body.get("tool_policy", "read_only")
+    if policy is not None and not (policy == "read_only" or isinstance(policy, list)):
+        raise HTTPException(status_code=400, detail="'tool_policy' must be 'read_only', a list of tool names, or null.")
+    trigger = body.get("trigger")
+    if trigger is not None and not isinstance(trigger, dict):
+        raise HTTPException(status_code=400, detail="'trigger' must be an object.")
+    return text, policy, trigger
 
 
 @router.post("/sessions/{session_id}/interrupt")

@@ -12,7 +12,7 @@ import os
 import re
 import time
 import weakref
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Callable, Collection
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -35,6 +35,7 @@ from ..state.background import (
     store_for_run,
 )
 from ..state.chat_store import (
+    MAX_INBOX_ITEMS,
     ChatSessionStore,
     SessionLeased,
     SessionNotStored,
@@ -96,6 +97,10 @@ _RECOVERY_ADVICE = (
     "check whether it already happened, or ask the user."
 )
 _AGENT_MESSAGES_KEPT = 512
+# A pull of the store's inbox (work other processes queued for the session) waits this long for an item (a long
+# poll), and this long before trying again after a pull, a save or an ack that failed.
+_INBOX_WAIT_S = 20.0
+_INBOX_RETRY_S = 1.0
 # How often a message handed to a session on another loop checks that loop is still there (a loop closed after it
 # took the receive and before it ran it settles nothing by itself).
 _HANDOVER_CHECK_S = 0.25
@@ -182,6 +187,100 @@ def _check_tool_policy(policy: Any) -> Any:
     if not all(isinstance(name, str) for name in names):
         raise ValueError("tool_policy names must be strings.")
     return names
+
+
+def check_wake(
+    text: Any, *, key: Any = None, tool_policy: Any = "read_only", trigger: Any = None, stored: bool = True
+) -> tuple[str, str | None, Any, dict[str, Any] | None]:
+    """:meth:`ChatSession.wake`'s checks, without a session: the text, key and policy as the wake keeps them, and,
+    with ``stored`` (a durable session), the trigger as JSON gives it back. Raises what ``wake()`` raises
+    (``ValueError``, ``TypeError``). A server checks a wake with it before queuing it for the worker that serves
+    the session, so that what that worker refuses is refused to the sender instead."""
+    text = text.strip() if isinstance(text, str) else ""
+    if not text:
+        raise ValueError("A wake needs non-empty text.")
+    if key is not None and not isinstance(key, str):
+        raise TypeError("key must be a string or None")
+    policy = _check_tool_policy(tool_policy)
+    key = (key or "").strip() or None
+    if trigger is not None and not isinstance(trigger, dict):
+        raise TypeError("trigger must be a dict")
+    if trigger:
+        reserved = [name for name in _RESERVED_TRIGGER_KEYS if name in trigger]
+        if reserved:
+            raise ValueError(f"A wake's trigger cannot set what the runtime says of the turn: {', '.join(reserved)}.")
+        kind = trigger.get("kind", WAKE_KIND)
+        if not isinstance(kind, str) or not _TRIGGER_KIND.fullmatch(kind) or kind in ATTENDED_TRIGGER_KINDS:
+            # An approval reviewer reads it (Runnable._review_gate), and shows it to a model reviewer: a short
+            # identifier of what started the turn, never a person's turn.
+            raise ValueError(
+                "A wake's trigger kind is a short lowercase identifier of what started the turn, not a user's turn "
+                f"({_TRIGGER_KIND.pattern}): {repr(kind)[:80]}."
+            )
+    owned = None
+    if trigger and stored:
+        # Stored with the wake: one a snapshot cannot hold would fail every save from now on. Refused here,
+        # to its caller, with nothing queued (as for resume()). Kept as JSON gave it back: the caller's dict
+        # (and what is nested in it) may change after this returns, and the queued wake must not.
+        try:
+            owned = _unchanged_by_json(trigger)
+            json.dumps(owned, ensure_ascii=False).encode("utf-8")  # a lone surrogate is no UTF-8
+        except (TypeError, UnicodeEncodeError) as error:
+            raise TypeError(
+                f"The wake's trigger cannot be stored ({error}): a durable session takes what JSON can carry."
+            ) from None
+    return text, key, policy, owned
+
+
+def check_agent_message(
+    text: Any, *, sender: Any, message_id: Any = None, reply_to: Any = None, priority: Any = "normal", hops: Any = 0
+) -> tuple[str, str, str | None, str | None]:
+    """:meth:`ChatSession.receive_agent_message`'s checks of the message itself, without a session (not the
+    recipient's own: who it ``accepts``, its guardrails): the text, sender and ids as it takes them. Raises
+    :class:`~timbal.core.peers.PeerRejected` (``invalid``). A server checks a message with it before queuing it
+    for the worker that serves the session."""
+    sender, message_id, reply_to = _check_envelope(sender, message_id, reply_to, priority, hops)
+    return _check_agent_text(text), sender, message_id, reply_to
+
+
+def _check_envelope(sender: Any, message_id: Any, reply_to: Any, priority: Any, hops: Any) -> tuple[str, Any, Any]:
+    from .peers import PeerRejected, _check_message_id, _check_name
+
+    try:
+        sender = _check_name(sender)
+    except ValueError as e:
+        raise PeerRejected("invalid", f"The sender's name: {e}") from None
+    message_id = _check_message_id(message_id, "message_id")
+    reply_to = _check_message_id(reply_to, "reply_to")
+    if priority not in ("normal", "urgent"):
+        raise PeerRejected("invalid", f"priority must be 'normal' or 'urgent', got {priority!r}")
+    if not isinstance(hops, int) or isinstance(hops, bool):
+        raise PeerRejected("invalid", "hops must be an integer.")
+    return sender, message_id, reply_to
+
+
+def _check_agent_text(text: Any) -> str:
+    from .peers import PeerRejected
+
+    text = text.strip() if isinstance(text, str) else ""
+    if not text:
+        raise PeerRejected("invalid", "A message from an agent needs text.")
+    if len(text) > MAX_SESSION_EVENT_CHARS:
+        raise PeerRejected("invalid", f"A message from an agent is limited to {MAX_SESSION_EVENT_CHARS} characters.")
+    return text
+
+
+def _acks_in_its_saves(store: ChatSessionStore | None) -> bool:
+    """Whether a session acks its inbox items in the saves that store them (``save(..., inbox_acked=)``): the store
+    says it does, and its ``save`` takes the argument. A subclass written before it, whose ``save`` does not,
+    is acked apart instead (:meth:`ChatSessionStore.ack_inbox`), and never handed an argument it would refuse."""
+    if store is None or not store.supports_inbox or not store.acks_with_save:
+        return False
+    try:
+        parameters = inspect.signature(store.save).parameters
+    except (TypeError, ValueError):
+        return False
+    return "inbox_acked" in parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 
 
 def _with_note(prompt: Message, note: str) -> Message:
@@ -818,6 +917,18 @@ class ChatSession:
         self._saver: asyncio.Task | None = None
         self._leased = False
         self._lease_task: asyncio.Task | None = None
+        # Work other processes queued for the session in its store (_drain_inbox, run by the lease task while
+        # this process holds the lease). What was applied, so that an item pulled again is not applied twice:
+        # with a store that acks in the save itself, the ids whose ack has not landed yet (the next save carries
+        # them); with one that acks apart, the last ids applied, stored in the snapshot (inbox_seen), at least
+        # as many as the store lets wait. And messages to cut for (now / interrupt) once they are stored.
+        self._inbox_task: asyncio.Task | None = None
+        self._acks_with_save = _acks_in_its_saves(session_store)
+        self._inbox_unacked: dict[str, None] = {}
+        self._inbox_seen: deque[str] = deque(
+            maxlen=max(MAX_INBOX_ITEMS, getattr(session_store, "max_inbox_items", 0) or 0)
+        )
+        self._inbox_cuts: list[tuple[SessionEvent, SendMode | None, int]] = []
         # When the request that last confirmed the lease was sent (monotonic): the store counted the lease
         # from no earlier than that, so it holds at least until this plus `lease_ttl_s`.
         self._lease_from: float | None = None
@@ -958,41 +1069,9 @@ class ChatSession:
         """
         if self.closed:
             raise RuntimeError("The chat session is closed.")
-        text = text.strip() if isinstance(text, str) else ""
-        if not text:
-            raise ValueError("A wake needs non-empty text.")
-        if key is not None and not isinstance(key, str):
-            raise TypeError("key must be a string or None")
-        policy = _check_tool_policy(tool_policy)
-        key = (key or "").strip() or None
-        if trigger is not None and not isinstance(trigger, dict):
-            raise TypeError("trigger must be a dict")
-        if trigger:
-            reserved = [name for name in _RESERVED_TRIGGER_KEYS if name in trigger]
-            if reserved:
-                raise ValueError(
-                    f"A wake's trigger cannot set what the runtime says of the turn: {', '.join(reserved)}."
-                )
-            kind = trigger.get("kind", WAKE_KIND)
-            if not isinstance(kind, str) or not _TRIGGER_KIND.fullmatch(kind) or kind in ATTENDED_TRIGGER_KINDS:
-                # An approval reviewer reads it (Runnable._review_gate), and shows it to a model reviewer: a short
-                # identifier of what started the turn, never a person's turn.
-                raise ValueError(
-                    "A wake's trigger kind is a short lowercase identifier of what started the turn, not a user's turn "
-                    f"({_TRIGGER_KIND.pattern}): {repr(kind)[:80]}."
-                )
-        owned = None
-        if trigger and self._session_store is not None:
-            # Stored with the wake: one a snapshot cannot hold would fail every save from now on. Refused here,
-            # to its caller, with nothing queued (as for resume()). Kept as JSON gave it back: the caller's dict
-            # (and what is nested in it) may change after this returns, and the queued wake must not.
-            try:
-                owned = _unchanged_by_json(trigger)
-                json.dumps(owned, ensure_ascii=False).encode("utf-8")  # a lone surrogate is no UTF-8
-            except (TypeError, UnicodeEncodeError) as error:
-                raise TypeError(
-                    f"The wake's trigger cannot be stored ({error}): a durable session takes what JSON can carry."
-                ) from None
+        text, key, policy, owned = check_wake(
+            text, key=key, tool_policy=tool_policy, trigger=trigger, stored=self._session_store is not None
+        )
         replaced = [wake for wake in self._wakes if wake.key == key] if key is not None else []
         for old in replaced:
             self._wakes.remove(old)
@@ -1158,29 +1237,14 @@ class ChatSession:
         guardrails screen the text: a block, or a redaction that leaves nothing, refuses it. Raises
         :class:`~timbal.core.peers.PeerRejected`.
         """
-        from .peers import PeerRejected, _check_message_id, _check_name
+        from .peers import PeerRejected
 
         if self.closed:
             raise PeerRejected("closed", "The agent's session is closed.")
-        try:
-            sender = _check_name(sender)
-        except ValueError as e:
-            raise PeerRejected("invalid", f"The sender's name: {e}") from None
-        message_id = _check_message_id(message_id, "message_id")
-        reply_to = _check_message_id(reply_to, "reply_to")
-        if priority not in ("normal", "urgent"):
-            raise PeerRejected("invalid", f"priority must be 'normal' or 'urgent', got {priority!r}")
-        if not isinstance(hops, int) or isinstance(hops, bool):
-            raise PeerRejected("invalid", "hops must be an integer.")
+        sender, message_id, reply_to = _check_envelope(sender, message_id, reply_to, priority, hops)
         if self._peer is not None and not self._peer.accepts_from(sender):
             raise PeerRejected("not_accepted", f"{self._peer.name} does not take messages from {sender}.")
-        text = text.strip() if isinstance(text, str) else ""
-        if not text:
-            raise PeerRejected("invalid", "A message from an agent needs text.")
-        if len(text) > MAX_SESSION_EVENT_CHARS:
-            raise PeerRejected(
-                "invalid", f"A message from an agent is limited to {MAX_SESSION_EVENT_CHARS} characters."
-            )
+        text = _check_agent_text(text)
         earlier = self._agent_messages.get((sender, message_id)) if message_id else None
         if earlier is not None:
             return {**earlier.receipt(), "duplicate": True}
@@ -1718,6 +1782,7 @@ class ChatSession:
                 event.id for event in session._kept_events.values() if event.kept_for == session_id
             )
             session._version, session._leased, session._lease_from = snapshot.version, True, leased_at
+            session._load_inbox_seen(snapshot.inbox_seen)
             session.root_run_id = snapshot.root_run_id
             session.turns, session.last_status, session._parked = snapshot.turns, snapshot.last_status, snapshot.parked
             session._last_prompt = _load_prompt(snapshot.last_prompt)
@@ -2646,6 +2711,7 @@ class ChatSession:
             answer_format=ANSWER_FORMAT,
             log_cursor=self.log.cursor_end,
             closed=self.closed and not self._keep,
+            inbox_seen=list(self._inbox_seen),
         )
 
     def persist(self) -> None:
@@ -2677,11 +2743,18 @@ class ChatSession:
             self._dirty = False
             covers = self._changes
             created = self._version is None
+            # The inbox items whose effect this snapshot holds, read in the same step: acked by the same write.
+            acks = list(self._inbox_unacked) if self._inbox_unacked else None
             snapshot = self._snapshot()
             self._saving = covers
             sent = time.monotonic()
             try:
-                self._version = await store.save(snapshot, expect_version=self._version, owner=process_owner())
+                if acks:
+                    self._version = await store.save(
+                        snapshot, expect_version=self._version, owner=process_owner(), inbox_acked=acks
+                    )
+                else:
+                    self._version = await store.save(snapshot, expect_version=self._version, owner=process_owner())
             except SnapshotConflict as e:
                 self._saving = None
                 self._lose(str(e))
@@ -2697,6 +2770,8 @@ class ChatSession:
                 # lands is not known, and this session is not there to see it.
                 self._saving = None
                 raise
+            for item_id in acks or ():
+                self._inbox_unacked.pop(item_id, None)  # acked, with the effect it had
             if created:
                 # Inserted with this process's lease, in the same write (ChatSessionStore.save): the row never
                 # exists without an owner, and there is no second write that could fail and leave it so.
@@ -2723,6 +2798,168 @@ class ChatSession:
                     wake.replaced = []  # stored: withdrawing a later replacement puts this one back
 
     async def _renew_lease(self) -> None:
+        """While this process holds the lease: keep it (:meth:`_keep_lease`), and take what other processes queue
+        for the session in its store (:meth:`_drain_inbox`, a task of this one: it stops with the lease)."""
+        drain = self._start_inbox()
+        try:
+            await self._keep_lease()
+        finally:
+            if drain is not None and not drain.done():
+                drain.cancel()
+                await asyncio.wait({drain})  # (its own cancellation raises nothing here)
+
+    def _start_inbox(self) -> asyncio.Task | None:
+        store = self._session_store
+        if store is None or not store.supports_inbox or self.closed or self._lost:
+            return None
+        if self._inbox_task is not None and not self._inbox_task.done():
+            return None  # another lease task's
+        self._inbox_task = asyncio.get_running_loop().create_task(self._drain_inbox())
+        return self._inbox_task
+
+    def _load_inbox_seen(self, ids: list[str]) -> None:
+        """What a stored snapshot says the session applied from its inbox. With a store that acks in its saves,
+        acked by the next save (which no longer names them): a session stored by one that acks apart may have
+        crashed before acking them."""
+        for item_id in ids if isinstance(ids, list) else ():
+            if not isinstance(item_id, str):
+                continue
+            if self._acks_with_save:
+                self._inbox_unacked[item_id] = None
+            else:
+                self._inbox_seen.append(item_id)
+
+    def _inbox_applied(self, item_id: str) -> bool:
+        return item_id in self._inbox_unacked or item_id in self._inbox_seen
+
+    def _mark_applied(self, item_id: str) -> None:
+        """Called in the same step as the item's effect (nothing awaits in between): no snapshot holds one without
+        the other."""
+        if self._acks_with_save:
+            self._inbox_unacked[item_id] = None
+        else:
+            self._inbox_seen.append(item_id)
+
+    async def _drain_inbox(self) -> None:
+        """Apply what other processes queued for the session (a message, a wake, a message from another agent sent
+        to a worker that does not serve it), store it, and have it acked.
+
+        At least once: an item stays in the store until acked, and is pulled again after a crash. Applied once:
+        with a store that ``acks_with_save`` the save that stores an item's effect acks it in the same write; with
+        one that acks apart, the snapshot names what was applied (``inbox_seen``), and an item pulled again after
+        a crash between that save and its ack is skipped.
+        """
+        store = self._session_store
+        assert store is not None
+        owner = process_owner()
+        while not self.closed and not self._lost:
+            try:
+                items = await store.pull_inbox(self.id, owner, wait_s=_INBOX_WAIT_S)
+            except SessionLeased as e:
+                self._lose(str(e))
+                return
+            except LookupError:
+                return  # the stored session is gone: nothing more is queued for it
+            except Exception as e:
+                logger.warning("chat_session_inbox_pull_failed", session_id=self.id, error=str(e))
+                await asyncio.sleep(_INBOX_RETRY_S)
+                continue
+            if not items:
+                continue
+            taken, fresh = [], False
+            for item in items:
+                item_id = str(item.get("id"))
+                if not self._inbox_applied(item_id):
+                    if self.closed or self._lost or not await self._apply_inbox(item_id, item):
+                        return  # the session closed: the rest is left for its next owner
+                    fresh = True
+                taken.append(item_id)
+            if not await self._inbox_stored(store, owner, taken, fresh=fresh):
+                await asyncio.sleep(_INBOX_RETRY_S)  # pulled again then: what it applied is not applied twice
+
+    async def _inbox_stored(self, store: ChatSessionStore, owner: str, ids: list[str], *, fresh: bool) -> bool:
+        """Store what the items did and have them acked. False: they stay queued (stored or acked not yet)."""
+        if fresh or self._inbox_unacked:
+            self._persist()  # (with a store that acks in its saves, the save carries the acks)
+        try:
+            await self.flush()
+        except (SessionNotStored, SessionLeased):
+            return False
+        waiting = []
+        for event, mode, mark in self._inbox_cuts:
+            if self.stored_since(mark):
+                self.cut_for(event, mode)  # as a route does once the message is stored
+            else:
+                waiting.append((event, mode, mark))
+        self._inbox_cuts = waiting
+        if self._acks_with_save or self.closed or self._lost:
+            return True
+        try:
+            await store.ack_inbox(self.id, owner, ids)
+        except SessionLeased as e:
+            self._lose(str(e))
+            return False
+        except LookupError:
+            return True
+        except Exception as e:
+            logger.warning("chat_session_inbox_ack_failed", session_id=self.id, error=str(e))
+            return False
+        return True
+
+    async def _apply_inbox(self, item_id: str, item: dict[str, Any]) -> bool:
+        """One queued item, as the route that queued it would have taken it here. True once it is marked applied
+        (with its effect, or refused: logged, and acked so that it never comes back; its sender was told only
+        that it was queued); False when the session closed first, which leaves it for the next owner."""
+        from .peers import PeerRejected
+
+        kind, body = item.get("kind"), item.get("body")
+        try:
+            if not isinstance(body, dict):
+                raise ValueError("an inbox item's body must be an object")
+            if kind in ("message", "agent_message") and not isinstance(body.get("text"), str):
+                raise ValueError("an inbox item's text must be a string")
+            if kind == "message":
+                mode = body.get("mode") or None
+                event = self.send(body["text"], mode=mode, defer_cut=True)
+                self._mark_applied(item_id)
+                if (mode or self.busy_mode) in ("now", "interrupt"):
+                    self._inbox_cuts.append((event, mode, self._changes))
+                done = {"event_id": event.id}
+            elif kind == "wake":
+                wake_id = self.wake(
+                    body.get("text"),
+                    key=body.get("key"),
+                    tool_policy=body.get("tool_policy", "read_only"),
+                    silent_ok=bool(body.get("silent_ok", True)),
+                    trigger=body.get("trigger"),
+                )
+                self._mark_applied(item_id)
+                done = {"wake_id": wake_id}
+            elif kind == "agent_message":
+                hops = body.get("hops", 0)
+                receipt = await self.receive_agent_message(
+                    body["text"],
+                    sender=body.get("from"),
+                    message_id=body.get("message_id"),
+                    reply_to=body.get("reply_to"),
+                    priority=body.get("priority") or "normal",
+                    hops=0 if hops is None else hops,
+                )
+                self._mark_applied(item_id)  # (from its post to here nothing awaits)
+                done = {"event_id": receipt["event_id"], "duplicate": receipt["duplicate"]}
+            else:
+                raise ValueError(f"unknown inbox kind {kind!r}")
+        except Exception as e:
+            if self.closed or (isinstance(e, PeerRejected) and e.reason == "closed"):
+                return False
+            self._mark_applied(item_id)
+            logger.warning("chat_session_inbox_item_refused", session_id=self.id, inbox_id=item_id, error=str(e))
+            self._record("inbox_refused", inbox_id=item_id, item_kind=kind, error=str(e))
+            return True
+        self._record("inbox_item", inbox_id=item_id, item_kind=kind, **done)
+        return True
+
+    async def _keep_lease(self) -> None:
         """Renew the lease every third of it, and stop the session when it runs out unrenewed.
 
         The lease is counted from when the request that last confirmed it was *sent* (`_lease_from`): the
