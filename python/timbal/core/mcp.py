@@ -971,13 +971,15 @@ class MCPServer(ToolSet):
     # Runs whose end hook is registered, with the run's loop: one hook per run, which finds the run's connection
     # when the run ends (a connection let go of earlier is not kept alive by it). The hook carries the loop itself.
     _run_hooked: dict[str, asyncio.AbstractEventLoop] = PrivateAttr(default_factory=dict)
-    # Per run, its connections opened and not yet closed successfully: one more as a connection is pooled
+    # Per run, its loop and its connections opened and not yet closed successfully: one more as a connection is pooled
     # (``_project_connection``), one less as its close returns (``_close_run_connection``), the key gone at none, and at
-    # the run's own end, after which nothing reads it (``_end_run_here``). Written by the
+    # the run's own end, after which nothing reads it (``_end_run_here``). With the loop, a close() on any loop forgets
+    # the count of a loop that has closed (``_take_run_connections``), as it does the rest of what that loop held: a
+    # connection still in use when its loop closed is in no other record (review on #334). Written by the
     # run's loop alone (a closed loop's is forgotten from anywhere, ``_drop_run``). A run's end on another loop reads
     # it in one step (``_run_holds``): read collection by collection (the pool, the cut list, the close records), a
     # connection moving between two of them during the reads was found in neither (review on #334).
-    _run_open: dict[str, int] = PrivateAttr(default_factory=dict)
+    _run_open: dict[str, tuple[asyncio.AbstractEventLoop, int]] = PrivateAttr(default_factory=dict)
 
     def _provider_identity(self) -> tuple:
         # Its name, where it is reached and who it is reached as (headers, env, auth: two tenants of one endpoint are
@@ -1076,7 +1078,8 @@ class MCPServer(ToolSet):
             entry = None
         if entry is None:
             entry = _RunConnection(self._new_project_server(url, headers), fingerprint, asyncio.get_running_loop())
-            self._run_open[key] = self._run_open.get(key, 0) + 1  # before it is pooled, and before the hook
+            _, opened = self._run_open.get(key, (None, 0))
+            self._run_open[key] = (entry.loop, opened + 1)  # before it is pooled, and before the hook
             self._run_connections[key] = entry
             if key not in self._run_hooked:
                 # The hook carries the run's loop: another loop may end the run as soon as on_end has accepted it, so
@@ -1144,7 +1147,8 @@ class MCPServer(ToolSet):
         loop may be paused there). One read, from another loop's thread: nothing a step of the run's loop does can
         make it miss one. What that loop opens after the read (a background child calling once the run has ended)
         is closed by its idle close."""
-        return self._run_open.get(key, 0) > 0
+        counted = self._run_open.get(key)
+        return counted is not None and counted[1] > 0
 
     def _end_run_here(self, key: str) -> Awaitable[None] | None:
         self._run_open.pop(key, None)  # read only by the run's end, which runs once: none left behind
@@ -1202,7 +1206,6 @@ class MCPServer(ToolSet):
         self._close_tasks.discard(task)
         for key in [key for key, closes in list(self._run_closes.items()) if task in closes]:
             self._discard_close(key, task)
-            self._run_open.pop(key, None)  # the run's loop closed: its connections went with it
 
     def _discard_close(self, key: str, task: asyncio.Task) -> None:
         """Take ``task`` off the run ``key``'s close records, and the record once empty."""
@@ -1237,9 +1240,12 @@ class MCPServer(ToolSet):
 
     def _closed_one(self, key: str) -> None:
         """One of the run ``key``'s connections closed (``_run_open``)."""
-        left = self._run_open.get(key, 0) - 1
-        if left > 0:
-            self._run_open[key] = left
+        counted = self._run_open.get(key)
+        if counted is None:
+            return  # dropped at the run's end, or with its loop
+        loop, opened = counted
+        if opened > 1:
+            self._run_open[key] = (loop, opened - 1)
         else:
             self._run_open.pop(key, None)
 
@@ -2195,7 +2201,6 @@ class MCPServer(ToolSet):
                 taken.append((key, entry))
             elif owner.is_closed():
                 self._unpool(key, entry)  # (another close() on another thread may be forgetting it too)
-                self._run_open.pop(key, None)
         for ident, (key, entry) in list(self._unclosed.items()):
             owner = entry.loop or loop
             if owner is loop:
@@ -2203,7 +2208,9 @@ class MCPServer(ToolSet):
                     taken.append((key, entry))
             elif owner.is_closed():
                 self._unclosed.pop(ident, None)
-                self._run_open.pop(key, None)
+        for key, counted in list(self._run_open.items()):
+            if counted[0] is not None and counted[0].is_closed() and self._run_open.get(key) is counted:
+                self._run_open.pop(key, None)  # its connections went with its loop
         for task in list(self._close_tasks):
             if _gone(task.get_loop(), loop):
                 self._forget_close(task)

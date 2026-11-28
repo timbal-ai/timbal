@@ -1520,7 +1520,8 @@ class TestCloseOnAnotherLoop:
     def pool(service, key, entry):
         """A run's connection pooled as ``_project_connection`` pools one: counted open (``_run_open``) until a close
         of it succeeds."""
-        service._run_open[key] = service._run_open.get(key, 0) + 1
+        _, opened = service._run_open.get(key, (None, 0))
+        service._run_open[key] = (entry.loop, opened + 1)
         service._run_connections[key] = entry
 
     @staticmethod
@@ -2216,6 +2217,46 @@ class TestCloseOnAnotherLoop:
             asyncio.run_coroutine_threadsafe(settle(), owner_loop).result(10)
         finally:
             stop()
+
+    def test_an_in_use_connection_whose_loop_closes_leaves_no_count_behind(self):
+        """close() on the run's loop lets go of a connection a call still uses (its last user is to close it); the run
+        ends on another loop (refused: it is open); then the run's loop closes with that call never finishing. A later
+        close() forgets the run's count with the rest of what the closed loop held: repeated, the counts piled up,
+        one run more each time, with every other record empty (review on #334). A close() on another loop while the
+        run's loop is live keeps it: the connection is open."""
+        from timbal.core.mcp import _RunConnection
+
+        class Server:
+            async def close(self):
+                raise AssertionError("never closed: its call never finishes")
+
+        service = MCPServer(transport="http", service="api")
+        for run in ("first", "second", "third"):
+            owner_loop, stop = self.owner_thread()
+            try:
+                entry = _RunConnection(Server(), "fingerprint", owner_loop)
+                self.pool(service, run, entry)
+                service._run_hooked[run] = owner_loop
+
+                async def let_go_in_use(entry=entry):
+                    entry.users = 1  # a call still uses it
+                    await service.close()
+                    assert entry.ended and entry.close_task is None
+
+                asyncio.run_coroutine_threadsafe(let_go_in_use(), owner_loop).result(10)
+                asyncio.run(asyncio.wait_for(service.close(), 10))  # from another loop: the run's is live
+                assert service._run_open[run][1] == 1
+
+                async def end_the_run(run=run, owner_loop=owner_loop):
+                    return service._run_ended(run, owner_loop)
+
+                with pytest.raises(RuntimeError, match=self.OWNS):
+                    asyncio.run(asyncio.wait_for(end_the_run(), 10))
+            finally:
+                stop()  # the run's loop closes, its call never finishing
+            asyncio.run(asyncio.wait_for(service.close(), 10))
+            assert not service._run_open, run
+            assert not service._run_connections and not service._unclosed and not service._run_closes
 
     @pytest.mark.parametrize("then", ["its idle retry", "close()"])
     @pytest.mark.asyncio
