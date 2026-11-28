@@ -91,9 +91,10 @@ class _Hangup:
     Checking that the call stays up used to mean sleeping past the moment a broken session would have hung up. That
     was most of this file's run time, and a guess that a stalled runner can get wrong. ``last_hold`` is when (real
     clock) the task last found the line busy after the agent's turn was over, which keeps the call up for another
-    poll. ``window_opened`` is the start of the open confirmation window, on the session's clock, and
-    ``heard_in_window`` is set when a window ended on the caller speaking: a check after the window can catch the
-    same speech, so a test of the window itself asserts this.
+    poll. ``window_opened`` is the open confirmation window's own start, the ``since`` it checks the caller's speech
+    against, on the session's clock. ``heard_in_window`` is set when a window ended on the caller speaking: a check
+    after the window can catch the same speech, so a test of the window itself asserts this. ``closing_at`` is when
+    (real clock) ``close()`` was first called, before any of its cleanup.
     """
 
     def __init__(self, session) -> None:
@@ -101,7 +102,14 @@ class _Hangup:
         self.last_hold: float | None = None
         self.window_opened: float | None = None
         self.heard_in_window = False
-        busy, grace = session._end_call_busy, session._end_call_grace
+        self.closing_at: float | None = None
+        self._in_window = False
+        busy, grace, speech, close = (
+            session._end_call_busy,
+            session._end_call_grace,
+            session._hangup_grace_speech,
+            session.close,
+        )
 
         def _busy(commit_at: float) -> bool:
             held = busy(commit_at)
@@ -109,19 +117,31 @@ class _Hangup:
                 self.last_hold = time.monotonic()
             return held
 
+        def _speech(commit_at: float, *, since: float) -> bool:
+            # Only the window calls this, first before it awaits, so the start is known as soon as the window is open.
+            if self._in_window and self.window_opened is None:
+                self.window_opened = since
+            return speech(commit_at, since=since)
+
         async def _grace(commit_at: float) -> bool:
-            if session._end_call_grace_secs > 0 and not session.closed:
-                # The window's own start: ``grace`` reads the same clock before it first awaits.
-                self.window_opened = _session_now()
+            self._in_window = True
             try:
                 heard = await grace(commit_at)
             finally:
+                self._in_window = False
                 self.window_opened = None
             self.heard_in_window = self.heard_in_window or heard
             return heard
 
+        async def _close() -> None:
+            if self.closing_at is None:
+                self.closing_at = time.monotonic()
+            await close()
+
         session._end_call_busy = _busy
         session._end_call_grace = _grace
+        session._hangup_grace_speech = _speech
+        session.close = _close
 
     async def held(self, message: str, for_secs: float = 0.3) -> None:
         """The task still finds the line busy ``for_secs`` from now, so whatever holds it lasted that long.
@@ -142,19 +162,20 @@ class _Hangup:
         assert session._end_call_task is not None, "the hangup task ended while the line was meant to be held"
 
     async def inside_the_window(self) -> None:
-        """The confirmation window is open, and the session's clock has moved a full tick past its start.
+        """The confirmation window is open, and the session's clock has moved past its start.
 
         A caller event from now on is inside the window, even on the coarse clock, where one in the window's own tick
-        reads as no later than its start. A full tick, because ``window_opened`` can read one tick below the window's
-        own start when a tick ends between the two reads.
+        reads as no later than its start.
         """
         await _until(
-            lambda: (
-                self.session.closed
-                or (self.window_opened is not None and _session_now() > self.window_opened + COARSE_TICK)
-            )
+            lambda: self.session.closed or (self.window_opened is not None and _session_now() > self.window_opened)
         )
         assert not self.session.closed, "hung up before the test saw the confirmation window open"
+
+    def closed_after(self, start: float) -> float:
+        """Real seconds from ``start`` to the moment ``close()`` was called."""
+        assert self.closing_at is not None, "close() was never called"
+        return self.closing_at - start
 
     async def dropped(self) -> None:
         """The task ended without hanging up, so nothing is left that could."""
@@ -420,6 +441,7 @@ class TestEndCall:
             tracker=tracker,
             hangup_grace_secs=grace,
         )
+        hangup = _Hangup(session)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
 
@@ -430,7 +452,7 @@ class TestEndCall:
         heard = time.monotonic()
         await asyncio.wait_for(call, timeout=3.0)
         assert session.closed
-        assert time.monotonic() - heard >= _quiet_secs(session, grace), "hung up before hangup_grace_secs elapsed"
+        assert hangup.closed_after(heard) >= _quiet_secs(session, grace), "hung up before hangup_grace_secs elapsed"
 
     async def test_commit_during_grace_cancels_hangup(self) -> None:
         tracker = FakePlaybackTracker()
@@ -548,6 +570,7 @@ class TestEndCall:
         )
         session, stt, _tts = _session(model, tools=[end_call_later], tracker=tracker)
         assert session.hangup_grace_secs == 0
+        hangup = _Hangup(session)
         events: list[VoiceSessionEvent] = []
         call = await _call(session, events)
 
@@ -558,7 +581,7 @@ class TestEndCall:
         heard = time.monotonic()
         await asyncio.wait_for(call, timeout=3.0)
         assert session.closed
-        assert time.monotonic() - heard >= _quiet_secs(session, 0.8), "the tool's grace_secs did not apply"
+        assert hangup.closed_after(heard) >= _quiet_secs(session, 0.8), "the tool's grace_secs did not apply"
 
     async def test_tool_can_hang_up_immediately_when_the_session_waits(self) -> None:
         async def end_call_now() -> str:
@@ -733,6 +756,8 @@ class TestCommitHangup:
         tracker.playing = True
         await stt.inject(TranscriptEvent(type="committed", text="Cuelga la llamada."))
         await asyncio.wait_for(waiting.wait(), timeout=2.0)
+        # The goodbye is still playing, so commit_hangup is still waiting: a False now would owe nothing to the caller.
+        assert not finished.is_set(), "commit_hangup returned before the caller spoke again"
         # A new commit interrupts the turn that is still inside commit_hangup.
         # The handler must not reach the hangup, either because the wait
         # returns false or because the interruption cancels it first.
