@@ -381,15 +381,34 @@ class ChatSessionStore(ABC):
     async def release_lease(self, session_id: str, owner: str) -> None: ...
 
     async def post_inbox(
-        self, session_id: str, kind: str, body: dict[str, Any], *, idempotency_key: str | None = None
+        self,
+        session_id: str,
+        kind: str,
+        body: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+        agent: str | None = None,
     ) -> str:
         """Queue ``kind`` (:data:`INBOX_KINDS`) with ``body`` for the session's owner; returns the item's id.
 
         With ``idempotency_key``, a repeat is the same item (its id comes back, nothing is queued), while it
-        waits and for :data:`INBOX_KEY_KEPT_S` after its ack. ``LookupError``: no such session, or a closed one.
-        :class:`InboxFull`: ``max_inbox_items`` wait already. ``ValueError`` / ``TypeError``: a kind, key or body
-        the store cannot take."""
+        waits and for :data:`INBOX_KEY_KEPT_S` after its ack. ``agent``: only a session of that agent takes it
+        (several agents can share a store, and a session id alone does not say whose it is). ``LookupError``:
+        no such session, a closed one, or another agent's. :class:`InboxFull`: ``max_inbox_items`` wait already.
+        ``ValueError`` / ``TypeError``: a kind, key or body the store cannot take."""
         raise NotImplementedError(f"{type(self).__name__} has no inbox")
+
+    async def find_inbox_key(self, session_id: str, key: str) -> tuple[str, bool] | None:  # noqa: ARG002
+        """The item ``key`` names in the session's inbox, while it waits and for :data:`INBOX_KEY_KEPT_S` after its
+        ack (as a post with the key would find it): ``(id, acked)``, or None. Needs no lease: a worker that takes a
+        request directly asks whether it was queued before. A store without it answers None."""
+        return None
+
+    async def keep_inbox_key(self, session_id: str, key: str, item_id: str) -> None:  # noqa: ARG002
+        """Record that the request ``key`` names was taken directly, as an item ``item_id`` already acked: for
+        :data:`INBOX_KEY_KEPT_S` a post with the key is that item, and queues nothing. Nothing when the key names an
+        item already, or the session is not stored. A store without it records nothing."""
+        return None
 
     async def pull_inbox(self, session_id: str, owner: str, *, wait_s: float = 0.0) -> list[dict[str, Any]]:
         """The items not acked yet, oldest first (``{id, kind, body, posted_at}``), waiting up to ``wait_s`` for a
@@ -503,12 +522,18 @@ class InMemoryChatSessionStore(ChatSessionStore):
             raise SessionLeased(f"session {session_id} is not leased to {owner}")
 
     async def post_inbox(
-        self, session_id: str, kind: str, body: dict[str, Any], *, idempotency_key: str | None = None
+        self,
+        session_id: str,
+        kind: str,
+        body: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+        agent: str | None = None,
     ) -> str:
         raw = _inbox_body(kind, body, idempotency_key)
         row = self._rows.get(session_id)
-        if row is None or row[0].closed:
-            raise LookupError(f"No stored chat session {session_id!r}.")
+        if row is None or row[0].closed or (agent is not None and row[0].agent != agent):
+            raise LookupError(f"No stored chat session {session_id!r}" + (f" of agent {agent!r}." if agent else "."))
         items = self._inbox.setdefault(session_id, [])
         now = time.time()
         if idempotency_key is not None:
@@ -537,6 +562,27 @@ class InMemoryChatSessionStore(ChatSessionStore):
                 return items
             await asyncio.wait({posted}, timeout=wait_s)
         return self._pull(session_id, owner)
+
+    def _keyed(self, session_id: str, key: str, now: float) -> _MemoryItem | None:
+        for item in self._inbox.get(session_id, ()):
+            if item.key == key and (item.acked_at is None or item.acked_at >= now - INBOX_KEY_KEPT_S):
+                return item
+        return None
+
+    async def find_inbox_key(self, session_id: str, key: str) -> tuple[str, bool] | None:
+        item = self._keyed(session_id, key, time.time())
+        return (item.id, item.acked_at is not None) if item is not None else None
+
+    async def keep_inbox_key(self, session_id: str, key: str, item_id: str) -> None:
+        now = time.time()
+        row = self._rows.get(session_id)
+        if row is None or row[0].closed or self._keyed(session_id, key, now) is not None:
+            return
+        items = self._inbox.setdefault(session_id, [])
+        items[:] = [item for item in items if item.key != key]  # (one kept past its time)
+        item = _MemoryItem(item_id, "agent_message", "{}", key, now)
+        item.acked_at = now
+        items.append(item)
 
     def _pull(self, session_id: str, owner: str) -> list[dict[str, Any]]:
         self._holder(session_id, owner, running=True)
@@ -940,7 +986,13 @@ class SqliteChatSessionStore(ChatSessionStore):
         return ids
 
     async def post_inbox(
-        self, session_id: str, kind: str, body: dict[str, Any], *, idempotency_key: str | None = None
+        self,
+        session_id: str,
+        kind: str,
+        body: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+        agent: str | None = None,
     ) -> str:
         raw = _inbox_body(kind, body, idempotency_key)
         item_id, cap = _new_inbox_id(), self.max_inbox_items
@@ -948,9 +1000,13 @@ class SqliteChatSessionStore(ChatSessionStore):
         def write(conn):
             def post():
                 now = time.time()
-                row = conn.execute("SELECT snapshot FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone()
-                if row is None or _closed(row[0]):
-                    raise LookupError(f"No stored chat session {session_id!r}.")
+                row = conn.execute(
+                    "SELECT snapshot, agent FROM chat_sessions WHERE session_id = ?", (session_id,)
+                ).fetchone()
+                if row is None or _closed(row[0]) or (agent is not None and row[1] != agent):
+                    raise LookupError(
+                        f"No stored chat session {session_id!r}" + (f" of agent {agent!r}." if agent else ".")
+                    )
                 if idempotency_key is not None:
                     # A key kept past its time is forgotten here, by the post that names it: the post is a new item.
                     conn.execute(
@@ -1009,6 +1065,42 @@ class SqliteChatSessionStore(ChatSessionStore):
                 return items
             await asyncio.wait({posted}, timeout=wait_s)
         return await self._run(query)
+
+    async def find_inbox_key(self, session_id: str, key: str) -> tuple[str, bool] | None:
+        def query(conn):
+            return (
+                _settled(conn)
+                .execute(
+                    "SELECT id, acked_at FROM chat_inbox WHERE session_id = ? AND idempotency_key = ? "
+                    "AND (acked_at IS NULL OR acked_at >= ?)",
+                    (session_id, key, time.time() - INBOX_KEY_KEPT_S),
+                )
+                .fetchone()
+            )
+
+        row = await self._run(query)
+        return (row[0], row[1] is not None) if row is not None else None
+
+    async def keep_inbox_key(self, session_id: str, key: str, item_id: str) -> None:
+        def write(conn):
+            def keep():
+                now = time.time()
+                row = conn.execute("SELECT snapshot FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone()
+                if row is None or _closed(row[0]):
+                    return
+                conn.execute(
+                    "DELETE FROM chat_inbox WHERE session_id = ? AND idempotency_key = ? AND acked_at < ?",
+                    (session_id, key, now - INBOX_KEY_KEPT_S),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO chat_inbox (id, session_id, kind, body, idempotency_key, posted_at, acked_at) "
+                    "VALUES (?, ?, 'agent_message', '{}', ?, ?, ?)",
+                    (item_id, session_id, key, now, now),
+                )
+
+            _transaction(conn, keep)
+
+        await self._run(write)
 
     def _sessions_with_items(self, session_ids: list[str]) -> set[str]:
         """For the watch's thread: which of ``session_ids`` have items waiting."""

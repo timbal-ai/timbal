@@ -2881,16 +2881,13 @@ class ChatSession:
         """Apply what other processes queued for the session and the drain has not taken yet, without waiting for
         more. A route calls it before it takes a request itself: an item queued before that request (its sender
         had its ``202``) comes before it, also when the drain has not seen it yet (another process's post reaches
-        a waiting pull at the watch's next look). Nothing to do without a store that has an inbox, or the lease;
-        a pull that fails is left to the drain."""
+        a waiting pull at the watch's next look). Nothing to do without a store that has an inbox, or the lease.
+        A pull that fails raises: a route then answers ``503`` and takes nothing (taken now, the request would go
+        ahead of work another worker accepted first). Its caller bounds the wait (``server/chat.py``)."""
         store = self._session_store
         if store is None or not store.supports_inbox or not self._leased or self.closed or self._lost:
             return
-        try:
-            items = await store.pull_inbox(self.id, process_owner())
-        except Exception as e:
-            logger.warning("chat_session_inbox_pull_failed", session_id=self.id, error=str(e))
-            return
+        items = await store.pull_inbox(self.id, process_owner())
         if not items:
             return
         async with self._inbox_lock:

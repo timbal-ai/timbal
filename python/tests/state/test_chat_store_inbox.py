@@ -457,3 +457,50 @@ class TestATransactionLeftOpen:
 
         assert await store._run(column) == "agent"  # the statement left open was not committed with the post
         assert await waiting(store) == ["x"]
+
+
+class TestTheAgentAndTheKeysAWorkerAsksAbout:
+    async def test_a_post_for_another_agents_session_is_refused(self, store):
+        await stored(store)  # agent "agent"
+        with pytest.raises(LookupError):
+            await store.post_inbox("s1", "message", message("x"), agent="another_agent")
+        await store.post_inbox("s1", "message", message("y"), agent="agent")
+        assert await waiting(store) == ["y"]
+
+    async def test_a_key_is_found_while_its_item_waits_and_a_day_after_its_ack(self, store, monkeypatch):
+        await stored(store)
+        assert await store.find_inbox_key("s1", "k") is None
+        item = await store.post_inbox("s1", "message", message("x"), idempotency_key="k")
+        assert await store.find_inbox_key("s1", "k") == (item, False)
+        await store.ack_inbox("s1", OWNER, [item])
+        assert await store.find_inbox_key("s1", "k") == (item, True)
+        later = time.time() + INBOX_KEY_KEPT_S + 60
+        monkeypatch.setattr(time, "time", lambda: later)
+        assert await store.find_inbox_key("s1", "k") is None
+
+    async def test_a_key_kept_for_a_request_taken_directly_is_that_item(self, store):
+        store.max_inbox_items = 1
+        await stored(store)
+        await store.keep_inbox_key("s1", "k", "ev_direct")
+        assert await store.find_inbox_key("s1", "k") == ("ev_direct", True)
+        assert await store.post_inbox("s1", "message", message("x"), idempotency_key="k") == "ev_direct"
+        assert await store.pull_inbox("s1", OWNER) == []  # nothing queued for it
+        await store.post_inbox("s1", "message", message("y"))  # and it takes no place under the cap
+        assert await waiting(store) == ["y"]
+
+    async def test_keeping_a_key_that_names_an_item_changes_nothing(self, store):
+        await stored(store)
+        item = await store.post_inbox("s1", "message", message("x"), idempotency_key="k")
+        await store.keep_inbox_key("s1", "k", "ev_other")
+        assert await store.find_inbox_key("s1", "k") == (item, False)
+        assert await waiting(store) == ["x"]
+
+    async def test_no_key_is_kept_for_a_session_not_stored_or_closed(self, store):
+        await store.keep_inbox_key("nobody", "k", "ev_1")
+        assert await store.find_inbox_key("nobody", "k") is None
+        version = await stored(store)
+        await store.save(
+            SessionSnapshot(session_id="s1", agent="agent", closed=True), expect_version=version, owner=OWNER
+        )
+        await store.keep_inbox_key("s1", "k", "ev_1")
+        assert await store.find_inbox_key("s1", "k") is None

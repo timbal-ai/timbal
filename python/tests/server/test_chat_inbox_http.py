@@ -376,3 +376,110 @@ def test_startup_restores_a_session_whose_only_work_is_its_inbox(tmp_path, monke
         while time.monotonic() < deadline and not (sessions.get("s1") and sessions["s1"].turns == 1):
             time.sleep(0.05)
         assert sessions.get("s1") is not None and sessions["s1"].turns == 1
+
+
+class TestReviewOn341:
+    """Findings of the review on timbal#341, each reproduced before its fix."""
+
+    def test_a_session_of_another_agent_is_not_queued_for(self, client):
+        """Two agents on one store: the lease is met before the snapshot's agent is read, and the request was
+        queued for a session that is not this agent's (its own worker would then run it)."""
+        from timbal.state.chat_store import SessionSnapshot
+
+        store = client.app.state.chat_store
+        snapshot = SessionSnapshot(session_id="not-mine", agent="another_agent")
+        client.portal.call(lambda: store.save(snapshot, expect_version=None, owner=ELSEWHERE))
+        for route, body in (
+            ("messages", {"text": "hi"}),
+            ("wake", {"text": "check"}),
+            ("agent_messages", {"from": "bob", "text": "x", "message_id": "am_1"}),
+        ):
+            response = post(client, "not-mine", route, body)
+            assert response.status_code == 404, (route, response.text)
+        assert waiting(client, "not-mine") == []
+
+    def test_work_queued_for_a_session_its_owner_then_lets_go_is_applied(self, client, monkeypatch):
+        """The owner lets the session go (idle reaping) before it pulls what was queued: the worker that took the
+        request restores the session once it is free, and applies it (it waited for the next startup)."""
+        import timbal.server.chat as chat_module
+
+        monkeypatch.setattr(chat_module, "_RESTORE_RETRY_S", 0.05)
+        session_id = served_elsewhere(client)
+        assert post(client, session_id, "messages", {"text": "while it moved"}).json()["queued"] == "inbox"
+        client.portal.call(client.app.state.chat_store.release_lease, session_id, ELSEWHERE)  # let go, undrained
+        deadline = time.monotonic() + 10
+        sessions = client.app.state.chat_sessions
+        while time.monotonic() < deadline and not (sessions.get(session_id) and sessions[session_id].turns == 1):
+            time.sleep(0.02)
+        assert sessions.get(session_id) is not None and sessions[session_id].turns == 1
+
+    def _restored_anew(self, client, session_id):
+        """This process lets the session go and serves it again from the store: what it held only in memory
+        (the last messages from agents, by sender and id) is gone."""
+        session = client.app.state.chat_sessions.pop(session_id)
+        client.portal.call(lambda: session.close(keep=True))
+        assert client.get(f"/chat/sessions/{session_id}").status_code == 200
+
+    def test_an_agent_message_queued_then_retried_at_its_new_owner_is_a_duplicate(self, client):
+        session_id = served_elsewhere(client)
+        body = {"from": "bob", "text": "the build is green", "message_id": "am_9"}
+        assert post(client, session_id, "agent_messages", body).json()["queued"] == "inbox"
+        client.portal.call(client.app.state.chat_store.release_lease, session_id, ELSEWHERE)
+        assert client.get(f"/chat/sessions/{session_id}").status_code == 200  # restored here, the item applied
+        settled(client, session_id, lambda st, _rs: st["turns"] == 1)
+        self._restored_anew(client, session_id)
+        retried = post(client, session_id, "agent_messages", body)
+        assert retried.status_code == 202 and retried.json()["duplicate"] is True, retried.text
+        state, records = settled(client, session_id, lambda _st, _rs: True)
+        assert state["turns"] == 1 and len([r for r in records if r["kind"] == "agent_message"]) == 0
+
+    def test_an_agent_message_taken_directly_then_retried_through_another_worker_is_not_queued(self, client):
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        body = {"from": "bob", "text": "the build is green", "message_id": "am_9"}
+        first = post(client, session_id, "agent_messages", body)
+        assert first.status_code == 202 and first.json()["duplicate"] is False, first.text
+        settled(client, session_id, lambda st, _rs: st["turns"] == 1)
+        session = client.app.state.chat_sessions.pop(session_id)
+        client.portal.call(lambda: session.close(keep=True))
+        client.portal.call(client.app.state.chat_store.acquire_lease, session_id, ELSEWHERE)  # another worker has it
+        retried = post(client, session_id, "agent_messages", body)
+        assert retried.status_code == 202, retried.text
+        assert waiting(client, session_id) == []  # the same message: nothing more queued for it
+
+    def test_a_direct_request_waits_no_longer_than_the_store_bound_for_what_is_queued(self, client, monkeypatch):
+        """The read of what is queued comes before the request is taken: a store that does not answer is a 503
+        that took nothing (with Retry-After), within the routes' bound, not a request that waits with it."""
+        # A bound above what a slow disk adds to every call (TIMBAL_TEST_SLOW_IO), far below how long the read hangs.
+        monkeypatch.setenv("TIMBAL_CHAT_STORE_TIMEOUT_S", "1")
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        store = client.app.state.chat_store
+
+        async def hangs(*_args, **_kwargs):
+            await asyncio.sleep(20)
+            return []
+
+        monkeypatch.setattr(store, "pull_inbox", hangs)
+        started = time.monotonic()
+        response = post(client, session_id, "messages", {"text": "hi"})
+        assert time.monotonic() - started < 15  # a hang guard: it answered, it did not wait out the read
+        assert response.status_code == 503 and response.headers.get("Retry-After"), response.text
+        assert client.app.state.chat_sessions[session_id].pending_messages() == []
+
+    def test_a_direct_request_is_not_taken_ahead_of_queued_work_it_could_not_read(self, client, monkeypatch):
+        session_id = client.post("/chat/sessions", json={}).json()["session_id"]
+        store = client.app.state.chat_store
+
+        async def fails(*_args, **_kwargs):
+            raise OSError("disk I/O error")
+
+        monkeypatch.setattr(store, "pull_inbox", fails)
+        response = post(client, session_id, "wake", {"text": "check in"})
+        assert response.status_code == 503 and response.headers.get("Retry-After"), response.text
+        assert client.app.state.chat_sessions[session_id]._wakes == []
+
+    def test_senders_and_ids_with_colons_are_different_messages(self, client):
+        session_id = served_elsewhere(client)
+        first = post(client, session_id, "agent_messages", {"from": "support:eu", "text": "a", "message_id": "7"})
+        second = post(client, session_id, "agent_messages", {"from": "support", "text": "b", "message_id": "eu:7"})
+        assert first.json()["inbox_id"] != second.json()["inbox_id"]
+        assert sorted(i["body"]["text"] for i in waiting(client, session_id)) == ["a", "b"]
