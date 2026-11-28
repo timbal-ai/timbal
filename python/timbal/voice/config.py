@@ -1331,6 +1331,9 @@ class VoiceConfig(BaseModel):
     """How to say terms the voice reads badly, in the text sent to the voice
     and nowhere else: ``{"DNI": "deneí", "NIE": "níe"}``, or by reply language
     with ``"*"`` for all of them (``{"es": {"DNI": "deneí"}, "*": {...}}``).
+    With ``reply_language="follow"`` the language is the one the caller
+    speaks (``VoiceSession.spoken_language``), and ``language`` until one is
+    known, as for ``filler.phrases``.
     A term is matched whole and in the case it is written. Reply deltas, the
     transcript and the model's memory keep the model's spelling. ``None``
     (default) and ``{}`` change nothing. Server-side: a caller hello cannot set

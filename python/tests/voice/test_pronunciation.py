@@ -188,6 +188,56 @@ async def test_the_reply_language_picks_the_terms():
     assert tts.streams[0].fed == ["The D N I is on file."]
 
 
+BY_LANGUAGE = {"es": {"DNI": "deneí"}, "ca": {"DNI": "de-ena-i"}, "*": {"SMS": "esemese"}}
+
+
+async def test_a_reply_that_follows_the_caller_gets_the_terms_of_the_language_they_speak():
+    tts = StreamingMockTTS()
+    session = make_session(
+        ["Tu DNI y un SMS.", "El teu DNI i un SMS."],
+        tts=tts,
+        language="ca",
+        reply_language="follow",
+        pronunciations=BY_LANGUAGE,
+    )
+    session.set_spoken_language("es")
+    await session._run_turn("hola, quiero pedir cita para el coche")
+    session.set_spoken_language("ca-ES")
+    await session._run_turn("ara t'ho dic en català, si us plau")
+    assert ["".join(stream.fed) for stream in tts.streams] == [
+        "Tu deneí y un esemese.",
+        "El teu de-ena-i i un esemese.",
+    ]
+
+
+async def test_the_language_the_transcriber_reported_picks_the_terms_too():
+    tts = StreamingMockTTS()
+    session = make_session(["Tu DNI."], tts=tts, language=None, reply_language="follow", pronunciations=BY_LANGUAGE)
+    session._note_heard_language("es", "hola, quiero pedir cita para el coche")
+    await session._run_turn("hola, quiero pedir cita para el coche")
+    assert tts.streams[0].fed == ["Tu deneí."]
+
+
+async def test_until_the_caller_has_spoken_it_is_the_transcribers_language_and_with_none_only_the_shared_terms():
+    tts = MockTTS()
+    hinted = make_session(["hi"], tts=tts, language="ca", reply_language="follow", pronunciations=BY_LANGUAGE)
+    await hinted._speak("Bona tarda. Tingues a mà el DNI i el SMS.", greeting=True)
+    unknown = make_session(["hi"], tts=tts, language=None, reply_language="follow", pronunciations=BY_LANGUAGE)
+    await unknown._speak("Bona tarda. Tingues a mà el DNI i el SMS.", greeting=True)
+    assert tts.synthesized_texts == [
+        "Bona tarda. Tingues a mà el de-ena-i i el esemese.",
+        "Bona tarda. Tingues a mà el DNI i el esemese.",
+    ]
+
+
+async def test_a_pinned_reply_language_is_not_moved_by_what_the_caller_speaks():
+    tts = StreamingMockTTS()
+    session = make_session(["Tu DNI."], tts=tts, language="es", reply_language="es", pronunciations=BY_LANGUAGE)
+    session.set_spoken_language("ca")
+    await session._run_turn("bon dia, vull demanar hora")
+    assert tts.streams[0].fed == ["Tu deneí."]
+
+
 async def test_a_hesitation_sound_and_a_spoken_form_go_together():
     tts = StreamingMockTTS()
     session = make_session(

@@ -12,6 +12,7 @@ from structlog.testing import capture_logs
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
 from timbal.voice import SessionStarted, TranscriptEvent, VoiceSessionEvent, current_voice_session
+from timbal.voice.events import TranscriptEntry
 
 from .test_end_call import GOODBYE, _call, _hangs_up_with, end_call
 from .test_session import FakePlaybackTracker
@@ -47,6 +48,11 @@ def _transfers_with(reply: str, *later: str | Message) -> _Model:
         reply,
         *later,
     )
+
+
+async def _turn_over(session, events: list[VoiceSessionEvent], reply: str) -> None:
+    """The turn that said ``reply`` has ended. Until then a short commit is a crumb of the caller's last words."""
+    await _until(lambda: reply in _texts(events) and not session._is_speaking and not session._active_turn_user_text)
 
 
 def _outcome(session) -> asyncio.Future[str]:
@@ -260,6 +266,28 @@ class TestWaitUntilHeard:
         await stt.finish()
         await asyncio.wait_for(call, timeout=3.0)
 
+    async def test_a_word_the_session_drops_is_not_the_caller_speaking(self) -> None:
+        """«Vale.» over the reply is listening, not taking the floor: the session drops it and so does the wait."""
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(_Model("Un momento."), tracker=tracker, ignore_backchannels=True)
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Hola, quería una cita."))
+        await _turn_over(session, events, "Un momento.")
+        heard = asyncio.create_task(session.wait_until_heard())
+        await asyncio.sleep(0.1)
+        await stt.inject(TranscriptEvent(type="committed", text="Vale."))
+        await _until(lambda: session._dropped_commit_text == "Vale.")
+        await asyncio.sleep(0.2)
+        assert not heard.done()
+
+        tracker.playing = False
+        assert await asyncio.wait_for(heard, timeout=3.0) is True
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
+
     async def test_false_when_the_call_ends_first(self) -> None:
         tracker = FakePlaybackTracker()
         session, stt, _tts = _session(_Model("Un momento."), tracker=tracker)
@@ -346,11 +374,36 @@ class TestTransferCall:
 
         tracker.playing = True
         await stt.inject(TranscriptEvent(type="committed", text="Quiero hablar con una persona."))
-        await _until(lambda: HANDOFF in _texts(events))
+        await _turn_over(session, events, HANDOFF)
         outcome = _outcome(session)
         await stt.inject(TranscriptEvent(type="committed", text="Vale, gracias."))
+        await _until(lambda: "A usted." in _texts(events))
         await asyncio.sleep(0.3)
         assert line.dialled == []
+
+        tracker.playing = False
+        await asyncio.wait_for(call, timeout=5.0)
+        assert line.dialled == [NUMBER] and outcome.result() == "transferred"
+
+    async def test_an_acknowledgement_the_session_drops_does_not_cancel_it(self) -> None:
+        """«Vale.» over "I'll put you through" starts no turn, so it is in no transcript row. The row before it
+        is the request that asked for the transfer, and read in its place it took the transfer back."""
+        tracker, line = FakePlaybackTracker(), _Line()
+        model = _transfers_with(HANDOFF)
+        session, stt, _tts = _session(model, tools=[transfer], tracker=tracker, ignore_backchannels=True)
+        session.call_transferer = line.transfer
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Quiero hablar con una persona."))
+        await _turn_over(session, events, HANDOFF)
+        outcome = _outcome(session)
+        await stt.inject(TranscriptEvent(type="committed", text="Vale."))
+        await _until(lambda: session._dropped_commit_text == "Vale.")
+        await asyncio.sleep(0.3)
+        assert len(model.calls) == 2, "the acknowledgement started a turn"
+        assert line.dialled == [] and not outcome.done()
 
         tracker.playing = False
         await asyncio.wait_for(call, timeout=5.0)
@@ -471,3 +524,45 @@ class TestTransferCall:
         await session.close()
         await asyncio.wait_for(call, timeout=3.0)
         assert await session.transfer_call(NUMBER) == "closed"
+
+
+class TestWhatTheCallerSaidMeanwhile:
+    """What keeps the call up while a hangup or a transfer waits, when the session dropped the commit."""
+
+    REQUEST = "Quiero hablar con una persona."
+
+    async def _waiting(self):
+        session, _stt, _tts = _session(_Model())
+        session._transcript.append(TranscriptEntry(role="user", text=self.REQUEST))
+        session._stamp_taken_commit()
+        session._transcript.append(TranscriptEntry(role="assistant", text=HANDOFF))
+        await asyncio.sleep(0.02)
+        return session, session._last_commit_at
+
+    @pytest.mark.parametrize(
+        "dropped,keeps_the_call",
+        [
+            ("Vale.", False),
+            ("Adiós.", False),
+            ("Espera.", True),
+            ("¿Cuánto va a tardar?", True),
+            (REQUEST, False),  # a late twin of the request itself: nothing new
+            (HANDOFF, False),  # the agent's own line coming back through the caller's microphone
+        ],
+    )
+    async def test_a_dropped_commit_is_read_by_its_own_words(self, dropped: str, keeps_the_call: bool) -> None:
+        session, baseline = await self._waiting()
+        session._settle_consumed_commit(dropped)
+        assert session._last_commit_at > baseline
+        assert session._caller_retracted_since(baseline) is keeps_the_call
+
+    async def test_a_request_taken_before_the_dropped_word_still_counts(self) -> None:
+        session, baseline = await self._waiting()
+        session._transcript.append(TranscriptEntry(role="user", text="Espera, una cosa más."))
+        session._stamp_taken_commit()
+        session._settle_consumed_commit("Vale.")
+        assert session._caller_retracted_since(baseline) is True
+
+    async def test_nothing_said_is_nothing_new(self) -> None:
+        session, baseline = await self._waiting()
+        assert session._caller_retracted_since(baseline) is False

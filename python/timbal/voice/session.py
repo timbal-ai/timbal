@@ -1724,6 +1724,11 @@ class VoiceSession:
         self._active_turn_user_text: str = ""
         self._turn_started_at: float = 0.0
         self._last_commit_at: float = 0.0
+        # The last commit the session took as caller speech (a turn, a hold). ``_last_commit_at`` also moves
+        # for one it dropped (an acknowledgement over the reply, an echo, a late twin), whose words are kept
+        # in ``_dropped_commit_text``: they are in no transcript row.
+        self._taken_commit_at: float = 0.0
+        self._dropped_commit_text = ""
         self._partials_since_last_commit: int = 0
         self._last_partial_at: float = 0.0
         # Latest non-empty STT partial text — fed to the VAD endpointer's
@@ -2148,11 +2153,12 @@ class VoiceSession:
         To hang up or transfer afterwards use :meth:`end_call` and
         :meth:`transfer_call`, which wait the same way.
         """
-        commit_at, interrupts = self._last_commit_at, self._interrupt_serial
+        # Commits the session takes. One it drops (a «vale» over the reply) is not the caller taking the floor.
+        commit_at, interrupts = self._taken_commit_at, self._interrupt_serial
         give_up_at = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
 
         def cut() -> bool:
-            return self._closed or self._last_commit_at > commit_at or self._interrupt_serial != interrupts
+            return self._closed or self._taken_commit_at > commit_at or self._interrupt_serial != interrupts
 
         while not cut():
             if self._end_call_output_busy():
@@ -2202,6 +2208,18 @@ class VoiceSession:
             return partial
         if self._last_commit_at <= baseline:
             return None
+        dropped = self._dropped_commit_text
+        if dropped and self._taken_commit_at <= baseline:
+            # Every commit since ``baseline`` is one the session dropped, so the last transcript row is from
+            # before it: the caller's «vale» over "I'll put you through" read as the request that had asked
+            # for the transfer, and took it back. The dropped words are what was said. A late twin of that
+            # last row is not something new.
+            last = next((e.text for e in reversed(self._transcript) if e.role == "user" and (e.text or "").strip()), "")
+            if _likely_stt_echo(dropped, self._hangup_echo_reference()):
+                return None
+            if last and _is_same_user_utterance_refinement(last, dropped):
+                return None
+            return dropped
         held = (self._held_user_text or "").strip()
         if held and not _likely_stt_echo(held, self._hangup_echo_reference()):
             return held
@@ -2394,6 +2412,10 @@ class VoiceSession:
             # Replaced or torn down before it ran its course. (Its own ``finally`` no longer owns the slot.)
             self._settle_transfer("closed" if self._closed else "cancelled")
         self._end_call_task = None
+
+    def _stamp_taken_commit(self) -> None:
+        """Stamp a commit the session takes as caller speech: a turn, a hold, a confirmed speculative turn."""
+        self._last_commit_at = self._taken_commit_at = self._event_stamp()
 
     def _event_stamp(self) -> float:
         """``time.monotonic()`` for a caller event (commit, partial), strictly after the previous stamp.
@@ -2852,6 +2874,14 @@ class VoiceSession:
     def _filler_language(self) -> str | None:
         """The language a filler is said in: the reply's when it is pinned, else the caller's, else the hint's."""
         return self.effective_reply_language() or self.spoken_language or self.audio_input.language
+
+    def _pronunciation_language(self) -> str | None:
+        """The language whose ``pronunciations`` a line gets: as for a filler.
+
+        A reply that follows the caller (``reply_language="follow"``) is pinned to no language, and by the
+        reply's language alone a map keyed by language never applied on such a call.
+        """
+        return self._filler_language()
 
     def _arm_flux_eager_query(self) -> None:
         """Put ``eager_eot_threshold`` on a Flux socket when speculation or prediction needs it.
@@ -3650,6 +3680,7 @@ class VoiceSession:
         self._consumed_utterance_at = now
         self._stale_commit_sent_at = max(self._stale_commit_sent_at, now)
         self._last_commit_at = max(self._last_commit_at, now)
+        self._dropped_commit_text = self._consumed_utterance
 
     def _is_replay_of_consumed(self, text: str) -> bool:
         """Same utterance as a commit we already handled, still inside its window.
@@ -4349,7 +4380,7 @@ class VoiceSession:
         self._cancel_hold()
         self._held_user_text = text
         self._hold_armed_timeout_secs = timeout_secs
-        self._last_commit_at = self._event_stamp()
+        self._stamp_taken_commit()
 
         # Anchor for "user resumed speaking": partials older than the commit
         # event are the held fragment's own trailing refinements and must not
@@ -4530,7 +4561,7 @@ class VoiceSession:
         self._turn_predictive_endpoint = predictive_endpoint
         self._turn_stt_latency = self._pending_stt_latency
         self._pending_stt_latency = None
-        self._last_commit_at = self._event_stamp()
+        self._stamp_taken_commit()
         # A confirmed real turn closes the speculative budget for this utterance.
         self._speculative_attempts = 0
         self._caller_speech_started_at = None
@@ -5159,7 +5190,7 @@ class VoiceSession:
         self._turn_vad_endpointed = vad_endpointed
         self._turn_stt_latency = self._pending_stt_latency
         self._pending_stt_latency = None
-        self._last_commit_at = self._event_stamp()
+        self._stamp_taken_commit()
         # The headline clocks start at confirmation, not at the eager start.
         self._turn_eou_at = time.monotonic()
         self._active_turn_user_text = final_text
@@ -8167,7 +8198,7 @@ class VoiceSession:
                 # INFO on purpose: the sound is heard on the call, and how often is what to tune.
                 logger.info("tts_audio_tag", count=kept, text_preview=text.strip()[:60], **_trace_debug_fields())
         if self._pronouncer is not None:
-            text = self._pronouncer.apply(text, self.effective_reply_language())
+            text = self._pronouncer.apply(text, self._pronunciation_language())
         return text
 
     def _heard_segments(self) -> list[tuple[str, int]]:
