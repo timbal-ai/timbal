@@ -23,7 +23,7 @@ on:
         type: choice
         options:
           - all
-          - ubuntu-latest
+          - ubuntu-24.04  # scripts/ci_plan.py LINUX
           - macos-latest
           - windows-latest
 

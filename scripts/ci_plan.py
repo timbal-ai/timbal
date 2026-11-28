@@ -26,10 +26,15 @@ import re
 import subprocess
 import sys
 
-OSES = ["ubuntu-latest", "macos-latest", "windows-latest"]
+# Linux on ubuntu-24.04, not ubuntu-latest (ubuntu-26.04 since November 2026): on image 20261122 the hosted
+# runner was shut down near the end of a full run, 3 of its 86 test jobs ("The runner has received a shutdown
+# signal", exit 143, no test failed), and none of the 320 on earlier 26.04 images. actions/runner-images#15179
+# reports the same shutdowns on 26.04 only. Move on once 26.04 runs our suite to the end.
+LINUX = "ubuntu-24.04"
+OSES = [LINUX, "macos-latest", "windows-latest"]
 PYTHONS = ["3.11", "3.12", "3.13"]
-FAST = {"os": "ubuntu-latest", "python": "3.11"}
-COVERAGE = {"os": "ubuntu-latest", "python": "3.13"}  # one cell of the full matrix measures coverage
+FAST = {"os": LINUX, "python": "3.11"}
+COVERAGE = {"os": LINUX, "python": "3.13"}  # one cell of the full matrix measures coverage
 
 # Files the tests (or the CI job itself) depend on. Anything else (docs, other workflows) skips the tests.
 TESTED = re.compile(
